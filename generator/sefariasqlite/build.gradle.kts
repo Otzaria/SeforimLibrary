@@ -24,6 +24,7 @@ kotlin {
 
         jvmMain.dependencies {
             implementation(project(":idresolver"))
+            implementation(project(":generator-common"))
             implementation(libs.sqlDelight.driver.sqlite)
             implementation(libs.commons.compress)
             implementation(libs.zstd)

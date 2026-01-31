@@ -2,15 +2,13 @@ package io.github.kdroidfilter.seforimlibrary.packaging
 
 import co.touchlab.kermit.Logger
 import co.touchlab.kermit.Severity
+import io.github.kdroidfilter.seforimlibrary.common.OptimizedHttpClient
 import io.github.kdroidfilter.seforimlibrary.net.DownloadUrls
-import java.net.URI
-import java.net.http.HttpClient
-import java.net.http.HttpRequest
-import java.net.http.HttpResponse
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.Paths
 
+private const val USER_AGENT = "SeforimLibrary-DownloadLexicalDb/1.0"
 /**
  * Download the latest `lexical.db` from SeforimMagicIndexer GitHub releases and place it next to `seforim.db`.
  *
@@ -47,46 +45,25 @@ private fun resolveDbPath(args: Array<String>): Path {
 }
 
 private fun downloadLatestLexicalDb(outDb: Path, logger: Logger) {
-    val client = HttpClient.newBuilder()
-        .version(HttpClient.Version.HTTP_2)
-        .followRedirects(HttpClient.Redirect.NORMAL)
-        .build()
-    val token = System.getenv("GITHUB_TOKEN") ?: System.getenv("GH_TOKEN")
-
-    val req = HttpRequest.newBuilder(URI(DownloadUrls.MAGIC_INDEXER_LATEST_API))
-        .header("Accept", "application/vnd.github+json")
-        .header("User-Agent", "SeforimLibrary-DownloadLexicalDb/1.0")
-        .apply { if (!token.isNullOrBlank()) header("Authorization", "Bearer $token") }
-        .build()
-    val res = client.send(req, HttpResponse.BodyHandlers.ofString())
-    if (res.statusCode() !in 200..299) {
-        throw IllegalStateException("GitHub API error: HTTP ${res.statusCode()}\n${res.body()}")
-    }
-
-    val body = res.body()
+    // Fetch release info from GitHub API
+    val body = OptimizedHttpClient.fetchJson(DownloadUrls.MAGIC_INDEXER_LATEST_API, USER_AGENT, logger)
     val regex = Regex(""""browser_download_url"\s*:\s*"([^"]+/lexical\.db)"""")
     val dbUrl = regex.findAll(body).map { it.groupValues[1] }.firstOrNull()
         ?: throw IllegalStateException("No lexical.db asset found in latest SeforimMagicIndexer release")
 
     logger.i { "Downloading lexical.db from $dbUrl" }
-    val dbReq = HttpRequest.newBuilder(URI(dbUrl))
-        .header("Accept", "application/octet-stream")
-        .header("User-Agent", "SeforimLibrary-DownloadLexicalDb/1.0")
-        .apply { if (!token.isNullOrBlank()) header("Authorization", "Bearer $token") }
-        .build()
-    val dbRes = client.send(dbReq, HttpResponse.BodyHandlers.ofInputStream())
-    if (dbRes.statusCode() !in 200..299) {
-        throw IllegalStateException("Failed to download lexical.db: HTTP ${dbRes.statusCode()}")
-    }
 
     val tmp = outDb.resolveSibling(outDb.fileName.toString() + ".part")
     Files.deleteIfExists(tmp)
 
-    dbRes.body().use { input ->
-        Files.newOutputStream(tmp).use { output ->
-            input.copyTo(output, 1 shl 20)
-        }
-    }
+    // Download with optimized client
+    OptimizedHttpClient.downloadFile(
+        url = dbUrl,
+        destination = tmp,
+        userAgent = USER_AGENT,
+        logger = logger,
+        progressPrefix = "Downloading lexical.db"
+    )
 
     // Atomic-ish replace
     if (Files.exists(outDb)) {
@@ -96,6 +73,5 @@ private fun downloadLatestLexicalDb(outDb: Path, logger: Logger) {
         logger.i { "Existing lexical.db moved to ${backup.toAbsolutePath()}" }
     }
     Files.move(tmp, outDb)
-    logger.i { "Saved lexical.db to ${outDb.toAbsolutePath()}" }
 }
 
