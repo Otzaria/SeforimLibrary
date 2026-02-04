@@ -27,5 +27,9 @@ DELETE FROM tocText WHERE id = ?;
 countAll:
 SELECT COUNT(*) FROM tocText;
 
+insertWithId:
+INSERT OR IGNORE INTO tocText (id, text)
+VALUES (?, ?);
+
 lastInsertRowId:
 SELECT last_insert_rowid();

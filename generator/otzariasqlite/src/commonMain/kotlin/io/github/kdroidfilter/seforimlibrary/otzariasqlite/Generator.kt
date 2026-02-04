@@ -1,6 +1,7 @@
 package io.github.kdroidfilter.seforimlibrary.otzariasqlite
 
 import co.touchlab.kermit.Logger
+import io.github.kdroidfilter.seforimlibrary.core.IdResolverProvider
 import io.github.kdroidfilter.seforimlibrary.core.models.*
 import io.github.kdroidfilter.seforimlibrary.core.text.HebrewTextUtils
 import io.github.kdroidfilter.seforimlibrary.dao.repository.SeforimRepository
@@ -27,12 +28,14 @@ import kotlin.io.path.readText
  *
  * @property sourceDirectory The path to the source directory containing the data files
  * @property repository The repository used to store the generated data
+ * @property idResolverProvider Optional provider for stable ID resolution from previous DB
  */
 class DatabaseGenerator(
     private val sourceDirectory: Path,
     private val repository: SeforimRepository,
     private val acronymDbPath: String? = null,
-    private val filterSourcesForLinks: Boolean = true
+    private val filterSourcesForLinks: Boolean = true,
+    private val idResolverProvider: IdResolverProvider? = null
 ) {
 
     private val logger = Logger.withTag("DatabaseGenerator")
@@ -685,9 +688,32 @@ class DatabaseGenerator(
             return
         }
 
-        // Assign a unique ID to this book
-        val currentBookId = nextBookId++
-        logger.d { "Assigning ID $currentBookId to book '$title' with categoryId: $categoryId" }
+        // Resolve sourceId first (needed for book ID resolution)
+        val sourceId = resolveSourceIdFor(path)
+        val bookFilePath = toLibraryRelativeKey(path).substringBeforeLast('.')
+        val fileType = path.extension.ifEmpty { "txt" }
+
+        // Resolve book ID: use IdResolver if available, otherwise allocate sequentially
+        val resolvedId = idResolverProvider?.resolveBookId(bookFilePath, sourceId, fileType)
+        val currentBookId: Long
+
+        if (resolvedId != null) {
+            if (repository.getBook(resolvedId) != null) {
+                logger.i { "⏭️ Book '$title' with resolved ID $resolvedId already exists (append mode). Skipping." }
+                processedBooksCount += 1
+                return
+            }
+            currentBookId = resolvedId
+        } else {
+            // Ensure nextBookId is free
+            while (repository.getBook(nextBookId) != null) {
+                logger.w { "⚠️ ID collision for nextBookId=$nextBookId. Incrementing..." }
+                nextBookId++
+            }
+            currentBookId = nextBookId++
+        }
+
+        logger.d { "Assigning ID $currentBookId to book '$title' with categoryId: $categoryId (resolved=${resolvedId != null})" }
 
         // Create author list if author is available in metadata
         val authors = meta?.author?.let { authorName ->
@@ -722,7 +748,6 @@ class DatabaseGenerator(
             } else null
         }.getOrNull()
 
-        val sourceId = resolveSourceIdFor(path)
         val book = Book(
             id = currentBookId,
             categoryId = categoryId,
@@ -736,7 +761,7 @@ class DatabaseGenerator(
             order = meta?.order ?: 999f,
             topics = extractTopics(path),
             isBaseBook = isBaseBook,
-            filePath = toLibraryRelativeKey(path).substringBeforeLast('.')
+            filePath = bookFilePath
         )
 
         logger.d { "Inserting book '${book.title}' with ID: ${book.id} and categoryId: ${book.categoryId}" }
@@ -838,7 +863,9 @@ class DatabaseGenerator(
 
                 val parentId = (level - 1 downTo 1).firstNotNullOfOrNull { parentStack[it] }
                 val currentTocEntryId = nextTocEntryId++
-                val currentLineId = nextLineId++
+                // Resolve line ID: use IdResolver if available, otherwise allocate sequentially
+                val currentLineId = idResolverProvider?.resolveLineId(bookId, lineIndex)
+                    ?: nextLineId++
 
                 // Stocker l'info de cette entrée pour la deuxième passe
                 allTocEntries.add(TocEntryData(
@@ -849,11 +876,46 @@ class DatabaseGenerator(
                     lineIndex = lineIndex
                 ))
 
+                // Resolve TocEntry ID using lineIndex (which maps to lineId) for stability
+                // If the resolver is available, use it. Otherwise rely on nextTocEntryId if initialized properly, or fall back to 0 (auto-inc)
+                val resolvedTocEntryId = idResolverProvider?.resolveTocEntryId(bookId, currentLineId, level, parentId)
+                    ?: 0L // 0L will trigger auto-increment or explicit usage of 'id' field in insertTocEntry if set
+
+
+                // Resolve TocText ID to enable stable TocEntry IDs even if text changes
+                var resolvedTextId = idResolverProvider?.resolveTocTextId(plainText)
+
+                // If text not found in previous DB, try to reuse the old text ID associated with this structural entry,
+                // provided it wasn't shared by multiple entries.
+                if (resolvedTextId == null && idResolverProvider != null) {
+                     val oldTextId = idResolverProvider.getPreviousTextIdForTocEntry(resolvedTocEntryId)
+                     if (oldTextId != null) {
+                         // Check usage count to avoid hijacking a shared text ID
+                         val usageCount = idResolverProvider.getTocTextUsageCount(oldTextId)
+                         if (usageCount <= 1) {
+                             resolvedTextId = oldTextId
+                             logger.i { "Reusing old text ID $oldTextId for new text '$plainText' (was linked to TocEntry $resolvedTocEntryId)" }
+                             // Important: Register this mapping so subsequent lookups for this text get the reused ID
+                             idResolverProvider.registerTocTextId(plainText, oldTextId)
+                         }
+                     }
+                }
+                
+                // If still null (either no resolver, or reuse not possible), allocate new ID
+                if (resolvedTextId == null) {
+                    resolvedTextId = idResolverProvider?.allocateTocTextId(plainText) 
+                }
+
+                if (resolvedTextId != null) {
+                    repository.insertTocTextWithId(resolvedTextId, plainText)
+                }
+
                 // Créer l'entrée TOC avec hasChildren = false par défaut
                 val tocEntry = TocEntry(
-                    id = currentTocEntryId,
+                    id = resolvedTocEntryId, // Use resolved ID or 0
                     bookId = bookId,
                     parentId = parentId,
+                    textId = resolvedTextId,
                     text = plainText,
                     level = level,
                     lineId = null,
@@ -885,8 +947,9 @@ class DatabaseGenerator(
                     lineTocBuffer.clear()
                 }
             } else {
-                // Regular line
-                val currentLineId = nextLineId++
+                // Regular line - resolve ID using IdResolver if available
+                val currentLineId = idResolverProvider?.resolveLineId(bookId, lineIndex)
+                    ?: nextLineId++
                 val insertedLineId = repository.insertLine(
                     Line(
                         id = currentLineId,
@@ -1155,6 +1218,24 @@ class DatabaseGenerator(
      * Links connect lines between different books.
      */
     private suspend fun processLinks() {
+        // Pre-populate connection types with stable IDs from previous DB
+        // This MUST happen before any links are processed to ensure consistent IDs
+        idResolverProvider?.let { resolver ->
+            val connectionTypeMappings = resolver.getAllConnectionTypeMappings()
+            if (connectionTypeMappings.isNotEmpty()) {
+                logger.i { "Pre-populating ${connectionTypeMappings.size} connection types with stable IDs..." }
+                // Sort by ID to ensure insertion order matches original DB
+                val sortedMappings = connectionTypeMappings.entries.sortedBy { it.value }
+                for ((name, preferredId) in sortedMappings) {
+                    val actualId = repository.ensureConnectionTypeIdWithPreferred(name, preferredId)
+                    if (actualId != preferredId) {
+                        logger.w { "Connection type '$name' got ID $actualId instead of preferred $preferredId" }
+                    }
+                }
+                logger.i { "Connection types pre-populated successfully" }
+            }
+        }
+
         // Load caches once so most lookups stay in memory
         ensureCachesLoaded()
         // If headingLineIds is empty (e.g., running generateLinksOnly separately),
@@ -1302,16 +1383,41 @@ class DatabaseGenerator(
                         continue
                     }
 
+                    val connType = ConnectionType.fromString(linkData.connectionType)
+                    
+                    // Ensure connection type exists with correct ID (use ID from previous DB if available)
+                    val resolvedConnTypeId = idResolverProvider?.resolveConnectionTypeId(connType.name)
+                    if (resolvedConnTypeId != null) {
+                        // Insert connection type with ID from previous DB if not already present
+                        repository.ensureConnectionTypeIdWithPreferred(connType.name, resolvedConnTypeId)
+                    }
+                    
+                    // Resolve link ID: first try OLD connection type ID, then allocate new
+                    val resolvedLinkId = idResolverProvider?.let { resolver ->
+                        val oldConnTypeId = resolver.resolveConnectionTypeId(connType.name)
+                        if (oldConnTypeId != null) {
+                            resolver.resolveLinkId(sourceBook.id, targetBook.id, sourceLineId, targetLineId, oldConnTypeId)
+                        } else {
+                            // New connection type - allocate new link ID starting from maxLinkId + 1
+                            resolver.resolveLinkId(sourceBook.id, targetBook.id, sourceLineId, targetLineId, 0L)
+                        }
+                    } ?: 0L
+
                     val link = Link(
+                        id = resolvedLinkId,
                         sourceBookId = sourceBook.id,
                         targetBookId = targetBook.id,
                         sourceLineId = sourceLineId,
                         targetLineId = targetLineId,
-                        connectionType = ConnectionType.fromString(linkData.connectionType)
+                        connectionType = connType
                     )
 
                     logger.d { "Inserting link from book ${sourceBook.id} to book ${targetBook.id}" }
-                    val linkId = repository.insertLink(link)
+                    val linkId = if (resolvedLinkId > 0) {
+                        repository.insertLinkWithId(link)
+                    } else {
+                        repository.insertLink(link)
+                    }
                     logger.d { "Link inserted with ID: $linkId" }
                     processed++
                 } catch (e: Exception) {
@@ -1376,14 +1482,39 @@ class DatabaseGenerator(
                 // Skip links where source or target is a heading line
                 if (sourceLineId in headingLineIds || targetLineId in headingLineIds) continue
 
+                val connType = ConnectionType.fromString(linkData.connectionType)
+                
+                // Ensure connection type exists with correct ID (use ID from previous DB if available)
+                val resolvedConnTypeId = idResolverProvider?.resolveConnectionTypeId(connType.name)
+                if (resolvedConnTypeId != null) {
+                    // Insert connection type with ID from previous DB if not already present
+                    repository.ensureConnectionTypeIdWithPreferred(connType.name, resolvedConnTypeId)
+                }
+                
+                // Resolve link ID: first try OLD connection type ID, then allocate new
+                val resolvedLinkId = idResolverProvider?.let { resolver ->
+                    val oldConnTypeId = resolver.resolveConnectionTypeId(connType.name)
+                    if (oldConnTypeId != null) {
+                        resolver.resolveLinkId(sourceBook.id, targetBook.id, sourceLineId, targetLineId, oldConnTypeId)
+                    } else {
+                        // New ction type - allocate new link ID starting from maxLinkId + 1
+                        resolver.resolveLinkId(sourceBook.id, targetBook.id, sourceLineId, targetLineId, 0L)
+                    }
+                } ?: 0L
+
                 val link = Link(
+                    id = resolvedLinkId,
                     sourceBookId = sourceBook.id,
                     targetBookId = targetBook.id,
                     sourceLineId = sourceLineId,
                     targetLineId = targetLineId,
-                    connectionType = ConnectionType.fromString(linkData.connectionType)
+                    connectionType = connType
                 )
-                repository.insertLink(link)
+                if (resolvedLinkId > 0) {
+                    repository.insertLinkWithId(link)
+                } else {
+                    repository.insertLink(link)
+                }
                 processed++
             } catch (_: Exception) {
                 // Skip malformed entries but continue

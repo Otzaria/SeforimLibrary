@@ -22,6 +22,7 @@ kotlin {
         }
 
         jvmMain.dependencies {
+            implementation(project(":idresolver"))
             implementation(libs.sqlDelight.driver.sqlite)
             implementation(libs.commons.compress)
             implementation(libs.zstd)
@@ -57,6 +58,9 @@ tasks.register<JavaExec>("generateSefariaSqlite") {
     if (project.hasProperty("inMemoryDb")) {
         systemProperty("inMemoryDb", project.property("inMemoryDb") as String)
     }
+
+    // Provide project root path for finding backup DB
+    systemProperty("projectRoot", rootProject.projectDir.absolutePath)
 
     // Optional JVM tuning (similar to generator)
     jvmArgs = listOf(

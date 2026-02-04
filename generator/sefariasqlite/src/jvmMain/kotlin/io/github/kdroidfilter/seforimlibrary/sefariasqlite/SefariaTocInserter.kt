@@ -1,10 +1,12 @@
 package io.github.kdroidfilter.seforimlibrary.sefariasqlite
 
+import io.github.kdroidfilter.seforimlibrary.core.IdResolverProvider
 import io.github.kdroidfilter.seforimlibrary.core.models.TocEntry
 import io.github.kdroidfilter.seforimlibrary.dao.repository.SeforimRepository
 
 internal class SefariaTocInserter(
-    private val repository: SeforimRepository
+    private val repository: SeforimRepository,
+    private val idResolverProvider: IdResolverProvider? = null
 ) {
     /**
      * Insert TOC entries hierarchically and build `line_toc` mappings.
@@ -28,12 +30,26 @@ internal class SefariaTocInserter(
             while (levelStack.isNotEmpty() && levelStack.last().first >= h.level) levelStack.removeLast()
             val parent = levelStack.lastOrNull()?.second
             val lineIdForHeading = lineKeyToId[bookPath to h.lineIndex]
+            
+            // Resolve IDs if provider is available
+            val resolvedTextId = idResolverProvider?.resolveTocTextId(h.title)
+            if (resolvedTextId != null) {
+                repository.insertTocTextWithId(resolvedTextId, h.title)
+            }
+            // If resolvedTextId is available, we use it to look up the stable TocEntry ID
+            // NOW USING lineId (lineIdForHeading) INSTEAD OF textId FOR KEY STABILITY
+            val tocEntryId = idResolverProvider?.resolveTocEntryId(bookId, lineIdForHeading!!, h.level, parent) ?: 0L
+            
+            if (idResolverProvider == null && tocEntryId % 1000 == 0L) {
+                 println("WARNING: SefariaTocInserter is running without IdResolverProvider! IDs will be unstable.")
+            }
+
             val tocId = repository.insertTocEntry(
                 TocEntry(
-                    id = 0,
+                    id = tocEntryId,
                     bookId = bookId,
                     parentId = parent,
-                    textId = null,
+                    textId = resolvedTextId,
                     text = h.title,
                     level = h.level,
                     lineId = lineIdForHeading,

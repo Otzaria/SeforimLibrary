@@ -26,6 +26,7 @@ kotlin {
         }
 
         jvmMain.dependencies {
+            implementation(project(":idresolver"))
             implementation(libs.kotlinx.coroutines.swing)
             implementation(libs.sqlDelight.driver.sqlite)
         }
@@ -123,6 +124,9 @@ tasks.register<JavaExec>("generateLines") {
             systemProperty("persistDb", defaultDbPath)
         }
     }
+
+    // Provide project root path for finding backup DB
+    systemProperty("projectRoot", rootProject.projectDir.absolutePath)
 
     jvmArgs = listOf(
         "-Xmx10g",

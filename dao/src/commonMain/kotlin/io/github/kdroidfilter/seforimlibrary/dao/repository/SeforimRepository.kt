@@ -1352,10 +1352,13 @@ class SeforimRepository(databasePath: String, private val driver: SqlDriver) {
             logger.d{"Created new tocText entry with ID: $textId for text: '$truncatedText'"}
             return@withContext textId
         } catch (e: Exception) {
-            // Changed from error to warning level to reduce unnecessary error logs
             logger.w(e){"Exception in getOrCreateTocText for text: '$truncatedText', Length: ${text.length}, Hash: ${text.hashCode()}. Error: ${e.message}"}
             throw e
         }
+    }
+
+    suspend fun insertTocTextWithId(id: Long, text: String) = withContext(Dispatchers.IO) {
+        database.tocTextQueriesQueries.insertWithId(id, text)
     }
 
     suspend fun insertTocEntry(entry: TocEntry): Long = withContext(Dispatchers.IO) {
@@ -1469,6 +1472,43 @@ class SeforimRepository(databasePath: String, private val driver: SqlDriver) {
 
         logger.d{"Created new connection type with ID: $typeId"}
         return@withContext typeId
+    }
+
+    /**
+     * Gets the ID for a connection type by name, or creates it if it doesn't exist.
+     * This is a public wrapper around the private getOrCreateConnectionType function.
+     */
+    suspend fun ensureConnectionTypeId(name: String): Long = getOrCreateConnectionType(name)
+
+    /**
+     * Gets the ID for a connection type by name, or creates it with a specific ID if it doesn't exist.
+     * If the type already exists, returns the existing ID (ignores the provided preferredId).
+     *
+     * @param name The name of the connection type
+     * @param preferredId The preferred ID to use when creating a new entry (from previous DB)
+     * @return The ID of the connection type
+     */
+    suspend fun ensureConnectionTypeIdWithPreferred(name: String, preferredId: Long): Long = withContext(Dispatchers.IO) {
+        logger.d { "Getting or creating connection type '$name' with preferred ID: $preferredId" }
+
+        // Check if the connection type already exists
+        val existingType = database.connectionTypeQueriesQueries.selectByName(name).executeAsOneOrNull()
+        if (existingType != null) {
+            logger.d { "Found existing connection type with ID: ${existingType.id}" }
+            return@withContext existingType.id
+        }
+        logger.i { "Connection type '$name' not found, inserting with preferred ID: $preferredId" }
+        // Insert with the preferred ID
+        database.connectionTypeQueriesQueries.insertWithId(preferredId, name)
+
+        // Verify insertion
+        val insertedType = database.connectionTypeQueriesQueries.selectByName(name).executeAsOneOrNull()
+        if (insertedType != null) {
+            logger.d { "Created connection type '$name' with ID: ${insertedType.id}" }
+            return@withContext insertedType.id
+        }
+
+        throw RuntimeException("Failed to insert connection type '$name' with preferred ID $preferredId")
     }
 
     /**
@@ -1743,6 +1783,43 @@ class SeforimRepository(databasePath: String, private val driver: SqlDriver) {
     }
 
     /**
+     * Inserts a link with a specific ID (for stable ID resolution).
+     * If id is 0, falls back to auto-increment behavior.
+     */
+    suspend fun insertLinkWithId(link: Link): Long = withContext(Dispatchers.IO) {
+        try {
+            // Get or create the connection type
+            val connectionTypeId = getOrCreateConnectionType(link.connectionType.name)
+
+            if (link.id > 0) {
+                // Use explicit ID
+                database.linkQueriesQueries.insertWithId(
+                    id = link.id,
+                    sourceBookId = link.sourceBookId,
+                    targetBookId = link.targetBookId,
+                    sourceLineId = link.sourceLineId,
+                    targetLineId = link.targetLineId,
+                    connectionTypeId = connectionTypeId
+                )
+                return@withContext link.id
+            } else {
+                // Fall back to auto-increment
+                database.linkQueriesQueries.insert(
+                    sourceBookId = link.sourceBookId,
+                    targetBookId = link.targetBookId,
+                    sourceLineId = link.sourceLineId,
+                    targetLineId = link.targetLineId,
+                    connectionTypeId = connectionTypeId
+                )
+                return@withContext database.linkQueriesQueries.lastInsertRowId().executeAsOne()
+            }
+        } catch (e: Exception) {
+            logger.w(e) { "Error inserting link with ID: ${e.message}" }
+            throw e
+        }
+    }
+
+    /**
      * Inserts multiple links in a single transaction.
      * Optimized for bulk import; assumes no duplicate (sourceBookId, targetBookId, sourceLineId, targetLineId) rows.
      */
@@ -1763,13 +1840,26 @@ class SeforimRepository(databasePath: String, private val driver: SqlDriver) {
                 val connectionTypeId = typeIdCache[link.connectionType.name]
                     ?: error("Missing connection type id for ${link.connectionType.name}")
 
-                database.linkQueriesQueries.insert(
-                    sourceBookId = link.sourceBookId,
-                    targetBookId = link.targetBookId,
-                    sourceLineId = link.sourceLineId,
-                    targetLineId = link.targetLineId,
-                    connectionTypeId = connectionTypeId
-                )
+                if (link.id > 0) {
+                    // Use explicit ID
+                    database.linkQueriesQueries.insertWithId(
+                        id = link.id,
+                        sourceBookId = link.sourceBookId,
+                        targetBookId = link.targetBookId,
+                        sourceLineId = link.sourceLineId,
+                        targetLineId = link.targetLineId,
+                        connectionTypeId = connectionTypeId
+                    )
+                } else {
+                    // Use auto-increment
+                    database.linkQueriesQueries.insert(
+                        sourceBookId = link.sourceBookId,
+                        targetBookId = link.targetBookId,
+                        sourceLineId = link.sourceLineId,
+                        targetLineId = link.targetLineId,
+                        connectionTypeId = connectionTypeId
+                    )
+                }
             }
         }
     }

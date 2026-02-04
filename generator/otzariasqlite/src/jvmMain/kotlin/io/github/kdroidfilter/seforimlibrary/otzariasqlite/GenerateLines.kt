@@ -7,6 +7,8 @@ import co.touchlab.kermit.Logger
 import co.touchlab.kermit.Severity
 import io.github.kdroidfilter.seforimlibrary.dao.repository.SeforimRepository
 import io.github.kdroidfilter.seforimlibrary.db.SeforimDb
+import io.github.kdroidfilter.seforimlibrary.idresolver.IdResolverAdapter
+import io.github.kdroidfilter.seforimlibrary.idresolver.IdResolverLoader
 import kotlinx.coroutines.runBlocking
 import java.io.File
 import java.nio.file.Paths
@@ -18,6 +20,8 @@ import java.nio.file.Paths
  *   ./gradlew -p SeforimLibrary :otzariasqlite:generateLines -PseforimDb=/path/to.db -PsourceDir=/path/to/otzaria [-PacronymDb=/path/acronym.db]
  *   # To append to an existing DB instead of rotating it:
  *   ./gradlew -p SeforimLibrary :otzariasqlite:generateLines -PappendExistingDb=true
+ *   # To use ID resolution from a previous DB:
+ *   ./gradlew -p SeforimLibrary :otzariasqlite:generateLines -PpreviousDb=/path/to/previous.db
  */
 fun main(args: Array<String>) = runBlocking {
     Logger.setMinSeverity(Severity.Info)
@@ -52,6 +56,38 @@ fun main(args: Array<String>) = runBlocking {
         ?: if (appendExistingDb) seforimDbPropOrEnv else null
         ?: Paths.get("build", "seforim.db").toString()
 
+    // Load IdResolver from previous DB for stable ID resolution
+    // Get project root from system property set by Gradle, or try to find it
+    val projectRoot = resolveProjectRoot()
+    logger.i { "projectRoot=$projectRoot" }
+    val previousDbPath = System.getProperty("previousDb")
+        ?: System.getenv("PREVIOUS_DB")
+        ?: run {
+            // Auto-detect: look for seforim.db.bak in the project's build directory
+            // This is created when the existing DB is backed up
+            val buildBakFile = File(projectRoot, "build/seforim.db.bak")
+            val dbBakFile = File("$dbPath.bak")
+            logger.i { "buildBakFile.exists()=${buildBakFile.exists()}, path=${buildBakFile.absolutePath}" }
+            logger.i { "dbBakFile.exists()=${dbBakFile.exists()}, path=${dbBakFile.absolutePath}" }
+            when {
+                buildBakFile.exists() -> buildBakFile.absolutePath
+                dbBakFile.exists() -> dbBakFile.absolutePath
+                else -> null
+            }
+        }
+
+    val idResolverAdapter: IdResolverAdapter? = if (previousDbPath != null && File(previousDbPath).exists()) {
+        logger.i { "Loading ID mappings from previous DB: $previousDbPath" }
+        val resolver = IdResolverLoader.load(previousDbPath)
+        val stats = resolver.getStatistics()
+        logger.i { "IdResolver loaded: ${stats.loadedBooks} books, ${stats.loadedLines} lines, ${stats.loadedLinks} links" }
+        logger.i { "Estimated memory: ${String.format("%.1f", stats.estimatedMemoryUsageMB())} MB" }
+        IdResolverAdapter(resolver)
+    } else {
+        logger.i { "No previous DB found; IDs will be assigned sequentially" }
+        null
+    }
+
     // If writing directly to disk, rotate existing DB; for in-memory we will persist at the end
     if (!useMemoryDb && !appendExistingDb) {
         val dbFile = File(dbPath)
@@ -76,13 +112,16 @@ fun main(args: Array<String>) = runBlocking {
     runCatching { SeforimDb.Schema.create(driver) }
     val repository = SeforimRepository(dbPath, driver)
 
+    logger.i { "useMemoryDb=$useMemoryDb, appendExistingDb=$appendExistingDb" }
     if (useMemoryDb && appendExistingDb) {
         val baseDbPath = System.getProperty("baseDb")
             ?: System.getenv("SEFORIM_DB_BASE")
             ?: seforimDbPropOrEnv
             ?: persistDbPath
+        logger.i { "baseDbPath=$baseDbPath" }
         if (baseDbPath != null && baseDbPath != ":memory:") {
             val baseFile = File(baseDbPath)
+            logger.i { "baseFile.exists()=${baseFile.exists()}, path=${baseFile.absolutePath}" }
             if (baseFile.exists()) {
                 logger.i { "Seeding in-memory DB from base file: ${baseFile.absolutePath}" }
                 runCatching {
@@ -123,9 +162,19 @@ fun main(args: Array<String>) = runBlocking {
         val generator = DatabaseGenerator(
             sourceDirectory = Paths.get(sourceDir),
             repository = repository,
-            acronymDbPath = acronymDbPath
+            acronymDbPath = acronymDbPath,
+            idResolverProvider = idResolverAdapter
         )
         generator.generateLinesOnly()
+        
+        // Log IdResolver statistics if used
+        idResolverAdapter?.let { adapter ->
+            val stats = adapter.getStatistics()
+            logger.i { "ID Resolution summary:" }
+            logger.i { "  Newly allocated books: ${stats.newlyAllocatedBooks}" }
+            logger.i { "  Newly allocated lines: ${stats.newlyAllocatedLines}" }
+        }
+        
         if (useMemoryDb) {
             // Persist in-memory DB to disk using VACUUM INTO (target must not exist)
             runCatching {
@@ -151,4 +200,24 @@ fun main(args: Array<String>) = runBlocking {
     } finally {
         repository.close()
     }
+}
+
+private fun resolveProjectRoot(): String {
+    val explicit = System.getProperty("projectRoot") ?: System.getenv("PROJECT_ROOT")
+    if (!explicit.isNullOrBlank()) return explicit
+
+    val userDir = File(System.getProperty("user.dir"))
+    val detected = findRepoRoot(userDir)
+    return detected?.absolutePath ?: userDir.absolutePath
+}
+
+private fun findRepoRoot(start: File): File? {
+    var current: File? = start
+    while (current != null) {
+        val hasSettings = File(current, "settings.gradle.kts").exists() || File(current, "settings.gradle").exists()
+        val hasGradlew = File(current, "gradlew").exists()
+        if (hasSettings || hasGradlew) return current
+        current = current.parentFile
+    }
+    return null
 }

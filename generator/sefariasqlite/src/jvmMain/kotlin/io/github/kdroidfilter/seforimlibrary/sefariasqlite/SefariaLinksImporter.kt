@@ -1,6 +1,7 @@
 package io.github.kdroidfilter.seforimlibrary.sefariasqlite
 
 import co.touchlab.kermit.Logger
+import io.github.kdroidfilter.seforimlibrary.core.IdResolverProvider
 import io.github.kdroidfilter.seforimlibrary.core.models.ConnectionType
 import io.github.kdroidfilter.seforimlibrary.core.models.Link
 import io.github.kdroidfilter.seforimlibrary.dao.repository.SeforimRepository
@@ -11,11 +12,20 @@ import kotlinx.coroutines.joinAll
 import kotlinx.coroutines.launch
 import java.nio.file.Files
 import java.nio.file.Path
+import java.util.concurrent.ConcurrentHashMap
 
 internal class SefariaLinksImporter(
     private val repository: SeforimRepository,
-    private val logger: Logger
+    private val logger: Logger,
+    private val idResolverProvider: IdResolverProvider? = null
 ) {
+    // Cache for connection type name -> id mapping (thread-safe for parallel processing)
+    private val connectionTypeCache = ConcurrentHashMap<String, Long>()
+    
+    // Track inserted link IDs to avoid duplicates (thread-safe)
+    // Key: link signature (srcBookId|tgtBookId|srcLineId|tgtLineId|connType)
+    private val insertedLinkKeys = ConcurrentHashMap.newKeySet<String>()
+    
     suspend fun processLinksInParallel(
         linksDir: Path,
         refsByCanonical: Map<String, List<RefEntry>>,
@@ -25,6 +35,25 @@ internal class SefariaLinksImporter(
         bookMetaById: Map<Long, BookMeta>,
         headingLineIds: Set<Long> = emptySet()
     ) = coroutineScope {
+        // Pre-populate connection types with stable IDs from previous DB
+        // This MUST happen before any links are processed to ensure consistent IDs
+        idResolverProvider?.let { resolver ->
+            val connectionTypeMappings = resolver.getAllConnectionTypeMappings()
+            if (connectionTypeMappings.isNotEmpty()) {
+                logger.i { "Pre-populating ${connectionTypeMappings.size} connection types with stable IDs..." }
+                // Sort by ID to ensure insertion order matches original DB
+                val sortedMappings = connectionTypeMappings.entries.sortedBy { it.value }
+                for ((name, preferredId) in sortedMappings) {
+                    val actualId = repository.ensureConnectionTypeIdWithPreferred(name, preferredId)
+                    connectionTypeCache[name] = actualId
+                    if (actualId != preferredId) {
+                        logger.w { "Connection type '$name' got ID $actualId instead of preferred $preferredId" }
+                    }
+                }
+                logger.i { "Connection types pre-populated successfully" }
+            }
+        }
+
         val csvFiles = Files.list(linksDir)
             .filter { it.fileName.toString().endsWith(".csv") }
             .toList()
@@ -119,26 +148,65 @@ internal class SefariaLinksImporter(
                             bookMetaById = bookMetaById
                         )
 
-                        // Send links to channel
-                        linkChannel.send(
-                            Link(
-                                sourceBookId = lineBookId(srcLine, lineIdToBookId),
-                                targetBookId = lineBookId(tgtLine, lineIdToBookId),
-                                sourceLineId = srcLine,
-                                targetLineId = tgtLine,
-                                connectionType = forwardType
-                            )
-                        )
+                        // Resolve link IDs if IdResolver is available
+                        val srcBookId = lineBookId(srcLine, lineIdToBookId)
+                        val tgtBookId = lineBookId(tgtLine, lineIdToBookId)
+                        
+                        val forwardLinkId = idResolverProvider?.let { resolver ->
+                            // First try to find existing link using OLD connection type ID
+                            val oldConnTypeId = resolver.resolveConnectionTypeId(forwardType.name)
+                            if (oldConnTypeId != null) {
+                                resolver.resolveLinkId(srcBookId, tgtBookId, srcLine, tgtLine, oldConnTypeId)
+                            } else {
+                                // New connection type - allocate new link ID starting from maxLinkId + 1
+                                // Use a synthetic key (with connTypeId=0) to ensure new allocation
+                                resolver.resolveLinkId(srcBookId, tgtBookId, srcLine, tgtLine, 0L)
+                            }
+                        } ?: 0L
+                        
+                        val reverseLinkId = idResolverProvider?.let { resolver ->
+                            // First try to find existing link using OLD connection type ID
+                            val oldConnTypeId = resolver.resolveConnectionTypeId(reverseType.name)
+                            if (oldConnTypeId != null) {
+                                resolver.resolveLinkId(tgtBookId, srcBookId, tgtLine, srcLine, oldConnTypeId)
+                            } else {
+                                // New ction type - allocate new link ID starting from maxLinkId + 1
+                                // Use a synthetic key (with connTypeId=0) to ensure new allocation
+                                resolver.resolveLinkId(tgtBookId, srcBookId, tgtLine, srcLine, 0L)
+                            }
+                        } ?: 0L
 
-                        linkChannel.send(
-                            Link(
-                                sourceBookId = lineBookId(tgtLine, lineIdToBookId),
-                                targetBookId = lineBookId(srcLine, lineIdToBookId),
-                                sourceLineId = tgtLine,
-                                targetLineId = srcLine,
-                                connectionType = reverseType
+                        // Build link keys to detect duplicates
+                        val forwardKey = "$srcBookId|$tgtBookId|$srcLine|$tgtLine|${forwardType.name}"
+                        val reverseKey = "$tgtBookId|$srcBookId|$tgtLine|$srcLine|${reverseType.name}"
+
+                        // Send forward link only if not already processed
+                        if (insertedLinkKeys.add(forwardKey)) {
+                            linkChannel.send(
+                                Link(
+                                    id = forwardLinkId,
+                                    sourceBookId = srcBookId,
+                                    targetBookId = tgtBookId,
+                                    sourceLineId = srcLine,
+                                    targetLineId = tgtLine,
+                                    connectionType = forwardType
+                                )
                             )
-                        )
+                        }
+
+                        // Send reverse link only if not already processed
+                        if (insertedLinkKeys.add(reverseKey)) {
+                            linkChannel.send(
+                                Link(
+                                    id = reverseLinkId,
+                                    sourceBookId = tgtBookId,
+                                    targetBookId = srcBookId,
+                                    sourceLineId = tgtLine,
+                                    targetLineId = srcLine,
+                                    connectionType = reverseType
+                                )
+                            )
+                        }
                     }
                 }
             }

@@ -1,6 +1,7 @@
 package io.github.kdroidfilter.seforimlibrary.sefariasqlite
 
 import co.touchlab.kermit.Logger
+import io.github.kdroidfilter.seforimlibrary.core.IdResolverProvider
 import io.github.kdroidfilter.seforimlibrary.core.models.Author
 import io.github.kdroidfilter.seforimlibrary.core.models.Book
 import io.github.kdroidfilter.seforimlibrary.core.models.Category
@@ -24,7 +25,8 @@ import kotlin.io.path.isDirectory
 class SefariaDirectImporter(
     private val exportRoot: Path,
     private val repository: SeforimRepository,
-    private val logger: Logger = Logger.withTag("SefariaDirectImporter")
+    private val logger: Logger = Logger.withTag("SefariaDirectImporter"),
+    private val idResolverProvider: IdResolverProvider? = null
 ) {
     private val json = Json { ignoreUnknownKeys = true; coerceInputValues = true }
 
@@ -138,33 +140,48 @@ class SefariaDirectImporter(
             return parentId ?: throw IllegalStateException("No category created for $pathParts")
         }
 
-        val nextBookId = AtomicLong(1L)
-        val nextLineId = AtomicLong(1L)
+        // Fallback counters (used when idResolverProvider doesn't have an existing ID)
+        val nextBookIdFallback = AtomicLong(1L)
+        val nextLineIdFallback = AtomicLong(1L)
         val lineKeyToId = ConcurrentHashMap<Pair<String, Int>, Long>()
         val lineIdToBookId = ConcurrentHashMap<Long, Long>()
         val allRefsWithPath = mutableListOf<RefEntry>()
         val bookMetaById = ConcurrentHashMap<Long, BookMeta>()
         val normalizedTitleToBookId = ConcurrentHashMap<String, Long>()
         val headingLineIds = ConcurrentHashMap.newKeySet<Long>()
+        
+        // Track inserted book paths to prevent duplicates
+        val insertedBookPaths = mutableSetOf<String>()
 
         // Batch insertions
         val lineBatch = mutableListOf<Line>()
         val lineTocBatch = mutableListOf<Pair<Long, Long>>() // lineId, tocId
 
-        val tocInserter = SefariaTocInserter(repository)
+        val tocInserter = SefariaTocInserter(repository, idResolverProvider)
         val altTocBuilder = SefariaAltTocBuilder(repository)
-        val linksImporter = SefariaLinksImporter(repository, logger)
+        val linksImporter = SefariaLinksImporter(repository, logger, idResolverProvider)
 
         logger.i { "Inserting books and lines..." }
         var processedBooks = 0
 
         for (payload in orderedBookPayloads) {
             val catId = ensureCategoryPath(payload.categoriesHe)
-            val bookId = nextBookId.getAndIncrement()
             val bookPath = buildBookPath(payload.categoriesHe, payload.heTitle)
+            
+            // Skip duplicate book paths (can occur in source data)
+            if (bookPath in insertedBookPaths) {
+                logger.w { "Skipping duplicate book path: $bookPath" }
+                continue
+            }
+            insertedBookPaths.add(bookPath)
+            
             val bookOrder = bookOrders[payload.enTitle]?.toFloat() ?: 999f
             val normalizedPath = normalizedBookPath(payload.categoriesHe, payload.heTitle)
             val isBaseBook = normalizedPath in baseBookKeys
+
+            // Resolve book ID: use IdResolver if available, otherwise allocate sequentially
+            val bookId = idResolverProvider?.resolveBookId(bookPath, sourceId, "txt")
+                ?: nextBookIdFallback.getAndIncrement()
 
             // Detect teamim and nekudot in book lines
             val (hasTeamim, hasNekudot) = detectTeamimAndNekudot(payload.lines)
@@ -215,7 +232,9 @@ class SefariaDirectImporter(
             val refsByLineIndex = payload.refEntries.associateBy { it.lineIndex - 1 }
 
             payload.lines.forEachIndexed { idx, content ->
-                val lineId = nextLineId.getAndIncrement()
+                // Resolve line ID: use IdResolver if available, otherwise allocate sequentially
+                val lineId = idResolverProvider?.resolveLineId(bookId, idx)
+                    ?: nextLineIdFallback.getAndIncrement()
                 val refEntry = refsByLineIndex[idx]
                 lineBatch += Line(
                     id = lineId,
