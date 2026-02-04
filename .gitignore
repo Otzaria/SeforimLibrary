@@ -26,3 +26,6 @@ generator/sefariasqlite/bin/jvmMain/books_blacklist.txt
 generator/sefariasqlite/bin/jvmMain/default_targumim.json
 generator/sefariasqlite/bin/jvmMain/default_commentators.json
 generator/sefariasqlite/bin/jvmMain/priority.txt
+update.sql
+.vscode/settings.json
+search/bin/jvmMain/hallucination_blacklist.tsv
