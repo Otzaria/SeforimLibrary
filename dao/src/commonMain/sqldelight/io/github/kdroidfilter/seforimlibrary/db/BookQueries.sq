@@ -35,6 +35,9 @@ JOIN author a ON ba.authorId = a.id
 WHERE a.name LIKE ? 
 ORDER BY b.orderIndex, b.title;
 
+selectBySource:
+SELECT * FROM book WHERE sourceId = ? ORDER BY orderIndex, title;
+
 -- Base-books helpers
 selectBaseIds:
 SELECT id FROM book WHERE isBaseBook = 1 ORDER BY orderIndex, title;

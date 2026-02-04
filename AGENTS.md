@@ -5,6 +5,7 @@
 - `dao/`: SQLDelight schema + repositories (`src/commonMain/sqldelight/...`).
 - `generator/`: grouping folder for generation tooling modules:
   - `generator/sefariasqlite/`: one-step Sefaria → SQLite pipeline.
+  - `generator/sefariadiff/`: compares old vs new Sefaria books and generates diff report.
   - `generator/otzariasqlite/`: JVM tools to download/import Otzaria and append it into an existing DB.
   - `generator/catalog/`: JVM tool to build the precomputed `catalog.pb` from a SQLite DB.
   - `generator/searchindex/`: JVM tooling to build Lucene indexes from a SQLite DB.
@@ -16,7 +17,8 @@
 - `./gradlew build`: build all modules.
 - `./gradlew :core:jvmTest`: run JVM tests for a single module (replace `core` as needed).
 - `./gradlew :core:allTests`: run tests for all KMP targets for that module.
-- `./gradlew generateSeforimDb`: Sefaria → SQLite, then append Otzaria + rebuild catalog.
+- `./gradlew generateSeforimDb`: Sefaria → SQLite, compare with backup, then append Otzaria + rebuild catalog.
+- `./gradlew :sefariadiff:generateSefariaDiff`: compare old and new Sefaria books and generate diff report.
 - `./gradlew :otzariasqlite:generateLines`: phase 1 DB generation (creates/persists `build/seforim.db` by default).
 - `./gradlew :otzariasqlite:generateLinks`: phase 2 link processing.
 - `./gradlew :otzariasqlite:appendOtzaria`: append Otzaria lines + links into an existing DB (wrapper task).

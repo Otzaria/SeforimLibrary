@@ -9,9 +9,10 @@ plugins {
 
 tasks.register("generateSeforimDb") {
     group = "application"
-    description = "Generate build/seforim.db from Sefaria, append Otzaria, build catalog, Lucene indexes, and release info."
+    description = "Generate build/seforim.db from Sefaria, compare with backup, append Otzaria, build catalog, Lucene indexes, and release info."
 
     dependsOn(":sefariasqlite:generateSefariaSqlite")
+    dependsOn(":sefariadiff:generateSefariaDiff")
     dependsOn(":otzariasqlite:appendOtzaria")
     dependsOn(":otzariasqlite:generateHavroutaLinks")
     //dependsOn(":catalog:buildCatalog")
@@ -21,6 +22,9 @@ tasks.register("generateSeforimDb") {
 }
 
 // Ensure ordering inside the pipeline task graph
+project(":sefariadiff").tasks.matching { it.name == "generateSefariaDiff" }.configureEach {
+    mustRunAfter(":sefariasqlite:generateSefariaSqlite")
+}
 project(":otzariasqlite").tasks.matching {
     it.name in setOf(
         // Use strict ordering on the actual DB-mutating task, not only the wrapper,
@@ -31,7 +35,7 @@ project(":otzariasqlite").tasks.matching {
         "appendOtzaria"
     )
 }.configureEach {
-    mustRunAfter(":sefariasqlite:generateSefariaSqlite")
+    mustRunAfter(":sefariadiff:generateSefariaDiff")
 }
 project(":otzariasqlite").tasks.matching { it.name == "generateHavroutaLinks" }.configureEach {
     mustRunAfter(":otzariasqlite:appendOtzaria")
