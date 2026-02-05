@@ -118,8 +118,8 @@ suspend fun generateSefariaDiff(newDbPath: String, oldDbPath: String, diffFilePa
             appendLine()
             
             appendLine("## סיכום")
-            appendLine("- סה"כ ספרים במסד החדש: ${newSefariaBooks.size}")
-            appendLine("- סה"כ ספרים במסד הישן: ${oldSefariaBooks.size}")
+            appendLine("- סה\"כ ספרים במסד החדש: ${newSefariaBooks.size}")
+            appendLine("- סה\"כ ספרים במסד הישן: ${oldSefariaBooks.size}")
             appendLine("- ספרים שנוספו: ${addedBooks.size}")
             appendLine("- ספרים שהוסרו: ${removedBooks.size}")
             appendLine("- ספרים ללא שינוי: ${commonBooks.size}")
