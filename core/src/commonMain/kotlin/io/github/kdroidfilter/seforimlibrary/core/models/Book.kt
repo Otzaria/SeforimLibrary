@@ -48,4 +48,7 @@ data class Book(
     val hasTeamim: Boolean = false,
     val hasNekudot: Boolean = false,
     val filePath: String? = null,
+    val fileType: String = "txt",
+    val fileSize: Long? = null,
+    val lastModified: Long? = null,
 )

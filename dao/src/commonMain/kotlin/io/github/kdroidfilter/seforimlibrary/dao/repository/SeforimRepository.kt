@@ -861,7 +861,9 @@ class SeforimRepository(databasePath: String, private val driver: SqlDriver) {
                 hasAltStructures = if (book.hasAltStructures) 1 else 0,
                 hasTeamim = if (book.hasTeamim) 1 else 0,
                 hasNekudot = if (book.hasNekudot) 1 else 0,
-                filePath = book.filePath
+                filePath = book.filePath,
+                fileType = book.fileType,
+                fileSize = book.fileSize
             )
             logger.d{"Used insertWithId for book '${book.title}' with ID: ${book.id} and categoryId: ${book.categoryId}"}
 
@@ -919,7 +921,9 @@ class SeforimRepository(databasePath: String, private val driver: SqlDriver) {
                 hasAltStructures = if (book.hasAltStructures) 1 else 0,
                 hasTeamim = if (book.hasTeamim) 1 else 0,
                 hasNekudot = if (book.hasNekudot) 1 else 0,
-                filePath = book.filePath
+                filePath = book.filePath,
+                fileType = book.fileType,
+                fileSize = book.fileSize
             )
             val id = database.bookQueriesQueries.lastInsertRowId().executeAsOne()
             logger.d{"Used insert for book '${book.title}', got ID: $id with categoryId: ${book.categoryId}"}
@@ -1905,6 +1909,38 @@ class SeforimRepository(databasePath: String, private val driver: SqlDriver) {
     }
 
     // Search functions removed (migrated to Lucene in app layer).
+
+    // --- Book Files ---
+
+    /**
+     * Check whether a book file with the given kind and SHA-256 hash already exists.
+     */
+    suspend fun existsBookFileByKindSha(kind: String, sha256: String): Boolean = withContext(Dispatchers.IO) {
+        database.bookFileQueriesQueries.existsFileByKindSha(kind, sha256).executeAsOneOrNull() != null
+    }
+
+    /**
+     * Insert a book file BLOB into the database.
+     */
+    suspend fun insertBookFile(
+        bookId: Long,
+        kind: String,
+        data: ByteArray,
+        size: Long,
+        sha256: String,
+        originalRelPath: String?,
+        createdAt: Long
+    ) = withContext(Dispatchers.IO) {
+        database.bookFileQueriesQueries.insertBookFile(
+            bookId = bookId,
+            kind = kind,
+            data_ = data,
+            size = size,
+            sha256 = sha256,
+            originalRelPath = originalRelPath,
+            createdAt = createdAt
+        )
+    }
 
     /**
      * Executes a raw SQL query.

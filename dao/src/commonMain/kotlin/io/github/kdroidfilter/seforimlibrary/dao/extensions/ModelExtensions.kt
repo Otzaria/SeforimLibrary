@@ -94,7 +94,11 @@ fun io.github.kdroidfilter.seforimlibrary.db.Book.toModel(json: Json, authors: L
         hasOtherConnection = hasOtherConnection == 1L,
         hasAltStructures = hasAltStructures == 1L,
         hasTeamim = hasTeamim == 1L,
-        hasNekudot = hasNekudot == 1L
+        hasNekudot = hasNekudot == 1L,
+        filePath = filePath,
+        fileType = fileType ?: "txt",
+        fileSize = fileSize,
+        lastModified = lastModified
     )
 }
 

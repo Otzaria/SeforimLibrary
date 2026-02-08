@@ -17,6 +17,7 @@ import java.io.File
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.Paths
+import java.nio.file.attribute.BasicFileAttributes
 import kotlin.io.path.exists
 import kotlin.io.path.extension
 import kotlin.io.path.nameWithoutExtension
@@ -78,6 +79,18 @@ class DatabaseGenerator(
 
     // Tracks books processed from the priority list to avoid double insertion
     private val processedPriorityBookKeys = mutableSetOf<String>()
+
+    private fun getFileCreatedAtMillis(path: Path): Long {
+        return try {
+            Files.readAttributes(path, BasicFileAttributes::class.java).creationTime().toMillis()
+        } catch (_: Exception) {
+            try {
+                Files.getLastModifiedTime(path).toMillis()
+            } catch (_: Exception) {
+                System.currentTimeMillis()
+            }
+        }
+    }
 
     // Overall progress across books
     private var totalBooksToProcess: Int = 0
@@ -268,6 +281,9 @@ class DatabaseGenerator(
                 preloadAllBookContents(libraryPath)
                 processDirectory(libraryPath, null, 0, metadata)
 
+                // Import PDF books and file blobs
+                importPdfBooks(libraryPath)
+
                 // Process links
                 processLinks()
 
@@ -342,6 +358,9 @@ class DatabaseGenerator(
                 // Preload all book .txt contents into RAM for faster processing
                 preloadAllBookContents(libraryPath)
                 processDirectory(libraryPath, null, 0, metadata)
+
+                // Import PDF books and file blobs
+                importPdfBooks(libraryPath)
 
                 // Build category closure after categories insertion
                 logger.i { "Building category_closure table (phase 1)..." }
@@ -620,7 +639,7 @@ class DatabaseGenerator(
                         processDirectory(entry, placement.id, placement.leafLevel + 1, metadata)
                     }
 
-                    Files.isRegularFile(entry) && entry.extension == "txt" -> {
+                    Files.isRegularFile(entry) && entry.extension in listOf("txt") -> {
                         // Skip if already processed from the priority list
                         val key = toLibraryRelativeKey(entry)
                         if (processedPriorityBookKeys.contains(key)) {
@@ -655,6 +674,21 @@ class DatabaseGenerator(
             }
         }
         logger.i { "=== Finished processing directory: ${directory.fileName} ===" }
+    }
+
+    private suspend fun importPdfBooks(libraryPath: Path) {
+        val manifestPath = sourceDirectory.resolve("metadata.json").takeIf { it.exists() }
+        val sourceId = sourceNameToId["Unknown"] ?: repository.insertSource("Unknown")
+        val importer = PdfImporter(
+            repository = repository,
+            booksDir = libraryPath,
+            manifestFile = manifestPath,
+            sourceId = sourceId,
+            idResolverProvider = idResolverProvider,
+            logger = Logger.withTag("PdfImporter"),
+            configurePragmas = false
+        )
+        importer.importPdfs()
     }
 
 
@@ -748,6 +782,9 @@ class DatabaseGenerator(
             } else null
         }.getOrNull()
 
+        // For non-text files, compute file size and modification time upfront
+        val fileSize: Long? = if (fileType != "txt") Files.size(path) else null
+
         val book = Book(
             id = currentBookId,
             categoryId = categoryId,
@@ -761,7 +798,9 @@ class DatabaseGenerator(
             order = meta?.order ?: 999f,
             topics = extractTopics(path),
             isBaseBook = isBaseBook,
-            filePath = bookFilePath
+            filePath = bookFilePath,
+            fileType = fileType,
+            fileSize = fileSize
         )
 
         logger.d { "Inserting book '${book.title}' with ID: ${book.id} and categoryId: ${book.categoryId}" }
@@ -788,8 +827,12 @@ class DatabaseGenerator(
             logger.w(e) { "Failed to insert acronyms for '$title'" }
         }
 
-        // Process content of the book
-        processBookContent(path, insertedBookId, title, categoryId)
+        // Process content of the book (only for text-based files, not PDFs etc.)
+        if (fileType == "txt") {
+            processBookContent(path, insertedBookId, title, categoryId)
+        } else {
+            logger.i { "Skipping non-text file type '$fileType' in Generator (handled elsewhere)" }
+        }
 
         // Book-level progress
         processedBooksCount += 1

@@ -1,0 +1,20 @@
+-- Queries for book_file table
+
+existsFileByKindSha:
+SELECT 1 FROM book_file WHERE kind = ? AND sha256 = ? LIMIT 1;
+
+insertBookFile:
+INSERT INTO book_file (bookId, kind, data, size, sha256, originalRelPath, createdAt)
+VALUES (?, ?, ?, ?, ?, ?, ?);
+
+countByKind:
+SELECT COUNT(*) FROM book_file WHERE kind = ?;
+
+selectByBookId:
+SELECT * FROM book_file WHERE bookId = ?;
+
+selectByKindAndSha:
+SELECT * FROM book_file WHERE kind = ? AND sha256 = ? LIMIT 1;
+
+deleteByBookId:
+DELETE FROM book_file WHERE bookId = ?;
