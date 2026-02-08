@@ -15,6 +15,7 @@ tasks.register("generateSeforimDb") {
     dependsOn(":sefariadiff:generateSefariaDiff")
     dependsOn(":otzariasqlite:appendOtzaria")
     dependsOn(":otzariasqlite:generateHavroutaLinks")
+    dependsOn(":dbversion:writeDbVersion")
     //dependsOn(":catalog:buildCatalog")
     //dependsOn(":searchindex:buildLuceneIndexDefault")
     //dependsOn(":packaging:writeReleaseInfo")
@@ -40,8 +41,11 @@ project(":otzariasqlite").tasks.matching {
 project(":otzariasqlite").tasks.matching { it.name == "generateHavroutaLinks" }.configureEach {
     mustRunAfter(":otzariasqlite:appendOtzaria")
 }
-project(":catalog").tasks.matching { it.name == "buildCatalog" }.configureEach {
+project(":dbversion").tasks.matching { it.name == "writeDbVersion" }.configureEach {
     mustRunAfter(":otzariasqlite:generateHavroutaLinks")
+}
+project(":catalog").tasks.matching { it.name == "buildCatalog" }.configureEach {
+    mustRunAfter(":dbversion:writeDbVersion")
 }
 project(":searchindex").tasks.matching { it.name == "buildLuceneIndexDefault" }.configureEach {
     mustRunAfter(":catalog:buildCatalog")

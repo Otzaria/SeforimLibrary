@@ -337,3 +337,11 @@ CREATE TABLE IF NOT EXISTS default_targum (
 
 CREATE INDEX IF NOT EXISTS idx_default_targum_book ON default_targum(bookId);
 CREATE INDEX IF NOT EXISTS idx_default_targum_target ON default_targum(targumBookId);
+
+-- Database metadata/versioning table
+CREATE TABLE IF NOT EXISTS db_meta (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_db_meta_key ON db_meta(key);
