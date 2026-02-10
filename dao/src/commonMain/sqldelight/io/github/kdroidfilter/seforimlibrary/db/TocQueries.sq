@@ -41,6 +41,9 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?);
 updateLineId:
 UPDATE tocEntry SET lineId = ? WHERE id = ?;
 
+updateLineIndex:
+UPDATE tocEntry SET lineIndex = ? WHERE id = ?;
+
 updateIsLastChild:
 UPDATE tocEntry SET isLastChild = ? WHERE id = ?;
 

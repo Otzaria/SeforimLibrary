@@ -287,6 +287,9 @@ class DatabaseGenerator(
                 // Process links
                 processLinks()
 
+                // Process headings files after links
+                processHeadings()
+
                 // Build category closure table for fast descendant queries
                 logger.i { "Building category_closure (ancestor-descendant) table..." }
                 repository.rebuildCategoryClosure()
@@ -385,6 +388,7 @@ class DatabaseGenerator(
             repository.setJournalModeOff()
             repository.runInTransaction {
                 processLinks()
+                processHeadings()
             }
         } finally {
             runCatching { enableForeignKeys() }
@@ -1334,6 +1338,72 @@ class DatabaseGenerator(
 
         // Update the book_has_links table
         updateBookHasLinksTable()
+    }
+
+    /**
+     * Processes all headings JSON files in the links directory.
+     * Each file maps heading text -> lineIndex for a PDF book.
+     */
+    private suspend fun processHeadings() {
+        val linksDir = sourceDirectory.resolve("links")
+        if (!linksDir.exists()) {
+            logger.w { "Links directory not found for headings import" }
+            return
+        }
+
+        val headingFiles = Files.list(linksDir).use { s ->
+            s.filter { it.extension == "json" && it.fileName.toString().endsWith("_headings.json") }
+                .toList()
+        }
+        if (headingFiles.isEmpty()) {
+            logger.i { "No headings files found to import" }
+            return
+        }
+
+        logger.i { "Processing ${headingFiles.size} headings files..." }
+        for (file in headingFiles) {
+            val bookTitle = file.nameWithoutExtension.removeSuffix("_headings")
+            val book = repository.getBookByTitleAndFileType(bookTitle, "pdf")
+            if (book == null) {
+                logger.w { "PDF book not found for headings: $bookTitle" }
+                continue
+            }
+
+            val content = file.readText(Charsets.UTF_8)
+            val headings = runCatching { json.decodeFromString<Map<String, Int>>(content) }
+                .getOrElse { e ->
+                    logger.w(e) { "Failed to parse headings JSON for $bookTitle" }
+                    emptyMap()
+                }
+            if (headings.isEmpty()) {
+                logger.w { "No headings found in file for $bookTitle" }
+                continue
+            }
+
+            // Clear existing TOC entries for this PDF book to avoid duplicates on re-import
+            repository.deleteTocEntriesByBookId(book.id)
+
+            val sorted = headings.entries.sortedBy { it.value }
+            val lastIndex = sorted.lastIndex
+            var inserted = 0
+            for ((idx, entry) in sorted.withIndex()) {
+                val tocEntryId = repository.insertTocEntry(
+                    TocEntry(
+                        bookId = book.id,
+                        parentId = null,
+                        text = entry.key,
+                        level = 1,
+                        lineId = null,
+                        isLastChild = idx == lastIndex,
+                        hasChildren = false
+                    )
+                )
+                repository.updateTocEntryLineIndex(tocEntryId, entry.value)
+                inserted += 1
+            }
+
+            logger.i { "Imported $inserted headings for $bookTitle" }
+        }
     }
 
     /**

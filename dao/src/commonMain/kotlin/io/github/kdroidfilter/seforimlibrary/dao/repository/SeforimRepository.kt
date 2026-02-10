@@ -641,6 +641,16 @@ class SeforimRepository(databasePath: String, private val driver: SqlDriver) {
         return@withContext bookData.toModel(json, authors, pubPlaces, pubDates).copy(topics = topics)
     }
 
+    suspend fun getBookByTitleAndFileType(title: String, fileType: String): Book? = withContext(Dispatchers.IO) {
+        val bookData = database.bookQueriesQueries.selectByTitleAndFileType(title, fileType).executeAsOneOrNull()
+            ?: return@withContext null
+        val authors = getBookAuthors(bookData.id)
+        val topics = getBookTopics(bookData.id)
+        val pubPlaces = getBookPubPlaces(bookData.id)
+        val pubDates = getBookPubDates(bookData.id)
+        return@withContext bookData.toModel(json, authors, pubPlaces, pubDates).copy(topics = topics)
+    }
+
     /**
      * Retrieves a book by approximate title (exact, normalized, or LIKE).
      */
@@ -1144,6 +1154,14 @@ class SeforimRepository(databasePath: String, private val driver: SqlDriver) {
         logger.d{"Repository updating line $lineId with tocEntryId: $tocEntryId"}
         database.lineQueriesQueries.updateTocEntryId(tocEntryId, lineId)
         logger.d{"Repository updated line $lineId with tocEntryId: $tocEntryId"}
+    }
+
+    suspend fun updateTocEntryLineIndex(tocEntryId: Long, lineIndex: Int) = withContext(Dispatchers.IO) {
+        database.tocQueriesQueries.updateLineIndex(lineIndex.toLong(), tocEntryId)
+    }
+
+    suspend fun deleteTocEntriesByBookId(bookId: Long) = withContext(Dispatchers.IO) {
+        database.tocQueriesQueries.deleteByBookId(bookId)
     }
 
     // --- Table of Contents ---

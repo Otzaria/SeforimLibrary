@@ -18,6 +18,9 @@ ORDER BY b.orderIndex, b.title;
 selectByTitle:
 SELECT * FROM book WHERE title = ? LIMIT 1;
 
+selectByTitleAndFileType:
+SELECT * FROM book WHERE title = ? AND fileType = ? ORDER BY id LIMIT 1;
+
 selectByTitleLike:
 SELECT * FROM book WHERE title LIKE ? LIMIT 1;
 
