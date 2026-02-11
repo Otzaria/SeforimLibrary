@@ -51,4 +51,6 @@ data class Book(
     val fileType: String = "txt",
     val fileSize: Long? = null,
     val lastModified: Long? = null,
+    val pages: Int? = null,
+    val volume: String? = null,
 )

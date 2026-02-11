@@ -84,5 +84,9 @@ WHERE id = ?;
 updateHasAltStructures:
 UPDATE book SET hasAltStructures = ? WHERE id = ?;
 
+insertExternalBook:
+INSERT INTO book (categoryId, sourceId, title, heShortDesc, orderIndex, isContentExternal, externalLibraryId, pages, volume)
+VALUES (?, ?, ?, ?, 999, 1, ?, ?, ?);
+
 lastInsertRowId:
 SELECT last_insert_rowid();

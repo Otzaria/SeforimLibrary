@@ -98,7 +98,9 @@ fun io.github.kdroidfilter.seforimlibrary.db.Book.toModel(json: Json, authors: L
         filePath = filePath,
         fileType = fileType ?: "txt",
         fileSize = fileSize,
-        lastModified = lastModified
+        lastModified = lastModified,
+        pages = pages?.toInt(),
+        volume = volume
     )
 }
 

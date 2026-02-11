@@ -90,6 +90,8 @@ CREATE TABLE IF NOT EXISTS book (
     fileType TEXT DEFAULT 'txt',
     fileSize INTEGER DEFAULT NULL,
     lastModified INTEGER DEFAULT NULL,
+    pages INTEGER DEFAULT NULL,
+    volume TEXT DEFAULT NULL,
     FOREIGN KEY (categoryId) REFERENCES category(id) ON DELETE CASCADE,
     FOREIGN KEY (sourceId) REFERENCES source(id) ON DELETE RESTRICT
 );
