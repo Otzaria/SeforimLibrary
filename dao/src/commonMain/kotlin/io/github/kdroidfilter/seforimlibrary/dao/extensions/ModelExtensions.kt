@@ -6,6 +6,7 @@ import io.github.kdroidfilter.seforimlibrary.core.models.Author
 import io.github.kdroidfilter.seforimlibrary.core.models.Book
 import io.github.kdroidfilter.seforimlibrary.core.models.Category
 import io.github.kdroidfilter.seforimlibrary.core.models.ConnectionType
+import io.github.kdroidfilter.seforimlibrary.core.models.Generation
 import io.github.kdroidfilter.seforimlibrary.core.models.Line
 import io.github.kdroidfilter.seforimlibrary.core.models.LineAltTocMapping
 import io.github.kdroidfilter.seforimlibrary.core.models.Link
@@ -34,6 +35,19 @@ private val logger = Logger.withTag("ModelExtensions")
  */
 fun io.github.kdroidfilter.seforimlibrary.db.Author.toModel(): Author {
     return Author(
+        id = id,
+        name = name,
+        generationId = generationId
+    )
+}
+
+/**
+ * Converts a database Generation entity to a domain Generation model.
+ *
+ * @return The domain Generation model
+ */
+fun io.github.kdroidfilter.seforimlibrary.db.Generation.toModel(): Generation {
+    return Generation(
         id = id,
         name = name
     )

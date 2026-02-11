@@ -12,6 +12,7 @@ interface IdResolverProvider {
     fun resolveCategoryId(title: String, parentId: Long?, level: Int): Long?
     fun resolveSourceId(name: String): Long?
     fun resolveAuthorId(name: String): Long?
+    fun resolveGenerationId(name: String): Long?
     fun resolveTopicId(name: String): Long?
     fun resolveConnectionTypeId(name: String): Long?
     fun resolvePubPlaceId(name: String): Long?

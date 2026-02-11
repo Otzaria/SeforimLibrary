@@ -1,0 +1,35 @@
+-- Queries for generations (era / period)
+
+selectAll:
+SELECT * FROM generation ORDER BY id;
+
+selectById:
+SELECT * FROM generation WHERE id = ?;
+
+selectByName:
+SELECT * FROM generation WHERE name = ? LIMIT 1;
+
+insert:
+INSERT INTO generation (name)
+VALUES (?)
+ON CONFLICT (name) DO NOTHING;
+
+insertWithId:
+INSERT OR IGNORE INTO generation (id, name)
+VALUES (?, ?);
+
+insertAndGetId:
+INSERT OR IGNORE INTO generation (name)
+VALUES (?);
+
+selectIdByName:
+SELECT id FROM generation WHERE name = ? LIMIT 1;
+
+delete:
+DELETE FROM generation WHERE id = ?;
+
+countAll:
+SELECT COUNT(*) FROM generation;
+
+lastInsertRowId:
+SELECT last_insert_rowid();

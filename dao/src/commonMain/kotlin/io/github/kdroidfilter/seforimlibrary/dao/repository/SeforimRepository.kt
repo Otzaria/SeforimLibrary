@@ -13,6 +13,7 @@ import io.github.kdroidfilter.seforimlibrary.core.models.Author
 import io.github.kdroidfilter.seforimlibrary.core.models.Book
 import io.github.kdroidfilter.seforimlibrary.core.models.Category
 import io.github.kdroidfilter.seforimlibrary.core.models.ConnectionType
+import io.github.kdroidfilter.seforimlibrary.core.models.Generation
 import io.github.kdroidfilter.seforimlibrary.core.models.Line
 import io.github.kdroidfilter.seforimlibrary.core.models.LineAltTocMapping
 import io.github.kdroidfilter.seforimlibrary.core.models.LineTocMapping
@@ -577,19 +578,76 @@ class SeforimRepository(databasePath: String, private val driver: SqlDriver) {
         return@withContext author?.toModel()
     }
 
+    // ── Generation helpers ───────────────────────────────────────────
+
+    /**
+     * Insert a generation (era) and return its ID.
+     * If [explicitId] is provided, it is used as the ID (for stable ID resolution).
+     * If the generation already exists, returns its existing ID.
+     */
+    suspend fun insertGeneration(name: String, explicitId: Long? = null): Long = withContext(Dispatchers.IO) {
+        logger.d { "Inserting generation: $name" + (explicitId?.let { " with explicit ID $it" } ?: "") }
+        val existing = database.generationQueriesQueries.selectByName(name).executeAsOneOrNull()
+        if (existing != null) return@withContext existing.id
+
+        if (explicitId != null) {
+            database.generationQueriesQueries.insertWithId(explicitId, name)
+            return@withContext explicitId
+        }
+
+        database.generationQueriesQueries.insert(name)
+        val id = database.generationQueriesQueries.lastInsertRowId().executeAsOne()
+        if (id != 0L) return@withContext id
+
+        // fallback
+        val retry = database.generationQueriesQueries.selectByName(name).executeAsOneOrNull()
+        return@withContext retry?.id ?: 0L
+    }
+
+    /**
+     * Resolve a generation name to its ID, or null if not found.
+     */
+    suspend fun getGenerationIdByName(name: String): Long? = withContext(Dispatchers.IO) {
+        database.generationQueriesQueries.selectIdByName(name).executeAsOneOrNull()
+    }
+
+    /**
+     * Return all generations.
+     */
+    suspend fun getAllGenerations(): List<Generation> = withContext(Dispatchers.IO) {
+        database.generationQueriesQueries.selectAll().executeAsList().map { it.toModel() }
+    }
+
+    /**
+     * Update the generation for a given author ID.
+     */
+    suspend fun updateAuthorGeneration(authorId: Long, generationId: Long?) = withContext(Dispatchers.IO) {
+        database.authorQueriesQueries.updateGeneration(generationId, authorId)
+    }
+
+    // ── Author insertion ─────────────────────────────────────────────
+
     // Insert an author and return its ID
-    suspend fun insertAuthor(name: String): Long = withContext(Dispatchers.IO) {
+    suspend fun insertAuthor(name: String, generationId: Long? = null): Long = withContext(Dispatchers.IO) {
         logger.d{"Inserting author: $name"}
 
         // Check if author already exists
         val existingAuthor = database.authorQueriesQueries.selectByName(name).executeAsOneOrNull()
         if (existingAuthor != null) {
+            // If a generationId is supplied and the existing author doesn't have one, update it
+            if (generationId != null && existingAuthor.generationId == null) {
+                database.authorQueriesQueries.updateGeneration(generationId, existingAuthor.id)
+            }
             logger.d{"Author already exists with ID: ${existingAuthor.id}"}
             return@withContext existingAuthor.id
         }
 
-        // Insert the author
-        database.authorQueriesQueries.insert(name)
+        // Insert the author (with optional generationId)
+        if (generationId != null) {
+            database.authorQueriesQueries.insertWithGeneration(name, generationId)
+        } else {
+            database.authorQueriesQueries.insert(name)
+        }
 
         // Get the ID of the inserted author
         val authorId = database.authorQueriesQueries.lastInsertRowId().executeAsOne()

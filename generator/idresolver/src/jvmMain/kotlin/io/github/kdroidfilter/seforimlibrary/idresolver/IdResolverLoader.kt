@@ -44,6 +44,7 @@ object IdResolverLoader {
         logger.i { "  TocTexts: ${data.tocTextIdMap.size}" }
         logger.i { "  Categories: ${data.categoryIdMap.size}" }
         logger.i { "  Authors: ${data.authorIdMap.size}" }
+        logger.i { "  Generations: ${data.generationIdMap.size}" }
         logger.i { "  Topics: ${data.topicIdMap.size}" }
         logger.i { "  Sources: ${data.sourceIdMap.size}" }
         logger.i { "  ConnectionTypes: ${data.connectionTypeIdMap.size}" }
@@ -76,6 +77,7 @@ object IdResolverLoader {
                 tocTextIdMap = loadTocTextIds(conn),
                 categoryIdMap = loadCategoryIds(conn),
                 authorIdMap = loadAuthorIds(conn),
+                generationIdMap = loadGenerationIds(conn),
                 topicIdMap = loadTopicIds(conn),
                 sourceIdMap = loadSourceIds(conn),
                 connectionTypeIdMap = loadConnectionTypeIds(conn),
@@ -91,6 +93,7 @@ object IdResolverLoader {
                 maxTocTextId = getMaxId(conn, "tocText"),
                 maxCategoryId = getMaxId(conn, "category"),
                 maxAuthorId = getMaxId(conn, "author"),
+                maxGenerationId = getMaxId(conn, "generation"),
                 maxTopicId = getMaxId(conn, "topic"),
                 maxSourceId = getMaxId(conn, "source"),
                 maxConnectionTypeId = getMaxId(conn, "connection_type"),
@@ -350,6 +353,29 @@ object IdResolverLoader {
             }
         } catch (e: Exception) {
             logger.w { "Failed to load author IDs: ${e.message}" }
+        }
+        return map
+    }
+
+    /**
+     * Load generation IDs: name → id
+     * Gracefully returns empty map if the table doesn't exist (old DB schema).
+     */
+    private fun loadGenerationIds(conn: Connection): Map<String, Long> {
+        val map = HashMap<String, Long>()
+        try {
+            conn.createStatement().use { stmt ->
+                stmt.executeQuery("SELECT id, name FROM generation").use { rs ->
+                    while (rs.next()) {
+                        val id = rs.getLong("id")
+                        val name = rs.getString("name") ?: continue
+                        map[name.trim()] = id
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            // Expected when loading from a DB that predates the generation table
+            logger.i { "generation table not found in previous DB (expected for older schemas): ${e.message}" }
         }
         return map
     }

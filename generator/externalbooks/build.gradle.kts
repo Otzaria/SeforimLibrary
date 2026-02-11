@@ -26,6 +26,25 @@ kotlin {
     }
 }
 
+// Download books.db from Google Drive if not already present
+tasks.register<JavaExec>("downloadBooksDb") {
+    group = "application"
+    description = "Download books.db from Google Drive if it doesn't exist locally."
+
+    dependsOn("jvmJar")
+    mainClass.set("io.github.kdroidfilter.seforimlibrary.externalbooks.BooksDbFetcherKt")
+    classpath = files(tasks.named("jvmJar")) + configurations.getByName("jvmRuntimeClasspath")
+
+    val defaultBooksDb = layout.buildDirectory.file("books.db").get().asFile.absolutePath
+    val booksDb = if (project.hasProperty("booksDb")) {
+        project.property("booksDb") as String
+    } else {
+        defaultBooksDb
+    }
+
+    args(booksDb)
+}
+
 // Import external book metadata (HebrewBooks + OtzarHaChochma) into seforim.db
 tasks.register<JavaExec>("importExternalBooks") {
     group = "application"

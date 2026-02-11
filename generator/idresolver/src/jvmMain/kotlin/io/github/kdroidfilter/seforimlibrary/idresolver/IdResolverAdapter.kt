@@ -42,6 +42,10 @@ class IdResolverAdapter(private val resolver: IdResolver) : IdResolverProvider {
         return resolver.resolveAuthorId(name)
     }
 
+    override fun resolveGenerationId(name: String): Long? {
+        return resolver.resolveGenerationId(name)
+    }
+
     override fun resolveTopicId(name: String): Long? {
         return resolver.resolveTopicId(name)
     }

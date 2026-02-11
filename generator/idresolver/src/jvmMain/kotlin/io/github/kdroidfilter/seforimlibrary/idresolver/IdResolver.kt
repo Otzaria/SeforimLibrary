@@ -35,6 +35,7 @@ class IdResolver private constructor(
     private val tocTextIdMap: Map<String, Long>,
     private val categoryIdMap: Map<String, Long>,
     private val authorIdMap: Map<String, Long>,
+    private val generationIdMap: Map<String, Long>,
     private val topicIdMap: Map<String, Long>,
     private val sourceIdMap: Map<String, Long>,
     private val connectionTypeIdMap: Map<String, Long>,
@@ -51,6 +52,7 @@ class IdResolver private constructor(
     initialMaxTocTextId: Long,
     initialMaxCategoryId: Long,
     initialMaxAuthorId: Long,
+    initialMaxGenerationId: Long,
     initialMaxTopicId: Long,
     initialMaxSourceId: Long,
     initialMaxConnectionTypeId: Long,
@@ -68,6 +70,7 @@ class IdResolver private constructor(
     private val nextTocTextId = AtomicLong(initialMaxTocTextId + 1)
     private val nextCategoryId = AtomicLong(initialMaxCategoryId + 1)
     private val nextAuthorId = AtomicLong(initialMaxAuthorId + 1)
+    private val nextGenerationId = AtomicLong(initialMaxGenerationId + 1)
     private val nextTopicId = AtomicLong(initialMaxTopicId + 1)
     private val nextSourceId = AtomicLong(initialMaxSourceId + 1)
     private val nextConnectionTypeId = AtomicLong(initialMaxConnectionTypeId + 1)
@@ -232,6 +235,15 @@ class IdResolver private constructor(
         return authorIdMap[name.trim()]
     }
 
+    // ===== Generation =====
+    
+    /**
+     * Resolve generation ID by name.
+     */
+    fun resolveGenerationId(name: String): Long? {
+        return generationIdMap[name.trim()]
+    }
+
     // ===== Topic =====
     
     /**
@@ -342,6 +354,7 @@ class IdResolver private constructor(
                 tocTextIdMap = emptyMap(),
                 categoryIdMap = emptyMap(),
                 authorIdMap = emptyMap(),
+                generationIdMap = emptyMap(),
                 topicIdMap = emptyMap(),
                 sourceIdMap = emptyMap(),
                 connectionTypeIdMap = emptyMap(),
@@ -357,6 +370,7 @@ class IdResolver private constructor(
                 initialMaxTocTextId = 0,
                 initialMaxCategoryId = 0,
                 initialMaxAuthorId = 0,
+                initialMaxGenerationId = 0,
                 initialMaxTopicId = 0,
                 initialMaxSourceId = 0,
                 initialMaxConnectionTypeId = 0,
@@ -378,6 +392,7 @@ class IdResolver private constructor(
                 tocTextIdMap = data.tocTextIdMap,
                 categoryIdMap = data.categoryIdMap,
                 authorIdMap = data.authorIdMap,
+                generationIdMap = data.generationIdMap,
                 topicIdMap = data.topicIdMap,
                 sourceIdMap = data.sourceIdMap,
                 connectionTypeIdMap = data.connectionTypeIdMap,
@@ -393,6 +408,7 @@ class IdResolver private constructor(
                 initialMaxTocTextId = data.maxTocTextId,
                 initialMaxCategoryId = data.maxCategoryId,
                 initialMaxAuthorId = data.maxAuthorId,
+                initialMaxGenerationId = data.maxGenerationId,
                 initialMaxTopicId = data.maxTopicId,
                 initialMaxSourceId = data.maxSourceId,
                 initialMaxConnectionTypeId = data.maxConnectionTypeId,
@@ -414,6 +430,7 @@ class IdResolver private constructor(
             loadedTocTexts = tocTextIdMap.size,
             loadedCategories = categoryIdMap.size,
             loadedAuthors = authorIdMap.size,
+            loadedGenerations = generationIdMap.size,
             loadedTopics = topicIdMap.size,
             loadedSources = sourceIdMap.size,
             loadedConnectionTypes = connectionTypeIdMap.size,
@@ -437,6 +454,7 @@ data class IdResolverData(
     val tocTextIdMap: Map<String, Long>,
     val categoryIdMap: Map<String, Long>,
     val authorIdMap: Map<String, Long>,
+    val generationIdMap: Map<String, Long>,
     val topicIdMap: Map<String, Long>,
     val sourceIdMap: Map<String, Long>,
     val connectionTypeIdMap: Map<String, Long>,
@@ -452,6 +470,7 @@ data class IdResolverData(
     val maxTocTextId: Long,
     val maxCategoryId: Long,
     val maxAuthorId: Long,
+    val maxGenerationId: Long,
     val maxTopicId: Long,
     val maxSourceId: Long,
     val maxConnectionTypeId: Long,
@@ -471,6 +490,7 @@ data class IdResolverStats(
     val loadedTocTexts: Int,
     val loadedCategories: Int,
     val loadedAuthors: Int,
+    val loadedGenerations: Int,
     val loadedTopics: Int,
     val loadedSources: Int,
     val loadedConnectionTypes: Int,
@@ -490,6 +510,7 @@ data class IdResolverStats(
             - Loaded tocTexts: $loadedTocTexts
             - Loaded categories: $loadedCategories
             - Loaded authors: $loadedAuthors
+            - Loaded generations: $loadedGenerations
             - Newly allocated books: $newlyAllocatedBooks
             - Newly allocated lines: $newlyAllocatedLines
             - Newly allocated links: $newlyAllocatedLinks
@@ -502,7 +523,8 @@ data class IdResolverStats(
         // Rough estimation: each map entry ~100 bytes average
         val totalEntries = loadedBooks + loadedLines + loadedLinks + 
             loadedTocEntries + loadedTocTexts + loadedCategories + 
-            loadedAuthors + loadedTopics + loadedSources + loadedConnectionTypes
+            loadedAuthors + loadedTopics + loadedSources + loadedConnectionTypes +
+            loadedGenerations
         return (totalEntries * 100.0) / (1024 * 1024)
     }
 }

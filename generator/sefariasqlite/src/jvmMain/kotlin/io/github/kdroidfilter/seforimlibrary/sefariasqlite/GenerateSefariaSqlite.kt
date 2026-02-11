@@ -9,6 +9,7 @@ import io.github.kdroidfilter.seforimlibrary.idresolver.IdResolverAdapter
 import io.github.kdroidfilter.seforimlibrary.idresolver.IdResolverLoader
 import kotlinx.coroutines.runBlocking
 import java.io.File
+import java.net.URI
 import java.nio.file.Path
 import java.nio.file.Paths
 
@@ -112,6 +113,19 @@ fun main(args: Array<String>) = runBlocking {
         )
         importer.import()
 
+        // Load generation (era) mappings from סדר הדורות CSV and update authors
+        val generationCsv = File(projectRoot, "build/סדר הדורות.csv")
+            .takeIf { it.exists() }
+            ?: File("build/סדר הדורות.csv").takeIf { it.exists() }
+            ?: downloadGenerationCsv(File(projectRoot, "build"), logger)
+
+        if (generationCsv != null) {
+            logger.i { "Loading generation mappings from ${generationCsv.absolutePath}" }
+            GenerationLoader.loadGenerations(generationCsv, repository, idResolverAdapter)
+        } else {
+            logger.w { "סדר הדורות.csv not found and download failed; skipping generation loading." }
+        }
+
         // Log IdResolver statistics if used
         idResolverAdapter?.let { adapter ->
             val stats = adapter.getStatistics()
@@ -165,4 +179,32 @@ private fun findRepoRoot(start: File): File? {
         current = current.parentFile
     }
     return null
+}
+
+private const val GENERATION_CSV_URL =
+    "https://raw.githubusercontent.com/Otzaria/otzaria-library/refs/heads/main/" +
+    "MoreBooks/%D7%A1%D7%A4%D7%A8%D7%99%D7%9D/%D7%90%D7%95%D7%A6%D7%A8%D7%99%D7%90/" +
+    "%D7%90%D7%95%D7%93%D7%95%D7%AA%20%D7%94%D7%AA%D7%95%D7%9B%D7%A0%D7%94/" +
+    "%D7%A1%D7%93%D7%A8%20%D7%94%D7%93%D7%95%D7%A8%D7%95%D7%AA.csv"
+
+/**
+ * Downloads the סדר הדורות CSV from the Otzaria GitHub repository into [targetDir].
+ * Returns the downloaded file, or null if the download failed.
+ */
+private fun downloadGenerationCsv(targetDir: File, logger: Logger): File? {
+    return try {
+        targetDir.mkdirs()
+        val target = File(targetDir, "סדר הדורות.csv")
+        logger.i { "Downloading סדר הדורות.csv from GitHub..." }
+        URI(GENERATION_CSV_URL).toURL().openStream().use { input ->
+            target.outputStream().use { output ->
+                input.copyTo(output)
+            }
+        }
+        logger.i { "Downloaded סדר הדורות.csv to ${target.absolutePath}" }
+        target
+    } catch (e: Exception) {
+        logger.w(e) { "Failed to download סדר הדורות.csv" }
+        null
+    }
 }

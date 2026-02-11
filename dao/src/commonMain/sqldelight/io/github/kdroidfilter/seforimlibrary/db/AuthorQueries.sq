@@ -20,12 +20,40 @@ INSERT INTO author (name)
 VALUES (?)
 ON CONFLICT (name) DO NOTHING;
 
+insertWithGeneration:
+INSERT INTO author (name, generationId)
+VALUES (?, ?)
+ON CONFLICT (name) DO UPDATE SET generationId = COALESCE(excluded.generationId, author.generationId);
+
 insertAndGetId:
 INSERT OR IGNORE INTO author (name)
 VALUES (?);
 
 selectIdByName:
 SELECT id FROM author WHERE name = ? LIMIT 1;
+
+updateGeneration:
+UPDATE author SET generationId = ? WHERE id = ?;
+
+updateGenerationByName:
+UPDATE author SET generationId = ? WHERE name = ?;
+
+selectByGeneration:
+SELECT a.* FROM author a WHERE a.generationId = ? ORDER BY a.name;
+
+selectWithGeneration:
+SELECT a.id, a.name, a.generationId, g.name AS generationName
+FROM author a
+LEFT JOIN generation g ON a.generationId = g.id
+ORDER BY a.name;
+
+selectWithGenerationByBookId:
+SELECT a.id, a.name, a.generationId, g.name AS generationName
+FROM author a
+JOIN book_author ba ON a.id = ba.authorId
+LEFT JOIN generation g ON a.generationId = g.id
+WHERE ba.bookId = ?
+ORDER BY a.name;
 
 delete:
 DELETE FROM author WHERE id = ?;
