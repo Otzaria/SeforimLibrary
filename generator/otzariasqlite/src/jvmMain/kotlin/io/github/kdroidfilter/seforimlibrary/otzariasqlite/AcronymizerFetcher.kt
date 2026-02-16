@@ -1,6 +1,7 @@
 package io.github.kdroidfilter.seforimlibrary.otzariasqlite
 
 import co.touchlab.kermit.Logger
+import io.github.kdroidfilter.seforimlibrary.net.DownloadUrls
 import java.net.URI
 import java.net.http.HttpClient
 import java.net.http.HttpRequest
@@ -10,8 +11,6 @@ import java.nio.file.Path
 import java.nio.file.Paths
 
 object AcronymizerFetcher {
-    private const val LATEST_API = "https://api.github.com/repos/kdroidFilter/SeforimAcronymizer/releases/latest"
-
     /** Ensure acronymizer DB is available locally under build/acronymizer/acronymizer.db (relative to CWD). */
     fun ensureLocalDb(logger: Logger): Path {
         val destRoot = Paths.get("build", "acronymizer")
@@ -31,7 +30,7 @@ object AcronymizerFetcher {
             .followRedirects(HttpClient.Redirect.NORMAL)
             .build()
         val token = System.getenv("GITHUB_TOKEN") ?: System.getenv("GH_TOKEN")
-        val req = HttpRequest.newBuilder(URI(LATEST_API))
+        val req = HttpRequest.newBuilder(URI(DownloadUrls.ACRONYMIZER_LATEST_API))
             .header("Accept", "application/vnd.github+json")
             .header("User-Agent", "SeforimLibrary-AcronymizerFetcher/1.0")
             .apply { if (!token.isNullOrBlank()) header("Authorization", "Bearer $token") }

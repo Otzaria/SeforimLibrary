@@ -2,6 +2,7 @@ package io.github.kdroidfilter.seforimlibrary.externalbooks
 
 import co.touchlab.kermit.Logger
 import co.touchlab.kermit.Severity
+import io.github.kdroidfilter.seforimlibrary.net.DownloadUrls
 import java.net.URI
 import java.net.http.HttpClient
 import java.net.http.HttpRequest
@@ -9,10 +10,6 @@ import java.net.http.HttpResponse
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.Paths
-
-private const val GOOGLE_DRIVE_FILE_ID = "1MQaelAU6_F1qDlW1ZbZ4joFZGbJD7Hdr"
-private const val DOWNLOAD_URL =
-    "https://drive.google.com/uc?export=download&id=$GOOGLE_DRIVE_FILE_ID&confirm=t"
 
 /**
  * Downloads `books.db` from Google Drive if it doesn't already exist locally.
@@ -31,7 +28,7 @@ fun ensureBooksDb(targetPath: Path, logger: Logger): Path {
 }
 
 private fun downloadBooksDb(outFile: Path, logger: Logger) {
-    logger.i { "Downloading books.db from Google Drive (file ID: $GOOGLE_DRIVE_FILE_ID)..." }
+    logger.i { "Downloading books.db from Google Drive (file ID: ${DownloadUrls.GOOGLE_DRIVE_BOOKS_DB_FILE_ID})..." }
 
     val client = HttpClient.newBuilder()
         .version(HttpClient.Version.HTTP_2)
@@ -39,7 +36,7 @@ private fun downloadBooksDb(outFile: Path, logger: Logger) {
         .connectTimeout(java.time.Duration.ofSeconds(30))
         .build()
 
-    val request = HttpRequest.newBuilder(URI(DOWNLOAD_URL))
+    val request = HttpRequest.newBuilder(URI(DownloadUrls.booksDbDownloadUrl()))
         .header("User-Agent", "SeforimLibrary-BooksDbFetcher/1.0")
         .timeout(java.time.Duration.ofMinutes(10))
         .build()

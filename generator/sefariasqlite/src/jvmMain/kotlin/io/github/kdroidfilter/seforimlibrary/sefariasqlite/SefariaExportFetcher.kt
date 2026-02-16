@@ -2,6 +2,7 @@ package io.github.kdroidfilter.seforimlibrary.sefariasqlite
 
 import co.touchlab.kermit.Logger
 import com.github.luben.zstd.ZstdInputStream
+import io.github.kdroidfilter.seforimlibrary.net.DownloadUrls
 import org.apache.commons.compress.archivers.tar.TarArchiveInputStream
 import java.io.BufferedInputStream
 import java.net.URI
@@ -21,8 +22,6 @@ import kotlin.io.path.isDirectory
  * The archive is fetched from the latest GitHub release of `kdroidFilter/SefariaExport`.
  */
 object SefariaExportFetcher {
-    private const val LATEST_API = "https://api.github.com/repos/kdroidFilter/SefariaExport/releases/latest"
-
     /**
      * Ensure a Sefaria export is available locally under `build/sefaria/export` (relative to CWD).
      * If the directory already exists and contains data, it is reused.
@@ -49,7 +48,7 @@ object SefariaExportFetcher {
             .followRedirects(HttpClient.Redirect.NORMAL)
             .build()
         val token = System.getenv("GITHUB_TOKEN") ?: System.getenv("GH_TOKEN")
-        val req = HttpRequest.newBuilder(URI(LATEST_API))
+        val req = HttpRequest.newBuilder(URI(DownloadUrls.SEFARIA_EXPORT_LATEST_API))
             .header("Accept", "application/vnd.github+json")
             .header("User-Agent", "SeforimLibrary-SefariaExportFetcher/1.0")
             .apply { if (!token.isNullOrBlank()) header("Authorization", "Bearer $token") }

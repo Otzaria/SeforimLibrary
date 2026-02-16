@@ -1,6 +1,7 @@
 package io.github.kdroidfilter.seforimlibrary.otzariasqlite
 
 import co.touchlab.kermit.Logger
+import io.github.kdroidfilter.seforimlibrary.net.DownloadUrls
 import java.io.BufferedInputStream
 import java.io.FileOutputStream
 import java.net.URI
@@ -15,8 +16,6 @@ import java.util.zip.ZipEntry
 import java.util.zip.ZipInputStream
 
 object OtzariaFetcher {
-    private const val LATEST_API = "https://api.github.com/repos/otzaria/otzaria-library/releases/latest"
-
     /** Ensure otzaria source is available locally under build/otzaria/source (relative to CWD). */
     fun ensureLocalSource(logger: Logger): Path {
         val destRoot = Paths.get("build", "otzaria", "source")
@@ -60,7 +59,7 @@ object OtzariaFetcher {
             .followRedirects(HttpClient.Redirect.NORMAL)
             .build()
         val token = System.getenv("GITHUB_TOKEN") ?: System.getenv("GH_TOKEN")
-        val req = HttpRequest.newBuilder(URI(LATEST_API))
+        val req = HttpRequest.newBuilder(URI(DownloadUrls.OTZARIA_LIBRARY_LATEST_API))
             .header("Accept", "application/vnd.github+json")
             .header("User-Agent", "SeforimLibrary-OtzariaFetcher/1.0")
             .apply {

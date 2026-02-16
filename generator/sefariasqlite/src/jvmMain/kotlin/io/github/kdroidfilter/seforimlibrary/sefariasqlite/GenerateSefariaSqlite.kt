@@ -7,6 +7,7 @@ import io.github.kdroidfilter.seforimlibrary.dao.repository.SeforimRepository
 import io.github.kdroidfilter.seforimlibrary.db.SeforimDb
 import io.github.kdroidfilter.seforimlibrary.idresolver.IdResolverAdapter
 import io.github.kdroidfilter.seforimlibrary.idresolver.IdResolverLoader
+import io.github.kdroidfilter.seforimlibrary.net.DownloadUrls
 import kotlinx.coroutines.runBlocking
 import java.io.File
 import java.net.URI
@@ -181,12 +182,6 @@ private fun findRepoRoot(start: File): File? {
     return null
 }
 
-private const val GENERATION_CSV_URL =
-    "https://raw.githubusercontent.com/Otzaria/otzaria-library/refs/heads/main/" +
-    "MoreBooks/%D7%A1%D7%A4%D7%A8%D7%99%D7%9D/%D7%90%D7%95%D7%A6%D7%A8%D7%99%D7%90/" +
-    "%D7%90%D7%95%D7%93%D7%95%D7%AA%20%D7%94%D7%AA%D7%95%D7%9B%D7%A0%D7%94/" +
-    "%D7%A1%D7%93%D7%A8%20%D7%94%D7%93%D7%95%D7%A8%D7%95%D7%AA.csv"
-
 /**
  * Downloads the סדר הדורות CSV from the Otzaria GitHub repository into [targetDir].
  * Returns the downloaded file, or null if the download failed.
@@ -196,7 +191,7 @@ private fun downloadGenerationCsv(targetDir: File, logger: Logger): File? {
         targetDir.mkdirs()
         val target = File(targetDir, "סדר הדורות.csv")
         logger.i { "Downloading סדר הדורות.csv from GitHub..." }
-        URI(GENERATION_CSV_URL).toURL().openStream().use { input ->
+        URI(DownloadUrls.OTZARIA_GENERATION_CSV).toURL().openStream().use { input ->
             target.outputStream().use { output ->
                 input.copyTo(output)
             }

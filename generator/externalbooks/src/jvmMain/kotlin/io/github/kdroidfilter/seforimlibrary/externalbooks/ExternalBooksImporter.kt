@@ -154,7 +154,7 @@ class ExternalBooksImporter(
             } else emptyList()
 
             // Resolve or allocate book ID
-            val resolvedId = idResolver?.resolveBookId(externalId, hebrewBooksSourceId, "external")
+            val resolvedId = idResolver?.resolveBookId(externalId, hebrewBooksSourceId, "link")
             val bookId = resolvedId ?: nextBookId.getAndIncrement()
 
             // Insert book via raw query (to populate pages + externalLibraryId)
@@ -165,12 +165,12 @@ class ExternalBooksImporter(
                      hasTargumConnection, hasReferenceConnection, hasSourceConnection,
                      hasCommentaryConnection, hasOtherConnection, hasAltStructures,
                      hasTeamim, hasNekudot, isContentExternal, externalLibraryId,
-                     pages)
+                     pages, fileType)
                 VALUES
                     ($bookId, $hebrewBooksCategoryId, $hebrewBooksSourceId,
                      '${escapeSql(title)}', 999, 0, 0,
                      0, 0, 0, 0, 0, 0, 0, 0, 1, '${escapeSql(externalId)}',
-                     ${pages?.toInt() ?: "NULL"})
+                     ${pages?.toInt() ?: "NULL"}, 'link')
                 """.trimIndent()
             )
 
@@ -250,7 +250,7 @@ class ExternalBooksImporter(
             } else emptyList()
 
             // Resolve or allocate book ID
-            val resolvedId = idResolver?.resolveBookId(externalId, otzarSourceId, "external")
+            val resolvedId = idResolver?.resolveBookId(externalId, otzarSourceId, "link")
             val bookId = resolvedId ?: nextBookId.getAndIncrement()
 
             repository.executeRawQuery(
@@ -260,13 +260,13 @@ class ExternalBooksImporter(
                      hasTargumConnection, hasReferenceConnection, hasSourceConnection,
                      hasCommentaryConnection, hasOtherConnection, hasAltStructures,
                      hasTeamim, hasNekudot, isContentExternal, externalLibraryId,
-                     pages, volume)
+                     pages, volume, fileType)
                 VALUES
                     ($bookId, $otzarCategoryId, $otzarSourceId,
                      '${escapeSql(title)}', 999, 0, 0,
                      0, 0, 0, 0, 0, 0, 0, 0, 1, '${escapeSql(externalId)}',
                      ${pages?.toInt() ?: "NULL"},
-                     ${if (volume != null) "'${escapeSql(volume)}'" else "NULL"})
+                     ${if (volume != null) "'${escapeSql(volume)}'" else "NULL"}, 'link')
                 """.trimIndent()
             )
 

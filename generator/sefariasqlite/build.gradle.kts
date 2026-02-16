@@ -10,6 +10,7 @@ kotlin {
 
     sourceSets {
         commonMain.dependencies {
+            implementation(project(":core"))
             api(project(":dao"))
 
             implementation(libs.kotlinx.coroutines.core)

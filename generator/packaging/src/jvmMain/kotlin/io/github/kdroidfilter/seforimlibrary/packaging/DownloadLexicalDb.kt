@@ -2,6 +2,7 @@ package io.github.kdroidfilter.seforimlibrary.packaging
 
 import co.touchlab.kermit.Logger
 import co.touchlab.kermit.Severity
+import io.github.kdroidfilter.seforimlibrary.net.DownloadUrls
 import java.net.URI
 import java.net.http.HttpClient
 import java.net.http.HttpRequest
@@ -9,8 +10,6 @@ import java.net.http.HttpResponse
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.Paths
-
-private const val LATEST_API = "https://api.github.com/repos/kdroidFilter/SeforimMagicIndexer/releases/latest"
 
 /**
  * Download the latest `lexical.db` from SeforimMagicIndexer GitHub releases and place it next to `seforim.db`.
@@ -54,7 +53,7 @@ private fun downloadLatestLexicalDb(outDb: Path, logger: Logger) {
         .build()
     val token = System.getenv("GITHUB_TOKEN") ?: System.getenv("GH_TOKEN")
 
-    val req = HttpRequest.newBuilder(URI(LATEST_API))
+    val req = HttpRequest.newBuilder(URI(DownloadUrls.MAGIC_INDEXER_LATEST_API))
         .header("Accept", "application/vnd.github+json")
         .header("User-Agent", "SeforimLibrary-DownloadLexicalDb/1.0")
         .apply { if (!token.isNullOrBlank()) header("Authorization", "Bearer $token") }
