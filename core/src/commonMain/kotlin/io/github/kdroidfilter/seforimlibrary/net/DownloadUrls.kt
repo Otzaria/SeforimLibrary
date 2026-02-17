@@ -11,7 +11,7 @@ object DownloadUrls {
     const val OTZARIA_LIBRARY_LATEST_API =
         "https://api.github.com/repos/otzaria/otzaria-library/releases/latest"
     const val SEFARIA_EXPORT_LATEST_API =
-        "https://api.github.com/repos/kdroidFilter/SefariaExport/releases/latest"
+        "https://api.github.com/repos/Otzaria/SefariaExport/releases/latest"
     const val ACRONYMIZER_LATEST_API =
         "https://api.github.com/repos/kdroidFilter/SeforimAcronymizer/releases/latest"
     const val MAGIC_INDEXER_LATEST_API =
