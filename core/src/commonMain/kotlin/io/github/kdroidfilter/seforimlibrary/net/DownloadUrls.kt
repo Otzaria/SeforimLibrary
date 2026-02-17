@@ -22,4 +22,16 @@ object DownloadUrls {
         "MoreBooks/%D7%A1%D7%A4%D7%A8%D7%99%D7%9D/%D7%90%D7%95%D7%A6%D7%A8%D7%99%D7%90/" +
         "%D7%90%D7%95%D7%93%D7%95%D7%AA%20%D7%94%D7%AA%D7%95%D7%9B%D7%A0%D7%94/" +
         "%D7%A1%D7%93%D7%A8%20%D7%94%D7%93%D7%95%D7%A8%D7%95%D7%AA.csv"
+
+    /** CSV mapping Sefaria book titles to Otzaria-style names (Windows-1255 encoded). */
+    const val OTZARIA_BOOK_RENAMES_CSV =
+        "https://raw.githubusercontent.com/Otzaria/otzaria-library/refs/heads/main/" +
+        "sefariaToOtzaria/%D7%A1%D7%A7%D7%A8%D7%99%D7%A4%D7%98%D7%99%D7%9D/from_export/" +
+        "%D7%A1%D7%A4%D7%A8%D7%99%D7%9D.csv"
+
+    /** CSV mapping Sefaria category names to Otzaria-style names (ISO-8859-8 encoded). */
+    const val OTZARIA_CATEGORY_RENAMES_CSV =
+        "https://raw.githubusercontent.com/Otzaria/otzaria-library/refs/heads/main/" +
+        "sefariaToOtzaria/%D7%A1%D7%A7%D7%A8%D7%99%D7%A4%D7%98%D7%99%D7%9D/from_export/" +
+        "%D7%AA%D7%99%D7%A7%D7%99%D7%95%D7%AA.csv"
 }
