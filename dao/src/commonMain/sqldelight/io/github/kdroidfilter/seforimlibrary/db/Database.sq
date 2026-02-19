@@ -26,10 +26,18 @@ CREATE INDEX IF NOT EXISTS idx_category_closure_descendant ON category_closure(d
 -- Generations table (era / period code table)
 CREATE TABLE IF NOT EXISTS generation (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    name TEXT NOT NULL UNIQUE
+    name TEXT NOT NULL UNIQUE,
+    startYear INTEGER,
+    endYear INTEGER,
+    parentGenerationId INTEGER,
+    FOREIGN KEY (parentGenerationId) REFERENCES generation(id),
+    CHECK (startYear IS NULL OR endYear IS NULL OR startYear <= endYear)
 );
 
 CREATE INDEX IF NOT EXISTS idx_generation_name ON generation(name);
+CREATE INDEX IF NOT EXISTS idx_generation_parent ON generation(parentGenerationId);
+CREATE INDEX IF NOT EXISTS idx_generation_start_year ON generation(startYear);
+CREATE INDEX IF NOT EXISTS idx_generation_end_year ON generation(endYear);
 
 -- Authors table
 CREATE TABLE IF NOT EXISTS author (

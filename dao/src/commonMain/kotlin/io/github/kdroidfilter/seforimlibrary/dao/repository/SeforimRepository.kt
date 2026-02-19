@@ -585,17 +585,34 @@ class SeforimRepository(databasePath: String, private val driver: SqlDriver) {
      * If [explicitId] is provided, it is used as the ID (for stable ID resolution).
      * If the generation already exists, returns its existing ID.
      */
-    suspend fun insertGeneration(name: String, explicitId: Long? = null): Long = withContext(Dispatchers.IO) {
+    suspend fun insertGeneration(
+        name: String,
+        explicitId: Long? = null,
+        startYear: Long? = null,
+        endYear: Long? = null,
+        parentGenerationId: Long? = null
+    ): Long = withContext(Dispatchers.IO) {
         logger.d { "Inserting generation: $name" + (explicitId?.let { " with explicit ID $it" } ?: "") }
         val existing = database.generationQueriesQueries.selectByName(name).executeAsOneOrNull()
-        if (existing != null) return@withContext existing.id
+        if (existing != null) {
+            if (startYear != null || endYear != null || parentGenerationId != null) {
+                database.generationQueriesQueries.updateMetadataByName(startYear, endYear, parentGenerationId, name)
+            }
+            return@withContext existing.id
+        }
 
         if (explicitId != null) {
-            database.generationQueriesQueries.insertWithId(explicitId, name)
+            database.generationQueriesQueries.insertWithId(
+                explicitId,
+                name,
+                startYear,
+                endYear,
+                parentGenerationId
+            )
             return@withContext explicitId
         }
 
-        database.generationQueriesQueries.insert(name)
+        database.generationQueriesQueries.insert(name, startYear, endYear, parentGenerationId)
         val id = database.generationQueriesQueries.lastInsertRowId().executeAsOne()
         if (id != 0L) return@withContext id
 

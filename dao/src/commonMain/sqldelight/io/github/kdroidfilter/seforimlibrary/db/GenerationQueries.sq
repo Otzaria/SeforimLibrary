@@ -10,20 +10,25 @@ selectByName:
 SELECT * FROM generation WHERE name = ? LIMIT 1;
 
 insert:
-INSERT INTO generation (name)
-VALUES (?)
+INSERT INTO generation (name, startYear, endYear, parentGenerationId)
+VALUES (?, ?, ?, ?)
 ON CONFLICT (name) DO NOTHING;
 
 insertWithId:
-INSERT OR IGNORE INTO generation (id, name)
-VALUES (?, ?);
+INSERT OR IGNORE INTO generation (id, name, startYear, endYear, parentGenerationId)
+VALUES (?, ?, ?, ?, ?);
 
 insertAndGetId:
-INSERT OR IGNORE INTO generation (name)
-VALUES (?);
+INSERT OR IGNORE INTO generation (name, startYear, endYear, parentGenerationId)
+VALUES (?, ?, ?, ?);
 
 selectIdByName:
 SELECT id FROM generation WHERE name = ? LIMIT 1;
+
+updateMetadataByName:
+UPDATE generation
+SET startYear = ?, endYear = ?, parentGenerationId = ?
+WHERE name = ?;
 
 delete:
 DELETE FROM generation WHERE id = ?;

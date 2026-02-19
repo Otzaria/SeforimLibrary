@@ -23,6 +23,12 @@ object GenerationLoader {
 
     private val logger = Logger.withTag("GenerationLoader")
 
+    private data class GenerationDetails(
+        val startYear: Long?,
+        val endYear: Long?,
+        val parentGenerationId: Long?
+    )
+
     /**
      * Normalized alias: "חזל" (without quotes) → "חז״ל" canonical form.
      */
@@ -98,6 +104,47 @@ object GenerationLoader {
     }
 
     /**
+     * Reads the generations metadata CSV and returns a map of generation-name → details.
+     * Expected headers: Era, Start Year, End Year, parentGenerationId
+     */
+    private fun parseGenerationDetailsCsv(csvFile: File): Map<String, GenerationDetails> {
+        if (!csvFile.exists()) {
+            logger.w { "Generation details CSV file not found: ${csvFile.absolutePath}" }
+            return emptyMap()
+        }
+
+        val result = mutableMapOf<String, GenerationDetails>()
+        val lines = csvFile.readLines(Charsets.UTF_8)
+        for (i in 1 until lines.size) {
+            val line = lines[i].trim()
+            if (line.isEmpty()) continue
+            val fields = parseCsvLine(line)
+            if (fields.isEmpty()) continue
+
+            val eraName = normalizeGenerationName(fields.getOrNull(0).orEmpty())
+            if (eraName.isEmpty()) continue
+
+            val startYear = fields.getOrNull(1)?.trim().orEmpty().toLongOrNull()
+            val endYear = fields.getOrNull(2)?.trim().orEmpty().toLongOrNull()
+            val parentGenerationId = fields.getOrNull(3)?.trim().orEmpty().toLongOrNull()
+
+            if (startYear != null && endYear != null && startYear > endYear) {
+                logger.w { "Skipping invalid generation range for '$eraName': startYear=$startYear endYear=$endYear" }
+                continue
+            }
+
+            result[eraName] = GenerationDetails(
+                startYear = startYear,
+                endYear = endYear,
+                parentGenerationId = parentGenerationId
+            )
+        }
+
+        logger.i { "Parsed ${result.size} generation detail rows from CSV" }
+        return result
+    }
+
+    /**
      * Seeds the generation table with all distinct generation names from the CSV,
      * then updates every author's generationId based on the books they wrote.
      *
@@ -111,11 +158,13 @@ object GenerationLoader {
      *    by title, find its authors, and set their generationId.
      *
      * @param csvFile The סדר הדורות CSV file
+     * @param generationDetailsCsv Optional generations details CSV (Era, Start Year, End Year, parentGenerationId)
      * @param repository The SeforimRepository to use for DB operations
      * @param idResolverProvider Optional ID resolver for stable generation IDs
      */
     suspend fun loadGenerations(
         csvFile: File,
+        generationDetailsCsv: File? = null,
         repository: SeforimRepository,
         idResolverProvider: IdResolverProvider? = null
     ) {
@@ -125,12 +174,24 @@ object GenerationLoader {
             return
         }
 
+        val generationDetailsByName = generationDetailsCsv
+            ?.takeIf { it.exists() }
+            ?.let { parseGenerationDetailsCsv(it) }
+            ?: emptyMap()
+
         // 1. Seed generation table with all distinct values, using stable IDs when available
         val distinctGenerations = bookToGeneration.values.toSet()
         val generationIdMap = mutableMapOf<String, Long>()
         for (genName in distinctGenerations) {
             val previousId = idResolverProvider?.resolveGenerationId(genName)
-            val genId = repository.insertGeneration(genName, explicitId = previousId)
+            val details = generationDetailsByName[genName]
+            val genId = repository.insertGeneration(
+                name = genName,
+                explicitId = previousId,
+                startYear = details?.startYear,
+                endYear = details?.endYear,
+                parentGenerationId = details?.parentGenerationId
+            )
             generationIdMap[genName] = genId
             if (previousId != null) {
                 logger.d { "Generation '$genName' inserted with stable ID $previousId" }

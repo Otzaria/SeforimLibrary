@@ -49,7 +49,10 @@ fun io.github.kdroidfilter.seforimlibrary.db.Author.toModel(): Author {
 fun io.github.kdroidfilter.seforimlibrary.db.Generation.toModel(): Generation {
     return Generation(
         id = id,
-        name = name
+        name = name,
+        startYear = startYear,
+        endYear = endYear,
+        parentGenerationId = parentGenerationId
     )
 }
 

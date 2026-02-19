@@ -122,7 +122,22 @@ fun main(args: Array<String>) = runBlocking {
 
         if (generationCsv != null) {
             logger.i { "Loading generation mappings from ${generationCsv.absolutePath}" }
-            GenerationLoader.loadGenerations(generationCsv, repository, idResolverAdapter)
+            val generationDetailsCsv = File(projectRoot, "build/generations.csv")
+                .takeIf { it.exists() }
+                ?: File("build/generations.csv").takeIf { it.exists() }
+
+            if (generationDetailsCsv != null) {
+                logger.i { "Loading generation details from ${generationDetailsCsv.absolutePath}" }
+            } else {
+                logger.i { "generations.csv not found; generation years/hierarchy will be skipped." }
+            }
+
+            GenerationLoader.loadGenerations(
+                csvFile = generationCsv,
+                generationDetailsCsv = generationDetailsCsv,
+                repository = repository,
+                idResolverProvider = idResolverAdapter
+            )
         } else {
             logger.w { "סדר הדורות.csv not found and download failed; skipping generation loading." }
         }
