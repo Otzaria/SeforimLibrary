@@ -99,14 +99,15 @@ class DatabaseGenerator(
     // Normalization helpers for categories/titles
     private fun normalizeHebrewLabel(raw: String): String {
         var s = raw.trim()
-        // Normalize common quote variants to Hebrew gershayim/geresh
+        // Normalize common quote variants to regular double-quote/geresh
         s = s.replace('\u201C', '"').replace('\u201D', '"')
         s = s.replace('\u2018', '\'').replace('\u2019', '\'')
-        s = s.replace("\"", "״")
-        s = s.replace("''", "״")
-        s = s.replace("׳׳", "״")
+        s = s.replace("״", "\"")
+        s = s.replace("''", "\"")
+        s = s.replace("׳׳", "\"")
         s = s.replace("`", "׳")
         s = s.replace("\u05f3", "׳")
+        s = s.replace("\u05f4", "\"")
         s = s.replace("\\s+".toRegex(), " ").trim()
         return s
     }
@@ -132,8 +133,8 @@ class DatabaseGenerator(
         return when (cleaned) {
             "תלמוד בבלי" -> listOf("תלמוד בבלי")
             "תלמוד ירושלמי", "תלמוד ירושלים" -> listOf("תלמוד ירושלמי")
-            "תנך", "תנ\"ך", "תנ״ך" -> listOf("תנ״ך")
-            "שות", "שו\"ת", "שו״ת" -> listOf("שו״ת")
+            "תנך", "תנ\"ך", "תנ״ך" -> listOf("תנ\"ך")
+            "שות", "שו\"ת", "שו״ת" -> listOf("שו\"ת")
             else -> listOf(cleaned)
         }
     }
@@ -181,7 +182,7 @@ class DatabaseGenerator(
     private fun normalizeBookTitle(rawTitle: String): String {
         val base = normalizeHebrewLabel(rawTitle)
         return when (base) {
-            "תנך", "תנ\"ך" -> "תנ״ך"
+            "תנך", "תנ\"ך" -> "תנ\"ך"
             else -> base
         }
     }

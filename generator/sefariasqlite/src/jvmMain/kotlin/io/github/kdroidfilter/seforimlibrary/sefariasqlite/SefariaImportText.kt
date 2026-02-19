@@ -2,7 +2,10 @@ package io.github.kdroidfilter.seforimlibrary.sefariasqlite
 
 internal fun sanitizeFolder(name: String?): String {
     if (name.isNullOrBlank()) return ""
-    return name.replace("\"", "״").trim()
+    return name
+        .replace("״", "\"")
+        .replace("\u05F4", "\"")
+        .trim()
 }
 
 internal fun normalizeTitleKey(value: String?): String? {
