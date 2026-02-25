@@ -2004,38 +2004,6 @@ class SeforimRepository(databasePath: String, private val driver: SqlDriver) {
 
     // Search functions removed (migrated to Lucene in app layer).
 
-    // --- Book Files ---
-
-    /**
-     * Check whether a book file with the given kind and SHA-256 hash already exists.
-     */
-    suspend fun existsBookFileByKindSha(kind: String, sha256: String): Boolean = withContext(Dispatchers.IO) {
-        database.bookFileQueriesQueries.existsFileByKindSha(kind, sha256).executeAsOneOrNull() != null
-    }
-
-    /**
-     * Insert a book file BLOB into the database.
-     */
-    suspend fun insertBookFile(
-        bookId: Long,
-        kind: String,
-        data: ByteArray,
-        size: Long,
-        sha256: String,
-        originalRelPath: String?,
-        createdAt: Long
-    ) = withContext(Dispatchers.IO) {
-        database.bookFileQueriesQueries.insertBookFile(
-            bookId = bookId,
-            kind = kind,
-            data_ = data,
-            size = size,
-            sha256 = sha256,
-            originalRelPath = originalRelPath,
-            createdAt = createdAt
-        )
-    }
-
     /**
      * Executes a raw SQL query.
      * This is useful for operations that are not covered by the generated queries,

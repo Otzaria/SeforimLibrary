@@ -282,9 +282,6 @@ class DatabaseGenerator(
                 preloadAllBookContents(libraryPath)
                 processDirectory(libraryPath, null, 0, metadata)
 
-                // Import PDF books and file blobs
-                importPdfBooks(libraryPath)
-
                 // Process links
                 processLinks()
 
@@ -362,9 +359,6 @@ class DatabaseGenerator(
                 // Preload all book .txt contents into RAM for faster processing
                 preloadAllBookContents(libraryPath)
                 processDirectory(libraryPath, null, 0, metadata)
-
-                // Import PDF books and file blobs
-                importPdfBooks(libraryPath)
 
                 // Build category closure after categories insertion
                 logger.i { "Building category_closure table (phase 1)..." }
@@ -680,22 +674,6 @@ class DatabaseGenerator(
         }
         logger.i { "=== Finished processing directory: ${directory.fileName} ===" }
     }
-
-    private suspend fun importPdfBooks(libraryPath: Path) {
-        val manifestPath = sourceDirectory.resolve("metadata.json").takeIf { it.exists() }
-        val sourceId = sourceNameToId["Unknown"] ?: repository.insertSource("Unknown")
-        val importer = PdfImporter(
-            repository = repository,
-            booksDir = libraryPath,
-            manifestFile = manifestPath,
-            sourceId = sourceId,
-            idResolverProvider = idResolverProvider,
-            logger = Logger.withTag("PdfImporter"),
-            configurePragmas = false
-        )
-        importer.importPdfs()
-    }
-
 
     /**
      * Creates a book in the database and processes its content.

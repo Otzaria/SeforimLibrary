@@ -280,44 +280,6 @@ tasks.register("appendOtzaria") {
     dependsOn("appendOtzariaLinks")
 }
 
-// Append PDF files from Otzaria into an existing DB
-// This task should run after appendOtzariaLines to add PDF files as BLOBs
-tasks.register<JavaExec>("appendOtzariaPdfs") {
-    group = "application"
-    description = "Append PDF files from Otzaria into an existing SQLite DB as BLOBs."
-
-    dependsOn("jvmJar")
-    mainClass.set("io.github.kdroidfilter.seforimlibrary.otzariasqlite.AppendPdfsKt")
-    classpath = files(tasks.named("jvmJar")) + configurations.getByName("jvmRuntimeClasspath")
-
-    val defaultDbPath = rootProject.layout.buildDirectory.file("seforim.db").get().asFile.absolutePath
-    val dbPath = when {
-        project.hasProperty("seforimDb") -> project.property("seforimDb") as String
-        else -> defaultDbPath
-    }
-
-    // Pass DB path via system property (Kotlin main will pick it up)
-    systemProperty("seforimDb", dbPath)
-
-    if (project.hasProperty("booksDir")) {
-        systemProperty("booksDir", project.property("booksDir") as String)
-    }
-    if (project.hasProperty("manifestFile")) {
-        systemProperty("manifestFile", project.property("manifestFile") as String)
-    }
-    if (project.hasProperty("sourceId")) {
-        systemProperty("sourceId", project.property("sourceId") as String)
-    }
-    if (project.hasProperty("batchSize")) {
-        systemProperty("batchSize", project.property("batchSize") as String)
-    }
-
-    jvmArgs = listOf(
-        "-Xmx4g",
-        "-XX:+UseG1GC"
-    )
-}
-
 // Generate links between Havrouta commentaries and Talmud tractates
 // Usage:
 //   ./gradlew :otzariasqlite:generateHavroutaLinks -PseforimDb=/path/to.db

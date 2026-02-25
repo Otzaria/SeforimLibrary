@@ -48,7 +48,8 @@ tasks.register<JavaExec>("downloadBooksDb") {
 // Import external book metadata (HebrewBooks + OtzarHaChochma) into seforim.db
 tasks.register<JavaExec>("importExternalBooks") {
     group = "application"
-    description = "Import HebrewBooks and OtzarHaChochma metadata from books.db into seforim.db."
+    description = "[DISABLED] External catalogs import was removed from the DB schema."
+    enabled = false
 
     dependsOn("jvmJar")
     mainClass.set("io.github.kdroidfilter.seforimlibrary.externalbooks.ImportExternalBooksKt")

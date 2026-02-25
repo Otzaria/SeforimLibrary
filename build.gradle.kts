@@ -16,7 +16,7 @@ tasks.register("generateSeforimDb") {
     dependsOn(":otzariasqlite:appendOtzaria")
     dependsOn(":otzariasqlite:generateHavroutaLinks")
     dependsOn(":sefariasqlite:renameCategories")
-    dependsOn(":externalbooks:importExternalBooks")
+    //dependsOn(":externalbooks:importExternalBooks")
     dependsOn(":dbversion:writeDbVersion")
     //dependsOn(":catalog:buildCatalog")
     //dependsOn(":searchindex:buildLuceneIndexDefault")
@@ -46,11 +46,8 @@ project(":sefariasqlite").tasks.matching { it.name == "renameCategories" }.confi
 project(":otzariasqlite").tasks.matching { it.name == "generateHavroutaLinks" }.configureEach {
     mustRunAfter(":otzariasqlite:appendOtzaria")
 }
-project(":externalbooks").tasks.matching { it.name == "importExternalBooks" }.configureEach {
-    mustRunAfter(":otzariasqlite:generateHavroutaLinks")
-}
 project(":dbversion").tasks.matching { it.name == "writeDbVersion" }.configureEach {
-    mustRunAfter(":externalbooks:importExternalBooks")
+    mustRunAfter(":otzariasqlite:generateHavroutaLinks")
 }
 project(":catalog").tasks.matching { it.name == "buildCatalog" }.configureEach {
     mustRunAfter(":dbversion:writeDbVersion")
