@@ -25,11 +25,9 @@ object OtzariaFetcher {
         }
         Files.createDirectories(destRoot)
 
-        // Download and extract all zip files from the release
-        val zipFiles = downloadAllZips(destRoot.parent, logger)
-        for (zipFile in zipFiles) {
-            extractZip(zipFile, destRoot, logger)
-        }
+        val zipPath = destRoot.parent.resolve("otzaria_latest.zip")
+        downloadLatestZip(zipPath, logger)
+        extractZip(zipPath, destRoot, logger)
 
         val root = findSourceRoot(destRoot)
         removeUnwantedFolder(root, logger)
@@ -55,44 +53,27 @@ object OtzariaFetcher {
         return extractRoot
     }
 
-    /**
-     * Download all zip files from the latest release.
-     * Returns list of downloaded zip file paths.
-     */
-    private fun downloadAllZips(downloadDir: Path, logger: Logger): List<Path> {
+    private fun downloadLatestZip(outZip: Path, logger: Logger) {
         // Fetch release info from GitHub API
         val body = OptimizedHttpClient.fetchJson(DownloadUrls.OTZARIA_LIBRARY_LATEST_API, USER_AGENT, logger)
 
-        // Find all .zip asset URLs
+        // Find all .zip asset URLs and keep only otzaria_latest.zip
         val regex = Regex(""""browser_download_url"\s*:\s*"([^"]+\.zip)"""")
         val zipUrls = regex.findAll(body).map { it.groupValues[1] }.toList()
+        val latestZipUrl = zipUrls.firstOrNull {
+            val fileName = it.substringAfterLast('/').substringBefore('?')
+            fileName == "otzaria_latest.zip"
+        } ?: throw IllegalStateException("No otzaria_latest.zip asset found in latest otzaria-library release")
 
-        if (zipUrls.isEmpty()) {
-            throw IllegalStateException("No .zip asset found in latest otzaria-library release")
-        }
-
-        logger.i { "Found ${zipUrls.size} zip file(s) to download" }
-
-        val downloadedFiles = mutableListOf<Path>()
-        for ((index, zipUrl) in zipUrls.withIndex()) {
-            // Extract filename from URL
-            val fileName = zipUrl.substringAfterLast('/')
-            val outZip = downloadDir.resolve(fileName)
-
-            logger.i { "Downloading [${index + 1}/${zipUrls.size}]: $fileName" }
-
-            OptimizedHttpClient.downloadFile(
-                url = zipUrl,
-                destination = outZip,
-                userAgent = USER_AGENT,
-                logger = logger,
-                progressPrefix = "Downloading $fileName"
-            )
-
-            downloadedFiles.add(outZip)
-        }
-
-        return downloadedFiles
+        logger.i { "Downloading otzaria from $latestZipUrl" }
+        OptimizedHttpClient.downloadFile(
+            url = latestZipUrl,
+            destination = outZip,
+            userAgent = USER_AGENT,
+            logger = logger,
+            progressPrefix = "Downloading otzaria_latest.zip"
+        )
+        logger.i { "Saved otzaria zip to ${outZip.toAbsolutePath()}" }
     }
 
     private fun extractZip(zipFile: Path, destinationDir: Path, logger: Logger) {
