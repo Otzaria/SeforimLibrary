@@ -19,7 +19,7 @@ concurrency:
 jobs:
   build-release:
     name: Generate DB, DIFF and publish release
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     timeout-minutes: 720
     env:
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
