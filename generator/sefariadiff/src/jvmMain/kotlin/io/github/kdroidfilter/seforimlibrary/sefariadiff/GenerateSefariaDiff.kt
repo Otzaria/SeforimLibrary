@@ -35,12 +35,7 @@ fun main(args: Array<String>) {
     runBlocking {
         try {
             generateSefariaDiff(newDbPath, oldDbPath, diffFilePath)
-            
-            // Wait for user input before continuing
             println("\nDiff report generated successfully at: $diffFilePath")
-            println("Press Enter to continue with Otzaria import...")
-            readLine()
-            
         } catch (e: Exception) {
             println("Error generating diff report: ${e.message}")
             e.printStackTrace()

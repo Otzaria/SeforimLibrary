@@ -13,7 +13,7 @@ The SefariaDiff generator serves as an intermediate step in the database generat
 - Identifies removed books  
 - Lists unchanged books with line count comparisons
 - Generates a detailed markdown report in `SeferiaDiff.txt`
-- Waits for user confirmation before continuing with Otzaria import
+- Continues automatically to Otzaria import without user interaction
 
 ## Usage
 
@@ -56,7 +56,7 @@ The SefariaDiff step is integrated into the main pipeline and runs automatically
 
 1. After `:sefariasqlite:generateSefariaSqlite` completes
 2. Before `:otzariasqlite:appendOtzaria` begins
-3. Pauses execution for user review before continuing
+3. Continues directly to the next step without pausing
 
 ## Fresh Installation
 
