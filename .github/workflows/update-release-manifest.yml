@@ -1,20 +1,28 @@
-name: Update Release Manifest
+name: Build DB Update Release
 
 on:
-  push:
-    branches: [master]
-  release:
-    types: [published]
   workflow_dispatch:
+    inputs:
+      delete_previous_db_assets:
+        description: "Delete DB assets from the previous release after successful publish"
+        required: true
+        default: true
+        type: boolean
 
 permissions:
   contents: write
 
+concurrency:
+  group: seforim-db-release
+  cancel-in-progress: false
+
 jobs:
-  update-manifest:
-    name: Generate release assets JSON
+  build-release:
+    name: Generate DB, DIFF and publish release
     runs-on: ubuntu-latest
+    timeout-minutes: 720
     env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
     steps:
@@ -22,43 +30,328 @@ jobs:
         uses: actions/checkout@v4
         with:
           ref: master
+          submodules: true
 
-      - name: Generate release manifest JSON
+      - name: Set up Java 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Free disk space for large DB build
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "Disk before cleanup:"
+          df -h
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc || true
+          sudo apt-get clean
+          echo "Disk after cleanup:"
+          df -h
+
+      - name: Install OS dependencies (sqldiff, sqlite3, zstd, jq)
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y sqlite3 zstd jq curl unzip
+          if apt-cache show sqlite3-tools >/dev/null 2>&1; then
+            sudo apt-get install -y sqlite3-tools
+          fi
+
+          if ! command -v sqldiff >/dev/null 2>&1; then
+            echo "sqldiff not found via apt packages, downloading official sqlite tools..."
+            SQLITE_TOOLS_REL_URL=$(curl -fsSL https://www.sqlite.org/download.html | grep -oE '[0-9]{4}/sqlite-tools-linux-x64-[0-9]+\.zip' | head -n 1 || true)
+            if [ -n "$SQLITE_TOOLS_REL_URL" ]; then
+              curl -fL "https://www.sqlite.org/${SQLITE_TOOLS_REL_URL}" -o /tmp/sqlite-tools.zip
+              rm -rf /tmp/sqlite-tools
+              mkdir -p /tmp/sqlite-tools
+              unzip -q /tmp/sqlite-tools.zip -d /tmp/sqlite-tools
+              SQDIFF_BIN=$(find /tmp/sqlite-tools -type f -name sqldiff | head -n 1 || true)
+              if [ -n "$SQDIFF_BIN" ]; then
+                sudo install -m 0755 "$SQDIFF_BIN" /usr/local/bin/sqldiff
+              fi
+            fi
+          fi
+
+          if ! command -v sqldiff >/dev/null 2>&1; then
+            echo "sqldiff was not found on this runner after package installation." >&2
+            echo "Install sqldiff (sqlite3-tools) or add a custom sqldiff binary download step." >&2
+            exit 1
+          fi
+          command -v sqldiff
+          command -v sqlite3
+          command -v zstd
+
+      - name: Restore previous DB from latest release (if exists)
+        id: restore_previous
+        shell: bash
         run: |
           set -euo pipefail
 
-          echo "Fetching all releases..."
+          mkdir -p build
+          rm -rf .tmp/previous-release
+          mkdir -p .tmp/previous-release
 
-          # Get latest release info
+          PREVIOUS_TAG=""
+          PREVIOUS_DB_ASSETS_JSON="[]"
+
+          mapfile -t TAGS < <(gh release list --limit 100 --json tagName,isDraft,isPrerelease --jq '.[] | select((.isDraft|not) and (.isPrerelease|not)) | .tagName')
+
+          for TAG in "${TAGS[@]}"; do
+            RELEASE_JSON=$(gh release view "$TAG" --json assets,tagName)
+            DB_ASSETS_JSON=$(jq -c '[.assets[].name | select(test("^seforim\\.db\\.zst(\\.part[0-9]+)?$") or test("^seforim_bundle\\.tar\\.zst(\\.part[0-9]+)?$"))]' <<<"$RELEASE_JSON")
+            if [ "$DB_ASSETS_JSON" != "[]" ]; then
+              PREVIOUS_TAG="$TAG"
+              PREVIOUS_DB_ASSETS_JSON="$DB_ASSETS_JSON"
+              break
+            fi
+          done
+
+          if [ -z "$PREVIOUS_TAG" ]; then
+            echo "No previous release with DB assets found. Running as first release."
+            echo "has_previous=false" >> "$GITHUB_OUTPUT"
+            echo "previous_tag=" >> "$GITHUB_OUTPUT"
+            echo "old_version=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "Found previous DB release: $PREVIOUS_TAG"
+          while IFS= read -r ASSET_NAME; do
+            [ -z "$ASSET_NAME" ] && continue
+            echo "Downloading asset: $ASSET_NAME"
+            gh release download "$PREVIOUS_TAG" -p "$ASSET_NAME" -D .tmp/previous-release
+          done < <(jq -r '.[]' <<<"$PREVIOUS_DB_ASSETS_JSON")
+
+          if compgen -G ".tmp/previous-release/seforim.db.zst.part*" > /dev/null; then
+            cat .tmp/previous-release/seforim.db.zst.part* > .tmp/previous-release/seforim.db.zst
+          fi
+
+          if [ -f ".tmp/previous-release/seforim.db.zst" ]; then
+            zstd -d -f .tmp/previous-release/seforim.db.zst -o build/seforim.db.bak
+          else
+            if compgen -G ".tmp/previous-release/seforim_bundle.tar.zst.part*" > /dev/null; then
+              cat .tmp/previous-release/seforim_bundle.tar.zst.part* > .tmp/previous-release/seforim_bundle.tar.zst
+            fi
+
+            if [ ! -f ".tmp/previous-release/seforim_bundle.tar.zst" ]; then
+              echo "Could not locate a supported DB asset after download."
+              exit 1
+            fi
+
+            mkdir -p .tmp/previous-release/unpacked
+            tar --use-compress-program=unzstd -xf .tmp/previous-release/seforim_bundle.tar.zst -C .tmp/previous-release/unpacked
+            RESTORED_DB=$(find .tmp/previous-release/unpacked -type f -name "seforim.db" | head -n 1 || true)
+
+            if [ -z "$RESTORED_DB" ]; then
+              echo "Failed to locate seforim.db inside bundle."
+              exit 1
+            fi
+
+            cp "$RESTORED_DB" build/seforim.db.bak
+          fi
+
+          if [ ! -f build/seforim.db.bak ]; then
+            echo "Failed to restore previous DB to build/seforim.db.bak"
+            exit 1
+          fi
+
+          OLD_VERSION=$(sqlite3 build/seforim.db.bak "SELECT value FROM db_meta WHERE key='content_version_int';")
+          if [ -z "$OLD_VERSION" ]; then
+            echo "Previous DB is missing db_meta.content_version_int"
+            exit 1
+          fi
+
+          echo "Restored previous DB version: $OLD_VERSION"
+
+          echo "has_previous=true" >> "$GITHUB_OUTPUT"
+          echo "previous_tag=$PREVIOUS_TAG" >> "$GITHUB_OUTPUT"
+          echo "old_version=$OLD_VERSION" >> "$GITHUB_OUTPUT"
+          {
+            echo "previous_db_assets_json<<EOF"
+            echo "$PREVIOUS_DB_ASSETS_JSON"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Build new DB
+        run: ./gradlew generateSeforimDb --no-daemon --stacktrace
+
+      - name: Compute versions and generate SQL diff
+        id: diff
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [ ! -f build/seforim.db ]; then
+            echo "Missing generated database at build/seforim.db"
+            exit 1
+          fi
+
+          NEW_VERSION=$(sqlite3 build/seforim.db "SELECT value FROM db_meta WHERE key='content_version_int';")
+          if [ -z "$NEW_VERSION" ]; then
+            echo "Generated DB is missing db_meta.content_version_int"
+            exit 1
+          fi
+
+          OLD_VERSION=""
+          if [ -f build/seforim.db.bak ]; then
+            OLD_VERSION=$(sqlite3 build/seforim.db.bak "SELECT value FROM db_meta WHERE key='content_version_int';")
+          fi
+
+          DIFF_PATH=""
+          if [ -n "$OLD_VERSION" ]; then
+            if [ "$OLD_VERSION" = "$NEW_VERSION" ]; then
+              echo "content_version_int did not increase (old=$OLD_VERSION, new=$NEW_VERSION)."
+              echo "Refusing to publish a release with identical content version."
+              exit 1
+            fi
+
+            DIFF_BASENAME="${OLD_VERSION}-${NEW_VERSION}.DIFF"
+            DIFF_TXT_PATH="build/${DIFF_BASENAME}"
+            DIFF_ZST_PATH="${DIFF_TXT_PATH}.zst"
+
+            sqldiff --transaction --primarykey build/seforim.db.bak build/seforim.db > "$DIFF_TXT_PATH"
+            zstd -19 -T0 -f "$DIFF_TXT_PATH" -o "$DIFF_ZST_PATH"
+
+            DIFF_PATH="$DIFF_ZST_PATH"
+          fi
+
+          echo "old_version=$OLD_VERSION" >> "$GITHUB_OUTPUT"
+          echo "new_version=$NEW_VERSION" >> "$GITHUB_OUTPUT"
+          echo "diff_path=$DIFF_PATH" >> "$GITHUB_OUTPUT"
+
+      - name: Compress and split DB asset
+        id: package_db
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          zstd -19 -T0 -f build/seforim.db -o build/seforim.db.zst
+
+          MAX_ASSET_BYTES=$((1900 * 1024 * 1024))
+          DB_ZST_SIZE=$(stat -c%s build/seforim.db.zst)
+          echo "Compressed DB size: $DB_ZST_SIZE bytes"
+
+          rm -f build/seforim.db.zst.part*
+          if [ "$DB_ZST_SIZE" -gt "$MAX_ASSET_BYTES" ]; then
+            split \
+              -b "$MAX_ASSET_BYTES" \
+              --numeric-suffixes=1 \
+              --suffix-length=2 \
+              build/seforim.db.zst \
+              build/seforim.db.zst.part
+            echo "db_parts_pattern=build/seforim.db.zst.part*" >> "$GITHUB_OUTPUT"
+          else
+            echo "db_parts_pattern=build/seforim.db.zst" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create GitHub release with DB + DIFF
+        id: create_release
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          NEW_VERSION="${{ steps.diff.outputs.new_version }}"
+          OLD_VERSION="${{ steps.diff.outputs.old_version }}"
+          DIFF_PATH="${{ steps.diff.outputs.diff_path }}"
+
+          RELEASE_TAG="db-v${NEW_VERSION}"
+          RELEASE_TITLE="$RELEASE_TAG"
+
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            echo "Release $RELEASE_TAG already exists, deleting it first for a clean publish."
+            gh release delete "$RELEASE_TAG" --yes --cleanup-tag
+          fi
+
+          shopt -s nullglob
+          FILES=(build/seforim.db.zst.part*)
+          if [ "${#FILES[@]}" -eq 0 ]; then
+            FILES=(build/seforim.db.zst)
+          fi
+          if [ -n "$DIFF_PATH" ]; then
+            FILES+=("$DIFF_PATH")
+          fi
+          if [ -f build/seforim-manifest.json ]; then
+            FILES+=("build/seforim-manifest.json")
+          fi
+
+          NOTES=$(printf '%s\n\n%s\n%s\n%s\n' \
+            "Automated database release." \
+            "New content_version_int: ${NEW_VERSION}" \
+            "Previous content_version_int: ${OLD_VERSION:-none}" \
+            "Diff asset: ${DIFF_PATH:-none}")
+
+          gh release create "$RELEASE_TAG" "${FILES[@]}" \
+            --title "$RELEASE_TITLE" \
+            --notes "$NOTES"
+
+          echo "release_tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Delete previous release DB assets
+        if: ${{ inputs.delete_previous_db_assets && steps.restore_previous.outputs.previous_tag != '' && steps.restore_previous.outputs.previous_tag != steps.create_release.outputs.release_tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          PREVIOUS_TAG="${{ steps.restore_previous.outputs.previous_tag }}"
+          echo "Deleting old DB assets from release: $PREVIOUS_TAG"
+
+          mapfile -t OLD_DB_ASSETS < <(
+            gh release view "$PREVIOUS_TAG" --json assets --jq \
+              '.assets[].name | select(test("^seforim\\.db\\.zst(\\.part[0-9]+)?$") or test("^seforim_bundle\\.tar\\.zst(\\.part[0-9]+)?$"))'
+          )
+
+          if [ "${#OLD_DB_ASSETS[@]}" -eq 0 ]; then
+            echo "No DB assets to delete from $PREVIOUS_TAG"
+            exit 0
+          fi
+
+          for ASSET in "${OLD_DB_ASSETS[@]}"; do
+            echo "Deleting asset: $ASSET"
+            gh release delete-asset "$PREVIOUS_TAG" "$ASSET" --yes
+          done
+
+      - name: Regenerate release-manifest.json
+        shell: bash
+        run: |
+          set -euo pipefail
+
           LATEST_RELEASE=$(gh release view --json tagName,name,publishedAt,assets)
-
-          # Get all releases for history
           ALL_RELEASES=$(gh release list --json tagName,name,publishedAt --limit 100)
-
-          # Get current timestamp
           GENERATED_AT=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 
-          # Build the manifest JSON directly with jq
           jq -n \
-             --arg generatedAt "$GENERATED_AT" \
-             --argjson latest "$LATEST_RELEASE" \
-             --argjson releases "$ALL_RELEASES" \
-             '{generatedAt: $generatedAt, latest: $latest, releases: $releases}' \
-             > release-manifest.json
+            --arg generatedAt "$GENERATED_AT" \
+            --argjson latest "$LATEST_RELEASE" \
+            --argjson releases "$ALL_RELEASES" \
+            '{generatedAt: $generatedAt, latest: $latest, releases: $releases}' \
+            > release-manifest.json
 
-          echo "Generated release-manifest.json:"
-          cat release-manifest.json
-
-      - name: Commit and push manifest
+      - name: Commit and push release-manifest.json
+        shell: bash
         run: |
+          set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
           git add release-manifest.json
-
           if git diff --staged --quiet; then
             echo "No changes to commit"
-          else
-            git commit -m "Update release manifest [skip ci]"
-            git push
+            exit 0
           fi
+
+          git commit -m "Update release manifest [skip ci]"
+          git push
+
+      - name: Cleanup generated data (always)
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          ./gradlew cleanGeneratedData --no-daemon
+          rm -rf build
+          rm -rf .tmp
+          rm -rf generator/*/build
