@@ -10,7 +10,6 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.decodeFromString
 import java.io.File
 import java.nio.file.Paths
-import java.time.LocalDate
 import java.time.ZoneOffset
 import java.time.ZonedDateTime
 import java.time.format.DateTimeFormatter
@@ -173,21 +172,6 @@ private fun resolveManifestPath(dbPath: String): String {
 }
 
 /**
- * Converts content version to date format (YYYYMMDD).
- * If contentVersion is already in date format (>= 20000000), returns it as-is.
- * Otherwise, returns today's date in YYYYMMDD format.
- */
-fun contentVersionToDateFormat(contentVersion: Int): Int {
-    // If it looks like a date (YYYYMMDD format), use it as-is
-    if (contentVersion >= 20000000 && contentVersion <= 99999999) {
-        return contentVersion
-    }
-    
-    // Otherwise, convert current date to YYYYMMDD
-    return LocalDate.now().format(DateTimeFormatter.ofPattern("yyyyMMdd")).toInt()
-}
-
-/**
  * Entry point for the DB Versioning Agent.
  * Reads configuration from system properties and writes version metadata to the database.
  *
@@ -317,12 +301,11 @@ fun main(args: Array<String>) {
         val reportJson = json.encodeToString(report)
         println(reportJson)
 
-        // Update manifest file
+        // Update manifest file with the exact DB content_version_int.
+        // Do not convert to date format so multiple releases in the same day remain distinct.
         val manifestPath = resolveManifestPath(dbPath)
-        // Use the actual content version that was written to DB (from report)
-        val contentVersionForManifest = contentVersionToDateFormat(report.contentVersionInt)
-        logger.i { "Updating manifest with content version: $contentVersionForManifest (from DB version ${report.contentVersionInt})" }
-        updateManifest(manifestPath, report.schemaVersionInt, contentVersionForManifest, logger)
+        logger.i { "Updating manifest with content version: ${report.contentVersionInt}" }
+        updateManifest(manifestPath, report.schemaVersionInt, report.contentVersionInt, logger)
 
         // Check status
         if (report.status != "ok" || report.integrityCheck != "ok" || report.foreignKeyCheckRows > 0) {

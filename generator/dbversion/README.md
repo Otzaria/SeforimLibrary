@@ -118,7 +118,7 @@ Additionally, a **manifest file** (`build/seforim-manifest.json`) is created/upd
 ```json
 {
   "latest_schema": 1,
-  "latest_content": 20260205,
+  "latest_content": 1,
   "patches": []
 }
 ```
@@ -128,13 +128,14 @@ Additionally, a **manifest file** (`build/seforim-manifest.json`) is created/upd
 The manifest file tracks the latest versions and provides a foundation for future patch management:
 
 - **`latest_schema`**: Current schema version (from `PRAGMA user_version`)
-- **`latest_content`**: Content version in YYYYMMDD format (e.g., 20260205)
+- **`latest_content`**: Exact `content_version_int` value from `db_meta` (monotonic integer)
 - **`patches`**: Array of patch entries for incremental updates (auto-appended when content advances)
 
 When a manifest already exists and `latest_content` changes, a new patch entry is appended with
 `file` set to `patch_{from}_to_{to}.bin` and `sha256` set to `pending` as placeholders.
 
 The manifest is updated automatically each time the versioning agent runs successfully.
+Because `latest_content` now tracks the exact integer version, multiple releases on the same day remain distinct.
 
 ## Integrity Checks
 
