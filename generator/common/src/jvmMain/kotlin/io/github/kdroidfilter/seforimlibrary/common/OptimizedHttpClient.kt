@@ -25,6 +25,8 @@ import java.util.concurrent.Executors
 object OptimizedHttpClient {
 
     private const val BUFFER_SIZE = 8 shl 20 // 8 MiB - larger buffer for better throughput
+    private const val PROGRESS_PERCENT_STEP = 10
+    private const val PROGRESS_TIME_FALLBACK_SECONDS = 10.0
 
     // HTTP/1.1 client for large downloads - avoids HTTP/2 overhead
     private val downloadClient: HttpClient by lazy {
@@ -163,7 +165,7 @@ object OptimizedHttpClient {
         var downloaded = 0L
         var lastLogTime = System.nanoTime()
         var lastLoggedBytes = 0L
-        var nextPctLog = 5
+        var nextPctLog = PROGRESS_PERCENT_STEP
         val startTime = lastLogTime
 
         while (true) {
@@ -176,7 +178,7 @@ object OptimizedHttpClient {
             val elapsedSinceLog = (now - lastLogTime) / 1_000_000_000.0
             val pct = if (totalBytes > 0) ((downloaded * 100.0) / totalBytes).toInt().coerceIn(0, 100) else -1
             val shouldLogPct = totalBytes > 0 && pct >= nextPctLog
-            val shouldLogTime = elapsedSinceLog >= 1.0
+            val shouldLogTime = totalBytes <= 0 && elapsedSinceLog >= PROGRESS_TIME_FALLBACK_SECONDS
 
             if (shouldLogPct || shouldLogTime) {
                 val deltaBytes = downloaded - lastLoggedBytes
@@ -197,7 +199,7 @@ object OptimizedHttpClient {
                 logger.i { msg }
                 lastLoggedBytes = downloaded
                 lastLogTime = now
-                if (totalBytes > 0) nextPctLog = ((pct / 5) + 1) * 5
+                if (totalBytes > 0) nextPctLog = ((pct / PROGRESS_PERCENT_STEP) + 1) * PROGRESS_PERCENT_STEP
             }
         }
 
