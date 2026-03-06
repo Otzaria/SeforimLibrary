@@ -52,7 +52,7 @@ jobs:
           echo "Disk after cleanup:"
           df -h
 
-      - name: Install OS dependencies (sqldiff, sqlite3, zstd, jq)
+      - name: Install OS dependencies (sqldiff, sqlite3, zstd, jq, gh)
         shell: bash
         run: |
           set -euo pipefail
@@ -60,6 +60,39 @@ jobs:
           sudo apt-get install -y sqlite3 zstd jq curl unzip
           if apt-cache show sqlite3-tools >/dev/null 2>&1; then
             sudo apt-get install -y sqlite3-tools
+          fi
+
+          if ! command -v gh >/dev/null 2>&1; then
+            if apt-cache show gh >/dev/null 2>&1; then
+              sudo apt-get install -y gh || true
+            fi
+          fi
+
+          if ! command -v gh >/dev/null 2>&1; then
+            echo "gh not found via apt packages, downloading official GitHub CLI..."
+            GH_VERSION=$(curl -fsSL https://api.github.com/repos/cli/cli/releases/latest | jq -r '.tag_name | sub("^v"; "")')
+            ARCH=$(dpkg --print-architecture)
+            case "$ARCH" in
+              amd64) GH_ARCH=amd64 ;;
+              arm64) GH_ARCH=arm64 ;;
+              *)
+                echo "Unsupported architecture for GitHub CLI: $ARCH" >&2
+                exit 1
+                ;;
+            esac
+
+            curl -fL "https://github.com/cli/cli/releases/download/v${GH_VERSION}/gh_${GH_VERSION}_linux_${GH_ARCH}.tar.gz" -o /tmp/gh.tar.gz
+            rm -rf /tmp/gh
+            mkdir -p /tmp/gh
+            tar -xzf /tmp/gh.tar.gz -C /tmp/gh
+
+            GH_BIN=$(find /tmp/gh -type f -path "*/bin/gh" | head -n 1 || true)
+            if [ -z "$GH_BIN" ]; then
+              echo "Failed to locate gh binary after download." >&2
+              exit 1
+            fi
+
+            sudo install -m 0755 "$GH_BIN" /usr/local/bin/gh
           fi
 
           if ! command -v sqldiff >/dev/null 2>&1; then
@@ -82,6 +115,7 @@ jobs:
             echo "Install sqldiff (sqlite3-tools) or add a custom sqldiff binary download step." >&2
             exit 1
           fi
+          command -v gh
           command -v sqldiff
           command -v sqlite3
           command -v zstd
