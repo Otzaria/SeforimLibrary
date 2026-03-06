@@ -165,8 +165,13 @@ object OptimizedHttpClient {
         var downloaded = 0L
         var lastLogTime = System.nanoTime()
         var lastLoggedBytes = 0L
-        var nextPctLog = PROGRESS_PERCENT_STEP
         val startTime = lastLogTime
+        val progressStepBytes = if (totalBytes > 0) {
+            ((totalBytes * PROGRESS_PERCENT_STEP) / 100).coerceAtLeast(1L)
+        } else {
+            -1L
+        }
+        var nextProgressLogBytes = progressStepBytes
 
         while (true) {
             val read = input.read(buffer)
@@ -177,7 +182,7 @@ object OptimizedHttpClient {
             val now = System.nanoTime()
             val elapsedSinceLog = (now - lastLogTime) / 1_000_000_000.0
             val pct = if (totalBytes > 0) ((downloaded * 100.0) / totalBytes).toInt().coerceIn(0, 100) else -1
-            val shouldLogPct = totalBytes > 0 && pct >= nextPctLog
+            val shouldLogPct = totalBytes > 0 && downloaded >= nextProgressLogBytes
             val shouldLogTime = totalBytes <= 0 && elapsedSinceLog >= PROGRESS_TIME_FALLBACK_SECONDS
 
             if (shouldLogPct || shouldLogTime) {
@@ -186,11 +191,16 @@ object OptimizedHttpClient {
                 val speedMb = speed / 1_048_576.0
                 val downloadedMb = downloaded / 1_048_576.0
                 val totalMb = if (totalBytes > 0) totalBytes / 1_048_576.0 else -1.0
+                val displayPct = if (totalBytes > 0) {
+                    ((downloaded / progressStepBytes) * PROGRESS_PERCENT_STEP).coerceAtMost(100L).toInt()
+                } else {
+                    -1
+                }
 
                 val msg = buildString {
                     append(prefix)
                     append(": ")
-                    if (pct >= 0) append("$pct% ")
+                    if (displayPct >= 0) append("$displayPct% ")
                     append("@ ${"%.2f".format(speedMb)} MB/s ")
                     append("(${"%.1f".format(downloadedMb)}")
                     if (totalMb > 0) append("/${"%.1f".format(totalMb)}")
@@ -199,7 +209,10 @@ object OptimizedHttpClient {
                 logger.i { msg }
                 lastLoggedBytes = downloaded
                 lastLogTime = now
-                if (totalBytes > 0) nextPctLog = ((pct / PROGRESS_PERCENT_STEP) + 1) * PROGRESS_PERCENT_STEP
+                if (totalBytes > 0) {
+                    nextProgressLogBytes = (((downloaded / progressStepBytes) + 1) * progressStepBytes)
+                        .coerceAtMost(totalBytes)
+                }
             }
         }
 
