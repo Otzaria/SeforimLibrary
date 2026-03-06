@@ -789,14 +789,6 @@ class DatabaseGenerator(
         logger.d { "Inserting book '${book.title}' with ID: ${book.id} and categoryId: ${book.categoryId}" }
         val insertedBookId = repository.insertBook(book)
 
-        // ✅ Important verification: ensure that ID and categoryId are correct
-        val insertedBook = repository.getBook(insertedBookId)
-        if (insertedBook?.categoryId != categoryId) {
-            logger.w { "WARNING: Book inserted with wrong categoryId! Expected: $categoryId, Got: ${insertedBook?.categoryId}" }
-            // Correct the categoryId if necessary
-            repository.updateBookCategoryId(insertedBookId, categoryId)
-        }
-
         logger.d { "Book '${book.title}' inserted with ID: $insertedBookId and categoryId: $categoryId" }
 
         // Insert acronyms for this book if an Acronymizer DB is available

@@ -8,6 +8,18 @@ internal class SefariaTocInserter(
     private val repository: SeforimRepository,
     private val idResolverProvider: IdResolverProvider? = null
 ) {
+    companion object {
+        @Volatile
+        private var didLogMissingIdResolverWarning = false
+    }
+
+    @Synchronized
+    private fun logMissingIdResolverWarningOnce() {
+        if (didLogMissingIdResolverWarning) return
+        println("WARNING: SefariaTocInserter is running without IdResolverProvider! IDs will be unstable. (logged once)")
+        didLogMissingIdResolverWarning = true
+    }
+
     /**
      * Insert TOC entries hierarchically and build `line_toc` mappings.
      */
@@ -26,6 +38,10 @@ internal class SefariaTocInserter(
         val allTocIds = mutableListOf<Long>()
         val tocParentMap = mutableMapOf<Long, Long?>()
 
+        if (idResolverProvider == null) {
+            logMissingIdResolverWarningOnce()
+        }
+
         payload.headings.sortedBy { it.lineIndex }.forEach { h ->
             while (levelStack.isNotEmpty() && levelStack.last().first >= h.level) levelStack.removeLast()
             val parent = levelStack.lastOrNull()?.second
@@ -39,10 +55,6 @@ internal class SefariaTocInserter(
             // If resolvedTextId is available, we use it to look up the stable TocEntry ID
             // NOW USING lineId (lineIdForHeading) INSTEAD OF textId FOR KEY STABILITY
             val tocEntryId = idResolverProvider?.resolveTocEntryId(bookId, lineIdForHeading!!, h.level, parent) ?: 0L
-            
-            if (idResolverProvider == null && tocEntryId % 1000 == 0L) {
-                 println("WARNING: SefariaTocInserter is running without IdResolverProvider! IDs will be unstable.")
-            }
 
             val tocId = repository.insertTocEntry(
                 TocEntry(

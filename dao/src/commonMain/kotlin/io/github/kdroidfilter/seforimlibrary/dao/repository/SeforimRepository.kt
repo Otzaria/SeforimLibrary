@@ -41,6 +41,8 @@ class SeforimRepository(databasePath: String, private val driver: SqlDriver) {
     private val database = SeforimDb(driver)
     private val json = Json { ignoreUnknownKeys = true }
     private val logger = Logger.withTag("SeforimRepository")
+    private var wrongCategoryIdWarningCount = 0
+    private val wrongCategoryIdWarningLimit = 3
 
     init {
         val repositoryLoggingEnv = getEnvironmentVariable("SEFORIMAPP_REPOSITORY_LOGGING")?.lowercase()
@@ -135,6 +137,16 @@ class SeforimRepository(databasePath: String, private val driver: SqlDriver) {
     }
     suspend fun setJournalModeOff() = setJournalMode("OFF")
     suspend fun setJournalModeWal() = setJournalMode("WAL")
+
+    private fun logWrongCategoryIdWarning(expected: Long, actual: Long?) {
+        wrongCategoryIdWarningCount += 1
+        if (wrongCategoryIdWarningCount <= wrongCategoryIdWarningLimit) {
+            logger.w { "Book inserted with wrong categoryId. Expected=$expected, actual=$actual" }
+            if (wrongCategoryIdWarningCount == wrongCategoryIdWarningLimit) {
+                logger.w { "Further wrong categoryId warnings will be suppressed." }
+            }
+        }
+    }
 
     /**
      * Inserts multiple line_toc mappings in a single batch.
@@ -956,8 +968,7 @@ class SeforimRepository(databasePath: String, private val driver: SqlDriver) {
             // ✅ Verify that the insertion was successful
             val insertedBook = database.bookQueriesQueries.selectById(book.id).executeAsOneOrNull()
             if (insertedBook?.categoryId != book.categoryId) {
-                // Changed from error to warning level to reduce unnecessary error logs
-                logger.w{"WARNING: Book inserted with wrong categoryId! Expected: ${book.categoryId}, Got: ${insertedBook?.categoryId}"}
+                logWrongCategoryIdWarning(expected = book.categoryId, actual = insertedBook?.categoryId)
                 // Fix immediately
                 database.bookQueriesQueries.updateCategoryId(book.categoryId, book.id)
                 logger.d{"Corrected categoryId for book ID: ${book.id}"}
