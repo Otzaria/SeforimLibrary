@@ -30,10 +30,11 @@ import kotlin.system.exitProcess
  *     [-PbundleOutput=/path/to/seforim_bundle.tar.zst] \
  *     [-PzstdLevel=22] \
  *     [-PzstdWorkers=0] \
+ *     [-PzstdLong=31] \
  *     [-PsplitPartBytes=2040109465]
  *
  * Env alternatives:
- *   SEFORIM_DB, OUTPUT_BUNDLE_TAR_ZST, ZSTD_LEVEL, ZSTD_WORKERS, SPLIT_PART_BYTES
+ *   SEFORIM_DB, OUTPUT_BUNDLE_TAR_ZST, ZSTD_LEVEL, ZSTD_WORKERS, ZSTD_LONG, SPLIT_PART_BYTES
  *   (legacy: OUTPUT_TAR_ZST or -Poutput maps to bundleOutput for compatibility)
  *
  * Defaults:
@@ -112,6 +113,13 @@ fun main(args: Array<String>) {
     ).toIntOrNull()?.let { if (it <= 0) Runtime.getRuntime().availableProcessors() else it }
         ?: Runtime.getRuntime().availableProcessors()
 
+    // Long-distance matching window log. Default: 31 for better compression on large DB bundles.
+    val zstdLong = (
+        System.getProperty("zstdLong")
+            ?: System.getenv("ZSTD_LONG")
+            ?: "31"
+        ).toIntOrNull()?.coerceIn(10, 31) ?: 31
+
     // Split part size (~1.9 GiB by default)
     val defaultSplitSize = (1.9 * 1024.0 * 1024.0 * 1024.0).toLong()
     val splitPartBytes = (
@@ -129,7 +137,7 @@ fun main(args: Array<String>) {
             " - Text index: $textIndexDir\n" +
             " - Lookup index: $lookupIndexDir\n" +
             " -> Bundle .tar.zst: $bundleOutputPath\n" +
-            " (zstd level $zstdLevel, workers $workers, split ${humanSize(splitPartBytes)})"
+            " (zstd level $zstdLevel, workers $workers, long $zstdLong, split ${humanSize(splitPartBytes)})"
     }
 
     try {
@@ -137,6 +145,8 @@ fun main(args: Array<String>) {
         Files.newOutputStream(bundleOutputPath).use { fos ->
             BufferedOutputStream(fos, 1 shl 20).use { bos ->
                 ZstdOutputStream(bos, zstdLevel).use { zstd ->
+                    runCatching { zstd.setLong(zstdLong) }
+                        .onFailure { logger.w(it) { "zstd setLong($zstdLong) failed; continuing without long-distance matching" } }
                     runCatching { zstd.setWorkers(workers) }
                         .onFailure { logger.w(it) { "zstd setWorkers($workers) failed; continuing single-threaded" } }
                     TarArchiveOutputStream(zstd).use { tar ->

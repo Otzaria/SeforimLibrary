@@ -24,6 +24,7 @@ jobs:
     env:
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      ZSTD_LONG: "31"
 
     steps:
       - name: Checkout
@@ -165,7 +166,7 @@ jobs:
           fi
 
           if [ -f ".tmp/previous-release/seforim.db.zst" ]; then
-            zstd -d -f .tmp/previous-release/seforim.db.zst -o build/seforim.db.bak
+            zstd -d --long="$ZSTD_LONG" -f .tmp/previous-release/seforim.db.zst -o build/seforim.db.bak
           else
             if compgen -G ".tmp/previous-release/seforim_bundle.tar.zst.part*" > /dev/null; then
               cat .tmp/previous-release/seforim_bundle.tar.zst.part* > .tmp/previous-release/seforim_bundle.tar.zst
@@ -177,7 +178,7 @@ jobs:
             fi
 
             mkdir -p .tmp/previous-release/unpacked
-            tar --use-compress-program=unzstd -xf .tmp/previous-release/seforim_bundle.tar.zst -C .tmp/previous-release/unpacked
+            tar --use-compress-program="zstd -d --long=$ZSTD_LONG" -xf .tmp/previous-release/seforim_bundle.tar.zst -C .tmp/previous-release/unpacked
             RESTORED_DB=$(find .tmp/previous-release/unpacked -type f -name "seforim.db" | head -n 1 || true)
 
             if [ -z "$RESTORED_DB" ]; then
@@ -248,7 +249,7 @@ jobs:
             DIFF_ZST_PATH="${DIFF_TXT_PATH}.zst"
 
             sqldiff --transaction --primarykey build/seforim.db.bak build/seforim.db > "$DIFF_TXT_PATH"
-            zstd -19 -T0 -f "$DIFF_TXT_PATH" -o "$DIFF_ZST_PATH"
+            zstd -19 -T0 --long="$ZSTD_LONG" -f "$DIFF_TXT_PATH" -o "$DIFF_ZST_PATH"
 
             DIFF_PATH="$DIFF_ZST_PATH"
           fi
@@ -263,7 +264,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          zstd -19 -T0 -f build/seforim.db -o build/seforim.db.zst
+          zstd -19 -T0 --long="$ZSTD_LONG" -f build/seforim.db -o build/seforim.db.zst
 
           MAX_ASSET_BYTES=$((1900 * 1024 * 1024))
           DB_ZST_SIZE=$(stat -c%s build/seforim.db.zst)

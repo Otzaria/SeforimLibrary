@@ -125,6 +125,9 @@ tasks.register<JavaExec>("packageArtifacts") {
     if (project.hasProperty("zstdWorkers")) {
         systemProperty("zstdWorkers", project.property("zstdWorkers") as String)
     }
+    if (project.hasProperty("zstdLong")) {
+        systemProperty("zstdLong", project.property("zstdLong") as String)
+    }
     if (project.hasProperty("splitPartBytes")) {
         systemProperty("splitPartBytes", project.property("splitPartBytes") as String)
     }
