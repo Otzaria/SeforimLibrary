@@ -1,50 +1,43 @@
 {
-  "generatedAt": "2026-03-05T07:35:37Z",
+  "generatedAt": "2026-03-07T20:35:43Z",
   "latest": {
     "assets": [
       {
-        "apiUrl": "https://api.github.com/repos/kdroidFilter/SeforimLibrary/releases/assets/340592924",
-        "contentType": "application/octet-stream",
-        "createdAt": "2026-01-14T20:43:44Z",
-        "digest": "sha256:0e93416ddec79e3265f4215cfc8e1cf0632432edd8e492dd409baa0e6baf7689",
-        "downloadCount": 1421,
-        "id": "RA_kwDOPFZ3eM4UTQkc",
+        "apiUrl": "https://api.github.com/repos/Y-PLONI/SeforimLibrary/releases/assets/369073148",
+        "contentType": "application/json",
+        "createdAt": "2026-03-07T20:34:54Z",
+        "downloadCount": 0,
+        "id": "RA_kwDOQ6kTXM4V_5v8",
         "label": "",
-        "name": "seforim_bundle.tar.zst.part01",
-        "size": 2040109465,
+        "name": "seforim-manifest.json",
+        "size": 70,
         "state": "uploaded",
-        "updatedAt": "2026-01-14T20:46:52Z",
-        "url": "https://github.com/kdroidFilter/SeforimLibrary/releases/download/20260114122617/seforim_bundle.tar.zst.part01"
+        "updatedAt": "2026-03-07T20:34:54Z",
+        "url": "https://github.com/Y-PLONI/SeforimLibrary/releases/download/db-v1/seforim-manifest.json"
       },
       {
-        "apiUrl": "https://api.github.com/repos/kdroidFilter/SeforimLibrary/releases/assets/340594173",
-        "contentType": "application/octet-stream",
-        "createdAt": "2026-01-14T20:46:52Z",
-        "digest": "sha256:48242548899177f944226dc7f83c5c6d2326702b18881ab3799cc6a27b4099f0",
-        "downloadCount": 926,
-        "id": "RA_kwDOPFZ3eM4UTQ39",
+        "apiUrl": "https://api.github.com/repos/Y-PLONI/SeforimLibrary/releases/assets/369073146",
+        "contentType": "application/zstd",
+        "createdAt": "2026-03-07T20:34:54Z",
+        "downloadCount": 0,
+        "id": "RA_kwDOQ6kTXM4V_5v6",
         "label": "",
-        "name": "seforim_bundle.tar.zst.part02",
-        "size": 964051608,
+        "name": "seforim.db.zst",
+        "size": 1054639575,
         "state": "uploaded",
-        "updatedAt": "2026-01-14T20:48:27Z",
-        "url": "https://github.com/kdroidFilter/SeforimLibrary/releases/download/20260114122617/seforim_bundle.tar.zst.part02"
+        "updatedAt": "2026-03-07T20:35:41Z",
+        "url": "https://github.com/Y-PLONI/SeforimLibrary/releases/download/db-v1/seforim.db.zst"
       }
     ],
-    "name": "20260114122617",
-    "publishedAt": "2026-01-15T05:41:46Z",
-    "tagName": "20260114122617"
+    "name": "db-v1",
+    "publishedAt": "2026-03-07T20:35:42Z",
+    "tagName": "db-v1"
   },
   "releases": [
     {
-      "name": "20260114122617",
-      "publishedAt": "2026-01-15T05:41:46Z",
-      "tagName": "20260114122617"
-    },
-    {
-      "name": "20251116085948",
-      "publishedAt": "2025-11-16T09:34:24Z",
-      "tagName": "20251116085948"
+      "name": "db-v1",
+      "publishedAt": "2026-03-07T20:35:42Z",
+      "tagName": "db-v1"
     }
   ]
 }
