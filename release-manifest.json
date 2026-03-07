@@ -1,39 +1,57 @@
 {
-  "generatedAt": "2026-03-07T20:35:43Z",
+  "generatedAt": "2026-03-07T22:41:51Z",
   "latest": {
     "assets": [
       {
-        "apiUrl": "https://api.github.com/repos/Y-PLONI/SeforimLibrary/releases/assets/369073148",
-        "contentType": "application/json",
-        "createdAt": "2026-03-07T20:34:54Z",
+        "apiUrl": "https://api.github.com/repos/Y-PLONI/SeforimLibrary/releases/assets/369116994",
+        "contentType": "application/zstd",
+        "createdAt": "2026-03-07T22:41:03Z",
         "downloadCount": 0,
-        "id": "RA_kwDOQ6kTXM4V_5v8",
+        "id": "RA_kwDOQ6kTXM4WAEdC",
+        "label": "",
+        "name": "1-2.DIFF.zst",
+        "size": 220,
+        "state": "uploaded",
+        "updatedAt": "2026-03-07T22:41:03Z",
+        "url": "https://github.com/Y-PLONI/SeforimLibrary/releases/download/db-v2/1-2.DIFF.zst"
+      },
+      {
+        "apiUrl": "https://api.github.com/repos/Y-PLONI/SeforimLibrary/releases/assets/369116993",
+        "contentType": "application/json",
+        "createdAt": "2026-03-07T22:41:03Z",
+        "downloadCount": 0,
+        "id": "RA_kwDOQ6kTXM4WAEdB",
         "label": "",
         "name": "seforim-manifest.json",
         "size": 70,
         "state": "uploaded",
-        "updatedAt": "2026-03-07T20:34:54Z",
-        "url": "https://github.com/Y-PLONI/SeforimLibrary/releases/download/db-v1/seforim-manifest.json"
+        "updatedAt": "2026-03-07T22:41:03Z",
+        "url": "https://github.com/Y-PLONI/SeforimLibrary/releases/download/db-v2/seforim-manifest.json"
       },
       {
-        "apiUrl": "https://api.github.com/repos/Y-PLONI/SeforimLibrary/releases/assets/369073146",
+        "apiUrl": "https://api.github.com/repos/Y-PLONI/SeforimLibrary/releases/assets/369116992",
         "contentType": "application/zstd",
-        "createdAt": "2026-03-07T20:34:54Z",
+        "createdAt": "2026-03-07T22:41:03Z",
         "downloadCount": 0,
-        "id": "RA_kwDOQ6kTXM4V_5v6",
+        "id": "RA_kwDOQ6kTXM4WAEdA",
         "label": "",
         "name": "seforim.db.zst",
-        "size": 1054639575,
+        "size": 1054639339,
         "state": "uploaded",
-        "updatedAt": "2026-03-07T20:35:41Z",
-        "url": "https://github.com/Y-PLONI/SeforimLibrary/releases/download/db-v1/seforim.db.zst"
+        "updatedAt": "2026-03-07T22:41:48Z",
+        "url": "https://github.com/Y-PLONI/SeforimLibrary/releases/download/db-v2/seforim.db.zst"
       }
     ],
-    "name": "db-v1",
-    "publishedAt": "2026-03-07T20:35:42Z",
-    "tagName": "db-v1"
+    "name": "db-v2",
+    "publishedAt": "2026-03-07T22:41:49Z",
+    "tagName": "db-v2"
   },
   "releases": [
+    {
+      "name": "db-v2",
+      "publishedAt": "2026-03-07T22:41:49Z",
+      "tagName": "db-v2"
+    },
     {
       "name": "db-v1",
       "publishedAt": "2026-03-07T20:35:42Z",
