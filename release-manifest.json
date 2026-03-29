@@ -9,11 +9,11 @@
         "downloadCount": 0,
         "id": "RA_kwDOQ6kTXM4WAb3o",
         "label": "",
-        "name": "2-3.DIFF.zst",
+        "name": "2-3.diff.zst",
         "size": 222,
         "state": "uploaded",
         "updatedAt": "2026-03-08T02:12:54Z",
-        "url": "https://github.com/Otzaria/SeforimLibrary/releases/download/db-v3/2-3.DIFF.zst"
+        "url": "https://github.com/Otzaria/SeforimLibrary/releases/download/db-v3/2-3.diff.zst"
       },
       {
         "apiUrl": "https://api.github.com/repos/Otzaria/SeforimLibrary/releases/assets/369212903",
