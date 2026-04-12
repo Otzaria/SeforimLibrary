@@ -592,13 +592,24 @@ class DatabaseGenerator(
      * Ensure all known source names from manifest are present in DB, including 'Unknown'.
      */
     private suspend fun precreateSourceEntries() {
-        // Always ensure 'Unknown' exists
-        val unknownId = repository.insertSource("Unknown")
-        sourceNameToId["Unknown"] = unknownId
-        // Insert all discovered sources
-        val uniqueSources = manifestSourcesByRel.values.toSet()
-        for (name in uniqueSources) {
-            val id = repository.insertSource(name)
+        val allSources = buildSet {
+            add("Unknown")
+            addAll(manifestSourcesByRel.values)
+        }
+        val sortedSources = allSources.sortedWith(
+            compareBy<String>(
+                { idResolverProvider?.resolveSourceId(it) == null },
+                { idResolverProvider?.resolveSourceId(it) ?: Long.MAX_VALUE },
+                { it }
+            )
+        )
+        for (name in sortedSources) {
+            val resolvedId = idResolverProvider?.resolveSourceId(name)
+            val id = if (resolvedId != null) {
+                repository.insertSourceWithId(resolvedId, name)
+            } else {
+                repository.insertSource(name)
+            }
             sourceNameToId[name] = id
         }
         logger.i { "Prepared ${sourceNameToId.size} sources in DB" }
@@ -1176,7 +1187,12 @@ class DatabaseGenerator(
         val sourceName = manifestSourcesByRel[rel] ?: "Unknown"
         val cached = sourceNameToId[sourceName]
         if (cached != null) return cached
-        val id = repository.insertSource(sourceName)
+        val resolvedId = idResolverProvider?.resolveSourceId(sourceName)
+        val id = if (resolvedId != null) {
+            repository.insertSourceWithId(resolvedId, sourceName)
+        } else {
+            repository.insertSource(sourceName)
+        }
         sourceNameToId[sourceName] = id
         return id
     }

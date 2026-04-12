@@ -108,7 +108,9 @@ class SefariaDirectImporter(
         repository.executeRawQuery("PRAGMA cache_size = -64000") // 64MB cache
 
         // Build DB entries
-        val sourceId = repository.insertSource("Sefaria")
+        val sourceId = idResolverProvider?.resolveSourceId("Sefaria")?.let { stableId ->
+            repository.insertSourceWithId(stableId, "Sefaria")
+        } ?: repository.insertSource("Sefaria")
         val categoryIds = ConcurrentHashMap<String, Long>()
         val categoryLevelsById = ConcurrentHashMap<Long, Int>()
 

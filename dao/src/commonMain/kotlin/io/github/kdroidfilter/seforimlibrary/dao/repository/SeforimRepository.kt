@@ -1122,6 +1122,36 @@ class SeforimRepository(databasePath: String, private val driver: SqlDriver) : L
         id
     }
 
+    /**
+     * Inserts a source with a stable ID from a previous database.
+     * Throws if the requested ID or name is already occupied by a different source.
+     */
+    suspend fun insertSourceWithId(id: Long, name: String): Long = withContext(Dispatchers.IO) {
+        val existingByName = database.sourceQueriesQueries.selectByName(name).executeAsOneOrNull()
+        if (existingByName != null) {
+            require(existingByName.id == id) {
+                "Source '$name' already exists with id=${existingByName.id}, expected id=$id"
+            }
+            return@withContext existingByName.id
+        }
+
+        val existingById = database.sourceQueriesQueries.selectById(id).executeAsOneOrNull()
+        require(existingById == null || existingById.name == name) {
+            "Source id=$id is already used by '${existingById?.name}', cannot assign it to '$name'"
+        }
+        if (existingById != null) {
+            return@withContext existingById.id
+        }
+
+        database.sourceQueriesQueries.insertWithId(id, name)
+        val inserted = database.sourceQueriesQueries.selectByName(name).executeAsOneOrNull()
+            ?: throw RuntimeException("Failed to insert source '$name' with stable id=$id")
+        require(inserted.id == id) {
+            "Source '$name' was inserted with id=${inserted.id}, expected id=$id"
+        }
+        inserted.id
+    }
+
     suspend fun updateBookTotalLines(bookId: Long, totalLines: Int) = withContext(Dispatchers.IO) {
         database.bookQueriesQueries.updateTotalLines(totalLines.toLong(), bookId)
     }
