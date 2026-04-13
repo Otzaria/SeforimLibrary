@@ -93,6 +93,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          export PATH="/usr/local/bin:$PATH"
           PKG_MANAGER="${{ steps.detect_os.outputs.pkg_manager }}"
 
           if [ "$PKG_MANAGER" = "apt" ]; then
@@ -164,32 +165,66 @@ jobs:
                 fi
                 ;;
               aarch64|arm64)
-                # No prebuilt arm64 binary from sqlite.org — compile sqldiff from full source.
-                # sqldiff.c is NOT in the amalgamation zip; it lives in the sqlite-src-*.zip.
-                echo "ARM64 detected: compiling sqldiff from SQLite full source..."
+                # No prebuilt arm64 binary from sqlite.org — compile sqldiff from source.
+                # sqlite3.c (amalgamation single-file) comes from sqlite-amalgamation-*.zip
+                # sqldiff.c lives under tool/ inside sqlite-src-*.zip
+                echo "ARM64 detected: compiling sqldiff from SQLite source..."
                 if [ "$PKG_MANAGER" = "apt" ]; then
                   sudo apt-get install -y gcc
                 else
                   sudo dnf install -y gcc
                 fi
-                SQLITE_SRC_URL=$(curl -fsSL https://www.sqlite.org/download.html | grep -oE '[0-9]{4}/sqlite-src-[0-9]+\.zip' | head -n 1 || true)
-                if [ -z "$SQLITE_SRC_URL" ]; then
-                  echo "Could not find SQLite full source URL." >&2
+
+                # Parse full paths including year directly from the download page
+                # (avoids guessing the year; the release may be from a prior year)
+                DOWNLOAD_HTML=$(curl -fsSL https://www.sqlite.org/download.html)
+                SQLITE_AMALG_PATH=$(printf '%s' "$DOWNLOAD_HTML" | grep -oE '[0-9]{4}/sqlite-amalgamation-[0-9]+\.zip' | head -n 1 || true)
+                SQLITE_SRC_PATH=$(printf '%s'  "$DOWNLOAD_HTML" | grep -oE '[0-9]{4}/sqlite-src-[0-9]+\.zip'          | head -n 1 || true)
+
+                if [ -z "$SQLITE_AMALG_PATH" ] || [ -z "$SQLITE_SRC_PATH" ]; then
+                  echo "Could not parse SQLite download URLs from download page." >&2
+                  echo "  amalgamation path : ${SQLITE_AMALG_PATH:-NOT FOUND}" >&2
+                  echo "  src path          : ${SQLITE_SRC_PATH:-NOT FOUND}" >&2
                   exit 1
                 fi
-                curl -fL "https://www.sqlite.org/${SQLITE_SRC_URL}" -o /tmp/sqlite-src.zip
-                rm -rf /tmp/sqlite-src
-                mkdir -p /tmp/sqlite-src
+                echo "Amalgamation: $SQLITE_AMALG_PATH"
+                echo "Full source : $SQLITE_SRC_PATH"
+
+                curl -fL "https://www.sqlite.org/${SQLITE_AMALG_PATH}" -o /tmp/sqlite-amalgamation.zip
+                curl -fL "https://www.sqlite.org/${SQLITE_SRC_PATH}"   -o /tmp/sqlite-src.zip
+
+                rm -rf /tmp/sqlite-amalg /tmp/sqlite-src /tmp/sqldiff-build
+                mkdir -p /tmp/sqlite-amalg /tmp/sqlite-src /tmp/sqldiff-build
+
+                echo "Extracting amalgamation..."
+                unzip -q /tmp/sqlite-amalgamation.zip -d /tmp/sqlite-amalg
+                echo "Extracting full source..."
                 unzip -q /tmp/sqlite-src.zip -d /tmp/sqlite-src
-                # sqldiff.c is at the root of the extracted source tree
-                SQLDIFF_C=$(find /tmp/sqlite-src -maxdepth 3 -name "sqldiff.c" | head -n 1 || true)
-                SQLITE3_C=$(find /tmp/sqlite-src -maxdepth 3 -name "sqlite3.c" | head -n 1 || true)
-                if [ -z "$SQLDIFF_C" ] || [ -z "$SQLITE3_C" ]; then
-                  echo "Failed to locate sqldiff.c or sqlite3.c inside SQLite source." >&2
+
+                SQLITE3_C=$(find /tmp/sqlite-amalg -name "sqlite3.c" | head -n 1 || true)
+                SQLDIFF_C=$(find /tmp/sqlite-src   -name "sqldiff.c" | head -n 1 || true)
+                echo "  sqlite3.c : ${SQLITE3_C:-NOT FOUND}"
+                echo "  sqldiff.c : ${SQLDIFF_C:-NOT FOUND}"
+
+                if [ -z "$SQLITE3_C" ] || [ -z "$SQLDIFF_C" ]; then
+                  echo "Failed to locate required source files." >&2
                   exit 1
                 fi
-                gcc -O2 -o /tmp/sqldiff "$SQLDIFF_C" "$SQLITE3_C" -lpthread -ldl -lm
+
+                # Copy all files into one build dir so #include "..." resolves correctly
+                find /tmp/sqlite-amalg -name "*.h" -exec cp {} /tmp/sqldiff-build/ \;
+                find /tmp/sqlite-src   -name "*.h" -exec cp -n {} /tmp/sqldiff-build/ \; || true
+                cp "$SQLITE3_C" /tmp/sqldiff-build/sqlite3.c
+                cp "$SQLDIFF_C" /tmp/sqldiff-build/sqldiff.c
+
+                echo "Compiling sqldiff..."
+                gcc -O2 -o /tmp/sqldiff \
+                  /tmp/sqldiff-build/sqldiff.c \
+                  /tmp/sqldiff-build/sqlite3.c \
+                  -lpthread -ldl -lm
+                echo "Compilation successful"
                 sudo install -m 0755 /tmp/sqldiff /usr/local/bin/sqldiff
+                echo "sqldiff installed to /usr/local/bin/sqldiff"
                 ;;
               *)
                 echo "No prebuilt sqldiff available for architecture $(uname -m)." >&2
