@@ -42,14 +42,50 @@ jobs:
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
 
+      - name: Detect OS and package manager
+        id: detect_os
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [ -f /etc/os-release ]; then
+            . /etc/os-release
+            OS_ID="${ID:-unknown}"
+            OS_ID_LIKE="${ID_LIKE:-}"
+          else
+            OS_ID="unknown"
+            OS_ID_LIKE=""
+          fi
+
+          echo "OS ID: $OS_ID"
+          echo "OS ID_LIKE: $OS_ID_LIKE"
+          echo "OS pretty name: ${PRETTY_NAME:-unknown}"
+
+          if echo "$OS_ID $OS_ID_LIKE" | grep -qiE 'debian|ubuntu'; then
+            PKG_MANAGER="apt"
+          elif echo "$OS_ID $OS_ID_LIKE" | grep -qiE 'rhel|centos|fedora|oracle|almalinux|rocky'; then
+            PKG_MANAGER="dnf"
+          else
+            echo "Unsupported OS '$OS_ID' — cannot determine package manager." >&2
+            exit 1
+          fi
+
+          echo "Detected package manager: $PKG_MANAGER"
+          echo "pkg_manager=$PKG_MANAGER" >> "$GITHUB_OUTPUT"
+
       - name: Free disk space for large DB build
         shell: bash
         run: |
           set -euo pipefail
+          PKG_MANAGER="${{ steps.detect_os.outputs.pkg_manager }}"
           echo "Disk before cleanup:"
           df -h
           sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc || true
-          sudo apt-get clean
+          if [ "$PKG_MANAGER" = "apt" ]; then
+            sudo apt-get clean
+          else
+            sudo dnf clean all || true
+          fi
           echo "Disk after cleanup:"
           df -h
 
@@ -57,27 +93,39 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          sudo apt-get update
-          sudo apt-get install -y sqlite3 zstd jq curl unzip
-          if apt-cache show sqlite3-tools >/dev/null 2>&1; then
-            sudo apt-get install -y sqlite3-tools
-          fi
+          PKG_MANAGER="${{ steps.detect_os.outputs.pkg_manager }}"
 
-          if ! command -v gh >/dev/null 2>&1; then
-            if apt-cache show gh >/dev/null 2>&1; then
-              sudo apt-get install -y gh || true
+          if [ "$PKG_MANAGER" = "apt" ]; then
+            sudo apt-get update
+            sudo apt-get install -y sqlite3 zstd jq curl unzip
+            if apt-cache show sqlite3-tools >/dev/null 2>&1; then
+              sudo apt-get install -y sqlite3-tools
+            fi
+            if ! command -v gh >/dev/null 2>&1; then
+              if apt-cache show gh >/dev/null 2>&1; then
+                sudo apt-get install -y gh || true
+              fi
+            fi
+          else
+            # dnf-based (RHEL / Oracle Linux / etc.)
+            sudo dnf install -y sqlite zstd jq curl unzip
+            # sqldiff is not in standard RHEL repos — handled below via binary download
+            if ! command -v gh >/dev/null 2>&1; then
+              if dnf info gh >/dev/null 2>&1; then
+                sudo dnf install -y gh || true
+              fi
             fi
           fi
 
+          # Install gh via binary download if still missing (distro-agnostic fallback)
           if ! command -v gh >/dev/null 2>&1; then
-            echo "gh not found via apt packages, downloading official GitHub CLI..."
+            echo "gh not found via package manager, downloading official GitHub CLI..."
             GH_VERSION=$(curl -fsSL https://api.github.com/repos/cli/cli/releases/latest | jq -r '.tag_name | sub("^v"; "")')
-            ARCH=$(dpkg --print-architecture)
-            case "$ARCH" in
-              amd64) GH_ARCH=amd64 ;;
-              arm64) GH_ARCH=arm64 ;;
+            case "$(uname -m)" in
+              x86_64)  GH_ARCH=amd64 ;;
+              aarch64|arm64) GH_ARCH=arm64 ;;
               *)
-                echo "Unsupported architecture for GitHub CLI: $ARCH" >&2
+                echo "Unsupported architecture for GitHub CLI: $(uname -m)" >&2
                 exit 1
                 ;;
             esac
@@ -96,19 +144,57 @@ jobs:
             sudo install -m 0755 "$GH_BIN" /usr/local/bin/gh
           fi
 
+          # Install sqldiff via binary download if missing (distro-agnostic)
           if ! command -v sqldiff >/dev/null 2>&1; then
-            echo "sqldiff not found via apt packages, downloading official sqlite tools..."
-            SQLITE_TOOLS_REL_URL=$(curl -fsSL https://www.sqlite.org/download.html | grep -oE '[0-9]{4}/sqlite-tools-linux-x64-[0-9]+\.zip' | head -n 1 || true)
-            if [ -n "$SQLITE_TOOLS_REL_URL" ]; then
-              curl -fL "https://www.sqlite.org/${SQLITE_TOOLS_REL_URL}" -o /tmp/sqlite-tools.zip
-              rm -rf /tmp/sqlite-tools
-              mkdir -p /tmp/sqlite-tools
-              unzip -q /tmp/sqlite-tools.zip -d /tmp/sqlite-tools
-              SQDIFF_BIN=$(find /tmp/sqlite-tools -type f -name sqldiff | head -n 1 || true)
-              if [ -n "$SQDIFF_BIN" ]; then
-                sudo install -m 0755 "$SQDIFF_BIN" /usr/local/bin/sqldiff
-              fi
-            fi
+            echo "sqldiff not found, attempting to download official sqlite tools..."
+            # sqlite.org only publishes prebuilt tools for linux-x64; on other architectures we
+            # compile sqldiff from the amalgamation source instead.
+            case "$(uname -m)" in
+              x86_64)
+                SQLITE_TOOLS_REL_URL=$(curl -fsSL https://www.sqlite.org/download.html | grep -oE '[0-9]{4}/sqlite-tools-linux-x64-[0-9]+\.zip' | head -n 1 || true)
+                if [ -n "$SQLITE_TOOLS_REL_URL" ]; then
+                  curl -fL "https://www.sqlite.org/${SQLITE_TOOLS_REL_URL}" -o /tmp/sqlite-tools.zip
+                  rm -rf /tmp/sqlite-tools
+                  mkdir -p /tmp/sqlite-tools
+                  unzip -q /tmp/sqlite-tools.zip -d /tmp/sqlite-tools
+                  SQDIFF_BIN=$(find /tmp/sqlite-tools -type f -name sqldiff | head -n 1 || true)
+                  if [ -n "$SQDIFF_BIN" ]; then
+                    sudo install -m 0755 "$SQDIFF_BIN" /usr/local/bin/sqldiff
+                  fi
+                fi
+                ;;
+              aarch64|arm64)
+                # No prebuilt arm64 binary from sqlite.org — compile sqldiff from full source.
+                # sqldiff.c is NOT in the amalgamation zip; it lives in the sqlite-src-*.zip.
+                echo "ARM64 detected: compiling sqldiff from SQLite full source..."
+                if [ "$PKG_MANAGER" = "apt" ]; then
+                  sudo apt-get install -y gcc
+                else
+                  sudo dnf install -y gcc
+                fi
+                SQLITE_SRC_URL=$(curl -fsSL https://www.sqlite.org/download.html | grep -oE '[0-9]{4}/sqlite-src-[0-9]+\.zip' | head -n 1 || true)
+                if [ -z "$SQLITE_SRC_URL" ]; then
+                  echo "Could not find SQLite full source URL." >&2
+                  exit 1
+                fi
+                curl -fL "https://www.sqlite.org/${SQLITE_SRC_URL}" -o /tmp/sqlite-src.zip
+                rm -rf /tmp/sqlite-src
+                mkdir -p /tmp/sqlite-src
+                unzip -q /tmp/sqlite-src.zip -d /tmp/sqlite-src
+                # sqldiff.c is at the root of the extracted source tree
+                SQLDIFF_C=$(find /tmp/sqlite-src -maxdepth 3 -name "sqldiff.c" | head -n 1 || true)
+                SQLITE3_C=$(find /tmp/sqlite-src -maxdepth 3 -name "sqlite3.c" | head -n 1 || true)
+                if [ -z "$SQLDIFF_C" ] || [ -z "$SQLITE3_C" ]; then
+                  echo "Failed to locate sqldiff.c or sqlite3.c inside SQLite source." >&2
+                  exit 1
+                fi
+                gcc -O2 -o /tmp/sqldiff "$SQLDIFF_C" "$SQLITE3_C" -lpthread -ldl -lm
+                sudo install -m 0755 /tmp/sqldiff /usr/local/bin/sqldiff
+                ;;
+              *)
+                echo "No prebuilt sqldiff available for architecture $(uname -m)." >&2
+                ;;
+            esac
           fi
 
           if ! command -v sqldiff >/dev/null 2>&1; then
