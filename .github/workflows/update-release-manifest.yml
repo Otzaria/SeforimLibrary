@@ -19,7 +19,7 @@ concurrency:
 jobs:
   build-release:
     name: Generate DB, diff and publish release
-    runs-on: self-hosted
+    runs-on: [self-hosted, Linux, ARM64]
     timeout-minutes: 720
     env:
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
