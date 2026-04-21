@@ -23,6 +23,14 @@ interface IdResolverProvider {
     
     fun getPreviousTextIdForTocEntry(tocEntryId: Long): Long? = null
     fun getTocTextUsageCount(textId: Long): Int = 0
+    fun resolveAltTocStructureId(bookId: Long, key: String): Long? = null
+    fun resolveAltTocEntryId(
+        structureId: Long,
+        parentId: Long?,
+        level: Int,
+        lineId: Long?,
+        text: String
+    ): Long? = null
 
     /**
      * Get all connection type mappings from the previous database.

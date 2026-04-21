@@ -1,11 +1,13 @@
 package io.github.kdroidfilter.seforimlibrary.sefariasqlite
 
+import io.github.kdroidfilter.seforimlibrary.core.IdResolverProvider
 import io.github.kdroidfilter.seforimlibrary.core.models.AltTocEntry
 import io.github.kdroidfilter.seforimlibrary.core.models.AltTocStructure
 import io.github.kdroidfilter.seforimlibrary.dao.repository.SeforimRepository
 
 internal class SefariaAltTocBuilder(
-    private val repository: SeforimRepository
+    private val repository: SeforimRepository,
+    private val idResolverProvider: IdResolverProvider? = null
 ) {
     suspend fun buildAltTocStructuresForBook(
         payload: BookPayload,
@@ -62,8 +64,10 @@ internal class SefariaAltTocBuilder(
 
         payload.altStructures.forEach { structure ->
             val isPsalms30DayCycle = structure.key == "30 Day Cycle"
+            val resolvedStructureId = idResolverProvider?.resolveAltTocStructureId(bookId, structure.key) ?: 0L
             val structureId = repository.upsertAltTocStructure(
                 AltTocStructure(
+                    id = resolvedStructureId,
                     bookId = bookId,
                     key = structure.key,
                     title = structure.title,
@@ -261,6 +265,37 @@ internal class SefariaAltTocBuilder(
                 // as a heading in the content, but will still be navigable via the TOC panel.
             }
 
+            suspend fun insertResolvedAltTocEntry(
+                structureId: Long,
+                parentId: Long?,
+                text: String,
+                level: Int,
+                lineId: Long?,
+                isLastChild: Boolean = false,
+                hasChildren: Boolean = false
+            ): Long {
+                val resolvedId = idResolverProvider?.resolveAltTocEntryId(
+                    structureId = structureId,
+                    parentId = parentId,
+                    level = level,
+                    lineId = lineId,
+                    text = text
+                ) ?: 0L
+                return repository.insertAltTocEntry(
+                    AltTocEntry(
+                        id = resolvedId,
+                        structureId = structureId,
+                        parentId = parentId,
+                        textId = null,
+                        text = text,
+                        level = level,
+                        lineId = lineId,
+                        isLastChild = isLastChild,
+                        hasChildren = hasChildren
+                    )
+                )
+            }
+
             fun nodeLabel(node: AltNodePayload, position: Int?): String {
                 if (!node.heTitle.isNullOrBlank()) return node.heTitle
                 if (!node.title.isNullOrBlank()) return node.title
@@ -316,17 +351,12 @@ internal class SefariaAltTocBuilder(
                 if (lineId in used) return 0L
                 used += lineId
 
-                val tocId = repository.insertAltTocEntry(
-                    AltTocEntry(
-                        structureId = structureId,
-                        parentId = parentId,
-                        textId = null,
-                        text = text,
-                        level = level,
-                        lineId = lineId,
-                        isLastChild = false,
-                        hasChildren = false
-                    )
+                val tocId = insertResolvedAltTocEntry(
+                    structureId = structureId,
+                    parentId = parentId,
+                    text = text,
+                    level = level,
+                    lineId = lineId
                 )
                 hasGeneratedAltStructures = true
                 entryLineInfo[tocId] = lineId to lineIndex
@@ -350,17 +380,12 @@ internal class SefariaAltTocBuilder(
 
                         val addressValue = computeAddressValue(node, idx)
                         val label = buildChildLabel(node.childLabel, idx, addressValue, node.addressTypes.firstOrNull())
-                        val childTocId = repository.insertAltTocEntry(
-                            AltTocEntry(
-                                structureId = structureId,
-                                parentId = tocId,
-                                textId = null,
-                                text = label,
-                                level = level + 1,
-                                lineId = childLineId,
-                                isLastChild = false,
-                                hasChildren = false
-                            )
+                        val childTocId = insertResolvedAltTocEntry(
+                            structureId = structureId,
+                            parentId = tocId,
+                            text = label,
+                            level = level + 1,
+                            lineId = childLineId
                         )
                         hasGeneratedAltStructures = true
                         hasChild = true
@@ -386,17 +411,12 @@ internal class SefariaAltTocBuilder(
                     !structure.title.isNullOrBlank() -> structure.title
                     else -> structure.key
                 }
-                val tocId = repository.insertAltTocEntry(
-                    AltTocEntry(
-                        structureId = structureId,
-                        parentId = parentId,
-                        textId = null,
-                        text = text,
-                        level = level,
-                        lineId = null,
-                        isLastChild = false,
-                        hasChildren = false
-                    )
+                val tocId = insertResolvedAltTocEntry(
+                    structureId = structureId,
+                    parentId = parentId,
+                    text = text,
+                    level = level,
+                    lineId = null
                 )
                 entryLineInfo[tocId] = null to null
                 entriesByParent.getOrPut(parentId) { mutableListOf() }.add(tocId)
@@ -431,17 +451,12 @@ internal class SefariaAltTocBuilder(
                         if (childLineId in usedLineIdsByParent.getOrPut(currentParent) { mutableSetOf() }) return@forEachIndexed
                         usedLineIdsByParent.getOrPut(currentParent) { mutableSetOf() } += childLineId
 
-                        val childId = repository.insertAltTocEntry(
-                            AltTocEntry(
-                                structureId = structureId,
-                                parentId = currentParent,
-                                textId = null,
-                                text = label,
-                                level = level,
-                                lineId = childLineId,
-                                isLastChild = false,
-                                hasChildren = false
-                            )
+                        val childId = insertResolvedAltTocEntry(
+                            structureId = structureId,
+                            parentId = currentParent,
+                            text = label,
+                            level = level,
+                            lineId = childLineId
                         )
                         hasGeneratedAltStructures = true
                         inserted = true

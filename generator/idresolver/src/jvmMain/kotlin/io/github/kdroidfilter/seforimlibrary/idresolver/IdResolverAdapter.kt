@@ -82,6 +82,20 @@ class IdResolverAdapter(private val resolver: IdResolver) : IdResolverProvider {
         return resolver.getTocTextUsageCount(textId)
     }
 
+    override fun resolveAltTocStructureId(bookId: Long, key: String): Long {
+        return resolver.resolveAltTocStructureId(bookId, key)
+    }
+
+    override fun resolveAltTocEntryId(
+        structureId: Long,
+        parentId: Long?,
+        level: Int,
+        lineId: Long?,
+        text: String
+    ): Long {
+        return resolver.resolveAltTocEntryId(structureId, parentId, level, lineId, text)
+    }
+
     override fun getAllConnectionTypeMappings(): Map<String, Long> {
         return resolver.getAllConnectionTypeMappings()
     }

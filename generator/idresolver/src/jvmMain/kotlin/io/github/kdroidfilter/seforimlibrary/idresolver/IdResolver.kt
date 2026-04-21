@@ -42,6 +42,7 @@ class IdResolver private constructor(
     private val pubPlaceIdMap: Map<String, Long>,
     private val pubDateIdMap: Map<String, Long>,
     private val altTocStructureIdMap: Map<String, Long>,
+    private val altTocEntryIdMap: Map<String, Long>,
     private val tocEntryIdToTextIdMap: Map<Long, Long>,
     private val tocTextUsageCountMap: Map<Long, Int>,
     // Starting counters for new IDs
@@ -58,7 +59,8 @@ class IdResolver private constructor(
     initialMaxConnectionTypeId: Long,
     initialMaxPubPlaceId: Long,
     initialMaxPubDateId: Long,
-    initialMaxAltTocStructureId: Long
+    initialMaxAltTocStructureId: Long,
+    initialMaxAltTocEntryId: Long
 ) {
     private val logger = Logger.withTag("IdResolver")
 
@@ -77,6 +79,7 @@ class IdResolver private constructor(
     private val nextPubPlaceId = AtomicLong(initialMaxPubPlaceId + 1)
     private val nextPubDateId = AtomicLong(initialMaxPubDateId + 1)
     private val nextAltTocStructureId = AtomicLong(initialMaxAltTocStructureId + 1)
+    private val nextAltTocEntryId = AtomicLong(initialMaxAltTocEntryId + 1)
 
     // Thread-safe maps for tracking newly allocated IDs
     private val newlyAllocatedBooks = ConcurrentHashMap<String, Long>()
@@ -84,6 +87,8 @@ class IdResolver private constructor(
     private val newlyAllocatedLinks = ConcurrentHashMap<String, Long>()
     private val newlyAllocatedTocEntries = ConcurrentHashMap<String, Long>()
     private val newlyAllocatedTocTexts = ConcurrentHashMap<String, Long>()
+    private val newlyAllocatedAltTocStructures = ConcurrentHashMap<String, Long>()
+    private val newlyAllocatedAltTocEntries = ConcurrentHashMap<String, Long>()
 
     // ===== Book =====
     
@@ -302,9 +307,30 @@ class IdResolver private constructor(
     /**
      * Resolve alt TOC structure ID by bookId + key.
      */
-    fun resolveAltTocStructureId(bookId: Long, key: String): Long? {
+    fun resolveAltTocStructureId(bookId: Long, key: String): Long {
         val mapKey = buildAltTocStructureKey(bookId, key)
-        return altTocStructureIdMap[mapKey]
+        altTocStructureIdMap[mapKey]?.let { return it }
+        return newlyAllocatedAltTocStructures.computeIfAbsent(mapKey) {
+            nextAltTocStructureId.getAndIncrement()
+        }
+    }
+
+    /**
+     * Resolve alt TOC entry ID by structureId + parentId + level + lineId + text.
+     * Returns existing ID if found, otherwise allocates a new one from the end of the old table.
+     */
+    fun resolveAltTocEntryId(
+        structureId: Long,
+        parentId: Long?,
+        level: Int,
+        lineId: Long?,
+        text: String
+    ): Long {
+        val mapKey = buildAltTocEntryKey(structureId, parentId, level, lineId, text)
+        altTocEntryIdMap[mapKey]?.let { return it }
+        return newlyAllocatedAltTocEntries.computeIfAbsent(mapKey) {
+            nextAltTocEntryId.getAndIncrement()
+        }
     }
 
     // ===== Key Builders =====
@@ -342,6 +368,16 @@ class IdResolver private constructor(
             return "$bookId$SEPARATOR${key.trim()}"
         }
 
+        fun buildAltTocEntryKey(
+            structureId: Long,
+            parentId: Long?,
+            level: Int,
+            lineId: Long?,
+            text: String
+        ): String {
+            return "$structureId$SEPARATOR${parentId ?: "null"}$SEPARATOR$level$SEPARATOR${lineId ?: "null"}$SEPARATOR${text.trim()}"
+        }
+
         /**
          * Create an empty IdResolver (no previous DB).
          */
@@ -361,6 +397,7 @@ class IdResolver private constructor(
                 pubPlaceIdMap = emptyMap(),
                 pubDateIdMap = emptyMap(),
                 altTocStructureIdMap = emptyMap(),
+                altTocEntryIdMap = emptyMap(),
                 tocEntryIdToTextIdMap = emptyMap(),
                 tocTextUsageCountMap = emptyMap(),
                 initialMaxBookId = 0,
@@ -376,7 +413,8 @@ class IdResolver private constructor(
                 initialMaxConnectionTypeId = 0,
                 initialMaxPubPlaceId = 0,
                 initialMaxPubDateId = 0,
-                initialMaxAltTocStructureId = 0
+                initialMaxAltTocStructureId = 0,
+                initialMaxAltTocEntryId = 0
             )
         }
 
@@ -399,6 +437,7 @@ class IdResolver private constructor(
                 pubPlaceIdMap = data.pubPlaceIdMap,
                 pubDateIdMap = data.pubDateIdMap,
                 altTocStructureIdMap = data.altTocStructureIdMap,
+                altTocEntryIdMap = data.altTocEntryIdMap,
                 tocEntryIdToTextIdMap = data.tocEntryIdToTextIdMap,
                 tocTextUsageCountMap = data.tocTextUsageCountMap,
                 initialMaxBookId = data.maxBookId,
@@ -414,7 +453,8 @@ class IdResolver private constructor(
                 initialMaxConnectionTypeId = data.maxConnectionTypeId,
                 initialMaxPubPlaceId = data.maxPubPlaceId,
                 initialMaxPubDateId = data.maxPubDateId,
-                initialMaxAltTocStructureId = data.maxAltTocStructureId
+                initialMaxAltTocStructureId = data.maxAltTocStructureId,
+                initialMaxAltTocEntryId = data.maxAltTocEntryId
             )
         }
     }
@@ -461,6 +501,7 @@ data class IdResolverData(
     val pubPlaceIdMap: Map<String, Long>,
     val pubDateIdMap: Map<String, Long>,
     val altTocStructureIdMap: Map<String, Long>,
+    val altTocEntryIdMap: Map<String, Long>,
     val tocEntryIdToTextIdMap: Map<Long, Long>,
     val tocTextUsageCountMap: Map<Long, Int>,
     val maxBookId: Long,
@@ -476,7 +517,8 @@ data class IdResolverData(
     val maxConnectionTypeId: Long,
     val maxPubPlaceId: Long,
     val maxPubDateId: Long,
-    val maxAltTocStructureId: Long
+    val maxAltTocStructureId: Long,
+    val maxAltTocEntryId: Long
 )
 
 /**

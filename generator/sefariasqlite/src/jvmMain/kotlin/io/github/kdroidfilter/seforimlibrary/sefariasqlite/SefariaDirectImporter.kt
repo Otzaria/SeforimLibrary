@@ -160,7 +160,7 @@ class SefariaDirectImporter(
         val lineTocBatch = mutableListOf<Pair<Long, Long>>() // lineId, tocId
 
         val tocInserter = SefariaTocInserter(repository, idResolverProvider)
-        val altTocBuilder = SefariaAltTocBuilder(repository)
+        val altTocBuilder = SefariaAltTocBuilder(repository, idResolverProvider)
         val linksImporter = SefariaLinksImporter(repository, logger, idResolverProvider)
 
         logger.i { "Inserting books and lines..." }

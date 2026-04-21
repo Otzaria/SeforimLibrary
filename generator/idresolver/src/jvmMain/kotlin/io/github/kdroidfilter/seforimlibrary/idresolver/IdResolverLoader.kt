@@ -84,6 +84,7 @@ object IdResolverLoader {
                 pubPlaceIdMap = loadPubPlaceIds(conn),
                 pubDateIdMap = loadPubDateIds(conn),
                 altTocStructureIdMap = loadAltTocStructureIds(conn),
+                altTocEntryIdMap = loadAltTocEntryIds(conn),
                 tocEntryIdToTextIdMap = loadTocEntryTextIds(conn),
                 tocTextUsageCountMap = loadTocTextUsageCounts(conn),
                 maxBookId = getMaxId(conn, "book"),
@@ -99,7 +100,8 @@ object IdResolverLoader {
                 maxConnectionTypeId = getMaxId(conn, "connection_type"),
                 maxPubPlaceId = getMaxId(conn, "pub_place"),
                 maxPubDateId = getMaxId(conn, "pub_date"),
-                maxAltTocStructureId = getMaxId(conn, "alt_toc_structure")
+                maxAltTocStructureId = getMaxId(conn, "alt_toc_structure"),
+                maxAltTocEntryId = getMaxId(conn, "alt_toc_entry")
             )
         }
     }
@@ -505,6 +507,50 @@ object IdResolverLoader {
             }
         } catch (e: Exception) {
             logger.w { "Failed to load alt_toc_structure IDs: ${e.message}" }
+        }
+        return map
+    }
+
+    /**
+     * Load alt TOC entry IDs: structureId|parentId|level|lineId|text → id
+     */
+    private fun loadAltTocEntryIds(conn: Connection): Map<String, Long> {
+        val map = HashMap<String, Long>()
+        try {
+            conn.createStatement().use { stmt ->
+                stmt.executeQuery(
+                    """
+                    SELECT e.id, e.structureId, e.parentId, e.level, e.lineId, tt.text
+                    FROM alt_toc_entry e
+                    JOIN tocText tt ON tt.id = e.textId
+                    ORDER BY e.id
+                    """.trimIndent()
+                ).use { rs ->
+                    while (rs.next()) {
+                        val id = rs.getLong("id")
+                        val structureId = rs.getLong("structureId")
+                        val parentId = rs.getLong("parentId")
+                        val parentIdNullable = if (rs.wasNull()) null else parentId
+                        val level = rs.getInt("level")
+                        val lineId = rs.getLong("lineId")
+                        val lineIdNullable = if (rs.wasNull()) null else lineId
+                        val text = rs.getString("text") ?: continue
+
+                        val mapKey = IdResolver.buildAltTocEntryKey(
+                            structureId = structureId,
+                            parentId = parentIdNullable,
+                            level = level,
+                            lineId = lineIdNullable,
+                            text = text
+                        )
+                        if (mapKey !in map) {
+                            map[mapKey] = id
+                        }
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            logger.w { "Failed to load alt_toc_entry IDs: ${e.message}" }
         }
         return map
     }
