@@ -31,3 +31,7 @@ DELETE FROM book_acronym WHERE bookId = ?;
 
 countByBookId:
 SELECT COUNT(*) FROM book_acronym WHERE bookId = ?;
+
+selectDistinctBookIds:
+SELECT DISTINCT bookId FROM book_acronym
+ORDER BY bookId;
