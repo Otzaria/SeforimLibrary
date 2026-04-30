@@ -146,7 +146,9 @@ class DatabaseGenerator(
 
     private suspend fun findExistingCategory(parentId: Long?, title: String): Category? {
         val targetKey = comparableLabel(title)
-        val candidates = if (parentId == null) repository.getRootCategories() else repository.getCategoryChildren(parentId)
+        val candidates = categoryChildrenCache.getOrPut(parentId) {
+            (if (parentId == null) repository.getRootCategories() else repository.getCategoryChildren(parentId)).toMutableList()
+        }
         return candidates.firstOrNull { comparableLabel(it.title) == targetKey }
     }
 
@@ -200,8 +202,8 @@ class DatabaseGenerator(
             .trim()
     }
 
-    // Book contents cache: maps library-relative key -> list of lines
-    private val bookContentCache = mutableMapOf<String, List<String>>()
+    // Category children cache: maps parentId (null = root) -> list of children, avoids N+1 DB queries
+    private val categoryChildrenCache = mutableMapOf<Long?, MutableList<Category>>()
 
     // Tracks whether ID counters have been initialized from an existing DB
     private var idCountersInitialized = false
