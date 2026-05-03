@@ -48,7 +48,6 @@ class DatabaseGenerator(
     }
     private var nextBookId = 1L // Counter for book IDs
     private var nextLineId = 1L // Counter for line IDs
-    private var nextTocEntryId = 1L // Counter for TOC entry IDs
 
     // Optional connection to the Acronymizer DB (opened lazily)
     private var acronymDb: java.sql.Connection? = null
@@ -147,7 +146,9 @@ class DatabaseGenerator(
 
     private suspend fun findExistingCategory(parentId: Long?, title: String): Category? {
         val targetKey = comparableLabel(title)
-        val candidates = if (parentId == null) repository.getRootCategories() else repository.getCategoryChildren(parentId)
+        val candidates = categoryChildrenCache.getOrPut(parentId) {
+            (if (parentId == null) repository.getRootCategories() else repository.getCategoryChildren(parentId)).toMutableList()
+        }
         return candidates.firstOrNull { comparableLabel(it.title) == targetKey }
     }
 
@@ -159,13 +160,19 @@ class DatabaseGenerator(
 
         for (title in normalizedSegments) {
             val existing = findExistingCategory(currentParent, title)
-            val categoryId = existing?.id ?: repository.insertCategory(
-                Category(
-                    parentId = currentParent,
-                    title = title,
-                    level = currentLevel
-                )
-            )
+            val categoryId = if (existing != null) {
+                existing.id
+            } else {
+                val newCat = Category(parentId = currentParent, title = title, level = currentLevel)
+                val resolvedCatId = idResolverProvider?.resolveCategoryId(title, currentParent, currentLevel)
+                val id = if (resolvedCatId != null) {
+                    repository.insertCategoryWithId(resolvedCatId, newCat)
+                } else {
+                    repository.insertCategory(newCat)
+                }
+                categoryChildrenCache.getOrPut(currentParent) { mutableListOf() }.add(newCat.copy(id = id))
+                id
+            }
             lastId = categoryId
             currentParent = categoryId
             currentLevel += 1
@@ -195,8 +202,8 @@ class DatabaseGenerator(
             .trim()
     }
 
-    // Book contents cache: maps library-relative key -> list of lines
-    private val bookContentCache = mutableMapOf<String, List<String>>()
+    // Category children cache: maps parentId (null = root) -> list of children, avoids N+1 DB queries
+    private val categoryChildrenCache = mutableMapOf<Long?, MutableList<Category>>()
 
     // Tracks whether ID counters have been initialized from an existing DB
     private var idCountersInitialized = false
@@ -206,12 +213,10 @@ class DatabaseGenerator(
         idCountersInitialized = true
         val maxBookId = try { repository.getMaxBookId() } catch (_: Exception) { 0L }
         val maxLineId = try { repository.getMaxLineId() } catch (_: Exception) { 0L }
-        val maxTocEntryId = try { repository.getMaxTocEntryId() } catch (_: Exception) { 0L }
         nextBookId = (maxBookId + 1).coerceAtLeast(1)
         nextLineId = (maxLineId + 1).coerceAtLeast(1)
-        nextTocEntryId = (maxTocEntryId + 1).coerceAtLeast(1)
-        if (maxBookId > 0 || maxLineId > 0 || maxTocEntryId > 0) {
-            logger.i { "Continuing from existing DB ids: nextBookId=$nextBookId, nextLineId=$nextLineId, nextTocEntryId=$nextTocEntryId" }
+        if (maxBookId > 0 || maxLineId > 0) {
+            logger.i { "Continuing from existing DB ids: nextBookId=$nextBookId, nextLineId=$nextLineId" }
         } else {
             logger.d { "No existing rows found; starting ID counters at 1" }
         }
@@ -891,24 +896,13 @@ class DatabaseGenerator(
                 }
 
                 val parentId = (level - 1 downTo 1).firstNotNullOfOrNull { parentStack[it] }
-                val currentTocEntryId = nextTocEntryId++
                 // Resolve line ID: use IdResolver if available, otherwise allocate sequentially
                 val currentLineId = idResolverProvider?.resolveLineId(bookId, lineIndex)
                     ?: nextLineId++
 
-                // Stocker l'info de cette entrée pour la deuxième passe
-                allTocEntries.add(TocEntryData(
-                    id = currentTocEntryId,
-                    parentId = parentId,
-                    level = level,
-                    text = plainText,
-                    lineIndex = lineIndex
-                ))
-
-                // Resolve TocEntry ID using lineIndex (which maps to lineId) for stability
-                // If the resolver is available, use it. Otherwise rely on nextTocEntryId if initialized properly, or fall back to 0 (auto-inc)
+                // Resolve TocEntry ID using lineId for stability; 0L triggers SQLite auto-increment
                 val resolvedTocEntryId = idResolverProvider?.resolveTocEntryId(bookId, currentLineId, level, parentId)
-                    ?: 0L // 0L will trigger auto-increment or explicit usage of 'id' field in insertTocEntry if set
+                    ?: 0L
 
 
                 // Resolve TocText ID to enable stable TocEntry IDs even if text changes
@@ -953,6 +947,13 @@ class DatabaseGenerator(
                 )
 
                 val tocEntryId = repository.insertTocEntry(tocEntry)
+                allTocEntries.add(TocEntryData(
+                    id = tocEntryId,
+                    parentId = parentId,
+                    level = level,
+                    text = plainText,
+                    lineIndex = lineIndex
+                ))
                 parentStack[level] = tocEntryId
                 entriesByParent.getOrPut(parentId) { mutableListOf() }.add(tocEntryId)
                 currentOwningTocEntryId = tocEntryId
@@ -1715,11 +1716,12 @@ class DatabaseGenerator(
         val path = acronymDbPath ?: return
         logger.i { "Backfilling missing acronyms from $path for existing books..." }
         val books = runCatching { repository.getAllBooks() }.getOrDefault(emptyList())
+        if (books.isEmpty()) return
+        val booksWithAcronyms = runCatching { repository.getBookIdsWithAcronyms() }.getOrDefault(emptySet())
         var insertedCount = 0
         var touchedBooks = 0
         for (book in books) {
-            val existing = runCatching { repository.getAcronymsForBook(book.id) }.getOrDefault(emptyList())
-            if (existing.isNotEmpty()) continue
+            if (book.id in booksWithAcronyms) continue
             val terms = fetchAcronymsForTitle(book.title)
             if (terms.isNotEmpty()) {
                 repository.bulkInsertBookAcronyms(book.id, terms)

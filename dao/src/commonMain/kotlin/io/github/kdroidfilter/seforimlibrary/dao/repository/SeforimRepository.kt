@@ -420,6 +420,22 @@ class SeforimRepository(databasePath: String, private val driver: SqlDriver) : L
     }
 
     /**
+     * Inserts a category with a stable ID from a previous database.
+     */
+    suspend fun insertCategoryWithId(id: Long, category: Category): Long = withContext(Dispatchers.IO) {
+        val existingById = database.categoryQueriesQueries.selectById(id).executeAsOneOrNull()
+        if (existingById != null) return@withContext existingById.id
+        database.categoryQueriesQueries.insertWithId(
+            id = id,
+            parentId = category.parentId,
+            title = category.title,
+            level = category.level.toLong(),
+            orderIndex = category.order.toLong()
+        )
+        id
+    }
+
+    /**
      * Rebuilds the category_closure table from the current category tree.
      * Inserts self-pairs and ancestor-descendant pairs for fast descendant filtering.
      */
@@ -2509,6 +2525,13 @@ class SeforimRepository(databasePath: String, private val driver: SqlDriver) : L
     suspend fun findBooksByAcronymExact(term: String, limit: Int = 20): List<Book> = withContext(Dispatchers.IO) {
         val ids = database.acronymQueriesQueries.selectBookIdsByTerm(term).executeAsList()
         ids.take(limit).mapNotNull { id -> getBook(id) }
+    }
+
+    /**
+     * Returns a set of all book IDs that have acronyms.
+     */
+    suspend fun getBookIdsWithAcronyms(): Set<Long> = withContext(Dispatchers.IO) {
+        database.acronymQueriesQueries.selectDistinctBookIds().executeAsList().toSet()
     }
 
     /**
