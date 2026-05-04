@@ -201,6 +201,8 @@ class DatabaseGenerator(
             .replace("'", "")
             .trim()
     }
+    // Book contents cache: maps library-relative key -> list of lines
+    private val bookContentCache = mutableMapOf<String, List<String>>()
 
     // Category children cache: maps parentId (null = root) -> list of children, avoids N+1 DB queries
     private val categoryChildrenCache = mutableMapOf<Long?, MutableList<Category>>()
