@@ -139,11 +139,15 @@ private fun parsePairs(lines: List<String>): List<Pair<String, String>> = lines.
 
 /**
  * `name,Source path,Destination path` rows. Drops the header row if present;
- * if the first line doesn't look like a header (no "path" token), treats it as
- * data and logs a warning so a header-less upload doesn't silently lose row 0.
+ * detection requires both `source path` and `destination path` tokens so a
+ * stray book title containing the word "path" can't be mistaken for a header.
+ * If the first line doesn't look like a header, treats it as data and logs a
+ * warning so a header-less upload doesn't silently lose row 0.
  */
 private fun parseBookMoves(lines: List<String>, logger: Logger): List<BookMove> {
-    val body = if (lines.firstOrNull()?.contains("path", ignoreCase = true) == true) {
+    val firstLower = lines.firstOrNull()?.lowercase()
+    val isHeader = firstLower != null && "source path" in firstLower && "destination path" in firstLower
+    val body = if (isHeader) {
         lines.drop(1)
     } else {
         if (lines.isNotEmpty()) logger.w { "Moving files.csv: no header detected; treating first row as data" }
@@ -259,30 +263,25 @@ private fun deleteCategory(conn: Connection, categoryId: Long) {
  * "ראשונים על המשנה", etc.
  */
 private fun findSourceCategories(conn: Connection, pattern: String): List<Pair<Long, Long?>> {
-    val exact = mutableListOf<Pair<Long, Long?>>()
-    conn.prepareStatement("SELECT id, parentId FROM category WHERE title = ?").use { stmt ->
-        stmt.setString(1, pattern)
-        stmt.executeQuery().use { rs ->
-            while (rs.next()) {
-                val parent = rs.getLong(2).let { if (rs.wasNull()) null else it }
-                exact.add(rs.getLong(1) to parent)
+    fun query(sql: String, param: String): List<Pair<Long, Long?>> {
+        val rows = mutableListOf<Pair<Long, Long?>>()
+        conn.prepareStatement(sql).use { stmt ->
+            stmt.setString(1, param)
+            stmt.executeQuery().use { rs ->
+                while (rs.next()) {
+                    val parent = rs.getLong(2).let { if (rs.wasNull()) null else it }
+                    rows.add(rs.getLong(1) to parent)
+                }
             }
         }
+        return rows
     }
+
+    val exact = query("SELECT id, parentId FROM category WHERE title = ?", pattern)
     if (exact.isNotEmpty()) return exact
 
-    val prefix = mutableListOf<Pair<Long, Long?>>()
     val likePattern = pattern.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
-    conn.prepareStatement("SELECT id, parentId FROM category WHERE title LIKE ? ESCAPE '\\'").use { stmt ->
-        stmt.setString(1, likePattern)
-        stmt.executeQuery().use { rs ->
-            while (rs.next()) {
-                val parent = rs.getLong(2).let { if (rs.wasNull()) null else it }
-                prefix.add(rs.getLong(1) to parent)
-            }
-        }
-    }
-    return prefix
+    return query("SELECT id, parentId FROM category WHERE title LIKE ? ESCAPE '\\'", likePattern)
 }
 
 private fun renameBookTitle(conn: Connection, oldTitle: String, newTitle: String, logger: Logger): Int {
