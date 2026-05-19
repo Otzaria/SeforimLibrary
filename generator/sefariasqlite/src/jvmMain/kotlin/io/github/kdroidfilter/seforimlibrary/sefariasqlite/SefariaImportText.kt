@@ -4,7 +4,6 @@ internal fun sanitizeFolder(name: String?): String {
     if (name.isNullOrBlank()) return ""
     return name
         .replace("״", "\"")
-        .replace("״", "\"")
         .trim()
 }
 

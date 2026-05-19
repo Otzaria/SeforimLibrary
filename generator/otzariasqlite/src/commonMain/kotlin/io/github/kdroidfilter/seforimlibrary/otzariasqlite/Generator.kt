@@ -131,7 +131,6 @@ class DatabaseGenerator(
         s = s.replace("׳׳", "\"")
         s = s.replace("`", "׳")
         s = s.replace("\u05f3", "׳")
-        s = s.replace("״", "\"")
         s = s.replace("\\s+".toRegex(), " ").trim()
         return s
     }
