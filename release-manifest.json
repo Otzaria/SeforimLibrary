@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-05-19T12:36:53Z",
+  "generatedAt": "2026-05-24T18:41:40Z",
   "latest": {
     "assets": [
       {
@@ -7,7 +7,7 @@
         "contentType": "application/json",
         "createdAt": "2026-04-16T10:26:18Z",
         "digest": "sha256:9bbf17911551718bfe8ce541835da8c2952af1258ff1051cc388ba018c772b17",
-        "downloadCount": 12,
+        "downloadCount": 13,
         "id": "RA_kwDOQ6kTXM4XtG1x",
         "label": "",
         "name": "seforim-manifest.json",
@@ -21,7 +21,7 @@
         "contentType": "application/zstd",
         "createdAt": "2026-04-16T10:26:18Z",
         "digest": "sha256:f99f8e2041abe7273c512a6cdd1d57ab356f2439285954b6da113760bdfe2dc9",
-        "downloadCount": 5018,
+        "downloadCount": 5574,
         "id": "RA_kwDOQ6kTXM4XtG1v",
         "label": "",
         "name": "seforim.db.zst",
