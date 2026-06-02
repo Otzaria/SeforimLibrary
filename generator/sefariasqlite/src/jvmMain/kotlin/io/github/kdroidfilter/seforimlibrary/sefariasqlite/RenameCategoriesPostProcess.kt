@@ -45,7 +45,7 @@ import kotlin.system.exitProcess
  * Env alternatives:
  *   SEFORIM_DB
  */
-private const val FOR_DB_BASE = "https://raw.githubusercontent.com/Otzaria/otzaria-library/main/ForDB"
+internal const val FOR_DB_BASE = "https://raw.githubusercontent.com/Otzaria/otzaria-library/main/ForDB"
 private const val CATEGORY_RENAMES_URL = "$FOR_DB_BASE/%D7%AA%D7%99%D7%A7%D7%99%D7%95%D7%AA.csv"
 private const val BOOK_RENAMES_URL = "$FOR_DB_BASE/%D7%A1%D7%A4%D7%A8%D7%99%D7%9D.csv"
 private const val BOOK_MOVES_URL = "$FOR_DB_BASE/Moving%20files.csv"
@@ -132,7 +132,7 @@ fun main(args: Array<String>) {
 }
 
 /** `old,new` rows — skips blanks and malformed lines. */
-private fun parsePairs(lines: List<String>): List<Pair<String, String>> = lines.mapNotNull { line ->
+internal fun parsePairs(lines: List<String>): List<Pair<String, String>> = lines.mapNotNull { line ->
     val f = parseCsvLine(line).map { it.trim() }
     if (f.size >= 2 && f[0].isNotEmpty() && f[1].isNotEmpty()) f[0] to f[1] else null
 }
@@ -287,10 +287,10 @@ private fun findSourceCategories(conn: Connection, pattern: String): List<Pair<L
 // Upstream rename CSV uses bare-acronym keys (e.g. רדק) while Sefaria stores
 // the punctuated form (רד״ק / רד"ק). Compare with quotes/geresh stripped on
 // both sides; the new title is still written exactly as the CSV provides it.
-private fun stripTitlePunct(s: String): String =
+internal fun stripTitlePunct(s: String): String =
     s.replace("\"", "").replace("״", "").replace("'", "").replace("׳", "")
 
-private const val STRIP_TITLE_PUNCT_SQL =
+internal const val STRIP_TITLE_PUNCT_SQL =
     "REPLACE(REPLACE(REPLACE(REPLACE(title, '\"', ''), '״', ''), '''', ''), '׳', '')"
 
 private fun renameBookTitle(conn: Connection, oldTitle: String, newTitle: String, logger: Logger): Int {
@@ -368,7 +368,7 @@ private fun resolveCategoryPath(conn: Connection, path: String): Long? {
  * Returns an empty list on failure (logs a warning); the corresponding section
  * then becomes a no-op and the rest of the run proceeds.
  */
-private fun downloadCsv(url: String, logger: Logger): List<String> = try {
+internal fun downloadCsv(url: String, logger: Logger): List<String> = try {
     val conn = URI(url).toURL().openConnection().apply {
         connectTimeout = 10_000
         readTimeout = 30_000
