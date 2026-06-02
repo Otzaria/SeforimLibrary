@@ -9,7 +9,7 @@ plugins {
 
 tasks.register("generateSeforimDb") {
     group = "application"
-    description = "Generate build/seforim.db from Sefaria, append Otzaria, build catalog, Lucene indexes, and release info."
+    description = "Generate build/seforim.db from Sefaria, append Otzaria, build catalog, and release info."
 
     dependsOn(":sefariasqlite:generateSefariaSqlite")
     dependsOn(":otzariasqlite:appendOtzaria")
@@ -17,7 +17,6 @@ tasks.register("generateSeforimDb") {
     dependsOn(":sefariasqlite:renameCategories")
     dependsOn(":sefariasqlite:seedGenerations")
     dependsOn(":catalog:buildCatalog")
-    dependsOn(":searchindex:buildLuceneIndexDefault")
     dependsOn(":packaging:writeReleaseInfo")
     dependsOn(":packaging:downloadLexicalDb")
     // Stamps schema_meta.db_version into the produced seforim.db so the
@@ -32,7 +31,6 @@ tasks.register("generateSeforimDb") {
 project(":generator-common").tasks.matching { it.name == "stampSchemaVersion" }.configureEach {
     mustRunAfter(":packaging:writeReleaseInfo")
     mustRunAfter(":catalog:buildCatalog")
-    mustRunAfter(":searchindex:buildLuceneIndexDefault")
     mustRunAfter(":sefariasqlite:seedGenerations")
 }
 
@@ -66,16 +64,13 @@ project(":catalog").tasks.matching { it.name == "buildCatalog" }.configureEach {
     mustRunAfter(":otzariasqlite:generateHavroutaLinks")
     mustRunAfter(":sefariasqlite:seedGenerations")
 }
-project(":searchindex").tasks.matching { it.name == "buildLuceneIndexDefault" }.configureEach {
-    mustRunAfter(":catalog:buildCatalog")
-}
 project(":packaging").tasks.matching { it.name == "writeReleaseInfo" }.configureEach {
-    mustRunAfter(":searchindex:buildLuceneIndexDefault")
+    mustRunAfter(":catalog:buildCatalog")
 }
 
 tasks.register("packageSeforimBundle") {
     group = "application"
-    description = "Generate DB + catalog + indexes + release info, then package a bundle (.tar.zst)."
+    description = "Generate DB + catalog + release info, then package a bundle (.tar.zst)."
 
 //    dependsOn("generateSeforimDb")
     dependsOn(":packaging:packageArtifacts")
@@ -86,8 +81,8 @@ tasks.register("packageSeforimBundle") {
 //}
 
 /**
- * Push-button release task — produces the seforim.db + catalog.pb + Lucene
- * indexes, then derives a delta against a configured previous release and
+ * Push-button release task — produces the seforim.db + catalog.pb, then
+ * derives a delta against a configured previous release and
  * emits the JSON artefacts the client polls.
  *
  * Required when invoking:
@@ -105,7 +100,7 @@ tasks.register("packageSeforimBundle") {
  * Output (under <root>/build/):
  *   - seforim.db                   freshly-built DB
  *   - seforim.db.buildstate        IdAllocator snapshot for the next build
- *   - catalog.pb / *.lucene/       app artefacts
+ *   - catalog.pb                   app artefacts
  *   - patch-v<from>-v<to>.db                  binary delta
  *   - patch-v<from>-v<to>.db.manifest.json    per-delta manifest
  *   - release_meta.json (optional)            release-level index
@@ -178,7 +173,7 @@ tasks.register<Delete>("cleanGeneratedData") {
     delete(layout.buildDirectory.file("catalog.pb"))
     delete(layout.buildDirectory.file("release_info.txt"))
 
-    // Lucene indexes
+    // Stale index directories from older builds
     delete(layout.buildDirectory.dir("seforim.db.lucene"))
     delete(layout.buildDirectory.dir("seforim.db.lookup.lucene"))
 

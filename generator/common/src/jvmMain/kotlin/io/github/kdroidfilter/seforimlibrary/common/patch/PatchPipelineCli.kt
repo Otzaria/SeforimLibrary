@@ -62,24 +62,16 @@ fun main(args: Array<String>) {
     }
     DriverManager.getConnection("jdbc:sqlite:${target.toAbsolutePath()}").use { conn ->
         conn.createStatement().use { it.execute("PRAGMA foreign_keys = ON") }
-        // The producer ships upserts/deletes for every table in
-        // PATCH_TABLES_IN_FK_ORDER (including the book_* junctions and
-        // book_generation). We still don't pass expectedToContentHash into
-        // apply(): the hash equality is checked below as a soft gate (warn, not
-        // throw) so a mismatch on a not-yet-fully-covered derived table doesn't
-        // fail the whole pipeline. Tighten to a hard assert once every tracked
-        // table is confirmed to round-trip.
         PatchApplier(logger).apply(conn = conn, patchDb = outPath)
         val appliedHash = LogicalContentHasher().compute(conn)
         if (appliedHash == newHash) {
             logger.i { "✅ Patch apply verified: target hash matches new ($newHash)" }
         } else {
-            logger.w {
+            error(
                 "Patch applied without errors but logical content hash differs " +
                     "(applied=$appliedHash, expected=$newHash). " +
-                    "Soft gate: a tracked table did not round-trip exactly — " +
-                    "inspect with diagnoseHashMismatch before trusting this patch."
-            }
+                    "Run diagnoseHashMismatch before publishing this patch."
+            )
         }
     }
     runCatching { Files.deleteIfExists(target) }

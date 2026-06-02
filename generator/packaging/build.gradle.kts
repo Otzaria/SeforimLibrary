@@ -80,10 +80,10 @@ tasks.register<JavaExec>("downloadLexicalDb") {
     jvmArgs = listOf("-Xmx512m")
 }
 
-// Package DB + Lucene indexes into single tar.zst and split
+// Package DB artifacts into single tar.zst and split
 tasks.register<JavaExec>("packageArtifacts") {
     group = "application"
-    description = "Create seforim_bundle.tar.zst (DB + indexes + release info) with zstd and split into ~1.9GiB parts."
+    description = "Create seforim_bundle.tar.zst (DB + catalog + release info) with zstd and split into ~1.9GiB parts."
 
     dependsOn("jvmJar", "writeReleaseInfo", "downloadLexicalDb")
     mainClass.set("io.github.kdroidfilter.seforimlibrary.packaging.PackageArtifactsKt")

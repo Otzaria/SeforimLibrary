@@ -32,7 +32,7 @@ permissions:
 jobs:
   build-and-release:
     name: Build seforim.db + bundle + delta fan, publish pre-release
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, ARM64]
     timeout-minutes: 360
     env:
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -48,16 +48,8 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Free disk space on runner
-        uses: jlumbroso/free-disk-space@main
-        with:
-          tool-cache: true
-          android: true
-          dotnet: true
-          haskell: true
-          large-packages: true
-          docker-images: false
-          swap-storage: false
+      - name: Disk before build
+        run: df -h
 
       - name: Bridle daemon heaps + generator forks for the 16 GB runner
         run: |
@@ -68,14 +60,11 @@ jobs:
           generatorHeap=8g
           EOF
 
-      - name: Install JBR 25
-        run: |
-          curl -L -o jbr.tar.gz "https://cache-redirector.jetbrains.com/intellij-jbr/jbrsdk-25.0.1-linux-x64-b268.52.tar.gz"
-          mkdir -p "$RUNNER_TEMP/jbr"
-          tar -xzf jbr.tar.gz -C "$RUNNER_TEMP/jbr"
-          JBR_DIR=$(find "$RUNNER_TEMP/jbr" -mindepth 1 -maxdepth 1 -type d -name "jbr*" -o -name "jbrsdk*" | head -n 1)
-          echo "JAVA_HOME=$JBR_DIR" >> "$GITHUB_ENV"
-          echo "$JBR_DIR/bin" >> "$GITHUB_PATH"
+      - name: Set up Java 25
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "25"
 
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
@@ -83,8 +72,8 @@ jobs:
       - name: Grant execute permission for gradlew
         run: chmod +x gradlew
 
-      - name: Install zstd + sqlite + jq
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends zstd sqlite3 jq
+      - name: Install DB workflow dependencies
+        run: bash .github/scripts/install-db-workflow-deps.sh
 
       # ─── Discover prior releases + decide db_version ───────────────────────
       # Tags are `v<dbVersion>-<utcTimestamp>` so version discovery is just
