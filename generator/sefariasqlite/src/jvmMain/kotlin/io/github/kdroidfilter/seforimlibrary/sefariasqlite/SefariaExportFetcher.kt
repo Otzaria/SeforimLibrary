@@ -14,10 +14,10 @@ import kotlin.io.path.isDirectory
 /**
  * Downloads the latest Sefaria export (.tar.zst) and extracts it locally.
  *
- * The archive is fetched from the latest GitHub release of `kdroidFilter/SefariaExport`.
+ * The archive is fetched from the latest GitHub release of `Otzaria/SefariaExport`.
  */
 object SefariaExportFetcher {
-    private const val LATEST_API = "https://api.github.com/repos/kdroidFilter/SefariaExport/releases/latest"
+    private const val LATEST_API = "https://api.github.com/repos/Otzaria/SefariaExport/releases/latest"
     private const val USER_AGENT = "SeforimLibrary-SefariaExportFetcher/1.0"
 
     /**

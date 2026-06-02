@@ -28,7 +28,7 @@ permissions:
 jobs:
   real-diff:
     name: Build v1 (N-1 sources) + v2 (N sources) + verify patch
-    runs-on: ubuntu-24.04-arm
+    runs-on: [self-hosted, Linux, ARM64]
     timeout-minutes: 300
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -39,16 +39,8 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Free disk space on runner
-        uses: jlumbroso/free-disk-space@main
-        with:
-          tool-cache: true
-          android: true
-          dotnet: true
-          haskell: true
-          large-packages: true
-          docker-images: false
-          swap-storage: false
+      - name: Disk before build
+        run: df -h
 
       - name: Bridle daemon heaps + generator forks for the 16 GB runner
         run: |
@@ -66,17 +58,14 @@ jobs:
           generatorHeap=8g
           EOF
 
-      - name: Disk after cleanup
+      - name: Disk after setup
         run: df -h
 
-      - name: Install JBR 25
-        run: |
-          curl -L -o jbr.tar.gz "https://cache-redirector.jetbrains.com/intellij-jbr/jbrsdk-25.0.1-linux-aarch64-b268.52.tar.gz"
-          mkdir -p "$RUNNER_TEMP/jbr"
-          tar -xzf jbr.tar.gz -C "$RUNNER_TEMP/jbr"
-          JBR_DIR=$(find "$RUNNER_TEMP/jbr" -mindepth 1 -maxdepth 1 -type d -name "jbr*" -o -name "jbrsdk*" | head -n 1)
-          echo "JAVA_HOME=$JBR_DIR" >> "$GITHUB_ENV"
-          echo "$JBR_DIR/bin" >> "$GITHUB_PATH"
+      - name: Set up Java 25
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "25"
 
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
@@ -84,8 +73,8 @@ jobs:
       - name: Grant execute permission for gradlew
         run: chmod +x gradlew
 
-      - name: Install zstd
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends zstd sqlite3
+      - name: Install DB workflow dependencies
+        run: bash .github/scripts/install-db-workflow-deps.sh
 
       # ─── Pre-stage SECOND-TO-LAST releases into fetcher caches ─────────────
       - name: Pre-stage Sefaria N-1 export into fetcher cache
@@ -96,7 +85,7 @@ jobs:
           # The Sefaria fetcher cache lives under build/sefaria/export and is
           # considered "valid" iff non-empty. We extract the N-1 archive
           # there so the fetcher uses it instead of /releases/latest.
-          URL=$(gh api repos/kdroidFilter/SefariaExport/releases \
+          URL=$(gh api repos/Otzaria/SefariaExport/releases \
                   --jq '.[1].assets[] | select(.name | endswith(".tar.zst")) | .browser_download_url')
           echo "Sefaria N-1 archive: $URL"
           curl -L -o /tmp/sefaria.tar.zst "$URL"
@@ -135,14 +124,13 @@ jobs:
           test "$V" = "1" || { echo "❌ db_version=$V (expected 1)"; exit 1; }
           echo "✓ v1 stamped"
 
-      - name: Stash v1 artefacts + clear v1 sources + lucene
+      - name: Stash v1 artefacts + clear v1 sources
         run: |
           set -euo pipefail
           mv build/seforim.db build/seforim.db.v1
           mv build/seforim.db.buildstate build/seforim.db.buildstate.v1
           mv build/catalog.pb build/catalog.pb.v1
-          # Drop v1's Lucene/lexical (~3 GB) — only need DB + buildstate + catalog
-          rm -rf build/seforim.db.lucene build/seforim.db.lookup.lucene
+          # Drop lexical.db; only need DB + buildstate + catalog
           rm -f build/lexical.db build/release_info.txt
           # Clear cached sources so v2 re-fetches /releases/latest
           rm -rf generator/sefariasqlite/build/sefaria
