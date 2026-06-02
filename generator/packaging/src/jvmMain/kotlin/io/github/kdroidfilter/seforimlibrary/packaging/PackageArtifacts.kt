@@ -20,7 +20,6 @@ import kotlin.system.exitProcess
  * Package artifacts with Zstandard (zstd):
  *  - SQLite DB (seforim.db)
  *  - Precomputed catalog (catalog.pb)
- *  - Lucene indexes (text and lookup)
  *  - Lexical DB (lexical.db)
  *  All packaged into a single .tar.zst bundle
  *
@@ -40,7 +39,6 @@ import kotlin.system.exitProcess
  *   DB path from -PseforimDb, env SEFORIM_DB, or build/seforim.db
  *   Bundle output to build/package/seforim_bundle.tar.zst
  *   Catalog expected at same location as DB (catalog.pb)
- *   Indexes expected next to DB (.lucene, .lookup.lucene)
  *   Release info expected next to DB (release_info.txt)
  *   Lexical DB expected next to DB (lexical.db)
  */
@@ -59,10 +57,6 @@ fun main(args: Array<String>) {
         exitProcess(1)
     }
 
-    // Resolve index directories next to the DB
-    val textIndexDir: Path = if (dbPathStr.endsWith(".db")) Paths.get("$dbPathStr.lucene") else Paths.get("$dbPathStr.luceneindex")
-    val lookupIndexDir: Path = if (dbPathStr.endsWith(".db")) Paths.get("$dbPathStr.lookup.lucene") else Paths.get("$dbPathStr.lookupindex")
-
     // Resolve precomputed catalog next to the DB
     val catalogPath: Path = dbPath.resolveSibling("catalog.pb")
 
@@ -77,12 +71,6 @@ fun main(args: Array<String>) {
     val embedModelPath: Path = dbPath.resolveSibling("seforim-embed-v5-int8.onnx")
     val embedTokenizerPath: Path = dbPath.resolveSibling("tokenizer.json")
 
-    if (!textIndexDir.toFile().isDirectory) {
-        logger.w { "Lucene text index directory missing: $textIndexDir (will skip)" }
-    }
-    if (!lookupIndexDir.toFile().isDirectory) {
-        logger.w { "Lucene lookup index directory missing: $lookupIndexDir (will skip)" }
-    }
     if (!catalogPath.exists()) {
         logger.w { "Precomputed catalog missing: $catalogPath (will skip)" }
     }
@@ -133,14 +121,12 @@ fun main(args: Array<String>) {
             " - Lexical DB: $lexicalDbPath\n" +
             " - Embed model: $embedModelPath\n" +
             " - Embed tokenizer: $embedTokenizerPath\n" +
-            " - Text index: $textIndexDir\n" +
-            " - Lookup index: $lookupIndexDir\n" +
             " -> Bundle .tar.zst: $bundleOutputPath\n" +
             " (zstd level $zstdLevel, workers $workers, split ${humanSize(splitPartBytes)})"
     }
 
     try {
-        // Tar + zstd the three artifacts into a single bundle
+        // Tar + zstd the DB artifacts into a single bundle
         Files.newOutputStream(bundleOutputPath).use { fos ->
             BufferedOutputStream(fos, 1 shl 20).use { bos ->
                 ZstdOutputStream(bos, zstdLevel).use { zstd ->
@@ -150,22 +136,9 @@ fun main(args: Array<String>) {
                         tar.setLongFileMode(TarArchiveOutputStream.LONGFILE_POSIX)
                         tar.setBigNumberMode(TarArchiveOutputStream.BIGNUMBER_POSIX)
 
-                        val haveText = textIndexDir.toFile().isDirectory
-                        val haveLookup = lookupIndexDir.toFile().isDirectory
                         val haveCatalog = catalogPath.exists()
                         val haveReleaseInfo = releaseInfoPath.exists()
                         val haveLexicalDb = lexicalDbPath.exists()
-
-                        if (haveLookup) {
-                            addDirectoryToTar(tar, lookupIndexDir, lookupIndexDir.fileName.toString(), logger)
-                        } else {
-                            logger.w { "Lucene lookup index directory missing: $lookupIndexDir (skipped)" }
-                        }
-                        if (haveText) {
-                            addDirectoryToTar(tar, textIndexDir, textIndexDir.fileName.toString(), logger)
-                        } else {
-                            logger.w { "Lucene text index directory missing: $textIndexDir (skipped)" }
-                        }
 
                         // Add the database file itself
                         addFileToTar(tar, dbPath, dbPath.fileName.toString(), logger)
