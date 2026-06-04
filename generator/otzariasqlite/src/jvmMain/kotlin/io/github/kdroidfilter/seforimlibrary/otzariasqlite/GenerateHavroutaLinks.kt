@@ -667,7 +667,7 @@ private suspend fun setHearotAsDefaultCommentators(
         val hearotBook = hearotByTractate[tractateName]
 
         if (hearotBook != null) {
-            repository.setDefaultCommentatorsForBook(havroutaBook.id, listOf(hearotBook.id))
+            repository.setDefaultCommentatorsForBook(havroutaBook.id, listOf(hearotBook.id to 0))
             count++
             logger.d { "Set ${hearotBook.title} as default for ${havroutaBook.title}" }
         }

@@ -2341,22 +2341,32 @@ class SeforimRepository(databasePath: String, private val driver: SqlDriver) : L
     // --- Default commentators ---
 
     /**
-     * Returns the list of commentator book IDs configured as defaults for the given book.
+     * Returns the default commentators for the given book as (commentatorBookId, position)
+     * pairs, ordered by position. Positions may be non-contiguous (a consumer may leave
+     * intentional gaps), so this preserves them for safe read-modify-write.
      */
-    suspend fun getDefaultCommentatorIdsForBook(bookId: Long): List<Long> = withContext(Dispatchers.IO) {
-        database.defaultCommentatorQueriesQueries.selectByBookId(bookId).executeAsList()
-    }
+    suspend fun getDefaultCommentatorsForBook(bookId: Long): List<Pair<Long, Int>> =
+        withContext(Dispatchers.IO) {
+            database.defaultCommentatorQueriesQueries.selectByBookId(bookId)
+                .executeAsList()
+                .map { it.commentatorBookId to it.position.toInt() }
+        }
 
     /**
-     * Replaces the default commentators list for a given book with the provided ordered IDs.
+     * Replaces the default commentator list for a given book.
+     * Each entry is (commentatorBookId, position); positions may be non-contiguous
+     * (gaps are intentional, e.g. via the "-" sentinel in default_commentators.json).
      */
-    suspend fun setDefaultCommentatorsForBook(bookId: Long, commentatorBookIds: List<Long>) = withContext(Dispatchers.IO) {
+    suspend fun setDefaultCommentatorsForBook(
+        bookId: Long,
+        commentators: List<Pair<Long, Int>>
+    ) = withContext(Dispatchers.IO) {
         database.defaultCommentatorQueriesQueries.deleteByBookId(bookId)
-        commentatorBookIds.forEachIndexed { index, commentatorBookId ->
+        commentators.forEach { (commentatorBookId, position) ->
             database.defaultCommentatorQueriesQueries.insert(
                 bookId = bookId,
                 commentatorBookId = commentatorBookId,
-                position = index.toLong()
+                position = position.toLong()
             )
         }
     }
