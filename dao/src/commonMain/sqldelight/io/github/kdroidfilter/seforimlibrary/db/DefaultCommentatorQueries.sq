@@ -1,7 +1,7 @@
 -- Queries for default commentators per book
 
 selectByBookId:
-SELECT commentatorBookId
+SELECT commentatorBookId, position
 FROM default_commentator
 WHERE bookId = ?
 ORDER BY position;
