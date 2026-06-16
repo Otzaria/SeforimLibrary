@@ -46,7 +46,7 @@ fun main(args: Array<String>) {
 
     logger.i { "Seeding generations in $dbPath" }
 
-    val rows = parseGenerations(downloadRequiredForDbCsv(GENERATIONS_FILE, logger), logger)
+    val rows = parseGenerations(downloadRequiredForDbFile(GENERATIONS_FILE, logger), logger)
 
     try {
         DriverManager.getConnection("jdbc:sqlite:$dbPath").use { conn ->
