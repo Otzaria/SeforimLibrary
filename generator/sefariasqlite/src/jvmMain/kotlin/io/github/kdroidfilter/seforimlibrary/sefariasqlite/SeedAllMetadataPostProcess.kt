@@ -69,14 +69,14 @@ fun main(args: Array<String>) = runBlocking {
     val driver = JdbcSqliteDriver(url = "jdbc:sqlite:$dbPath")
     val repository = SeforimRepository(dbPath.toString(), driver)
 
-    val buildStatePath = resolveBuildStatePath(dbPath)
-    val allocator = InMemoryIdAllocator.load(
-        buildStatePath.takeIf { Files.exists(it) },
-        Logger.withTag("IdAllocator"),
-    )
-    val bindings = IdAllocatorBindings(allocator, repository)
-
     try {
+        val buildStatePath = resolveBuildStatePath(dbPath)
+        val allocator = InMemoryIdAllocator.load(
+            buildStatePath.takeIf { Files.exists(it) },
+            Logger.withTag("IdAllocator"),
+        )
+        val bindings = IdAllocatorBindings(allocator, repository)
+
         val result = applyMetadata(repository, bindings, bulk, descriptions, logger)
         runCatching {
             allocator.snapshotTo(
