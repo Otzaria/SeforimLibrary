@@ -1032,6 +1032,14 @@ class SeforimRepository(databasePath: String, private val driver: SqlDriver) : L
     }
 
     /**
+     * Returns all sources. Used by metadata post-processes that resolve an existing
+     * source by name without creating new rows.
+     */
+    suspend fun getAllSources(): List<Source> = withContext(Dispatchers.IO) {
+        database.sourceQueriesQueries.selectAll().executeAsList().map { it.toModel() }
+    }
+
+    /**
      * Returns a Source by id, or null if not found.
      */
     suspend fun getSourceById(id: Long): Source? = withContext(Dispatchers.IO) {
@@ -1065,6 +1073,25 @@ class SeforimRepository(databasePath: String, private val driver: SqlDriver) : L
         logger.d{"Updating book $bookId with categoryId: $categoryId"}
         database.bookQueriesQueries.updateCategoryId(categoryId, bookId)
         logger.d{"Updated book $bookId with categoryId: $categoryId"}
+    }
+
+    /**
+     * Enriches a book's metadata. Descriptions are replaced only when an override is
+     * supplied (COALESCE keep-existing); sourceId is updated only when non-null.
+     */
+    suspend fun updateBookMetadata(
+        bookId: Long,
+        heShortDesc: String?,
+        heDesc: String?,
+        sourceId: Long?,
+    ) = withContext(Dispatchers.IO) {
+        database.bookQueriesQueries.updateDescriptions(heShortDesc, heDesc, bookId)
+        if (sourceId != null) database.bookQueriesQueries.updateSourceId(sourceId, bookId)
+    }
+
+    /** Lightweight (id, title) pairs for every book — used by ForDB metadata post-processes. */
+    suspend fun getAllBookTitleIds(): List<Pair<Long, String>> = withContext(Dispatchers.IO) {
+        database.bookQueriesQueries.selectAllTitleId().executeAsList().map { it.id to it.title }
     }
 
     suspend fun updateHasAltStructures(bookId: Long, hasAltStructures: Boolean) = withContext(Dispatchers.IO) {

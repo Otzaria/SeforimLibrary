@@ -453,33 +453,6 @@ internal fun resolveSeforimDbPath(args: Array<String>): Path =
     )
 
 /**
- * Opens [dbPath] with autocommit off, runs [block], and commits. On any failure
- * it rolls back, logs [errorContext], and exits the process — the fail-loud
- * convention shared by the ForDB post-process tasks.
- */
-internal fun <T> withSeforimDbTransaction(
-    dbPath: Path,
-    logger: Logger,
-    errorContext: String,
-    block: (Connection) -> T,
-): T {
-    try {
-        DriverManager.getConnection("jdbc:sqlite:$dbPath").use { conn ->
-            conn.autoCommit = false
-            return try {
-                block(conn).also { conn.commit() }
-            } catch (e: Exception) {
-                runCatching { conn.rollback() }.onFailure { logger.w(it) { "Rollback failed" } }
-                throw e
-            }
-        }
-    } catch (e: Exception) {
-        logger.e(e) { errorContext }
-        exitProcess(1)
-    }
-}
-
-/**
  * Returns the lines of a required file (CSV or JSON) from the cached
  * `fordb-latest` release archive. Throws if the file is absent.
  */

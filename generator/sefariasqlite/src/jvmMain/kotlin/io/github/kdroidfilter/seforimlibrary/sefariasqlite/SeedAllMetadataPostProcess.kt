@@ -1,15 +1,22 @@
 package io.github.kdroidfilter.seforimlibrary.sefariasqlite
 
+import app.cash.sqldelight.driver.jdbc.sqlite.JdbcSqliteDriver
 import co.touchlab.kermit.Logger
 import co.touchlab.kermit.Severity
+import io.github.kdroidfilter.seforimlibrary.common.ids.IdAllocatorBindings
+import io.github.kdroidfilter.seforimlibrary.common.ids.InMemoryIdAllocator
+import io.github.kdroidfilter.seforimlibrary.dao.repository.SeforimRepository
+import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonPrimitive
-import java.sql.Connection
-import java.sql.Types
+import java.nio.file.Files
+import java.nio.file.Path
+import java.nio.file.Paths
+import java.time.Instant
 import kotlin.io.path.exists
 import kotlin.system.exitProcess
 
@@ -30,7 +37,11 @@ import kotlin.system.exitProcess
  *  - heShortDesc and heDesc (the latter from the CSV's heDescNew column) replace
  *    the existing value only when present (COALESCE keep-existing).
  *  - sourceId is set from Sourcefolder (existing source rows only).
- *  - pub dates and pub place are added (INSERT OR IGNORE links).
+ *  - pub dates and pub place are created through the IdAllocator and linked.
+ *
+ * pub_date and pub_place are IdAllocator-managed tables: creating rows via the
+ * allocator (not raw INSERT) keeps their ids stable across builds, which the
+ * delta-update pipeline relies on. build_state is snapshotted at the end.
  *
  * Usage:
  *   ./gradlew :sefariasqlite:seedAllMetadata -PseforimDb=/path/to/seforim.db
@@ -41,7 +52,7 @@ private const val METADATA_CHANGES_FILE = "sefaria_metadata_changes.csv"
 
 private val json = Json { ignoreUnknownKeys = true }
 
-fun main(args: Array<String>) {
+fun main(args: Array<String>) = runBlocking {
     Logger.setMinSeverity(Severity.Info)
     val logger = Logger.withTag("SeedAllMetadata")
 
@@ -55,10 +66,40 @@ fun main(args: Array<String>) {
     val bulk = parseBulkMetadata(downloadRequiredForDbFile(ALL_METADATA_FILE, logger))
     val descriptions = parseDescriptionOverrides(downloadRequiredForDbFile(METADATA_CHANGES_FILE, logger))
 
-    val result = withSeforimDbTransaction(dbPath, logger, "Failed to seed all-metadata; aborting") { conn ->
-        applyMetadata(conn, bulk, descriptions, logger)
+    val driver = JdbcSqliteDriver(url = "jdbc:sqlite:$dbPath")
+    val repository = SeforimRepository(dbPath.toString(), driver)
+
+    val buildStatePath = resolveBuildStatePath(dbPath)
+    val allocator = InMemoryIdAllocator.load(
+        buildStatePath.takeIf { Files.exists(it) },
+        Logger.withTag("IdAllocator"),
+    )
+    val bindings = IdAllocatorBindings(allocator, repository)
+
+    try {
+        val result = applyMetadata(repository, bindings, bulk, descriptions, logger)
+        runCatching {
+            allocator.snapshotTo(
+                target = buildStatePath,
+                extraMeta = mapOf(
+                    "generator" to "seedallmetadata",
+                    "generated_at" to Instant.now().toString(),
+                ),
+            )
+        }.onFailure { logger.w(it) { "Failed to write build_state to $buildStatePath" } }
+        logger.i { "All-metadata done: updated=${result.updated} unmatched=${result.unmatched}" }
+    } catch (e: Exception) {
+        logger.e(e) { "Failed to seed all-metadata; aborting" }
+        exitProcess(1)
+    } finally {
+        repository.close()
     }
-    logger.i { "All-metadata done: updated=${result.updated} unmatched=${result.unmatched}" }
+}
+
+/** Resolves the build_state path: -DbuildStatePath / BUILD_STATE_PATH, else `<db>.buildstate`. */
+private fun resolveBuildStatePath(dbPath: Path): Path {
+    val explicit = System.getProperty("buildStatePath") ?: System.getenv("BUILD_STATE_PATH")
+    return if (explicit != null) Paths.get(explicit) else Paths.get("$dbPath.buildstate")
 }
 
 private data class BulkMetadata(
@@ -107,14 +148,15 @@ private fun parseDescriptionOverrides(lines: List<String>): Map<String, Descript
     }.toMap()
 }
 
-private fun applyMetadata(
-    conn: Connection,
+private suspend fun applyMetadata(
+    repository: SeforimRepository,
+    bindings: IdAllocatorBindings,
     bulk: Map<String, BulkMetadata>,
     descriptions: Map<String, Description>,
     logger: Logger,
 ): MetadataResult {
-    val bookIdsByTitle = loadBookIdsByTitle(conn)
-    val sourceIdsByName = loadSourceIdsByName(conn)
+    val bookIdsByTitle = repository.getAllBookTitleIds().groupBy({ it.second }, { it.first })
+    val sourceIdsByName = repository.getAllSources().associate { it.name.lowercase() to it.id }
 
     var updated = 0
     var unmatched = 0
@@ -134,77 +176,23 @@ private fun applyMetadata(
         val description = descriptions[title]
         val sourceId = meta?.sourcefolder?.let { sourceIdsByName[it.lowercase()] }
 
-        conn.prepareStatement(
-            "UPDATE book SET heShortDesc = COALESCE(?, heShortDesc), heDesc = COALESCE(?, heDesc), " +
-                "sourceId = COALESCE(?, sourceId) WHERE id = ?",
-        ).use { st ->
-            st.setString(1, description?.heShortDesc)
-            st.setString(2, description?.heDesc)
-            if (sourceId != null) st.setLong(3, sourceId) else st.setNull(3, Types.INTEGER)
-            st.setLong(4, bookId)
-            st.executeUpdate()
-        }
+        repository.updateBookMetadata(
+            bookId = bookId,
+            heShortDesc = description?.heShortDesc,
+            heDesc = description?.heDesc,
+            sourceId = sourceId,
+        )
 
+        // pub_date / pub_place go through the allocator for stable ids (delta-safety).
         meta?.pubDates?.forEach { year ->
-            linkLookup(
-                conn, bookId, year.toString(),
-                "INSERT OR IGNORE INTO pub_date (date) VALUES (?)",
-                "SELECT id FROM pub_date WHERE date = ?",
-                "INSERT OR IGNORE INTO book_pub_date (bookId, pubDateId) VALUES (?, ?)",
-            )
+            repository.linkPubDateToBook(bindings.upsertPubDate(year.toString()), bookId)
         }
         meta?.pubPlaceHe?.let { place ->
-            linkLookup(
-                conn, bookId, place,
-                "INSERT OR IGNORE INTO pub_place (name) VALUES (?)",
-                "SELECT id FROM pub_place WHERE name = ?",
-                "INSERT OR IGNORE INTO book_pub_place (bookId, pubPlaceId) VALUES (?, ?)",
-            )
+            repository.linkPubPlaceToBook(bindings.upsertPubPlace(place), bookId)
         }
         updated++
     }
     return MetadataResult(updated, unmatched)
-}
-
-private fun loadBookIdsByTitle(conn: Connection): Map<String, List<Long>> {
-    val rows = ArrayList<Pair<String, Long>>()
-    conn.createStatement().use { st ->
-        st.executeQuery("SELECT id, title FROM book").use { rs ->
-            while (rs.next()) rows += rs.getString(2) to rs.getLong(1)
-        }
-    }
-    return rows.groupBy({ it.first }, { it.second })
-}
-
-private fun loadSourceIdsByName(conn: Connection): Map<String, Long> {
-    val map = HashMap<String, Long>()
-    conn.createStatement().use { st ->
-        st.executeQuery("SELECT id, name FROM source").use { rs ->
-            while (rs.next()) map[rs.getString(2).lowercase()] = rs.getLong(1)
-        }
-    }
-    return map
-}
-
-/** Inserts [value] into a lookup table (if new) and links it to [bookId]. */
-private fun linkLookup(
-    conn: Connection,
-    bookId: Long,
-    value: String,
-    insertSql: String,
-    selectIdSql: String,
-    linkSql: String,
-) {
-    conn.prepareStatement(insertSql).use { it.setString(1, value); it.executeUpdate() }
-    val refId = conn.prepareStatement(selectIdSql).use { st ->
-        st.setString(1, value)
-        st.executeQuery().use { rs -> if (rs.next()) rs.getLong(1) else return }
-    }
-    conn.prepareStatement(linkSql).use { st ->
-        st.setLong(1, bookId)
-        st.setLong(2, refId)
-        st.executeUpdate()
-    }
 }
 
 private fun JsonObject.string(key: String): String? =
