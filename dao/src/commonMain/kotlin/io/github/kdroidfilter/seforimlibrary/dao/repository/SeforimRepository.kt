@@ -1085,7 +1085,9 @@ class SeforimRepository(databasePath: String, private val driver: SqlDriver) : L
         heDesc: String?,
         sourceId: Long?,
     ) = withContext(Dispatchers.IO) {
-        database.bookQueriesQueries.updateDescriptions(heShortDesc, heDesc, bookId)
+        if (heShortDesc != null || heDesc != null) {
+            database.bookQueriesQueries.updateDescriptions(heShortDesc, heDesc, bookId)
+        }
         if (sourceId != null) database.bookQueriesQueries.updateSourceId(sourceId, bookId)
     }
 
