@@ -16,6 +16,7 @@ tasks.register("generateSeforimDb") {
     dependsOn(":otzariasqlite:generateHavroutaLinks")
     dependsOn(":sefariasqlite:renameCategories")
     dependsOn(":sefariasqlite:seedGenerations")
+    dependsOn(":sefariasqlite:seedAllMetadata")
     dependsOn(":catalog:buildCatalog")
     dependsOn(":searchindex:buildLuceneIndexDefault")
     dependsOn(":packaging:writeReleaseInfo")
@@ -34,6 +35,7 @@ project(":generator-common").tasks.matching { it.name == "stampSchemaVersion" }.
     mustRunAfter(":catalog:buildCatalog")
     mustRunAfter(":searchindex:buildLuceneIndexDefault")
     mustRunAfter(":sefariasqlite:seedGenerations")
+    mustRunAfter(":sefariasqlite:seedAllMetadata")
 }
 
 // Ensure ordering inside the pipeline task graph
@@ -62,9 +64,19 @@ project(":sefariasqlite").tasks.matching { it.name == "seedGenerations" }.config
     mustRunAfter(":otzariasqlite:generateHavroutaLinks")
     mustRunAfter(":sefariasqlite:renameCategories")
 }
+// seedAllMetadata matches by final book title, so it must run after appendOtzaria
+// and renameCategories. Ordered after seedGenerations as well so the post-process
+// seeders write to seforim.db sequentially rather than concurrently.
+project(":sefariasqlite").tasks.matching { it.name == "seedAllMetadata" }.configureEach {
+    mustRunAfter(":otzariasqlite:appendOtzaria")
+    mustRunAfter(":otzariasqlite:generateHavroutaLinks")
+    mustRunAfter(":sefariasqlite:renameCategories")
+    mustRunAfter(":sefariasqlite:seedGenerations")
+}
 project(":catalog").tasks.matching { it.name == "buildCatalog" }.configureEach {
     mustRunAfter(":otzariasqlite:generateHavroutaLinks")
     mustRunAfter(":sefariasqlite:seedGenerations")
+    mustRunAfter(":sefariasqlite:seedAllMetadata")
 }
 project(":searchindex").tasks.matching { it.name == "buildLuceneIndexDefault" }.configureEach {
     mustRunAfter(":catalog:buildCatalog")

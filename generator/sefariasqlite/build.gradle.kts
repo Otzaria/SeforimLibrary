@@ -122,3 +122,29 @@ tasks.register<JavaExec>("renameCategories") {
 
     jvmArgs = listOf("-Xmx256m")
 }
+
+// Metadata enrichment — sets sourceId and pub dates/places from ForDB/all_metadata.json
+// and replaces heShortDesc/heDesc from ForDB/sefaria_metadata_changes.csv. Both assets
+// come from the fordb-latest release archive. Runs after the other post-process seeders.
+// Usage:
+//   ./gradlew :sefariasqlite:seedAllMetadata
+//   ./gradlew :sefariasqlite:seedAllMetadata -PseforimDb=/path/to/seforim.db
+tasks.register<JavaExec>("seedAllMetadata") {
+    group = "application"
+    description = "Seed book descriptions, pub dates/places, and source from all_metadata.json + the changes CSV."
+
+    dependsOn("jvmJar")
+    mainClass.set("io.github.kdroidfilter.seforimlibrary.sefariasqlite.SeedAllMetadataPostProcessKt")
+    classpath = files(tasks.named("jvmJar")) + configurations.getByName("jvmRuntimeClasspath")
+
+    if (project.hasProperty("seforimDb")) {
+        systemProperty("seforimDb", project.property("seforimDb") as String)
+    } else if (System.getenv("SEFORIM_DB") != null) {
+        systemProperty("seforimDb", System.getenv("SEFORIM_DB"))
+    } else {
+        val defaultDbPath = rootProject.layout.buildDirectory.file("seforim.db").get().asFile.absolutePath
+        systemProperty("seforimDb", defaultDbPath)
+    }
+
+    jvmArgs = listOf("-Xmx512m")
+}
