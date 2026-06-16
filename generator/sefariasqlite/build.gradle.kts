@@ -126,6 +126,8 @@ tasks.register<JavaExec>("renameCategories") {
 // Metadata enrichment — sets sourceId and pub dates/places from ForDB/all_metadata.json
 // and replaces heShortDesc/heDesc from ForDB/sefaria_metadata_changes.csv. Both assets
 // come from the fordb-latest release archive. Runs after the other post-process seeders.
+// pub_date/pub_place are created through the IdAllocator, so this loads build_state and
+// needs the generator heap (not 512m).
 // Usage:
 //   ./gradlew :sefariasqlite:seedAllMetadata
 //   ./gradlew :sefariasqlite:seedAllMetadata -PseforimDb=/path/to/seforim.db
@@ -146,5 +148,8 @@ tasks.register<JavaExec>("seedAllMetadata") {
         systemProperty("seforimDb", defaultDbPath)
     }
 
-    jvmArgs = listOf("-Xmx512m")
+    jvmArgs = listOf(
+        "-Xmx$generatorHeap",
+        "-XX:+UseG1GC",
+    )
 }

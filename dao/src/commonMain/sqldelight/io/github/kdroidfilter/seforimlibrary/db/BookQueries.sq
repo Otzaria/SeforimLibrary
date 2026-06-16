@@ -3,6 +3,10 @@
 selectAll:
 SELECT * FROM book ORDER BY orderIndex, title;
 
+-- Lightweight (id, title) pairs used by ForDB metadata post-processes to match books by title.
+selectAllTitleId:
+SELECT id, title FROM book;
+
 selectById:
 SELECT * FROM book WHERE id = ?;
 
@@ -71,6 +75,16 @@ SELECT MAX(id) FROM book;
 
 updateCategoryId:
 UPDATE book SET categoryId = ? WHERE id = ?;
+
+-- Metadata enrichment (seedAllMetadata): replace descriptions only when an override is supplied.
+updateDescriptions:
+UPDATE book SET
+    heShortDesc = COALESCE(:heShortDesc, heShortDesc),
+    heDesc = COALESCE(:heDesc, heDesc)
+WHERE id = :id;
+
+updateSourceId:
+UPDATE book SET sourceId = :sourceId WHERE id = :id;
 
 -- Update connection flags on book
 updateConnectionFlags:
