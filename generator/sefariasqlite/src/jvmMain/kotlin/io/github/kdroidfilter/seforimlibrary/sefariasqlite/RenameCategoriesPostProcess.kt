@@ -11,6 +11,7 @@ import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.io.InputStream
 import java.nio.charset.StandardCharsets
+import java.nio.file.Path
 import java.nio.file.Paths
 import java.sql.Connection
 import java.sql.DriverManager
@@ -80,14 +81,14 @@ fun main(args: Array<String>) {
     // Rules downloaded from otzaria-library/ForDB/ at startup.
     // category_renames.csv and book_renames.csv have no header; book_moves.csv has one.
     val categoryRenames: List<CategoryRename> =
-        parseCategoryRenames(downloadRequiredForDbCsv(FOR_DB_CSV_FILES.getValue("categoryRenames"), logger))
+        parseCategoryRenames(downloadRequiredForDbFile(FOR_DB_CSV_FILES.getValue("categoryRenames"), logger))
     val bookRenames: List<Pair<String, String>> =
         parsePairs(
-            downloadRequiredForDbCsv(FOR_DB_CSV_FILES.getValue("bookRenames"), logger),
+            downloadRequiredForDbFile(FOR_DB_CSV_FILES.getValue("bookRenames"), logger),
             FOR_DB_CSV_FILES.getValue("bookRenames")
         )
     val bookMoves: List<BookMove> =
-        parseBookMoves(downloadRequiredForDbCsv(FOR_DB_CSV_FILES.getValue("bookMoves"), logger), logger)
+        parseBookMoves(downloadRequiredForDbFile(FOR_DB_CSV_FILES.getValue("bookMoves"), logger), logger)
 
     try {
         DriverManager.getConnection("jdbc:sqlite:$dbPath").use { conn ->
@@ -442,18 +443,57 @@ private fun resolveCategoryPath(conn: Connection, path: String): Long? {
     return parentId
 }
 
-internal fun downloadRequiredForDbCsv(fileName: String, logger: Logger): List<String> {
-    return forDbReleaseCsvs(logger).getValue(fileName)
+/** Resolves the seforim.db path: positional arg, -PseforimDb, SEFORIM_DB, then build default. */
+internal fun resolveSeforimDbPath(args: Array<String>): Path =
+    Paths.get(
+        args.getOrNull(0)
+            ?: System.getProperty("seforimDb")
+            ?: System.getenv("SEFORIM_DB")
+            ?: Paths.get("build", "seforim.db").toString(),
+    )
+
+/**
+ * Opens [dbPath] with autocommit off, runs [block], and commits. On any failure
+ * it rolls back, logs [errorContext], and exits the process — the fail-loud
+ * convention shared by the ForDB post-process tasks.
+ */
+internal fun <T> withSeforimDbTransaction(
+    dbPath: Path,
+    logger: Logger,
+    errorContext: String,
+    block: (Connection) -> T,
+): T {
+    try {
+        DriverManager.getConnection("jdbc:sqlite:$dbPath").use { conn ->
+            conn.autoCommit = false
+            return try {
+                block(conn).also { conn.commit() }
+            } catch (e: Exception) {
+                runCatching { conn.rollback() }.onFailure { logger.w(it) { "Rollback failed" } }
+                throw e
+            }
+        }
+    } catch (e: Exception) {
+        logger.e(e) { errorContext }
+        exitProcess(1)
+    }
 }
 
-private var cachedForDbCsvs: Map<String, List<String>>? = null
+/**
+ * Returns the lines of a required file (CSV or JSON) from the cached
+ * `fordb-latest` release archive. Throws if the file is absent.
+ */
+internal fun downloadRequiredForDbFile(fileName: String, logger: Logger): List<String> =
+    forDbReleaseFiles(logger).getValue(fileName)
 
-private fun forDbReleaseCsvs(logger: Logger): Map<String, List<String>> {
-    cachedForDbCsvs?.let { return it }
+private var cachedForDbFiles: Map<String, List<String>>? = null
+
+private fun forDbReleaseFiles(logger: Logger): Map<String, List<String>> {
+    cachedForDbFiles?.let { return it }
 
     val archiveUrl = forDbReleaseArchiveUrl(logger)
     logger.i { "Downloading ForDB release archive from $archiveUrl" }
-    val csvs = try {
+    val files = try {
         OptimizedHttpClient.downloadStream(
             url = archiveUrl,
             userAgent = FOR_DB_USER_AGENT,
@@ -466,13 +506,13 @@ private fun forDbReleaseCsvs(logger: Logger): Map<String, List<String>> {
         throw IllegalStateException("Failed to load required ForDB release archive", e)
     }
 
-    val missing = FOR_DB_CSV_FILES.values.filterNot { it in csvs }
+    val missing = FOR_DB_CSV_FILES.values.filterNot { it in files }
     check(missing.isEmpty()) {
         "ForDB release archive is missing required file(s): ${missing.joinToString()}"
     }
 
-    cachedForDbCsvs = csvs
-    return csvs
+    cachedForDbFiles = files
+    return files
 }
 
 private fun forDbReleaseArchiveUrl(logger: Logger): String {
@@ -485,7 +525,7 @@ private fun forDbReleaseArchiveUrl(logger: Logger): String {
 }
 
 private fun readForDbZip(stream: InputStream): Map<String, List<String>> {
-    val csvs = mutableMapOf<String, List<String>>()
+    val files = mutableMapOf<String, List<String>>()
     ZipInputStream(stream).use { zip ->
         var entry = zip.nextEntry
         while (entry != null) {
@@ -493,10 +533,12 @@ private fun readForDbZip(stream: InputStream): Map<String, List<String>> {
                 val normalizedName = entry.name.replace('\\', '/')
                 if (normalizedName.startsWith("ForDB/")) {
                     val fileName = normalizedName.removePrefix("ForDB/")
-                    if ('/' !in fileName && fileName.endsWith(".csv")) {
+                    // Capture text assets directly under ForDB/ — CSV rule files
+                    // plus all_metadata.json (consumed by seedAllMetadata).
+                    if ('/' !in fileName && (fileName.endsWith(".csv") || fileName.endsWith(".json"))) {
                         val bytes = ByteArrayOutputStream()
                         zip.copyTo(bytes)
-                        csvs[fileName] = ByteArrayInputStream(bytes.toByteArray())
+                        files[fileName] = ByteArrayInputStream(bytes.toByteArray())
                             .bufferedReader(StandardCharsets.UTF_8)
                             .readLines()
                     }
@@ -506,5 +548,5 @@ private fun readForDbZip(stream: InputStream): Map<String, List<String>> {
             entry = zip.nextEntry
         }
     }
-    return csvs
+    return files
 }
