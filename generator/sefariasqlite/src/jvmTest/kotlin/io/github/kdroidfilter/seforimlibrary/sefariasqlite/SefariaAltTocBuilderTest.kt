@@ -238,4 +238,144 @@ class SefariaAltTocBuilderTest {
 
         driver.close()
     }
+
+    /**
+     * Mesillat Yesharim: the "Topic" alt-struct wholeRefs use the title variant
+     * "Messilat Yesharim" (double-s, listed in titleVariants) instead of the
+     * primary "Mesillat Yesharim". An unrecognized title made resolution fall
+     * onto the bare-ordinal tail fallback ("13"), which collided with the
+     * same-numbered Introduction segment ("...Introduction 13") — so every
+     * chapter node landed inside the Introduction instead of its chapter.
+     *
+     * After the fix, a recognized title-variant prefix is rewritten to the
+     * primary title, so "Messilat Yesharim 13" resolves to chapter 13.
+     */
+    @Test
+    fun titleVariantWholeRefShouldResolveToChapterNotIntroduction() = runBlocking {
+        val driver = JdbcSqliteDriver(JdbcSqliteDriver.IN_MEMORY)
+        val repository = SeforimRepository(":memory:", driver)
+
+        val categoryId = repository.insertCategory(
+            Category(id = 0, parentId = null, title = "מוסר", level = 0, order = 0)
+        )
+        val sourceId = repository.insertSource("Sefaria")
+        val bookId = repository.insertBook(
+            Book(
+                id = 0,
+                categoryId = categoryId,
+                sourceId = sourceId,
+                title = "מסילת ישרים",
+                heShortDesc = null,
+                notesContent = null,
+                order = 0f,
+                totalLines = 80,
+                isBaseBook = true,
+                hasAltStructures = true
+            )
+        )
+
+        val bookPath = "מסילת ישרים"
+        val lineKeyToId = mutableMapOf<Pair<String, Int>, Long>()
+        for (i in 0 until 80) {
+            val lineId = repository.insertLine(
+                Line(id = 0, bookId = bookId, lineIndex = i, content = "line $i", heRef = null)
+            )
+            lineKeyToId[bookPath to i] = lineId
+        }
+
+        // Introduction segments 1..20 occupy lines 1..20 (line 0 is the heading).
+        // Chapter 13 segment 1 sits far later, at line 63. The intro segment 13
+        // (line 13) is the earlier line that the buggy tail fallback preferred.
+        val refEntries = buildList {
+            for (n in 1..20) {
+                add(
+                    RefEntry(
+                        ref = "Mesillat Yesharim, Author's Introduction $n",
+                        heRef = "מסילת ישרים, הקדמה, $n",
+                        path = bookPath,
+                        lineIndex = n + 1 // 1-based; 0-based line = n
+                    )
+                )
+            }
+            add(
+                RefEntry(
+                    ref = "Mesillat Yesharim 13:1",
+                    heRef = "מסילת ישרים, יג, א",
+                    path = bookPath,
+                    lineIndex = 64 // 0-based line 63
+                )
+            )
+        }
+
+        val altStructures = listOf(
+            AltStructurePayload(
+                key = "Topic",
+                title = "Mesillat Yesharim",
+                heTitle = "מסילת ישרים",
+                nodes = listOf(
+                    AltNodePayload(
+                        title = "The Trait of Separation",
+                        heTitle = "בביאור מדת הפרישות",
+                        wholeRef = "Messilat Yesharim 13", // double-s title variant
+                        refs = emptyList(),
+                        addressTypes = listOf("Integer"),
+                        childLabel = null,
+                        addresses = emptyList(),
+                        skippedAddresses = emptyList(),
+                        startingAddress = null,
+                        offset = null,
+                        children = emptyList()
+                    )
+                )
+            )
+        )
+
+        val payload = BookPayload(
+            heTitle = "מסילת ישרים",
+            enTitle = "Mesillat Yesharim",
+            categoriesHe = listOf("מוסר"),
+            lines = (0 until 80).map { "line $it" },
+            refEntries = refEntries,
+            headings = emptyList(),
+            authors = emptyList(),
+            description = null,
+            pubDates = emptyList(),
+            altStructures = altStructures,
+            // "Messilat Yesharim" is a real Sefaria title variant for this book.
+            titleAliasKeys = listOf("messilat yesharim", "mesilat yesharim")
+        )
+
+        val bindings = IdAllocatorBindings(InMemoryIdAllocator.load(path = null), repository)
+        val builder = SefariaAltTocBuilder(repository, bindings)
+        val result = builder.buildAltTocStructuresForBook(
+            payload = payload,
+            bookId = bookId,
+            bookPath = bookPath,
+            lineKeyToId = lineKeyToId,
+            totalLines = 80
+        )
+
+        assertTrue(result, "Alt structure should have been generated")
+
+        val structureId = repository.getAltTocStructuresForBook(bookId).first().id
+        val perishut = repository.getAltTocEntriesForStructure(structureId)
+            .find { it.text == "בביאור מדת הפרישות" }
+        assertNotNull(perishut, "פרישות entry should exist")
+
+        val chapterLineId = lineKeyToId[bookPath to 63]
+        val introSegment13LineId = lineKeyToId[bookPath to 13]
+        assertEquals(
+            chapterLineId,
+            perishut.lineId,
+            "פרישות should resolve to chapter 13 (line 63), not Introduction segment 13 (line 13). " +
+                "Got lineId=${perishut.lineId}"
+        )
+        assertNotEquals(
+            introSegment13LineId,
+            perishut.lineId,
+            "פרישות must not land inside the Introduction"
+        )
+
+        driver.close()
+    }
 }

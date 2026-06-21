@@ -52,6 +52,31 @@ internal class SefariaAltTocBuilder(
             }
         }.filterNot { it.isBlank() }.toSet()
 
+        // Alt-struct refs sometimes use a non-primary title spelling listed in
+        // the index titleVariants (e.g. "Messilat Yesharim" vs the primary
+        // "Mesillat Yesharim"). An unrecognized book title fails canonical
+        // matching and falls onto the bare-ordinal tail fallback, which then
+        // collides with a same-numbered Introduction segment. Rewrite a known
+        // alias prefix back to the primary title so the lookup hits the chapter.
+        val canonicalEnTitle = canonicalCitation(payload.enTitle)
+        val canonicalHeTitle = canonicalCitation(payload.heTitle)
+        val titleAliasesCanonical = buildSet {
+            payload.titleAliasKeys.forEach { add(canonicalCitation(it)) }
+            addAll(bookAliasKeys)
+        }.filterNot { it.isBlank() || it == canonicalEnTitle || it == canonicalHeTitle }
+            .sortedByDescending { it.length }
+
+        fun normalizeCitationBookTitle(raw: String): String {
+            val canon = canonicalCitation(raw)
+            val primary =
+                if (canon.any { it in 'א'..'ת' }) canonicalHeTitle else canonicalEnTitle
+            for (alias in titleAliasesCanonical) {
+                if (canon == alias) return primary
+                if (canon.startsWith("$alias ")) return primary + canon.substring(alias.length)
+            }
+            return raw
+        }
+
         val canonicalToLine: Map<String, Pair<Long?, Int?>> = buildMap {
             refsForBook.forEach { entry ->
                 val lineIdx = entry.lineIndex - 1
@@ -124,6 +149,7 @@ internal class SefariaAltTocBuilder(
                 allowTailFallback: Boolean = true
             ): Pair<Long?, Int?> {
                 if (citation.isNullOrBlank()) return null to null
+                val normalizedCitation = normalizeCitationBookTitle(citation)
 
                 fun expandedCandidates(base: String): List<String> {
                     if (base.isBlank() || maxColonDepth <= 0) return emptyList()
@@ -224,10 +250,10 @@ internal class SefariaAltTocBuilder(
                     return null
                 }
 
-                lookup(citation)?.let { return it }
+                lookup(normalizedCitation)?.let { return it }
 
                 if (isChapterOrSimanLevel) {
-                    val canonical = canonicalCitation(citation)
+                    val canonical = canonicalCitation(normalizedCitation)
                     val base = canonical.substringBefore('-').trim()
                     if (!base.contains(':')) {
                         val withColon = "$base:1"
