@@ -55,7 +55,10 @@ class PatchDbProducer(
             attach(conn, "prev", prevDb)
             attach(conn, "new", newDb)
             val nextMigrationVersion = (migrations.maxOfOrNull { it.first } ?: 0) + 1
-            writeMigrations(conn, migrations + inferCreateTableMigrations(conn, nextMigrationVersion))
+            val createTableMigrations = inferCreateTableMigrations(conn, nextMigrationVersion)
+            val addColumnMigrations =
+                inferAddColumnMigrations(conn, nextMigrationVersion + createTableMigrations.size)
+            writeMigrations(conn, migrations + createTableMigrations + addColumnMigrations)
 
             // Materialise upsert_/delete_ tables based on the new DB's actual
             // schema. The producer is generic — every table in our config list
@@ -143,6 +146,30 @@ class PatchDbProducer(
         return out
     }
 
+    // ADD COLUMN for columns present in new but not prev, on tables in both
+    // (new tables are fully created by inferCreateTableMigrations).
+    private fun inferAddColumnMigrations(conn: Connection, firstVersion: Int): List<Pair<Int, String>> {
+        val out = ArrayList<Pair<Int, String>>()
+        var version = firstVersion
+        for (table in PATCH_TABLES_IN_FK_ORDER) {
+            if (!tableExists(conn, "new", table.name)) continue
+            if (!tableExists(conn, "prev", table.name)) continue
+            val prevCols = PatchDbSchema.readTableInfo(conn, "prev", table.name).map { it.name }.toSet()
+            for (col in PatchDbSchema.readTableInfo(conn, "new", table.name)) {
+                if (col.name in prevCols) continue
+                // SQLite forbids ADD COLUMN of a NOT NULL column without a DEFAULT.
+                require(!col.notNull || col.defaultValue != null) {
+                    "Cannot delta-migrate added NOT NULL column ${table.name}.${col.name} without a DEFAULT"
+                }
+                val notNull = if (col.notNull) " NOT NULL" else ""
+                val default = col.defaultValue?.let { " DEFAULT $it" } ?: ""
+                out += version++ to
+                    "ALTER TABLE \"${table.name}\" ADD COLUMN \"${col.name}\" ${col.type}$notNull$default"
+            }
+        }
+        return out
+    }
+
     private fun readCreateSql(conn: Connection, schemaAlias: String, type: String, name: String): String? {
         conn.prepareStatement(
             "SELECT sql FROM $schemaAlias.sqlite_master WHERE type=? AND name=? AND sql IS NOT NULL",
@@ -198,13 +225,16 @@ class PatchDbProducer(
         }
         val joinCond = table.primaryKey.joinToString(" AND ") { "new.\"$it\" = prev.\"$it\"" }
         val nonPkCols = cols.filter { it !in table.primaryKey }
+        val prevCols = PatchDbSchema.readTableInfo(conn, "prev", table.name).map { it.name }.toSet()
         // Use SQLite's `IS NOT` so NULL is treated as a distinct value from
         // '' and from any other column value. The previous COALESCE-based
         // comparison conflated NULL and empty string, silently dropping
         // upserts where a column toggled between NULL and '' (or vice
         // versa) — caught by the real-data v1→v2 e2e on book.heShortDesc.
+        // A column absent in prev (added this release) is NULL for every prev
+        // row after its ADD COLUMN migration, so it differs wherever new is set.
         val diffPredicate = if (nonPkCols.isEmpty()) "FALSE" else nonPkCols.joinToString(" OR ") {
-            "new.\"$it\" IS NOT prev.\"$it\""
+            if (it in prevCols) "new.\"$it\" IS NOT prev.\"$it\"" else "new.\"$it\" IS NOT NULL"
         }
         // First PK column is enough to detect "prev row absent".
         val firstPk = table.primaryKey.first()
@@ -252,8 +282,11 @@ class PatchDbProducer(
             if (!tableExists(conn, "main", "upsert_${table.name}")) continue
             val pkCols = table.primaryKey
             if (pkCols.isEmpty()) continue
+            val prevCols = PatchDbSchema.readTableInfo(conn, "prev", table.name).map { it.name }.toSet()
             val uniqueGroups = readSecondaryUniqueGroups(conn, "new", table.name, pkCols.toSet())
             for (uniqueCols in uniqueGroups) {
+                // A unique group added this release isn't in prev — nothing to collide with.
+                if (uniqueCols.any { it !in prevCols }) continue
                 val firstUnique = uniqueCols.first()
                 val joinUnique = uniqueCols.joinToString(" AND ") { "new.\"$it\" = prev.\"$it\"" }
                 val pkDiffers = pkCols.joinToString(" OR ") {

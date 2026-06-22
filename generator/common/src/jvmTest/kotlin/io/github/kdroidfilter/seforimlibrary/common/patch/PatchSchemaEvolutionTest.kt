@@ -40,6 +40,53 @@ class PatchSchemaEvolutionTest {
         }
     }
 
+    @Test
+    fun `producer emits ADD COLUMN migration when target adds a column to a tracked table`() {
+        val prev = tmp.newFolder().toPath().resolve("prev.db")
+        val next = tmp.newFolder().toPath().resolve("next.db")
+        val patch = tmp.newFolder().toPath().resolve("patch.db")
+        val target = tmp.newFolder().toPath().resolve("target.db")
+
+        buildBookDb(prev, withHeDesc = false)
+        buildBookDb(next, withHeDesc = true)
+
+        val produced = PatchDbProducer().produce(prev, next, patch, fromVersion = 1, toVersion = 2)
+        assertEquals(2, produced.upsertCounts.getValue("book"))
+
+        Files.copy(prev, target)
+        DriverManager.getConnection("jdbc:sqlite:${target.toAbsolutePath()}").use { conn ->
+            conn.createStatement().use { it.execute("PRAGMA foreign_keys = ON") }
+            val applied = PatchApplier().apply(conn, patch)
+
+            assertTrue(applied.migrationsApplied >= 1, "expected an ADD COLUMN migration")
+            assertTrue(hasColumn(conn, "book", "heDesc"), "heDesc column should exist after apply")
+            assertEquals(logicalHash(next), LogicalContentHasher().compute(conn))
+        }
+    }
+
+    private fun buildBookDb(path: Path, withHeDesc: Boolean) {
+        DriverManager.getConnection("jdbc:sqlite:${path.toAbsolutePath()}").use { conn ->
+            conn.createStatement().use { st ->
+                st.executeUpdate("CREATE TABLE schema_meta (key TEXT PRIMARY KEY NOT NULL, value TEXT NOT NULL)")
+                st.executeUpdate("INSERT INTO schema_meta(key, value) VALUES ('db_version', '1')")
+                if (withHeDesc) {
+                    st.executeUpdate("CREATE TABLE book (id INTEGER PRIMARY KEY NOT NULL, title TEXT NOT NULL, heDesc TEXT)")
+                    st.executeUpdate("INSERT INTO book(id, title, heDesc) VALUES (10, 'Genesis', 'long desc A'), (11, 'Exodus', 'long desc B')")
+                } else {
+                    st.executeUpdate("CREATE TABLE book (id INTEGER PRIMARY KEY NOT NULL, title TEXT NOT NULL)")
+                    st.executeUpdate("INSERT INTO book(id, title) VALUES (10, 'Genesis'), (11, 'Exodus')")
+                }
+            }
+        }
+    }
+
+    private fun hasColumn(conn: Connection, table: String, column: String): Boolean =
+        conn.createStatement().use { st ->
+            st.executeQuery("PRAGMA table_info(\"$table\")").use { rs ->
+                generateSequence { if (rs.next()) rs.getString("name") else null }.any { it == column }
+            }
+        }
+
     private fun buildPreviousDb(path: Path) {
         DriverManager.getConnection("jdbc:sqlite:${path.toAbsolutePath()}").use { conn ->
             conn.createStatement().use { st ->

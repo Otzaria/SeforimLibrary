@@ -98,7 +98,12 @@ internal object PatchDbSchema {
     }
 
     /** Schema info for a single column. */
-    data class ColumnInfo(val name: String, val type: String, val notNull: Boolean)
+    data class ColumnInfo(
+        val name: String,
+        val type: String,
+        val notNull: Boolean,
+        val defaultValue: String? = null,
+    )
 
     /**
      * Reads `PRAGMA <schema>.table_info(<table>)` and returns columns in
@@ -113,6 +118,7 @@ internal object PatchDbSchema {
                         name = rs.getString("name"),
                         type = rs.getString("type").ifBlank { "BLOB" },
                         notNull = rs.getInt("notnull") == 1,
+                        defaultValue = rs.getString("dflt_value"),
                     )
                 }
             }
