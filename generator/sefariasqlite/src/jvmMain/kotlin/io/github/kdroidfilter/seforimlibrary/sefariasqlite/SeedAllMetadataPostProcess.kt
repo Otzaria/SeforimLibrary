@@ -36,7 +36,7 @@ import kotlin.system.exitProcess
  * Per matched book:
  *  - heShortDesc and heDesc (the latter from the CSV's heDescNew column) replace
  *    the existing value only when present (COALESCE keep-existing).
- *  - sourceId is set from Sourcefolder (existing source rows only).
+ *  - sourceId is set from Sourcefolder via SOURCEFOLDER_TO_DB_SOURCE (existing rows only).
  *  - pub dates and pub place are created through the IdAllocator and linked.
  *
  * pub_date and pub_place are IdAllocator-managed tables: creating rows via the
@@ -49,6 +49,26 @@ import kotlin.system.exitProcess
  */
 private const val ALL_METADATA_FILE = "all_metadata.json"
 private const val METADATA_CHANGES_FILE = "sefaria_metadata_changes.csv"
+
+/**
+ * Maps each all_metadata.json `Sourcefolder` to the source name used in the built
+ * DB (manifest top-level dir, mostly `<x>ToOtzaria`). The casing/suffix differences
+ * are irregular, so the mapping is explicit rather than derived. An unknown
+ * Sourcefolder is fatal (see resolveSourceFolders) — release data changed and the
+ * mapping must be updated, not silently ignored.
+ */
+internal val SOURCEFOLDER_TO_DB_SOURCE = mapOf(
+    "Dicta" to "DictaToOtzaria",
+    "OnYourWay" to "OnYourWayToOtzaria",
+    "ToratEmet" to "ToratEmetToOtzaria",
+    "MoreBooks" to "MoreBooks",
+    "Orayta" to "OraytaToOtzaria",
+    "wiki_jewish_books" to "wikiJewishBooksToOtzaria",
+    "wikiSource" to "wikisourceToOtzaria",
+    "Pninim" to "pninimToOtzaria",
+    "Tashma" to "tashmaToOtzaria",
+    "Ben-Yehuda" to "Ben-YehudaToOtzaria",
+)
 
 private val json = Json { ignoreUnknownKeys = true }
 
@@ -102,20 +122,20 @@ private fun resolveBuildStatePath(dbPath: Path): Path {
     return if (explicit != null) Paths.get(explicit) else Paths.get("$dbPath.buildstate")
 }
 
-private data class BulkMetadata(
+internal data class BulkMetadata(
     val pubDates: List<Int>,
     val pubPlaceHe: String?,
     val sourcefolder: String?,
 )
 
-private data class Description(
+internal data class Description(
     val heShortDesc: String?,
     val heDesc: String?,
 )
 
 private data class MetadataResult(val updated: Int, val unmatched: Int)
 
-private fun parseBulkMetadata(lines: List<String>): Map<String, BulkMetadata> =
+internal fun parseBulkMetadata(lines: List<String>): Map<String, BulkMetadata> =
     json.parseToJsonElement(lines.joinToString("\n")).jsonArray.mapNotNull { element ->
         val obj = element as? JsonObject ?: return@mapNotNull null
         val title = obj.string("title") ?: return@mapNotNull null
@@ -132,14 +152,15 @@ private fun parseBulkMetadata(lines: List<String>): Map<String, BulkMetadata> =
  * heDescNew are used (heDescNew is the corrected text that becomes the book's
  * heDesc); the original heDesc column and the rest are ignored.
  */
-private fun parseDescriptionOverrides(lines: List<String>): Map<String, Description> {
+internal fun parseDescriptionOverrides(lines: List<String>): Map<String, Description> {
     if (lines.isEmpty()) return emptyMap()
     require("title" in lines.first().lowercase()) {
         "$METADATA_CHANGES_FILE must start with a header row"
     }
-    return lines.drop(1).mapNotNull { line ->
-        if (line.isBlank()) return@mapNotNull null
-        val cols = parseForDbCsvLine(line).map { it.trim() }
+    // Rejoin the readLines() split so the record parser can stitch quoted fields
+    // that span multiple physical lines (heShortDesc/heDesc carry embedded newlines).
+    return parseForDbCsvRecords(lines.joinToString("\n")).drop(1).mapNotNull { record ->
+        val cols = record.map { it.trim() }
         val title = cols.getOrNull(1)?.takeIf { it.isNotBlank() } ?: return@mapNotNull null
         title to Description(
             heShortDesc = cols.getOrNull(3)?.takeIf { it.isNotBlank() },
@@ -157,6 +178,7 @@ private suspend fun applyMetadata(
 ): MetadataResult {
     val bookIdsByTitle = repository.getAllBookTitleIds().groupBy({ it.second }, { it.first })
     val sourceIdsByName = repository.getAllSources().associate { it.name.lowercase() to it.id }
+    val sourceIdByFolder = resolveSourceFolders(bulk, sourceIdsByName, logger)
 
     var updated = 0
     var unmatched = 0
@@ -174,7 +196,7 @@ private suspend fun applyMetadata(
         val bookId = ids.single()
         val meta = bulk[title]
         val description = descriptions[title]
-        val sourceId = meta?.sourcefolder?.let { sourceIdsByName[it.lowercase()] }
+        val sourceId = meta?.sourcefolder?.let { sourceIdByFolder[it] }
 
         repository.updateBookMetadata(
             bookId = bookId,
@@ -193,6 +215,34 @@ private suspend fun applyMetadata(
         updated++
     }
     return MetadataResult(updated, unmatched)
+}
+
+/**
+ * Resolves each Sourcefolder seen in the metadata to a DB source id via
+ * SOURCEFOLDER_TO_DB_SOURCE. Unknown Sourcefolder values are fatal (release data
+ * changed; the explicit mapping must be updated). A mapped name absent from this
+ * DB build resolves to null — expected, since the metadata is a library-wide
+ * superset of any single generated DB.
+ */
+internal fun resolveSourceFolders(
+    bulk: Map<String, BulkMetadata>,
+    sourceIdsByName: Map<String, Long>,
+    logger: Logger,
+): Map<String, Long> {
+    val folders = bulk.values.mapNotNull { it.sourcefolder }.toSet()
+    val unknown = folders.filterNot { it in SOURCEFOLDER_TO_DB_SOURCE }
+    require(unknown.isEmpty()) {
+        "all-metadata: unmapped Sourcefolder value(s) ${unknown.sorted()}; " +
+            "update SOURCEFOLDER_TO_DB_SOURCE"
+    }
+    return folders.mapNotNull { folder ->
+        val dbName = SOURCEFOLDER_TO_DB_SOURCE.getValue(folder)
+        val id = sourceIdsByName[dbName.lowercase()]
+        if (id == null) {
+            logger.i { "all-metadata: source '$dbName' not in this DB; sourceId skipped for '$folder'" }
+            null
+        } else folder to id
+    }.toMap()
 }
 
 private fun JsonObject.string(key: String): String? =
