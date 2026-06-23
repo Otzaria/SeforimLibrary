@@ -201,6 +201,48 @@ internal fun parseForDbCsvLine(line: String): List<String> {
 }
 
 /**
+ * Splits CSV text into logical records, honoring RFC-4180 quoted fields that may
+ * span multiple physical lines. Needed for files whose fields can contain
+ * newlines (e.g. multi-line descriptions); single-line files use parseForDbCsvLine.
+ * Blank records (no fields, all empty) are dropped.
+ */
+internal fun parseForDbCsvRecords(text: String): List<List<String>> {
+    val records = mutableListOf<List<String>>()
+    var fields = mutableListOf<String>()
+    val sb = StringBuilder()
+    var inQuotes = false
+    var i = 0
+
+    fun endField() { fields.add(sb.toString()); sb.setLength(0) }
+    fun endRecord() {
+        endField()
+        if (fields.any { it.isNotEmpty() }) records.add(fields)
+        fields = mutableListOf()
+    }
+
+    while (i < text.length) {
+        val c = text[i]
+        if (inQuotes) {
+            if (c == '"') {
+                if (i + 1 < text.length && text[i + 1] == '"') { sb.append('"'); i++ }
+                else inQuotes = false
+            } else sb.append(c)
+        } else {
+            when (c) {
+                '"' -> if (sb.isEmpty()) inQuotes = true else sb.append(c)
+                ',' -> endField()
+                '\n' -> endRecord()
+                '\r' -> if (i + 1 < text.length && text[i + 1] == '\n') { endRecord(); i++ } else endRecord()
+                else -> sb.append(c)
+            }
+        }
+        i++
+    }
+    if (sb.isNotEmpty() || fields.isNotEmpty()) endRecord()
+    return records
+}
+
+/**
  * `name,Source path,Destination path` rows. Drops the header row if present;
  * detection requires both `source path` and `destination path` tokens so a
  * stray book title containing the word "path" can't be mistaken for a header.
