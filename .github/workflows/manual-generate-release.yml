@@ -29,6 +29,14 @@ on:
 permissions:
   contents: write
 
+# Only one release build at a time. A RAM-backed build dir (see the tmpfs step)
+# makes two concurrent runs on the same self-hosted host a memory hazard, and a
+# release pipeline should never race itself. Queue rather than cancel — a build
+# in flight is expensive (hours) and must not be killed mid-way.
+concurrency:
+  group: seforim-manual-release
+  cancel-in-progress: false
+
 jobs:
   build-and-release:
     name: Build seforim.db + bundle + delta fan, publish pre-release
@@ -43,6 +51,18 @@ jobs:
       PATCH_OFFSETS: "1 2 4 8 16"
 
     steps:
+      # MUST run before checkout. actions/checkout cleans the workspace with
+      # `git clean -ffdx`, which recurses into the (gitignored) build/ dir; if a
+      # canceled run left build/ as a tmpfs mountpoint, clean cannot rmdir the
+      # mountpoint and checkout fails or hangs. Release any stale mount first.
+      - name: Release stale RAM build dir (pre-checkout)
+        run: |
+          BUILD="$GITHUB_WORKSPACE/build"
+          while mountpoint -q "$BUILD"; do
+            echo "Stale tmpfs at build/ from a prior run — unmounting before checkout."
+            sudo umount "$BUILD" 2>/dev/null || sudo umount -l "$BUILD"
+          done
+
       - name: Checkout SeforimLibrary
         uses: actions/checkout@v4
         with:
@@ -50,6 +70,58 @@ jobs:
 
       - name: Disk before build
         run: df -h
+
+      # ─── RAM-backed build dir (tmpfs) ──────────────────────────────────────
+      # The DB build is fsync-bound on the OCI network block volume: CPU and RAM
+      # sit idle in iowait while SQLite waits on per-commit fsyncs to slow
+      # network storage. Backing build/ with a RAM tmpfs removes that stall.
+      #
+      # Mounted *at* build/ so every path stays byte-identical (build/seforim.db,
+      # build/seforim.db.buildstate, build/seforim.db.zst) — the DB generation
+      # and the delta/buildstate logic are completely untouched. Keep
+      # -PinMemoryDb=false below: file-backed-on-tmpfs is fast *and* avoids the
+      # second in-RAM copy that an in-memory DB would add on top of the tmpfs.
+      #
+      # Guards so a release build never falls and never endangers the other
+      # repos' runners that share this host:
+      #   • size=16G is a HARD cap — a runaway write fails THIS job cleanly with
+      #     ENOSPC instead of OOM-killing the host. Measured peak is ~11.4 GiB
+      #     (seforim.db ~7G + seforim.db.zst ~3.5G + buildstate ~0.9G coexist
+      #     during the compression step), so 16G leaves comfortable headroom.
+      #   • Preflight ABORTS before any work if another Runner.Worker is active
+      #     or MemAvailable < 18 GiB — never share the box, never start tight. A
+      #     clean abort + rerun beats a mid-build OOM, which is the real "fall".
+      #   • A stale mount from a canceled run is released in a pre-checkout step.
+      - name: Mount RAM-backed build dir (tmpfs)
+        run: |
+          set -euo pipefail
+          BUILD="$GITHUB_WORKSPACE/build"
+
+          # Exclusivity: this host runs three self-hosted runners (SeforimLibrary,
+          # otzaria, SefariaExport). A RAM-heavy release build must not share the
+          # box — a later spike in a concurrent job could OOM both. Our own job is
+          # exactly one Runner.Worker; >1 means another repo's job is active.
+          WORKERS=$(pgrep -cf 'Runner.Worker' || true)
+          if [ "${WORKERS:-0}" -gt 1 ]; then
+            echo "::error::${WORKERS} Runner.Worker processes active — another repo's job is running on this shared host. Refusing to start a RAM-backed build; rerun when the host is idle."
+            exit 1
+          fi
+
+          # Peak need is ~18 GiB (8 GiB generator heap + ~7 GiB DB on tmpfs +
+          # Gradle + base). Demand a near-idle box up front rather than risk a
+          # late OOM mid-build.
+          AVAIL_KB=$(awk '/MemAvailable/{print $2}' /proc/meminfo)
+          echo "MemAvailable: $((AVAIL_KB/1024/1024)) GiB"
+          if [ "$AVAIL_KB" -lt $((18*1024*1024)) ]; then
+            echo "::error::Only $((AVAIL_KB/1024/1024)) GiB available (<18 GiB). Aborting before work to avoid an OOM."
+            exit 1
+          fi
+
+          # Mount. uid/gid = the runner user so the build can write without sudo.
+          mkdir -p "$BUILD"
+          sudo mount -t tmpfs -o size=16G,nr_inodes=1m,uid="$(id -u)",gid="$(id -g)",mode=0755 tmpfs "$BUILD"
+          echo "tmpfs mounted on build/:"
+          findmnt "$BUILD" || df -h "$BUILD"
 
       - name: Bridle daemon heaps + generator forks for the 16 GB runner
         run: |
@@ -277,4 +349,18 @@ jobs:
             # between the start of this job and now.
             git pull --rebase origin master
             git push origin HEAD:master
+          fi
+
+      # Release the RAM tmpfs no matter how the job ended. By now assets are
+      # already uploaded and staged on real disk, so discarding build/ is safe;
+      # leaving the mount would pin ~GBs of RAM and trip the next run's sweep.
+      - name: Release RAM-backed build dir (tmpfs)
+        if: always()
+        run: |
+          BUILD="$GITHUB_WORKSPACE/build"
+          if mountpoint -q "$BUILD"; then
+            sudo umount "$BUILD" 2>/dev/null || sudo umount -l "$BUILD"
+            echo "Unmounted tmpfs build dir; RAM released."
+          else
+            echo "No tmpfs mount to release."
           fi
