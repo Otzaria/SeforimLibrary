@@ -31,7 +31,10 @@ class DeltaUpdaterClient(
     private val catalogPb: Path,
     private val workDir: Path,
     private val releaseMetaUrl: String,
-    private val indexSinks: () -> LuceneUpdater.SinkSession,
+    // Optional: a client that uses no Lucene index (or rebuilds it out of
+    // band) passes null, and the Lucene step is skipped while the SQLite +
+    // catalog delta still applies in full.
+    private val indexSinks: (() -> LuceneUpdater.SinkSession)? = null,
     private val localVersionProvider: () -> Int,
     private val httpGet: (String) -> String = ::defaultHttpGet,
     private val urlForPatchFile: (DeltaEntry, String) -> String = { entry, file ->
@@ -44,7 +47,7 @@ class DeltaUpdaterClient(
     private val json = Json { ignoreUnknownKeys = true; isLenient = true }
     private val applier = DeltaApplierClient(logger)
     private val downloader = DeltaDownloader(logger)
-    private val luceneUpdater = LuceneUpdater(logger)
+    private val luceneUpdater = if (indexSinks != null) LuceneUpdater(logger) else null
     private val catalogUpdater = CatalogUpdater(logger)
     private val orchestrator = UpdateOrchestrator(
         applier, downloader, luceneUpdater, catalogUpdater, workDir, logger,
