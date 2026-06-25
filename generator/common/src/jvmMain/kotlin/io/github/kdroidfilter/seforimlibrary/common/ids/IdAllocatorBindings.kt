@@ -131,6 +131,12 @@ class IdAllocatorBindings(
         return id
     }
 
+    // Assign the stable id without inserting; row is flushed later via insertTocEntriesBatch.
+    fun assignTocEntryId(entry: TocEntry, ancestorPath: String): TocEntry {
+        val id = allocator.tocEntryId(entry.bookId, ancestorPath)
+        return if (entry.id == id) entry else entry.copy(id = id)
+    }
+
     suspend fun upsertAltTocStructureStable(structure: AltTocStructure): Long {
         val id = allocator.altTocStructureId(structure.bookId, structure.key)
         val withId = if (structure.id == id) structure else structure.copy(id = id)

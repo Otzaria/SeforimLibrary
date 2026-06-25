@@ -27,6 +27,8 @@ internal class SefariaTocInserter(
         val entriesByParent = mutableMapOf<Long?, MutableList<Long>>()
         val allTocIds = mutableListOf<Long>()
         val tocParentMap = mutableMapOf<Long, Long?>()
+        // Allocator-assigned entries, flushed in one transaction below.
+        val tocBatch = ArrayList<TocEntry>(payload.headings.size)
 
         payload.headings.sortedBy { it.lineIndex }.forEach { h ->
             while (levelStack.isNotEmpty() && levelStack.last().first >= h.level) {
@@ -41,7 +43,7 @@ internal class SefariaTocInserter(
             // sources) resolve to distinct stable tocEntry ids.
             ancestorPathStack.addLast(textId)
             val ancestorPath = ancestorPathStack.joinToString("/") + "@${h.lineIndex}"
-            val tocId = bindings.insertTocEntryStable(
+            val entry = bindings.assignTocEntryId(
                 TocEntry(
                     id = 0,
                     bookId = bookId,
@@ -55,12 +57,17 @@ internal class SefariaTocInserter(
                 ),
                 ancestorPath = ancestorPath,
             )
+            tocBatch.add(entry)
+            val tocId = entry.id
             headingLineToToc[h.lineIndex] = tocId
             levelStack.addLast(h.level to tocId)
             allTocIds.add(tocId)
             tocParentMap[tocId] = parent
             entriesByParent.getOrPut(parent) { mutableListOf() }.add(tocId)
         }
+
+        // Flush all TOC inserts in one transaction.
+        repository.insertTocEntriesBatch(tocBatch)
 
         // Update hasChildren and isLastChild in one batched transaction
         // (per-row updates dominated this method's wall-time previously).
