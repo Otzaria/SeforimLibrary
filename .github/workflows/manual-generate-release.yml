@@ -144,6 +144,9 @@ jobs:
             -PdbVersion=${{ steps.discover.outputs.db_version }} \
             -PinMemoryDb=false \
             --no-daemon --stacktrace
+          # catalog.pb is no longer produced; drop any stale copy so a dirty
+          # self-hosted workspace can't smuggle it into the bundle or a patch.
+          rm -f build/catalog.pb
 
       - name: Package Seforim Bundle (split tar.zst)
         run: ./gradlew packageSeforimBundle --no-daemon --stacktrace
@@ -197,7 +200,6 @@ jobs:
               -PprevDb=$PWD/$PREV_DB \
               -PnewDb=$PWD/build/seforim.db \
               -Pout=$PWD/patches/patch-v${TARGET_VER}-v${THIS_VER}.db \
-              -PcatalogPb=$PWD/build/catalog.pb \
               -PfromVersion=$TARGET_VER -PtoVersion=$THIS_VER \
               --no-daemon --stacktrace
 
@@ -221,7 +223,6 @@ jobs:
           # Future releases recompose the prev DB from these parts.
           cp generator/packaging/build/package/seforim_bundle.tar.zst.part* "$STAGE/"
           cp build/seforim.db.buildstate "$STAGE/"
-          cp build/catalog.pb "$STAGE/"
           # Patch fan (zero or more files; only present from release #2 on).
           if compgen -G "patches/patch-*.db.zst" > /dev/null; then
             cp patches/patch-*.db.zst "$STAGE/"

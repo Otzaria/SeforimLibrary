@@ -129,15 +129,14 @@ jobs:
           set -euo pipefail
           mv build/seforim.db build/seforim.db.v1
           mv build/seforim.db.buildstate build/seforim.db.buildstate.v1
-          mv build/catalog.pb build/catalog.pb.v1
-          # Drop lexical.db; only need DB + buildstate + catalog
+          # Drop lexical.db; only need DB + buildstate
           rm -f build/lexical.db build/release_info.txt
           # Clear cached sources so v2 re-fetches /releases/latest
           rm -rf generator/sefariasqlite/build/sefaria
           rm -rf generator/otzariasqlite/build/otzaria
           # Also clear the acronymizer cache so it gets the current version
           rm -rf generator/otzariasqlite/build/acronymizer
-          ls -lah build/seforim.db.v1 build/seforim.db.buildstate.v1 build/catalog.pb.v1
+          ls -lah build/seforim.db.v1 build/seforim.db.buildstate.v1
           df -h
 
       # ─── BUILD v2 (LATEST sources, seeded by v1 buildstate) ────────────────
@@ -156,11 +155,13 @@ jobs:
       # ─── PRODUCE + VERIFY PATCH ────────────────────────────────────────────
       - name: producePatchAndVerify (strict invariant)
         run: |
+          # catalog.pb is no longer produced; drop any stale copy so it can't
+          # be auto-embedded into the patch via the default -PcatalogPb path.
+          rm -f build/catalog.pb
           ./gradlew :generator-common:producePatchAndVerify \
             -PprevDb=$PWD/build/seforim.db.v1 \
             -PnewDb=$PWD/build/seforim.db \
             -Pout=$PWD/build/patch-v1-v2.db \
-            -PcatalogPb=$PWD/build/catalog.pb \
             -PfromVersion=1 -PtoVersion=2 \
             --no-daemon --stacktrace
 
@@ -200,14 +201,12 @@ jobs:
             build/patch-v1-v2.db.manifest.json
           retention-days: 7
 
-      - name: Upload v1 + v2 catalogues + buildstates
+      - name: Upload v1 + v2 buildstates
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: delta-real-diff-context
           path: |
-            build/catalog.pb.v1
-            build/catalog.pb
             build/seforim.db.buildstate.v1
             build/seforim.db.buildstate
           retention-days: 7

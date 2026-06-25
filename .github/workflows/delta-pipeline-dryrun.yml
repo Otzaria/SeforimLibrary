@@ -84,10 +84,9 @@ jobs:
           # Use `mv` (rename, no copy) to save disk for the 7+ GB DB.
           mv build/seforim.db build/seforim.db.v1
           mv build/seforim.db.buildstate build/seforim.db.buildstate.v1
-          mv build/catalog.pb build/catalog.pb.v1
           # Drop lexical.db (~54 MB, will be re-downloaded if needed).
           rm -f build/lexical.db
-          ls -lah build/seforim.db.v1 build/seforim.db.buildstate.v1 build/catalog.pb.v1
+          ls -lah build/seforim.db.v1 build/seforim.db.buildstate.v1
           df -h
 
       # ─── BUILD v2 (seeded by v1 buildstate) ─────────────────────────────────
@@ -108,11 +107,13 @@ jobs:
       # ─── PRODUCE + VERIFY THE PATCH ─────────────────────────────────────────
       - name: producePatchAndVerify (strict prev + patch == new invariant)
         run: |
+          # catalog.pb is no longer produced; drop any stale copy so it can't
+          # be auto-embedded into the patch via the default -PcatalogPb path.
+          rm -f build/catalog.pb
           ./gradlew :generator-common:producePatchAndVerify \
             -PprevDb=$PWD/build/seforim.db.v1 \
             -PnewDb=$PWD/build/seforim.db \
             -Pout=$PWD/build/patch-v1-v2.db \
-            -PcatalogPb=$PWD/build/catalog.pb \
             -PfromVersion=1 -PtoVersion=2 \
             --no-daemon --stacktrace
 
