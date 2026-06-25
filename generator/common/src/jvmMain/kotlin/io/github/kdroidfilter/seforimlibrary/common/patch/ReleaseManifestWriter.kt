@@ -49,7 +49,7 @@ class ReleaseManifestWriter(
         fromContentHash: String,
         toContentHash: String,
         compressed: CompressedPatchSpec,
-        catalogBlobName: String? = "catalog.pb",
+        catalogBlobName: String? = null,
     ): Path {
         require(Files.isRegularFile(patchFile)) { "patch file not found: $patchFile" }
         val uncompressedSha256 = sha256(patchFile)

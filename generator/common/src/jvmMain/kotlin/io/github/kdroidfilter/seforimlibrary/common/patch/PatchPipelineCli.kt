@@ -92,7 +92,8 @@ fun main(args: Array<String>) {
         ?: System.getenv("CATALOG_PB_PATH")
         ?: outPath.resolveSibling("catalog.pb").toAbsolutePath().toString()
     val catalogFile = Paths.get(catalogPath)
-    if (Files.isRegularFile(catalogFile)) {
+    val catalogEmbedded = Files.isRegularFile(catalogFile)
+    if (catalogEmbedded) {
         DriverManager.getConnection("jdbc:sqlite:${outPath.toAbsolutePath()}").use { conn ->
             conn.prepareStatement("INSERT OR REPLACE INTO blobs(name, content) VALUES (?, ?)").use { ps ->
                 ps.setString(1, "catalog.pb")
@@ -135,6 +136,9 @@ fun main(args: Array<String>) {
             size = compressed.compressedSize,
             compression = "zstd",
         ),
+        // Only claim a catalog blob in the manifest when one was actually
+        // embedded, so the manifest can't advertise a blob the patch lacks.
+        catalogBlobName = if (catalogEmbedded) "catalog.pb" else null,
     )
 
     val releaseMeta = System.getProperty("releaseMeta")
