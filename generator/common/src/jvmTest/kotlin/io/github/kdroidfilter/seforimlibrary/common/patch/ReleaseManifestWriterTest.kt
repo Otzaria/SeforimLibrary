@@ -5,6 +5,7 @@ import org.junit.Test
 import org.junit.rules.TemporaryFolder
 import java.nio.file.Files
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 class ReleaseManifestWriterTest {
@@ -30,6 +31,7 @@ class ReleaseManifestWriterTest {
                 size = compressed.compressedSize,
                 compression = "zstd",
             ),
+            catalogBlobName = "catalog.pb",
         )
         val body = Files.readString(target)
         assertTrue(body.contains("\"fromVersion\": 1"))
@@ -44,6 +46,30 @@ class ReleaseManifestWriterTest {
         assertTrue(body.contains("\"sha256\": \"${compressed.compressedSha256}\""))
         assertTrue(body.contains("\"size\": ${compressed.compressedSize}"))
         assertTrue(body.contains("\"catalogBlobName\": \"catalog.pb\""))
+    }
+
+    @Test
+    fun `writeManifest omits catalogBlobName when no blob is embedded`() {
+        val patch = tmp.newFile("patch.db").toPath()
+        Files.writeString(patch, "hello world")
+        val compressed = PatchCompressor.compress(patch, level = 3, workers = 1)
+        val target = ReleaseManifestWriter().writeManifest(
+            patchFile = patch,
+            fromVersion = 1,
+            toVersion = 2,
+            fromSchemaVersion = 3,
+            toSchemaVersion = 3,
+            fromContentHash = "aaaa",
+            toContentHash = "bbbb",
+            compressed = ReleaseManifestWriter.CompressedPatchSpec(
+                file = compressed.compressedFile,
+                sha256 = compressed.compressedSha256,
+                size = compressed.compressedSize,
+                compression = "zstd",
+            ),
+        )
+        val body = Files.readString(target)
+        assertFalse(body.contains("catalogBlobName"), body)
     }
 
     @Test
