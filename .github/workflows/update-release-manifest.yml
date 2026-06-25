@@ -2,7 +2,7 @@ name: Update Release Manifest
 
 on:
   push:
-    branches: [master]
+    branches: [otzaria]
   release:
     types: [published]
   workflow_dispatch:
@@ -21,7 +21,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          ref: master
+          ref: otzaria
 
       - name: Generate release manifest JSON
         run: |
