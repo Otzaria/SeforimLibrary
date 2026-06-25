@@ -1494,6 +1494,30 @@ class SeforimRepository(databasePath: String, private val driver: SqlDriver) : L
         }
     }
 
+    // Batch-insert TOC rows in one transaction; ids are pre-assigned by the allocator.
+    suspend fun insertTocEntriesBatch(entries: List<TocEntry>) = withContext(Dispatchers.IO) {
+        if (entries.isEmpty()) return@withContext
+        entries.forEach { require(it.id > 0) { "insertTocEntriesBatch requires allocator-assigned ids (id > 0)" } }
+        // textId resolved here: getOrCreateTocText can't run in the transaction block.
+        val resolved = entries.map { entry ->
+            entry to (entry.textId ?: getOrCreateTocText(entry.text))
+        }
+        database.transaction {
+            resolved.forEach { (entry, textId) ->
+                database.tocQueriesQueries.insertWithId(
+                    id = entry.id,
+                    bookId = entry.bookId,
+                    parentId = entry.parentId,
+                    textId = textId,
+                    level = entry.level.toLong(),
+                    lineId = entry.lineId,
+                    isLastChild = if (entry.isLastChild) 1 else 0,
+                    hasChildren = if (entry.hasChildren) 1 else 0
+                )
+            }
+        }
+    }
+
     suspend fun insertTocEntry(entry: TocEntry): Long = withContext(Dispatchers.IO) {
         logger.d{"Repository inserting TOC entry with bookId: ${entry.bookId}, lineId: ${entry.lineId}, hasChildren: ${entry.hasChildren}"}
 
