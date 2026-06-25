@@ -29,19 +29,22 @@ jobs:
 
           echo "Fetching all releases..."
 
-          # Get latest release info
-          LATEST_RELEASE=$(gh release view --json tagName,name,publishedAt,assets)
+          # `gh release view` (no args) → the "Latest" release. With no releases
+          # (or only pre-releases) the call fails; leave `latest` null.
+          if LATEST_JSON=$(gh release view --json tagName,name,publishedAt,assets 2>/dev/null); then
+            LATEST_ARG=(--argjson latest "$LATEST_JSON")
+          else
+            LATEST_ARG=(--argjson latest null)
+          fi
 
-          # Get all releases for history
+          # All releases for history ([] when none exist).
           ALL_RELEASES=$(gh release list --json tagName,name,publishedAt --limit 100)
 
-          # Get current timestamp
           GENERATED_AT=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 
-          # Build the manifest JSON directly with jq
           jq -n \
              --arg generatedAt "$GENERATED_AT" \
-             --argjson latest "$LATEST_RELEASE" \
+             "${LATEST_ARG[@]}" \
              --argjson releases "$ALL_RELEASES" \
              '{generatedAt: $generatedAt, latest: $latest, releases: $releases}' \
              > release-manifest.json
