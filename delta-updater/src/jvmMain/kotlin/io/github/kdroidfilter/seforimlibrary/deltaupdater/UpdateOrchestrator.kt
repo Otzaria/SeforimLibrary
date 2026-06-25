@@ -42,7 +42,7 @@ import java.security.MessageDigest
 class UpdateOrchestrator(
     private val applier: DeltaApplierClient,
     private val downloader: DeltaDownloader,
-    private val luceneUpdater: LuceneUpdater,
+    private val luceneUpdater: LuceneUpdater?,
     private val catalogUpdater: CatalogUpdater,
     private val workDir: Path,
     private val logger: Logger = Logger.withTag("UpdateOrchestrator"),
@@ -60,7 +60,7 @@ class UpdateOrchestrator(
         chain: List<DeltaEntry>,
         fetchManifest: (DeltaEntry) -> DeltaManifest,
         baseUrlForEntry: (DeltaEntry, String) -> String,
-        luceneSinks: () -> LuceneUpdater.SinkSession,
+        luceneSinks: (() -> LuceneUpdater.SinkSession)? = null,
         progress: (current: Int, total: Int, status: String) -> Unit = { _, _, _ -> },
     ) {
         // First: recover from any half-applied previous run.
@@ -105,17 +105,23 @@ class UpdateOrchestrator(
                 // retry. (Without this, the rollback would only happen on
                 // the next app launch.)
                 try {
-                    progress(step, chain.size, "updating lucene")
-                    luceneSinks().use { session ->
-                        // Pass seforimDb so book-metadata-only changes
-                        // (no line edits) also trigger a re-index of the
-                        // book's lines — otherwise the Lucene Document's
-                        // stored book_title / category_id / … fields would
-                        // drift from the live DB.
-                        luceneUpdater.applyTo(
-                            mainPatch, session.delete, session.upsert,
-                            liveDbPath = seforimDb,
-                        )
+                    // Optional: a client with no Lucene index (or one that
+                    // rebuilds its search index out of band) wires no
+                    // updater/sinks and we skip this step. The SQLite delta
+                    // above already committed, so the core update is complete.
+                    if (luceneUpdater != null && luceneSinks != null) {
+                        progress(step, chain.size, "updating lucene")
+                        luceneSinks().use { session ->
+                            // Pass seforimDb so book-metadata-only changes
+                            // (no line edits) also trigger a re-index of the
+                            // book's lines — otherwise the Lucene Document's
+                            // stored book_title / category_id / … fields would
+                            // drift from the live DB.
+                            luceneUpdater.applyTo(
+                                mainPatch, session.delete, session.upsert,
+                                liveDbPath = seforimDb,
+                            )
+                        }
                     }
 
                     progress(step, chain.size, "updating catalog")

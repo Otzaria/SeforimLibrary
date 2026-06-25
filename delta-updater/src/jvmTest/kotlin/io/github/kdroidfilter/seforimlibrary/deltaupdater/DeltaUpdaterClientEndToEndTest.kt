@@ -192,6 +192,134 @@ class DeltaUpdaterClientEndToEndTest {
         }
     }
 
+    /**
+     * The Otzaria scenario: a client that wires NO Lucene sinks (it has no
+     * Lucene index — Otzaria uses a different search engine). The SQLite +
+     * catalog delta must still apply in full, the post-apply logical hash
+     * must match the target, and the marker/backup must be cleaned up — i.e.
+     * dropping the Lucene step does NOT break the delta.
+     */
+    @Test
+    fun `delta applies without any Lucene sinks (non-Lucene client)`() {
+        val liveDb = tmp.newFolder().toPath().resolve("seforim.db")
+        buildClientDb(liveDb)
+        val targetDb = tmp.newFolder().toPath().resolve("target.db")
+        buildTargetDb(targetDb)
+
+        val patchDb = tmp.newFolder().toPath().resolve("patch.db")
+        io.github.kdroidfilter.seforimlibrary.common.patch.PatchDbProducer().produce(
+            prevDb = liveDb,
+            newDb = targetDb,
+            outputPath = patchDb,
+            fromVersion = 1,
+            toVersion = 2,
+        )
+        DriverManager.getConnection("jdbc:sqlite:${patchDb.toAbsolutePath()}").use { c ->
+            c.prepareStatement("INSERT OR REPLACE INTO blobs(name, content) VALUES (?, ?)").use { ps ->
+                ps.setString(1, "catalog.pb")
+                ps.setBytes(2, "CATALOG_PAYLOAD_V2".toByteArray())
+                ps.executeUpdate()
+            }
+        }
+
+        val toHash = io.github.kdroidfilter.seforimlibrary.common.patch.LogicalContentHasher()
+            .compute(DriverManager.getConnection("jdbc:sqlite:${targetDb.toAbsolutePath()}"))
+        val fromHash = io.github.kdroidfilter.seforimlibrary.common.patch.LogicalContentHasher()
+            .compute(DriverManager.getConnection("jdbc:sqlite:${liveDb.toAbsolutePath()}"))
+        val uncompressedSha = sha256(patchDb)
+        val uncompressedSize = Files.size(patchDb)
+        val compressed = io.github.kdroidfilter.seforimlibrary.common.patch.PatchCompressor
+            .compress(patchDb, level = 3, workers = 1)
+
+        val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
+        val port = server.address.port
+        val base = "http://127.0.0.1:$port"
+        server.createContext("/release_meta.json") { ex ->
+            ex.respond(
+                200,
+                """
+                {
+                  "latestVersion": 2,
+                  "fullBundle": {"version": 2, "url": "$base/full.tar.zst", "sha256": "abcd", "size": 1000000000},
+                  "deltas": [
+                    {"fromVersion": 1, "toVersion": 2, "manifestUrl": "$base/1-2.json", "totalSize": ${compressed.compressedSize}}
+                  ],
+                  "retentionWindow": 30
+                }
+                """.trimIndent(),
+            )
+        }
+        server.createContext("/1-2.json") { ex ->
+            ex.respond(
+                200,
+                """
+                {
+                  "fromVersion": 1,
+                  "toVersion": 2,
+                  "fromSchemaVersion": 1,
+                  "toSchemaVersion": 1,
+                  "fromContentHash": "$fromHash",
+                  "toContentHash": "$toHash",
+                  "patchFiles": [
+                    {"file": "patch_global.db.zst", "compression": "zstd",
+                     "sha256": "${compressed.compressedSha256}", "size": ${compressed.compressedSize},
+                     "uncompressedSha256": "$uncompressedSha", "uncompressedSize": $uncompressedSize}
+                  ],
+                  "catalogBlobName": "catalog.pb"
+                }
+                """.trimIndent(),
+            )
+        }
+        server.createContext("/patch_global.db.zst") { ex ->
+            ex.responseHeaders.set("Content-Type", "application/octet-stream")
+            ex.sendResponseHeaders(200, compressed.compressedSize)
+            ex.responseBody.use { Files.copy(compressed.compressedFile, it) }
+        }
+        server.start()
+
+        try {
+            val catalogPb = tmp.newFolder().toPath().resolve("catalog.pb")
+            val workDir = tmp.newFolder().toPath()
+            // No indexSinks wired — the Lucene step must be skipped.
+            val client = DeltaUpdaterClient(
+                seforimDb = liveDb,
+                catalogPb = catalogPb,
+                workDir = workDir,
+                releaseMetaUrl = "$base/release_meta.json",
+                localVersionProvider = { 1 },
+            )
+
+            val path = client.checkForUpdate()
+            assertTrue(path is UpdatePath.Chain, "expected Chain, got $path")
+            require(path is UpdatePath.Chain)
+
+            val progressEvents = ArrayList<String>()
+            client.applyChain(path.deltas) { cur, total, status ->
+                progressEvents += "$cur/$total: $status"
+            }
+
+            // SQLite delta applied: logical hash matches the target.
+            val appliedHash = DriverManager.getConnection("jdbc:sqlite:${liveDb.toAbsolutePath()}").use {
+                io.github.kdroidfilter.seforimlibrary.common.patch.LogicalContentHasher().compute(it)
+            }
+            assertEquals(toHash, appliedHash, "applied DB must match target by logical hash")
+
+            // Catalog still written, marker/backup still cleaned up.
+            assertTrue(Files.exists(catalogPb))
+            assertEquals("CATALOG_PAYLOAD_V2", Files.readString(catalogPb))
+            assertTrue(!Files.exists(liveDb.resolveSibling("${liveDb.fileName}.backup")))
+            assertTrue(!Files.exists(liveDb.resolveSibling("${liveDb.fileName}.applying")))
+
+            // The Lucene step was skipped entirely (no such progress event).
+            assertTrue(
+                progressEvents.none { "updating lucene" in it },
+                "Lucene step must be skipped when no sinks are wired",
+            )
+        } finally {
+            server.stop(0)
+        }
+    }
+
     // ─── Test fixtures: tiny seforim-shaped DBs ───────────────────────────────
 
     private fun buildClientDb(path: Path) {
