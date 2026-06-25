@@ -64,8 +64,8 @@ object OtzariaFetcher {
         // Fetch release info from GitHub API
         val body = OptimizedHttpClient.fetchJson(LATEST_API, USER_AGENT, logger)
 
-        // Find all .zip asset URLs
-        val regex = Regex(""""browser_download_url"\s*:\s*"([^"]+\.zip)"""")
+        // The release also ships otzaria_dicta_latest.zip; download only the main library zip.
+        val regex = Regex(""""browser_download_url"\s*:\s*"([^"]+/otzaria_latest\.zip)"""")
         val zipUrls = regex.findAll(body).map { it.groupValues[1] }.toList()
 
         if (zipUrls.isEmpty()) {
