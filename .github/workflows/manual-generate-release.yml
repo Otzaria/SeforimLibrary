@@ -148,23 +148,9 @@ jobs:
           # self-hosted workspace can't smuggle it into the bundle or a patch.
           rm -f build/catalog.pb
 
-      - name: Package Seforim Bundle (split tar.zst)
-        run: ./gradlew packageSeforimBundle --no-daemon --stacktrace
-
-      - name: List bundle parts
-        run: |
-          set -euo pipefail
-          PARTS=(generator/packaging/build/package/seforim_bundle.tar.zst.part*)
-          if [ ${#PARTS[@]} -eq 0 ] || [ "${PARTS[0]}" = "generator/packaging/build/package/seforim_bundle.tar.zst.part*" ]; then
-            echo "No bundle parts produced." >&2
-            exit 1
-          fi
-          ls -lh "${PARTS[@]}"
-
       # ─── Produce log-fan of patches: offsets {1, 2, 4, 8, 16} ──────────────
-      # The prev DB is reconstituted from the bundle's split parts (GitHub
-      # caps single assets at 2 GiB, so we never ship the unsplit 7 GB DB
-      # directly). Each iteration cats + extracts, runs the producer, then
+      # The prev DB is reconstituted from the release's compressed seforim.db.zst.
+      # Each iteration downloads + decompresses, runs the producer, then
       # frees everything so disk peak stays bounded.
       - name: Produce + verify patch fan
         if: steps.discover.outputs.has_prev == 'true'
@@ -184,17 +170,14 @@ jobs:
               continue
             fi
             echo "=== Producing patch v${TARGET_VER} → v${THIS_VER} (offset $OFFSET, tag=$TAG) ==="
-            rm -rf prev-dbs/*
-            mkdir -p prev-dbs/extract
+            rm -rf prev-dbs
+            mkdir -p prev-dbs
             gh release download "$TAG" \
-              --pattern 'seforim_bundle.tar.zst.part*' \
+              --pattern 'seforim.db.zst' \
               --dir prev-dbs
-            cat prev-dbs/seforim_bundle.tar.zst.part* > prev-dbs/seforim_bundle.tar.zst
-            rm -f prev-dbs/seforim_bundle.tar.zst.part*
-            tar --use-compress-program=unzstd -xf prev-dbs/seforim_bundle.tar.zst -C prev-dbs/extract
-            rm -f prev-dbs/seforim_bundle.tar.zst
-            PREV_DB=$(find prev-dbs/extract -name seforim.db -type f | head -n1)
-            test -s "$PREV_DB" || { echo "::error::seforim.db not found in bundle of $TAG"; exit 1; }
+            unzstd -c prev-dbs/seforim.db.zst > prev-dbs/seforim.db
+            PREV_DB=prev-dbs/seforim.db
+            test -s "$PREV_DB" || { echo "::error::seforim.db.zst not found in release $TAG"; exit 1; }
 
             ./gradlew :generator-common:producePatchAndVerify \
               -PprevDb=$PWD/$PREV_DB \
@@ -213,15 +196,21 @@ jobs:
           echo "=== Final patch artefacts ==="
           ls -lh patches/ || true
 
+      # Compress the full DB into a single .zst for the release. Done after the
+      # delta phase so build/seforim.db (the diff ground-truth) and the .zst
+      # don't both sit on disk during the patch fan.
+      - name: Compress Seforim Database (zstd)
+        run: zstd -T0 -22 -f -o build/seforim.db.zst build/seforim.db
+
       # ─── Stage release assets ──────────────────────────────────────────────
       - name: Stage release assets
         run: |
           set -euo pipefail
           STAGE=release-staging
           mkdir -p "$STAGE"
-          # Bundle parts (each under 2 GiB) — canonical source of the DB.
-          # Future releases recompose the prev DB from these parts.
-          cp generator/packaging/build/package/seforim_bundle.tar.zst.part* "$STAGE/"
+          # Full DB, compressed — canonical source of the DB.
+          # Future releases reconstitute the prev DB from this.
+          cp build/seforim.db.zst "$STAGE/"
           cp build/seforim.db.buildstate "$STAGE/"
           # Patch fan (zero or more files; only present from release #2 on).
           if compgen -G "patches/patch-*.db.zst" > /dev/null; then
