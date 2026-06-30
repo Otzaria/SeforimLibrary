@@ -1,6 +1,6 @@
 -- Queries for default commentators per book
 
-selectByBookId:
+selectByBookIdWithPosition:
 SELECT commentatorBookId, position
 FROM default_commentator
 WHERE bookId = ?
