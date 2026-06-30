@@ -13,6 +13,7 @@ import io.github.kdroidfilter.seforimlibrary.core.models.Author
 import io.github.kdroidfilter.seforimlibrary.core.models.Book
 import io.github.kdroidfilter.seforimlibrary.core.models.Category
 import io.github.kdroidfilter.seforimlibrary.core.models.ConnectionType
+import io.github.kdroidfilter.seforimlibrary.core.models.DefaultCommentatorPosition
 import io.github.kdroidfilter.seforimlibrary.core.models.Line
 import io.github.kdroidfilter.seforimlibrary.core.models.LineAltTocMapping
 import io.github.kdroidfilter.seforimlibrary.core.models.LineTocMapping
@@ -2572,25 +2573,25 @@ class SeforimRepository(databasePath: String, private val driver: SqlDriver) : L
     // --- Default commentators ---
 
     /**
-     * Returns the default commentators for the given book as (commentatorBookId, position)
-     * pairs, ordered by position. Positions may be non-contiguous (a consumer may leave
-     * intentional gaps), so this preserves them for safe read-modify-write.
+     * Returns the default commentators for the given book, ordered by position.
+     * Positions may be non-contiguous (a consumer may leave intentional gaps), so
+     * they are preserved for safe read-modify-write.
      */
-    suspend fun getDefaultCommentatorsForBook(bookId: Long): List<Pair<Long, Int>> =
+    suspend fun getDefaultCommentatorsForBook(bookId: Long): List<DefaultCommentatorPosition> =
         withContext(Dispatchers.IO) {
             database.defaultCommentatorQueriesQueries.selectByBookIdWithPosition(bookId)
                 .executeAsList()
-                .map { it.commentatorBookId to it.position.toInt() }
+                .map { DefaultCommentatorPosition(it.commentatorBookId, it.position.toInt()) }
         }
 
     /**
-     * Replaces the default commentator list for a given book.
-     * Each entry is (commentatorBookId, position); positions may be non-contiguous
-     * (gaps are intentional, e.g. via the "-" sentinel in default_commentators.json).
+     * Replaces the default commentator list for a given book. Positions may be
+     * non-contiguous (gaps are intentional, e.g. via the "-" sentinel in
+     * default_commentators.json).
      */
     suspend fun setDefaultCommentatorsForBook(
         bookId: Long,
-        commentators: List<Pair<Long, Int>>
+        commentators: List<DefaultCommentatorPosition>
     ) = withContext(Dispatchers.IO) {
         database.defaultCommentatorQueriesQueries.deleteByBookId(bookId)
         commentators.forEach { (commentatorBookId, position) ->

@@ -1,6 +1,7 @@
 package io.github.kdroidfilter.seforimlibrary.sefariasqlite
 
 import co.touchlab.kermit.Logger
+import io.github.kdroidfilter.seforimlibrary.core.models.DefaultCommentatorPosition
 import io.github.kdroidfilter.seforimlibrary.dao.repository.SeforimRepository
 import kotlinx.serialization.json.Json
 
@@ -100,18 +101,18 @@ internal suspend fun applyDefaultCommentators(
 }
 
 /**
- * Resolves slots to (commentatorBookId, position) pairs.
+ * Resolves slots to [DefaultCommentatorPosition] entries.
  *
- * position = slot index. A null slot ("-") advances the position without emitting a row,
- * leaving a gap in the position sequence. A missing or duplicate commentator is packed
- * (position not advanced) — backward-compatible with contiguous defaults.
+ * A null slot ("-") advances the position without emitting an entry, leaving a gap in the
+ * position sequence. A missing or duplicate commentator is packed (position not advanced) —
+ * backward-compatible with contiguous defaults.
  */
 internal fun resolvePositionedCommentators(
     slots: List<String?>,
     baseBookId: Long,
     normalizedTitleToBookId: Map<String, Long>
-): List<Pair<Long, Int>> {
-    val positioned = mutableListOf<Pair<Long, Int>>()
+): List<DefaultCommentatorPosition> {
+    val positioned = mutableListOf<DefaultCommentatorPosition>()
     val seen = mutableSetOf<Long>()
     var position = 0
     slots.forEach { key ->
@@ -123,7 +124,7 @@ internal fun resolvePositionedCommentators(
         if (commentatorBookId != null && commentatorBookId != baseBookId &&
             seen.add(commentatorBookId)
         ) {
-            positioned += commentatorBookId to position
+            positioned += DefaultCommentatorPosition(commentatorBookId, position)
             position++
         }
     }

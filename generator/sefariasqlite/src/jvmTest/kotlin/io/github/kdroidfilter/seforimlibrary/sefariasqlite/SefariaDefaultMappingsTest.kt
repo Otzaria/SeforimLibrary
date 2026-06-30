@@ -1,5 +1,6 @@
 package io.github.kdroidfilter.seforimlibrary.sefariasqlite
 
+import io.github.kdroidfilter.seforimlibrary.core.models.DefaultCommentatorPosition
 import kotlin.test.Test
 import kotlin.test.assertEquals
 
@@ -10,7 +11,14 @@ class SefariaDefaultMappingsTest {
     fun contiguousSlotsGetSequentialPositions() {
         val result =
             resolvePositionedCommentators(listOf("א", "ב", "ג"), 99L, titleToId)
-        assertEquals(listOf(10L to 0, 20L to 1, 30L to 2), result)
+        assertEquals(
+            listOf(
+                DefaultCommentatorPosition(10L, 0),
+                DefaultCommentatorPosition(20L, 1),
+                DefaultCommentatorPosition(30L, 2)
+            ),
+            result
+        )
     }
 
     @Test
@@ -18,7 +26,10 @@ class SefariaDefaultMappingsTest {
         // א ב-position 0, slot ריק (null) מדלג ל-1, ב נוחת על position 2.
         val result =
             resolvePositionedCommentators(listOf("א", null, "ב"), 99L, titleToId)
-        assertEquals(listOf(10L to 0, 20L to 2), result)
+        assertEquals(
+            listOf(DefaultCommentatorPosition(10L, 0), DefaultCommentatorPosition(20L, 2)),
+            result
+        )
     }
 
     @Test
@@ -26,18 +37,21 @@ class SefariaDefaultMappingsTest {
         // מפרש שאינו ב-map מתקבץ (position לא מתקדם) — תאימות לאחור.
         val result =
             resolvePositionedCommentators(listOf("א", "לא קיים", "ב"), 99L, titleToId)
-        assertEquals(listOf(10L to 0, 20L to 1), result)
+        assertEquals(
+            listOf(DefaultCommentatorPosition(10L, 0), DefaultCommentatorPosition(20L, 1)),
+            result
+        )
     }
 
     @Test
     fun duplicatesAndSelfReferenceAreSkipped() {
         assertEquals(
-            listOf(10L to 0, 20L to 1),
+            listOf(DefaultCommentatorPosition(10L, 0), DefaultCommentatorPosition(20L, 1)),
             resolvePositionedCommentators(listOf("א", "א", "ב"), 99L, titleToId)
         )
         // baseBookId == commentator → מדולג (ספר אינו מפרש על עצמו)
         assertEquals(
-            listOf(20L to 0),
+            listOf(DefaultCommentatorPosition(20L, 0)),
             resolvePositionedCommentators(listOf("א", "ב"), 10L, titleToId)
         )
     }

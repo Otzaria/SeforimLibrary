@@ -6,6 +6,7 @@ import co.touchlab.kermit.Severity
 import io.github.kdroidfilter.seforimlibrary.common.ids.IdAllocatorBindings
 import io.github.kdroidfilter.seforimlibrary.common.ids.InMemoryIdAllocator
 import io.github.kdroidfilter.seforimlibrary.core.models.ConnectionType
+import io.github.kdroidfilter.seforimlibrary.core.models.DefaultCommentatorPosition
 import io.github.kdroidfilter.seforimlibrary.core.models.Link
 import io.github.kdroidfilter.seforimlibrary.dao.repository.SeforimRepository
 import kotlinx.coroutines.runBlocking
@@ -643,7 +644,10 @@ private suspend fun setHearotAsDefaultCommentators(
         val hearotBook = hearotByTractate[tractateName]
 
         if (hearotBook != null) {
-            repository.setDefaultCommentatorsForBook(havroutaBook.id, listOf(hearotBook.id to 0))
+            repository.setDefaultCommentatorsForBook(
+                havroutaBook.id,
+                listOf(DefaultCommentatorPosition(hearotBook.id, 0))
+            )
             count++
             logger.d { "Set ${hearotBook.title} as default for ${havroutaBook.title}" }
         }
