@@ -339,6 +339,7 @@ class SefariaAltTocBuilderTest {
             headings = emptyList(),
             authors = emptyList(),
             description = null,
+            heShortDesc = null,
             pubDates = emptyList(),
             altStructures = altStructures,
             // "Messilat Yesharim" is a real Sefaria title variant for this book.
