@@ -1,7 +1,102 @@
 {
-  "generatedAt": "2026-06-26T17:11:28Z",
-  "latest": null,
+  "generatedAt": "2026-06-30T06:17:01Z",
+  "latest": {
+    "assets": [
+      {
+        "apiUrl": "https://api.github.com/repos/Otzaria/SeforimLibrary/releases/assets/461874684",
+        "contentType": "application/octet-stream",
+        "createdAt": "2026-06-30T06:16:01Z",
+        "digest": "sha256:4fbc02ae2e48e17382af50538ebe73a6e244dfd5364b137909fea3fb06d16d7d",
+        "downloadCount": 0,
+        "id": "RA_kwDOQ6kTXM4bh6X8",
+        "label": "",
+        "name": "patch-v2-v4.db.zst",
+        "size": 38066377,
+        "state": "uploaded",
+        "updatedAt": "2026-06-30T06:16:03Z",
+        "url": "https://github.com/Otzaria/SeforimLibrary/releases/download/v4-20260630045331/patch-v2-v4.db.zst"
+      },
+      {
+        "apiUrl": "https://api.github.com/repos/Otzaria/SeforimLibrary/releases/assets/461874685",
+        "contentType": "application/json",
+        "createdAt": "2026-06-30T06:16:01Z",
+        "digest": "sha256:da4d76f3e0921dda95494c6ddad071f869f87023dced554a43da078faa5fb137",
+        "downloadCount": 0,
+        "id": "RA_kwDOQ6kTXM4bh6X9",
+        "label": "",
+        "name": "patch-v2-v4.db.zst.manifest.json",
+        "size": 607,
+        "state": "uploaded",
+        "updatedAt": "2026-06-30T06:16:01Z",
+        "url": "https://github.com/Otzaria/SeforimLibrary/releases/download/v4-20260630045331/patch-v2-v4.db.zst.manifest.json"
+      },
+      {
+        "apiUrl": "https://api.github.com/repos/Otzaria/SeforimLibrary/releases/assets/461874682",
+        "contentType": "application/octet-stream",
+        "createdAt": "2026-06-30T06:16:00Z",
+        "digest": "sha256:7ac189d074ce82017adc11677a01b66d0da01fb608c8f16dd389d5ba921cb3bc",
+        "downloadCount": 0,
+        "id": "RA_kwDOQ6kTXM4bh6X6",
+        "label": "",
+        "name": "patch-v3-v4.db.zst",
+        "size": 36320097,
+        "state": "uploaded",
+        "updatedAt": "2026-06-30T06:16:04Z",
+        "url": "https://github.com/Otzaria/SeforimLibrary/releases/download/v4-20260630045331/patch-v3-v4.db.zst"
+      },
+      {
+        "apiUrl": "https://api.github.com/repos/Otzaria/SeforimLibrary/releases/assets/461874683",
+        "contentType": "application/json",
+        "createdAt": "2026-06-30T06:16:00Z",
+        "digest": "sha256:660fa96d73a51799e8706e74e3e3b8877547873df7ef5e0ad25f19537319da4a",
+        "downloadCount": 0,
+        "id": "RA_kwDOQ6kTXM4bh6X7",
+        "label": "",
+        "name": "patch-v3-v4.db.zst.manifest.json",
+        "size": 607,
+        "state": "uploaded",
+        "updatedAt": "2026-06-30T06:16:01Z",
+        "url": "https://github.com/Otzaria/SeforimLibrary/releases/download/v4-20260630045331/patch-v3-v4.db.zst.manifest.json"
+      },
+      {
+        "apiUrl": "https://api.github.com/repos/Otzaria/SeforimLibrary/releases/assets/461874687",
+        "contentType": "application/octet-stream",
+        "createdAt": "2026-06-30T06:16:01Z",
+        "digest": "sha256:534e413042633e3ec208fabce33ba5cdbbfeb74e64dc8ea09feef5f365933b4f",
+        "downloadCount": 0,
+        "id": "RA_kwDOQ6kTXM4bh6X_",
+        "label": "",
+        "name": "seforim.db.buildstate",
+        "size": 876535808,
+        "state": "uploaded",
+        "updatedAt": "2026-06-30T06:16:48Z",
+        "url": "https://github.com/Otzaria/SeforimLibrary/releases/download/v4-20260630045331/seforim.db.buildstate"
+      },
+      {
+        "apiUrl": "https://api.github.com/repos/Otzaria/SeforimLibrary/releases/assets/461874686",
+        "contentType": "application/octet-stream",
+        "createdAt": "2026-06-30T06:16:01Z",
+        "digest": "sha256:a3487bf56fc0ea0b3137b94896d39641073844e51557100f6b2775eaed13890a",
+        "downloadCount": 0,
+        "id": "RA_kwDOQ6kTXM4bh6X-",
+        "label": "",
+        "name": "seforim.db.zst",
+        "size": 1241180854,
+        "state": "uploaded",
+        "updatedAt": "2026-06-30T06:16:58Z",
+        "url": "https://github.com/Otzaria/SeforimLibrary/releases/download/v4-20260630045331/seforim.db.zst"
+      }
+    ],
+    "name": "v4-20260630045331",
+    "publishedAt": "2026-06-30T06:16:59Z",
+    "tagName": "v4-20260630045331"
+  },
   "releases": [
+    {
+      "name": "v4-20260630045331",
+      "publishedAt": "2026-06-30T06:16:59Z",
+      "tagName": "v4-20260630045331"
+    },
     {
       "name": "v3-20260626155508",
       "publishedAt": "2026-06-26T17:10:27Z",
