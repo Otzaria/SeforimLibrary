@@ -315,17 +315,19 @@ internal class SefariaLinksImporter(
         repository.executeRawQuery(
             "CREATE TABLE _book_corpus (bookId INTEGER PRIMARY KEY NOT NULL, corpus TEXT) WITHOUT ROWID"
         )
-        // category_closure(ancestorId, descendantId) lets us tag each book
-        // by checking whether any of its category ancestors matches a known
-        // corpus root. CASE picks the most-specific matching corpus name.
+        // Tag each book by the corpus root among its category ancestors.
+        // flattenTalmudCategories renamed "תלמוד" → "תלמוד בבלי"/"תלמוד ירושלמי";
+        // map both back to "תלמוד" or every Talmud book gets a NULL corpus.
         repository.executeRawQuery(
             """
             INSERT INTO _book_corpus (bookId, corpus)
-            SELECT b.id, MIN(c.title) AS corpus
+            SELECT b.id,
+                   CASE WHEN MIN(c.title) IN ('תלמוד בבלי','תלמוד ירושלמי') THEN 'תלמוד'
+                        ELSE MIN(c.title) END AS corpus
             FROM book b
             JOIN category_closure cc ON cc.descendantId = b.categoryId
             JOIN category c ON c.id = cc.ancestorId
-            WHERE c.title IN ('תנ״ך','תלמוד','משנה','משניות','הלכה','חסידות','קבלה','מדרש','מוסר','ספרי מוסר','מחשבת ישראל')
+            WHERE c.title IN ('תנ״ך','תלמוד בבלי','תלמוד ירושלמי','משנה','משניות','הלכה','חסידות','קבלה','מדרש','מוסר','ספרי מוסר','מחשבת ישראל')
             GROUP BY b.id
             """.trimIndent()
         )
