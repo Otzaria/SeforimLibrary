@@ -133,6 +133,9 @@ internal class SefariaInlineAnchors(
         val lines: List<String>,
         /** 0-based lineIndex -> RefEntry (same map the line inserter used). */
         val refsByLineIndex: Map<Int, RefEntry>,
+        /** See BookPayload.singleVersionTitle / cleanShiftByLineIndex. */
+        val singleVersionTitle: String? = null,
+        val cleanShiftByLineIndex: Map<Int, Int> = emptyMap(),
     )
 
     private val skipCounts = linkedMapOf<String, Int>()

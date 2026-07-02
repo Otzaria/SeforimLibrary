@@ -303,6 +303,8 @@ class SefariaDirectImporter(
                 bookPath = bookPath,
                 lines = payload.lines,
                 refsByLineIndex = refsByLineIndex,
+                singleVersionTitle = payload.singleVersionTitle,
+                cleanShiftByLineIndex = payload.cleanShiftByLineIndex,
             )
 
             payload.lines.forEachIndexed { idx, content ->
@@ -455,6 +457,7 @@ class SefariaDirectImporter(
         val linksDir = dbRoot.resolve("links")
         if (linksDir.exists()) {
             logger.i { "Processing links (${headingLineIds.size} heading lines will be excluded from link targets)..." }
+            val charLevelPending = java.util.concurrent.ConcurrentLinkedQueue<PendingCharLevelAnchor>()
             linksImporter.processLinksInParallel(
                 linksDir = linksDir,
                 refsByCanonical = refsByCanonical,
@@ -462,7 +465,8 @@ class SefariaDirectImporter(
                 lineKeyToId = lineKeyToId,
                 lineIdToBookId = lineIdToBookId,
                 bookMetaById = bookMetaById,
-                headingLineIds = headingLineIds
+                headingLineIds = headingLineIds,
+                charLevelPending = charLevelPending
             )
             logger.i { "Links processed" }
 
@@ -474,6 +478,14 @@ class SefariaDirectImporter(
                 bookMetaById = bookMetaById,
                 refsByCanonical = refsByCanonical,
                 lineKeyToId = lineKeyToId,
+            )
+
+            // Char-level anchors from the quotation finder's charLevelData —
+            // exact-only (single-version + unmodified-line gates).
+            logger.i { "Resolving char-level anchors (charLevelData, ${charLevelPending.size} cells)..." }
+            SefariaCharLevelAnchors(repository, logger).generate(
+                pending = charLevelPending,
+                books = anchorBookInputs,
             )
         }
 

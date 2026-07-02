@@ -10,8 +10,13 @@ import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.joinAll
 import kotlinx.coroutines.launch
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.intOrNull
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import java.nio.file.Files
 import java.nio.file.Path
+import java.util.Queue
 
 internal class SefariaLinksImporter(
     private val repository: SeforimRepository,
@@ -25,7 +30,11 @@ internal class SefariaLinksImporter(
         lineKeyToId: Map<Pair<String, Int>, Long>,
         lineIdToBookId: Map<Long, Long>,
         bookMetaById: Map<Long, BookMeta>,
-        headingLineIds: Set<Long> = emptySet()
+        headingLineIds: Set<Long> = emptySet(),
+        // Collects the CSV `Char Level Data` cells for the post-links anchor
+        // pass (see SefariaCharLevelAnchors). Must be thread-safe — link files
+        // are processed in parallel. null = don't collect.
+        charLevelPending: Queue<PendingCharLevelAnchor>? = null
     ) = coroutineScope {
         // Pre-register all connection types we'll use so their ids are stable
         // (so `link.connectionTypeId` is reproducible across builds).
@@ -51,7 +60,8 @@ internal class SefariaLinksImporter(
                     lineIdToBookId = lineIdToBookId,
                     bookMetaById = bookMetaById,
                     headingLineIds = headingLineIds,
-                    linkChannel = linkChannel
+                    linkChannel = linkChannel,
+                    charLevelPending = charLevelPending
                 )
             }
         }
@@ -88,7 +98,8 @@ internal class SefariaLinksImporter(
         lineIdToBookId: Map<Long, Long>,
         bookMetaById: Map<Long, BookMeta>,
         headingLineIds: Set<Long>,
-        linkChannel: Channel<Link>
+        linkChannel: Channel<Link>,
+        charLevelPending: Queue<PendingCharLevelAnchor>? = null
     ) {
         Files.newBufferedReader(file).use { reader ->
             val iter = reader.lineSequence().iterator()
@@ -97,6 +108,10 @@ internal class SefariaLinksImporter(
             val idxC1 = headers.indexOf("Citation 1")
             val idxC2 = headers.indexOf("Citation 2")
             val idxConn = headers.indexOf("Conection Type")
+            // Optional word-level columns (SefariaExport extension; absent in
+            // older exports).
+            val idxCld1 = headers.indexOf("Char Level Data 1")
+            val idxCld2 = headers.indexOf("Char Level Data 2")
             if (idxC1 < 0 || idxC2 < 0 || idxConn < 0) return
 
             while (iter.hasNext()) {
@@ -106,6 +121,12 @@ internal class SefariaLinksImporter(
                 val c2 = normalizeCitation(row.getOrNull(idxC2).orEmpty())
                 if (c1.isEmpty() || c2.isEmpty()) continue
                 val conn = row.getOrNull(idxConn)?.trim().orEmpty()
+                val cld1 = if (charLevelPending != null && idxCld1 >= 0) {
+                    parseCharLevelCell(row.getOrNull(idxCld1))
+                } else null
+                val cld2 = if (charLevelPending != null && idxCld2 >= 0) {
+                    parseCharLevelCell(row.getOrNull(idxCld2))
+                } else null
 
                 val fromRefs = resolveRefs(c1, refsByCanonical, refsByBase)
                 val toRefs = resolveRefs(c2, refsByCanonical, refsByBase)
@@ -226,6 +247,32 @@ internal class SefariaLinksImporter(
                                 isDeclaredBase = isDeclaredBase,
                             )
                         )
+
+                        // Queue char-level cells for the post-links anchor pass.
+                        // Citation 1 data refers to `from`'s line, Citation 2 to
+                        // `to`'s — the anchor side follows the stored direction.
+                        if (charLevelPending != null) {
+                            if (cld1 != null) {
+                                charLevelPending.add(
+                                    cld1.toPending(
+                                        entry = from,
+                                        lineId = srcLine,
+                                        storedSrcLine = storedSrcLine,
+                                        storedTgtLine = storedTgtLine,
+                                    )
+                                )
+                            }
+                            if (cld2 != null) {
+                                charLevelPending.add(
+                                    cld2.toPending(
+                                        entry = to,
+                                        lineId = tgtLine,
+                                        storedSrcLine = storedSrcLine,
+                                        storedTgtLine = storedTgtLine,
+                                    )
+                                )
+                            }
+                        }
                     }
                 }
             }
@@ -240,6 +287,33 @@ internal class SefariaLinksImporter(
         val tgtLineIndex: Int,
         val connectionType: ConnectionType,
     )
+
+    /** A parsed `Char Level Data` CSV cell, before line/side resolution. */
+    internal data class CharLevelCell(
+        val start: Int,
+        val end: Int,
+        val versionTitle: String,
+        val language: String,
+        val isWordBased: Boolean,
+    ) {
+        fun toPending(
+            entry: RefEntry,
+            lineId: Long,
+            storedSrcLine: Long,
+            storedTgtLine: Long,
+        ) = PendingCharLevelAnchor(
+            path = entry.path,
+            lineIndex0 = entry.lineIndex - 1,
+            srcLineId = storedSrcLine,
+            tgtLineId = storedTgtLine,
+            side = if (lineId == storedSrcLine) 0 else 1,
+            startChar = start,
+            endChar = end,
+            versionTitle = versionTitle,
+            language = language,
+            isWordBased = isWordBased,
+        )
+    }
 
     private fun lineBookId(lineId: Long, lineIdToBookId: Map<Long, Long>): Long =
         lineIdToBookId[lineId] ?: 0
@@ -439,6 +513,43 @@ internal class SefariaLinksImporter(
                 ")"
         )
     }
+}
+
+private val charLevelJson = Json { ignoreUnknownKeys = true }
+
+/**
+ * Parses one `Char Level Data` CSV cell — a JSON dict with either
+ * startChar/endChar (char offsets into the version's segment text) or
+ * startWord/endWord (word indices, used by Sefaria for Tanakh verse sides),
+ * plus the versionTitle+language the offsets were computed against.
+ * Returns null for empty/unparseable cells (unparseable = malformed source
+ * data; there is nothing exact to import from it).
+ */
+internal fun parseCharLevelCell(cell: String?): SefariaLinksImporter.CharLevelCell? {
+    val raw = cell?.trim().orEmpty()
+    if (raw.isEmpty()) return null
+    return runCatching {
+        val obj = charLevelJson.parseToJsonElement(raw).jsonObject
+        val startChar = obj["startChar"]?.jsonPrimitive?.intOrNull
+        val endChar = obj["endChar"]?.jsonPrimitive?.intOrNull
+        val startWord = obj["startWord"]?.jsonPrimitive?.intOrNull
+        val endWord = obj["endWord"]?.jsonPrimitive?.intOrNull
+        val versionTitle = obj["versionTitle"]?.jsonPrimitive?.content?.trim().orEmpty()
+        val language = obj["language"]?.jsonPrimitive?.content?.trim().orEmpty()
+        val (start, end, wordBased) = when {
+            startChar != null && endChar != null -> Triple(startChar, endChar, false)
+            startWord != null && endWord != null -> Triple(startWord, endWord, true)
+            else -> return@runCatching null
+        }
+        if (versionTitle.isEmpty()) return@runCatching null
+        SefariaLinksImporter.CharLevelCell(
+            start = start,
+            end = end,
+            versionTitle = versionTitle,
+            language = language,
+            isWordBased = wordBased,
+        )
+    }.getOrNull()
 }
 
 /**

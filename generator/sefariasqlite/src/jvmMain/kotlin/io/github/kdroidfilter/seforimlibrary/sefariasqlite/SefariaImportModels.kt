@@ -43,6 +43,11 @@ internal data class BookMeta(
     val collectiveTitleEn: String? = null,
 )
 
+/// Marker value in [BookPayload.cleanShiftByLineIndex]: the line's stored
+/// content differs from the raw Sefaria segment (cleanSefariaLine modified
+/// it), so raw char offsets cannot be mapped exactly onto it.
+internal const val CLEAN_MODIFIED = -1
+
 internal data class BookPayload(
     val heTitle: String,
     val enTitle: String,
@@ -68,6 +73,15 @@ internal data class BookPayload(
     // so that title-pattern base parsing ("X on Y") can resolve "Y" to a bookId
     // when "Y" is a Sefaria-recognised alias (e.g. "Avot" → Pirkei Avot).
     val titleAliasKeys: List<String> = emptyList(),
+    // merged.json versions: when the book was merged from exactly ONE version,
+    // the merged text is that version verbatim — the precondition for exact
+    // charLevelData offset import. null when multi-version (or unknown).
+    val singleVersionTitle: String? = null,
+    // Sparse per-line offset bookkeeping for charLevelData mapping:
+    //   absent          -> stored content == raw segment, no prefix
+    //   n >= 0          -> stored content == "<prefix of raw-length n>" + raw
+    //   CLEAN_MODIFIED  -> cleanSefariaLine changed the content; offsets unusable
+    val cleanShiftByLineIndex: Map<Int, Int> = emptyMap(),
 )
 
 internal data class RefEntry(
@@ -75,6 +89,29 @@ internal data class RefEntry(
     val heRef: String,
     val path: String,
     val lineIndex: Int
+)
+
+/**
+ * A links-CSV `Char Level Data` cell waiting for offset resolution. Collected
+ * while streaming the CSVs (where the ref→line resolution and the stored link
+ * direction are known) and resolved after all lines/links exist, where the
+ * anchored line's stored content is available (see [SefariaCharLevelAnchors]).
+ */
+internal data class PendingCharLevelAnchor(
+    /** bookPath + 0-based lineIndex of the line the offsets refer to. */
+    val path: String,
+    val lineIndex0: Int,
+    /** The stored link row this anchor belongs to (post direction-swap). */
+    val srcLineId: Long,
+    val tgtLineId: Long,
+    /** 0 = the anchored line is the stored source line, 1 = the stored target. */
+    val side: Int,
+    val startChar: Int,
+    val endChar: Int,
+    val versionTitle: String,
+    val language: String,
+    /** Sefaria uses startWord/endWord (word indices) for Tanakh verse sides. */
+    val isWordBased: Boolean,
 )
 
 internal data class Heading(

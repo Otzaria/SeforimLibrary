@@ -109,13 +109,20 @@ internal class SefariaBookPayloadReader(
                 author.jsonObject["he"]?.stringOrNull()
             } ?: emptyList()
 
-            val (lines, refs, headings) = buildBookContent(
+            val (lines, refs, headings, cleanShifts) = buildBookContent(
                 schemaObj = schemaObj,
                 textElement = textElement,
                 bookHeTitle = hebrewTitle,
                 bookEnTitle = englishTitle,
                 authors = authors
             )
+            // merged.json "versions" is a list of [title, url] pairs. A single
+            // entry means the merged text IS that version verbatim — the
+            // precondition for exact charLevelData offsets.
+            val singleVersionTitle = (textJson["versions"] as? JsonArray)
+                ?.takeIf { it.size == 1 }
+                ?.let { (it.first() as? JsonArray)?.firstOrNull()?.stringOrNull() }
+                ?.trim()?.takeIf { it.isNotEmpty() }
             val description = extractDescription(schemaJson, schemaObj)
             val heShortDesc = extractShortDescription(schemaJson, schemaObj)
             val pubDates = extractPubDates(schemaJson, schemaObj)
@@ -152,6 +159,8 @@ internal class SefariaBookPayloadReader(
                 baseTextTitleKeys = baseTextTitleKeys,
                 collectiveTitleEn = collectiveTitleEn,
                 titleAliasKeys = titleAliasKeys,
+                singleVersionTitle = singleVersionTitle,
+                cleanShiftByLineIndex = cleanShifts,
             )
         }.onFailure { e ->
             logger.w(e) { "Failed to prepare book from $textPath" }
@@ -337,17 +346,26 @@ internal class SefariaBookPayloadReader(
         )
     }
 
+    internal data class BuiltBookContent(
+        val lines: List<String>,
+        val refs: List<RefEntry>,
+        val headings: List<Heading>,
+        val cleanShifts: Map<Int, Int>,
+    )
+
     private fun buildBookContent(
         schemaObj: JsonObject,
         textElement: JsonElement,
         bookHeTitle: String,
         bookEnTitle: String,
         authors: List<String>
-    ): Triple<List<String>, List<RefEntry>, List<Heading>> {
+    ): BuiltBookContent {
         // Pre-allocate with estimated capacity
         val output = ArrayList<String>(1000)
         val refs = ArrayList<RefEntry>(1000)
         val headings = ArrayList<Heading>(100)
+        // See BookPayload.cleanShiftByLineIndex — sparse raw-offset bookkeeping.
+        val cleanShifts = HashMap<Int, Int>()
 
         fun headingTagForLevel(level: Int): Pair<String, String> = when (level) {
             0 -> "<h1>" to "</h1>"
@@ -423,7 +441,8 @@ internal class SefariaBookPayloadReader(
                     headings = headings,
                     addressTypes = addressTypes,
                     referenceableSections = referenceableSections,
-                    childRefOffsets = childRefOffsets
+                    childRefOffsets = childRefOffsets,
+                    cleanShifts = cleanShifts
                 )
             }
         }
@@ -468,11 +487,12 @@ internal class SefariaBookPayloadReader(
                 headings = headings,
                 addressTypes = addressTypes,
                 referenceableSections = referenceableSections,
-                childRefOffsets = childRefOffsets
+                childRefOffsets = childRefOffsets,
+                cleanShifts = cleanShifts
             )
         }
 
-        return Triple(output, refs, headings)
+        return BuiltBookContent(output, refs, headings, cleanShifts)
     }
 
     private fun recursiveSections(
@@ -497,7 +517,9 @@ internal class SefariaBookPayloadReader(
         refIndexOffset: Int = 0,
         // Offsets to hand down to the *children* of the iteration at this
         // level (one entry per outer-dim index).
-        childRefOffsets: List<Int>? = null
+        childRefOffsets: List<Int>? = null,
+        // Sparse raw-offset bookkeeping (see BookPayload.cleanShiftByLineIndex).
+        cleanShifts: MutableMap<Int, Int>? = null
     ) {
         // Leaf when depth reached zero, OR when the data is shallower than the
         // schema declares (e.g. Keter Malkhut: schema says depth=2 but most
@@ -511,6 +533,13 @@ internal class SefariaBookPayloadReader(
                 val cleaned = cleanSefariaLine(content)
                 if (cleaned.isNotEmpty()) {
                     output += linePrefix + cleaned
+                    if (cleanShifts != null) {
+                        if (cleaned != content) {
+                            cleanShifts[output.size - 1] = CLEAN_MODIFIED
+                        } else if (linePrefix.isNotEmpty()) {
+                            cleanShifts[output.size - 1] = linePrefix.length
+                        }
+                    }
                     val cleanRef = trimTrailingSeparators(refPrefix)
                     val cleanHeRef = trimTrailingSeparators(heRefPrefix)
                     refEntries.add(
@@ -603,7 +632,8 @@ internal class SefariaBookPayloadReader(
                 linePrefix = nextLinePrefix,
                 addressTypes = addressTypes,
                 referenceableSections = referenceableSections,
-                refIndexOffset = nextRefIndexOffset
+                refIndexOffset = nextRefIndexOffset,
+                cleanShifts = cleanShifts
             )
         }
     }
