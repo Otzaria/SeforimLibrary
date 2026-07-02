@@ -127,6 +127,9 @@ AND ct.name IN ('COMMENTARY', 'TARGUM')
 GROUP BY l.targetBookId, b.title, a.name
 ORDER BY b.orderIndex, b.title;
 
+selectIdsBySourceAndTargetLine:
+SELECT id FROM link WHERE sourceLineId = ? AND targetLineId = ?;
+
 insert:
 INSERT INTO link (sourceBookId, targetBookId, sourceLineId, targetLineId, targetLineIndex, targetBookOrderIndex, connectionTypeId, isDeclaredBase)
 VALUES (?, ?, ?, ?, ?, ?, ?, ?);

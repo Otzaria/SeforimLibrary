@@ -1456,12 +1456,14 @@ class DatabaseGenerator(
             return 0
         }
 
-        // Skip Otzaria links for books that come from Sefaria (Sefaria links are more accurate)
-        if (sourceBook.id in sefariaBookIds) {
-            return 0
-        }
+        // Sefaria ships its own links between two Sefaria books — those are more
+        // accurate, so Otzaria links are skipped per-link when BOTH sides are
+        // Sefaria-sourced. A link touching a non-Sefaria side cannot exist in
+        // Sefaria at all (e.g. משנה ברורה → שער הציון) and must be kept.
+        val sourceIsSefaria = sourceBook.id in sefariaBookIds
 
         var processed = 0
+        val anchorBatch = mutableListOf<LinkAnchor>()
         for ((index, linkData) in links.withIndex()) {
             try {
                 val path = linkData.path_2
@@ -1479,6 +1481,8 @@ class DatabaseGenerator(
                     logger.i { "Original path: ${linkData.path_2}" }
                     continue
                 }
+
+                if (sourceIsSefaria && targetBook.id in sefariaBookIds) continue
 
                 val sourceLineIndex = (linkData.line_index_1.toInt() - 1).coerceAtLeast(0)
                 val targetLineIndex = (linkData.line_index_2.toInt() - 1).coerceAtLeast(0)
@@ -1500,13 +1504,49 @@ class DatabaseGenerator(
                     targetLineIndex = targetLineIndex,
                     connectionType = ConnectionType.fromString(linkData.connectionType)
                 )
-                repository.insertLink(link)
+                val linkId = repository.insertLink(link)
+                buildLinkAnchor(linkData, linkId, sourceLineId, bookTitle)?.let { anchorBatch += it }
                 processed++
             } catch (_: Exception) {
                 // Skip malformed entries but continue
             }
         }
+        if (anchorBatch.isNotEmpty()) {
+            repository.insertLinkAnchorsBatch(anchorBatch)
+            logger.i { "Inserted ${anchorBatch.size} word-level anchors for $bookTitle" }
+        }
         return processed
+    }
+
+    /**
+     * Word-level anchor of a link, when the JSON entry carries one. The JSON
+     * `start`/`end` are raw char offsets into the source line's stored content;
+     * they are converted here to the visible-char coordinate space the
+     * `link_anchor` table mandates (see Database.sq).
+     */
+    private suspend fun buildLinkAnchor(
+        linkData: LinkData,
+        linkId: Long,
+        sourceLineId: Long,
+        bookTitle: String,
+    ): LinkAnchor? {
+        val rawStart = linkData.start?.toInt() ?: return null
+        val content = repository.getLine(sourceLineId)?.content
+        if (content == null || rawStart < 0 || rawStart > content.length) {
+            logger.w {
+                "Anchor offset $rawStart out of bounds (len=${content?.length}) " +
+                    "for $bookTitle line ${linkData.line_index_1.toInt()} — anchor dropped"
+            }
+            return null
+        }
+        val rawEnd = linkData.end?.toInt()?.takeIf { it in rawStart..content.length }
+        return LinkAnchor(
+            linkId = linkId,
+            side = 0,
+            charStart = countVisibleChars(content, rawStart),
+            charEnd = rawEnd?.let { countVisibleChars(content, it) },
+            label = null,
+        )
     }
 
     /**
@@ -1794,7 +1834,12 @@ class DatabaseGenerator(
         val path_2: String,
         val line_index_2: Double,
         @SerialName("Conection Type")
-        val connectionType: String = ""
+        val connectionType: String = "",
+        // Optional word-level anchor: raw char range [start, end) inside the
+        // source line's stored content (line_index_1 side). Present e.g. in the
+        // "אור הישר" family and in the converted משנה ברורה → שער הציון links.
+        val start: Double? = null,
+        val end: Double? = null
     )
 
     /**

@@ -204,6 +204,9 @@ class SefariaDirectImporter(
         val tocInserter = SefariaTocInserter(repository, bindings)
         val altTocBuilder = SefariaAltTocBuilder(repository, bindings)
         val linksImporter = SefariaLinksImporter(repository, bindings, logger)
+        // Inputs for the inline-anchor pass (itags → link_anchor), collected in
+        // the book loop so the pass can run after links exist.
+        val anchorBookInputs = mutableListOf<SefariaInlineAnchors.BookInput>()
 
         logger.i { "Inserting books and lines..." }
         var processedBooks = 0
@@ -293,6 +296,14 @@ class SefariaDirectImporter(
 
             // Create a mapping from lineIndex to RefEntry for quick lookup
             val refsByLineIndex = payload.refEntries.associateBy { it.lineIndex - 1 }
+
+            anchorBookInputs += SefariaInlineAnchors.BookInput(
+                bookId = bookId,
+                enTitle = payload.enTitle,
+                bookPath = bookPath,
+                lines = payload.lines,
+                refsByLineIndex = refsByLineIndex,
+            )
 
             payload.lines.forEachIndexed { idx, content ->
                 val refEntry = refsByLineIndex[idx]
@@ -454,6 +465,16 @@ class SefariaDirectImporter(
                 headingLineIds = headingLineIds
             )
             logger.i { "Links processed" }
+
+            // Word-level anchors: resolve the itags embedded in base texts to
+            // the freshly inserted link rows (see SefariaInlineAnchors).
+            logger.i { "Resolving inline commentary anchors (itags)..." }
+            SefariaInlineAnchors(repository, logger).generate(
+                books = anchorBookInputs,
+                bookMetaById = bookMetaById,
+                refsByCanonical = refsByCanonical,
+                lineKeyToId = lineKeyToId,
+            )
         }
 
         // Re-enable normal SQLite settings

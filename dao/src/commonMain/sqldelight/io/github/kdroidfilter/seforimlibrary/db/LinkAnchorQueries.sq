@@ -1,0 +1,18 @@
+-- Queries for the link_anchor table (word-level link anchors).
+-- See the table comment in Database.sq for the coordinate-space contract.
+
+insert:
+INSERT OR IGNORE INTO link_anchor (linkId, side, charStart, charEnd, label)
+VALUES (?, ?, ?, ?, ?);
+
+selectByLinkId:
+SELECT * FROM link_anchor WHERE linkId = ? ORDER BY side, charStart;
+
+selectByLinkIds:
+SELECT * FROM link_anchor WHERE linkId IN ? ORDER BY linkId, side, charStart;
+
+countAll:
+SELECT COUNT(*) FROM link_anchor;
+
+deleteByLinkId:
+DELETE FROM link_anchor WHERE linkId = ?;

@@ -9,6 +9,7 @@ import io.github.kdroidfilter.seforimlibrary.core.models.ConnectionType
 import io.github.kdroidfilter.seforimlibrary.core.models.Line
 import io.github.kdroidfilter.seforimlibrary.core.models.LineAltTocMapping
 import io.github.kdroidfilter.seforimlibrary.core.models.Link
+import io.github.kdroidfilter.seforimlibrary.core.models.LinkAnchor
 import io.github.kdroidfilter.seforimlibrary.core.models.PubDate
 import io.github.kdroidfilter.seforimlibrary.core.models.PubPlace
 import io.github.kdroidfilter.seforimlibrary.core.models.SearchResult
@@ -369,6 +370,21 @@ fun io.github.kdroidfilter.seforimlibrary.db.SelectLinksBySourceLineIds.toModel(
         targetLineIndex = targetLineIndex.toInt(),
         connectionType = ConnectionType.fromString(connectionType),
         isDeclaredBase = isDeclaredBase == 1L,
+    )
+}
+
+/**
+ * Converts a database Link_anchor entity to a domain LinkAnchor model.
+ *
+ * @return The domain LinkAnchor model
+ */
+fun io.github.kdroidfilter.seforimlibrary.db.Link_anchor.toModel(): LinkAnchor {
+    return LinkAnchor(
+        linkId = linkId,
+        side = side.toInt(),
+        charStart = charStart.toInt(),
+        charEnd = charEnd?.toInt(),
+        label = label,
     )
 }
 

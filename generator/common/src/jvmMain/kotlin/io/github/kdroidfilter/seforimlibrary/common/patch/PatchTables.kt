@@ -61,6 +61,7 @@ internal val PATCH_TABLES_IN_FK_ORDER: List<PatchTable> = listOf(
 
     // Links.
     PatchTable("link",               listOf("id"),       updatable = true),
+    PatchTable("link_anchor",        listOf("linkId", "side", "charStart"), updatable = true),
     PatchTable("book_has_links",     listOf("bookId"),   updatable = true),
 
     // Alternative TOCs.

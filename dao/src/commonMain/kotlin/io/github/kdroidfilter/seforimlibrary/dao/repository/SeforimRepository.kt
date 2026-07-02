@@ -18,6 +18,7 @@ import io.github.kdroidfilter.seforimlibrary.core.models.Line
 import io.github.kdroidfilter.seforimlibrary.core.models.LineAltTocMapping
 import io.github.kdroidfilter.seforimlibrary.core.models.LineTocMapping
 import io.github.kdroidfilter.seforimlibrary.core.models.Link
+import io.github.kdroidfilter.seforimlibrary.core.models.LinkAnchor
 import io.github.kdroidfilter.seforimlibrary.core.models.PubDate
 import io.github.kdroidfilter.seforimlibrary.core.models.PubPlace
 import io.github.kdroidfilter.seforimlibrary.core.models.Source
@@ -2220,6 +2221,43 @@ class SeforimRepository(databasePath: String, private val driver: SqlDriver) : L
             }
         }
     }
+
+    /**
+     * Inserts multiple link anchors in a single transaction.
+     * Idempotent: rows already present (same linkId/side/charStart) are ignored.
+     */
+    suspend fun insertLinkAnchorsBatch(anchors: List<LinkAnchor>) = withContext(Dispatchers.IO) {
+        if (anchors.isEmpty()) return@withContext
+        database.transaction {
+            anchors.forEach { anchor ->
+                database.linkAnchorQueriesQueries.insert(
+                    linkId = anchor.linkId,
+                    side = anchor.side.toLong(),
+                    charStart = anchor.charStart.toLong(),
+                    charEnd = anchor.charEnd?.toLong(),
+                    label = anchor.label,
+                )
+            }
+        }
+    }
+
+    /**
+     * Returns the word-level anchors of a link, ordered by (side, charStart).
+     */
+    suspend fun getLinkAnchors(linkId: Long): List<LinkAnchor> = withContext(Dispatchers.IO) {
+        database.linkAnchorQueriesQueries.selectByLinkId(linkId).executeAsList().map { it.toModel() }
+    }
+
+    /**
+     * Returns the ids of the stored links connecting the given source line to
+     * the given target line (usually a single id; more when the same pair is
+     * stored under several connection types).
+     */
+    suspend fun getLinkIdsBetweenLines(sourceLineId: Long, targetLineId: Long): List<Long> =
+        withContext(Dispatchers.IO) {
+            database.linkQueriesQueries.selectIdsBySourceAndTargetLine(sourceLineId, targetLineId)
+                .executeAsList()
+        }
 
     /**
      * Migrates existing links to use the new connection_type table.

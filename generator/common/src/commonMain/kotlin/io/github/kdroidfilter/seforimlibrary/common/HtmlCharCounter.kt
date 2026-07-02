@@ -12,12 +12,20 @@ package io.github.kdroidfilter.seforimlibrary.common
  * text will contain: it feeds the content-aware scrollbar, which combines it
  * with a runtime `chars_per_visual_line` measurement to size the thumb.
  */
-fun countVisibleChars(html: String): Int {
-    if (html.isEmpty()) return 0
+fun countVisibleChars(html: String): Int = countVisibleChars(html, html.length)
+
+/**
+ * Visible-char count of `html[0, endExclusive)` — converts a raw string offset
+ * into the visible-char coordinate space of [countVisibleChars]. Used to store
+ * word-level link anchors (see the `link_anchor` table) whose sources provide
+ * raw offsets into the stored line content.
+ */
+fun countVisibleChars(html: String, endExclusive: Int): Int {
+    if (html.isEmpty() || endExclusive <= 0) return 0
     var count = 0
     var inTag = false
     var i = 0
-    val len = html.length
+    val len = minOf(html.length, endExclusive)
     while (i < len) {
         val c = html[i]
         when {
