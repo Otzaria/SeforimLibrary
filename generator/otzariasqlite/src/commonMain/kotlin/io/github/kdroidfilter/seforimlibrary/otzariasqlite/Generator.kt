@@ -1328,125 +1328,6 @@ class DatabaseGenerator(
     }
 
     /**
-     * Processes a single link file, creating links between books.
-     *
-     * @param linkFile The path to the link file
-     * @return The number of links successfully processed
-     */
-    private suspend fun processLinkFile(linkFile: Path): Int {
-        val bookTitle = linkFile.nameWithoutExtension.removeSuffix("_links")
-        logger.d { "Processing link file for book: $bookTitle" }
-
-        // Find the source book (use RAM cache)
-        val sourceBook = booksByTitle[bookTitle]
-
-        if (sourceBook == null) {
-            logger.w { "Source book not found for links: $bookTitle" }
-            return 0
-        }
-
-        // Skip Otzaria links for books that come from Sefaria (Sefaria links are more accurate)
-        if (sourceBook.id in sefariaBookIds) {
-            return 0
-        }
-
-        logger.d { "Found source book with ID: ${sourceBook.id}" }
-
-        try {
-            val content = linkFile.readText()
-            logger.d { "Link file content length: ${content.length}" }
-            val links = parseLinksFromJson(content, bookTitle)
-            logger.d { "Decoded ${links.size} links from file" }
-            var processed = 0
-
-            for ((index, linkData) in links.withIndex()) {
-                try {
-                    // Find the target book
-                    // Handle paths with backslashes
-                    val path = linkData.path_2
-                    val targetTitle = if (path.contains('\\')) {
-                        // Extract the last component of a backslash-separated path
-                        val lastComponent = path.split('\\').last()
-                        // Remove file extension if present
-                        lastComponent.substringBeforeLast('.', lastComponent)
-                    } else {
-                        // Use the standard path handling for forward slash paths
-                        val targetPath = Paths.get(path)
-                        targetPath.fileName.toString().substringBeforeLast('.')
-                    }
-                    logger.d { "Link ${index + 1}/${links.size} - Target book title: $targetTitle" }
-
-                    // Try to find the target book (use RAM cache)
-                    val targetBook = booksByTitle[targetTitle]
-                    if (targetBook == null) {
-                        // Enhanced logging for debugging
-                        logger.i { "Link ${index + 1}/${links.size} - Target book not found: $targetTitle" }
-                        logger.i { "Original path: ${linkData.path_2}" }
-                        continue
-                    }
-                    logger.d { "Using target book with ID: ${targetBook.id}" }
-
-                    // Find the lines
-                    // Adjust indices from 1-based to 0-based
-                    val sourceLineIndex = (linkData.line_index_1.toInt() - 1).coerceAtLeast(0)
-                    val targetLineIndex = (linkData.line_index_2.toInt() - 1).coerceAtLeast(0)
-
-                    logger.d { "Looking for source line at index: $sourceLineIndex (original: ${linkData.line_index_1}) in book ${sourceBook.id}" }
-
-                    // Try to find the source line (use RAM cache)
-                    val sourceLineId = getLineIdCached(sourceBook.id, sourceLineIndex)
-                    if (sourceLineId == null) {
-                        logger.d { "Source line not found at index: $sourceLineIndex, skipping this link but continuing with others" }
-                        continue
-                    }
-                    logger.d { "Using source line with ID: $sourceLineId" }
-
-                    logger.d { "Looking for target line at index: $targetLineIndex (original: ${linkData.line_index_2}) in book ${targetBook.id}" }
-
-                    // Try to find the target line (use RAM cache)
-                    val targetLineId = getLineIdCached(targetBook.id, targetLineIndex)
-                    if (targetLineId == null) {
-                        logger.d { "Target line not found at index: $targetLineIndex, skipping this link but continuing with others" }
-                        continue
-                    }
-                    logger.d { "Using target line with ID: $targetLineId" }
-
-                    // Skip links where source or target is a heading line
-                    if (sourceLineId in headingLineIds || targetLineId in headingLineIds) {
-                        logger.d { "Skipping link to heading line" }
-                        continue
-                    }
-
-                    val link = Link(
-                        sourceBookId = sourceBook.id,
-                        targetBookId = targetBook.id,
-                        sourceLineId = sourceLineId,
-                        targetLineId = targetLineId,
-                        targetLineIndex = targetLineIndex,
-                        connectionType = ConnectionType.fromString(linkData.connectionType)
-                    )
-
-                    logger.d { "Inserting link from book ${sourceBook.id} to book ${targetBook.id}" }
-                    val linkId = repository.insertLink(link)
-                    logger.d { "Link inserted with ID: $linkId" }
-                    processed++
-                } catch (e: Exception) {
-                    // Changed from error to debug level to reduce unnecessary error logs
-                    logger.d(e) { "Error processing link: ${linkData.heRef_2}" }
-                    logger.d { "Error processing link: ${e.message}" }
-                }
-            }
-            logger.d { "Processed $processed links out of ${links.size}" }
-            return processed
-        } catch (e: Exception) {
-            // Changed from error to warning level to reduce unnecessary error logs
-            logger.w(e) { "Error processing link file: ${linkFile.fileName}" }
-            logger.d { "Error processing link file: ${e.message}" }
-            return 0
-        }
-    }
-
-    /**
      * Processes links that were preloaded in memory for a given source book.
      */
     private suspend fun processLinksForBook(bookTitle: String, links: List<LinkData>): Int {
@@ -1545,8 +1426,22 @@ class DatabaseGenerator(
             side = 0,
             charStart = countVisibleChars(content, rawStart),
             charEnd = rawEnd?.let { countVisibleChars(content, it) },
-            label = null,
+            label = anchorLabelFromHeRef(linkData.heRef_2),
         )
+    }
+
+    /**
+     * אות הסימון של עוגן-נקודה, מתוך ה-heRef העשיר של קובץ הקישורים:
+     * "שער הציון, סימן א, סעיף א אות ג" → "ג". מחזיר null כשאין רכיב
+     * " אות X" תקין (למשל בקישורי טווח של קבצי linker).
+     */
+    private fun anchorLabelFromHeRef(heRef: String): String? {
+        val idx = heRef.lastIndexOf(" אות ")
+        if (idx < 0) return null
+        val tail = heRef.substring(idx + " אות ".length).trim()
+        if (tail.isEmpty() || tail.length > 6) return null
+        val valid = tail.all { it in 'א'..'ת' || it == '"' || it == '׳' || it == '״' }
+        return if (valid) tail else null
     }
 
     /**

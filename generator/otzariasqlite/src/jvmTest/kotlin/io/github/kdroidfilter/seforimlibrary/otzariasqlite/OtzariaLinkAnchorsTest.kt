@@ -59,7 +59,7 @@ class OtzariaLinkAnchorsTest {
             linksDir.resolve("משנה ברורה_links.json"),
             """
             |[
-            | {"line_index_1": 2, "heRef_2": "שער הציון, סימן א", "path_2": "שער הציון.txt",
+            | {"line_index_1": 2, "heRef_2": "שער הציון, סימן א, סעיף א אות ג", "path_2": "שער הציון.txt",
             |  "line_index_2": 2, "Conection Type": "commentary", "start": 6, "end": 12},
             | {"line_index_1": 2, "heRef_2": "ילקוט א", "path_2": "ילקוט.txt",
             |  "line_index_2": 1, "Conection Type": "commentary", "start": 1}
@@ -76,6 +76,8 @@ class OtzariaLinkAnchorsTest {
         assertEquals(1, anchors.size)
         assertEquals(3, anchors.single().charStart)
         assertEquals(5, anchors.single().charEnd)
+        // אות הסימון נגזרת מרכיב " אות X" של ה-heRef העשיר בקובץ הקישורים.
+        assertEquals("ג", anchors.single().label)
 
         // Sefaria(MB) → Sefaria(ילקוט): must stay skipped.
         assertTrue(repo.getLinkIdsBetweenLines(101, 300).isEmpty())

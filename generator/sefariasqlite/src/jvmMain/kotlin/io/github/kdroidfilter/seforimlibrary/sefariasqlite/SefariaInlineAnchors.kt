@@ -219,6 +219,10 @@ internal class SefariaInlineAnchors(
                         skip("comment ref not found") { targetRef }
                         continue
                     }
+                    // תווית לתצוגה: המפורשת מהתג, ואם אין — הגימטריה של מספר
+                    // ההערה (זו האות המודפסת אצל הפרשנים מבוססי-data-order:
+                    // ס"ק ז של הט"ז מסומן "ז").
+                    val label = itag.label ?: toGematria(order)
                     var anchored = false
                     for (entry in entries) {
                         val tgtLineId = lineKeyToId[entry.path to (entry.lineIndex - 1)] ?: continue
@@ -228,7 +232,7 @@ internal class SefariaInlineAnchors(
                                 side = 0,
                                 charStart = itag.charStart,
                                 charEnd = null,
-                                label = itag.label,
+                                label = label,
                             )
                             anchored = true
                         }
