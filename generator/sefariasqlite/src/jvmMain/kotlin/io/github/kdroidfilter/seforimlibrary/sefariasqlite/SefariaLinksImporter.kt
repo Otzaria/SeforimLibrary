@@ -4,6 +4,8 @@ import co.touchlab.kermit.Logger
 import io.github.kdroidfilter.seforimlibrary.common.ids.IdAllocatorBindings
 import io.github.kdroidfilter.seforimlibrary.core.models.ConnectionType
 import io.github.kdroidfilter.seforimlibrary.core.models.Link
+import io.github.kdroidfilter.seforimlibrary.core.models.LinkCoverage
+import io.github.kdroidfilter.seforimlibrary.core.models.LinkRange
 import io.github.kdroidfilter.seforimlibrary.dao.repository.SeforimRepository
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.coroutineScope
@@ -17,12 +19,28 @@ import kotlinx.serialization.json.jsonPrimitive
 import java.nio.file.Files
 import java.nio.file.Path
 import java.util.Queue
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.ConcurrentLinkedQueue
+import java.util.concurrent.atomic.LongAdder
 
 internal class SefariaLinksImporter(
     private val repository: SeforimRepository,
     private val bindings: IdAllocatorBindings,
     private val logger: Logger
 ) {
+    // Lazy per-book-path prefix indexes for range-end resolution; built only
+    // for paths actually hit by ranged citations.
+    private val pathIndexCache = ConcurrentHashMap<String, PathRefPrefixIndex>()
+    private val pendingRanges = ConcurrentLinkedQueue<LinkRange>()
+    private val pendingCoverage = ConcurrentLinkedQueue<LinkCoverage>()
+
+    // Range accounting — surfaced in the end-of-phase summary log.
+    private val rangedRowsSeen = LongAdder()
+    private val rangesResolved = LongAdder()
+    private val rangeEndUnresolved = LongAdder()
+    private val rangeReversed = LongAdder()
+    private val rangedRowsDropped = LongAdder()
+
     suspend fun processLinksInParallel(
         linksDir: Path,
         refsByCanonical: Map<String, List<RefEntry>>,
@@ -34,7 +52,9 @@ internal class SefariaLinksImporter(
         // Collects the CSV `Char Level Data` cells for the post-links anchor
         // pass (see SefariaCharLevelAnchors). Must be thread-safe — link files
         // are processed in parallel. null = don't collect.
-        charLevelPending: Queue<PendingCharLevelAnchor>? = null
+        charLevelPending: Queue<PendingCharLevelAnchor>? = null,
+        // All RefEntries grouped by book path — range-end resolution input.
+        refsByPath: Map<String, List<RefEntry>> = emptyMap()
     ) = coroutineScope {
         // Pre-register all connection types we'll use so their ids are stable
         // (so `link.connectionTypeId` is reproducible across builds).
@@ -61,7 +81,8 @@ internal class SefariaLinksImporter(
                     bookMetaById = bookMetaById,
                     headingLineIds = headingLineIds,
                     linkChannel = linkChannel,
-                    charLevelPending = charLevelPending
+                    charLevelPending = charLevelPending,
+                    refsByPath = refsByPath
                 )
             }
         }
@@ -88,6 +109,28 @@ internal class SefariaLinksImporter(
 
         // Wait for inserter to finish
         inserter.join()
+
+        // Ranges/coverage reference link ids, so they are inserted only after
+        // every link row exists.
+        insertPendingRangesAndCoverage()
+    }
+
+    private suspend fun insertPendingRangesAndCoverage() {
+        val ranges = generateSequence { pendingRanges.poll() }.toList()
+        val coverage = generateSequence { pendingCoverage.poll() }.toList()
+        ranges.chunked(SefariaImportTuning.LINK_BATCH_SIZE).forEach {
+            repository.insertLinkRangesBatch(it)
+        }
+        coverage.chunked(SefariaImportTuning.LINK_BATCH_SIZE).forEach {
+            repository.insertLinkCoverageBatch(it)
+        }
+        logger.i {
+            "Ranged links: ${rangedRowsSeen.sum()} CSV rows with a ranged citation, " +
+                "${rangesResolved.sum()} range sides resolved (${ranges.size} range rows, " +
+                "${coverage.size} coverage rows), " +
+                "end-unresolved=${rangeEndUnresolved.sum()}, reversed=${rangeReversed.sum()}, " +
+                "rows dropped with unresolved citation=${rangedRowsDropped.sum()}"
+        }
     }
 
     private suspend fun processLinkFile(
@@ -99,7 +142,8 @@ internal class SefariaLinksImporter(
         bookMetaById: Map<Long, BookMeta>,
         headingLineIds: Set<Long>,
         linkChannel: Channel<Link>,
-        charLevelPending: Queue<PendingCharLevelAnchor>? = null
+        charLevelPending: Queue<PendingCharLevelAnchor>? = null,
+        refsByPath: Map<String, List<RefEntry>> = emptyMap()
     ) {
         Files.newBufferedReader(file).use { reader ->
             val iter = reader.lineSequence().iterator()
@@ -128,9 +172,19 @@ internal class SefariaLinksImporter(
                     parseCharLevelCell(row.getOrNull(idxCld2))
                 } else null
 
+                // Ranged citations ("Exodus 1:1-6:1") resolve to their FIRST
+                // line via resolveRefs; the range's remaining lines are added
+                // below as link_range + link_coverage rows.
+                val range1 = parseCitationRange(canonicalCitation(c1))
+                val range2 = parseCitationRange(canonicalCitation(c2))
+                if (range1 != null || range2 != null) rangedRowsSeen.increment()
+
                 val fromRefs = resolveRefs(c1, refsByCanonical, refsByBase)
                 val toRefs = resolveRefs(c2, refsByCanonical, refsByBase)
-                if (fromRefs.isEmpty() || toRefs.isEmpty()) continue
+                if (fromRefs.isEmpty() || toRefs.isEmpty()) {
+                    if (range1 != null || range2 != null) rangedRowsDropped.increment()
+                    continue
+                }
 
                 // Hoisted: `conn` is constant across the inner pair loop, no
                 // reason to re-parse it for every (from, to) combination.
@@ -222,6 +276,7 @@ internal class SefariaLinksImporter(
                             }
 
                         val typeId = bindings.upsertConnectionType(storedType.name)
+                        val linkId = bindings.allocator.linkId(storedSrcLine, storedTgtLine, typeId)
 
                         // Flag: was this orientation chosen because the target's
                         // schema **explicitly declares** the source as a base text?
@@ -237,7 +292,7 @@ internal class SefariaLinksImporter(
 
                         linkChannel.send(
                             Link(
-                                id = bindings.allocator.linkId(storedSrcLine, storedTgtLine, typeId),
+                                id = linkId,
                                 sourceBookId = storedSrcBook,
                                 targetBookId = storedTgtBook,
                                 sourceLineId = storedSrcLine,
@@ -247,6 +302,25 @@ internal class SefariaLinksImporter(
                                 isDeclaredBase = isDeclaredBase,
                             )
                         )
+
+                        // Ranged sides: record the range end + per-line coverage.
+                        // The side is relative to the STORED direction (0 = source).
+                        if (range1 != null) {
+                            queueRangeSide(
+                                range = range1, entry = from, lineId = srcLine,
+                                storedSrcLine = storedSrcLine, linkId = linkId,
+                                lineKeyToId = lineKeyToId, headingLineIds = headingLineIds,
+                                refsByPath = refsByPath,
+                            )
+                        }
+                        if (range2 != null) {
+                            queueRangeSide(
+                                range = range2, entry = to, lineId = tgtLine,
+                                storedSrcLine = storedSrcLine, linkId = linkId,
+                                lineKeyToId = lineKeyToId, headingLineIds = headingLineIds,
+                                refsByPath = refsByPath,
+                            )
+                        }
 
                         // Queue char-level cells for the post-links anchor pass.
                         // Citation 1 data refers to `from`'s line, Citation 2 to
@@ -277,6 +351,58 @@ internal class SefariaLinksImporter(
                 }
             }
         }
+    }
+
+    /**
+     * Resolves a ranged citation side to its end line and queues a
+     * [LinkRange] row plus [LinkCoverage] rows for every covered line after
+     * the first (heading lines excluded). [entry] is the already-resolved
+     * range START; the end resolves via the path's prefix index, so a range
+     * cited at any depth ("13:11-13") covers through the LAST leaf line under
+     * its end address. Unresolvable/reversed ends are counted, never guessed.
+     */
+    private fun queueRangeSide(
+        range: CitationRange,
+        entry: RefEntry,
+        lineId: Long,
+        storedSrcLine: Long,
+        linkId: Long,
+        lineKeyToId: Map<Pair<String, Int>, Long>,
+        headingLineIds: Set<Long>,
+        refsByPath: Map<String, List<RefEntry>>,
+    ) {
+        val pathIndex = pathIndexCache.computeIfAbsent(entry.path) {
+            PathRefPrefixIndex.build(refsByPath[it].orEmpty())
+        }
+        val endEntry = pathIndex.lastUnder(range.endCanonical)
+        if (endEntry == null) {
+            rangeEndUnresolved.increment()
+            return
+        }
+        if (endEntry.lineIndex < entry.lineIndex) {
+            rangeReversed.increment()
+            return
+        }
+        // Degenerate range ("1:1-1"): single line, nothing to record.
+        if (endEntry.lineIndex == entry.lineIndex) return
+        val endLineId = lineKeyToId[entry.path to (endEntry.lineIndex - 1)]
+        if (endLineId == null) {
+            rangeEndUnresolved.increment()
+            return
+        }
+        val side = if (lineId == storedSrcLine) 0 else 1
+        pendingRanges += LinkRange(
+            linkId = linkId,
+            side = side,
+            endLineId = endLineId,
+            endLineIndex = endEntry.lineIndex - 1,
+        )
+        for (lineIndex1 in (entry.lineIndex + 1)..endEntry.lineIndex) {
+            val coveredId = lineKeyToId[entry.path to (lineIndex1 - 1)] ?: continue
+            if (coveredId in headingLineIds) continue
+            pendingCoverage += LinkCoverage(lineId = coveredId, linkId = linkId, side = side)
+        }
+        rangesResolved.increment()
     }
 
     private data class StoredLink(

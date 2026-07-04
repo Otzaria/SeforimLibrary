@@ -19,6 +19,8 @@ import io.github.kdroidfilter.seforimlibrary.core.models.LineAltTocMapping
 import io.github.kdroidfilter.seforimlibrary.core.models.LineTocMapping
 import io.github.kdroidfilter.seforimlibrary.core.models.Link
 import io.github.kdroidfilter.seforimlibrary.core.models.LinkAnchor
+import io.github.kdroidfilter.seforimlibrary.core.models.LinkCoverage
+import io.github.kdroidfilter.seforimlibrary.core.models.LinkRange
 import io.github.kdroidfilter.seforimlibrary.core.models.PubDate
 import io.github.kdroidfilter.seforimlibrary.core.models.PubPlace
 import io.github.kdroidfilter.seforimlibrary.core.models.Source
@@ -2246,6 +2248,41 @@ class SeforimRepository(databasePath: String, private val driver: SqlDriver) : L
      */
     suspend fun getLinkAnchors(linkId: Long): List<LinkAnchor> = withContext(Dispatchers.IO) {
         database.linkAnchorQueriesQueries.selectByLinkId(linkId).executeAsList().map { it.toModel() }
+    }
+
+    /**
+     * Inserts multiple link ranges in a single transaction.
+     * Idempotent; on duplicate (linkId, side) the widest range wins.
+     */
+    suspend fun insertLinkRangesBatch(ranges: List<LinkRange>) = withContext(Dispatchers.IO) {
+        if (ranges.isEmpty()) return@withContext
+        database.transaction {
+            ranges.forEach { range ->
+                database.linkRangeQueriesQueries.insertRange(
+                    linkId = range.linkId,
+                    side = range.side.toLong(),
+                    endLineId = range.endLineId,
+                    endLineIndex = range.endLineIndex.toLong(),
+                )
+            }
+        }
+    }
+
+    /**
+     * Inserts multiple link coverage rows in a single transaction.
+     * Idempotent: rows already present are ignored.
+     */
+    suspend fun insertLinkCoverageBatch(rows: List<LinkCoverage>) = withContext(Dispatchers.IO) {
+        if (rows.isEmpty()) return@withContext
+        database.transaction {
+            rows.forEach { row ->
+                database.linkRangeQueriesQueries.insertCoverage(
+                    lineId = row.lineId,
+                    linkId = row.linkId,
+                    side = row.side.toLong(),
+                )
+            }
+        }
     }
 
     /**

@@ -43,6 +43,10 @@
 --     link.connectionTypeId           -> connection_type(id)     ON DELETE CASCADE
 --     book_has_links.bookId           -> book(id)                ON DELETE CASCADE
 --     link_anchor.linkId              -> link(id)                ON DELETE CASCADE
+--     link_range.linkId               -> link(id)                ON DELETE CASCADE
+--     link_range.endLineId            -> line(id)                ON DELETE CASCADE
+--     link_coverage.lineId            -> line(id)                ON DELETE CASCADE
+--     link_coverage.linkId            -> link(id)                ON DELETE CASCADE
 --     line_toc.lineId                 -> line(id)                ON DELETE CASCADE
 --     line_toc.tocEntryId             -> tocEntry(id)            ON DELETE CASCADE
 --     alt_toc_structure.bookId        -> book(id)                ON DELETE CASCADE
@@ -366,6 +370,37 @@ CREATE TABLE IF NOT EXISTS link_anchor (
     PRIMARY KEY (linkId, side, charStart),
     FOREIGN KEY (linkId) REFERENCES link(id) ON DELETE CASCADE
 );
+
+-- Range extent of a link whose citation spans multiple lines (e.g. "Exodus 1:1-6:1").
+-- The link row is anchored at the range's FIRST line; this row records the last line
+-- of the ranged side. side: 0 = source side, 1 = target side (same as link_anchor).
+CREATE TABLE IF NOT EXISTS link_range (
+    linkId INTEGER NOT NULL,
+    side INTEGER NOT NULL,
+    endLineId INTEGER NOT NULL,
+    -- Denormalized line.lineIndex of endLineId, for display/ordering without a JOIN.
+    endLineIndex INTEGER NOT NULL,
+    PRIMARY KEY (linkId, side),
+    FOREIGN KEY (linkId) REFERENCES link(id) ON DELETE CASCADE,
+    FOREIGN KEY (endLineId) REFERENCES line(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_link_range_end_line ON link_range(endLineId);
+
+-- One row per line covered by a ranged link side BEYOND its first line (the first
+-- line is matched by the equality queries on link.sourceLineId/targetLineId).
+-- Keeps "which links cover line X?" an indexed equality lookup. Heading lines are
+-- excluded, mirroring the links importer's heading skip.
+CREATE TABLE IF NOT EXISTS link_coverage (
+    lineId INTEGER NOT NULL,
+    linkId INTEGER NOT NULL,
+    side INTEGER NOT NULL,
+    PRIMARY KEY (lineId, linkId, side),
+    FOREIGN KEY (lineId) REFERENCES line(id) ON DELETE CASCADE,
+    FOREIGN KEY (linkId) REFERENCES link(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_link_coverage_link ON link_coverage(linkId);
 
 -- Removed legacy FTS view/table in favor of Lucene (10.x)
 

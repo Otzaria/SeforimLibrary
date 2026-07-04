@@ -393,6 +393,7 @@ class SefariaDirectImporter(
 
         // Build citation lookup for links
         val refsByCanonical = allRefsWithPath.groupBy { canonicalCitation(it.ref) }
+        val refsByPath = allRefsWithPath.groupBy { it.path }
         val refsByBase = mutableMapOf<String, RefEntry>()
         allRefsWithPath.forEach { entry ->
             val base = canonicalBase(entry.ref)
@@ -466,7 +467,8 @@ class SefariaDirectImporter(
                 lineIdToBookId = lineIdToBookId,
                 bookMetaById = bookMetaById,
                 headingLineIds = headingLineIds,
-                charLevelPending = charLevelPending
+                charLevelPending = charLevelPending,
+                refsByPath = refsByPath
             )
             logger.i { "Links processed" }
 

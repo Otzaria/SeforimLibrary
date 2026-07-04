@@ -212,6 +212,10 @@ internal fun resolveRefs(
     val rangeStart = citationRangeStart(canonical)
     if (rangeStart != null) {
         refsByCanonical[rangeStart]?.let { if (it.isNotEmpty()) return it }
+        // A range start at an intermediate level (e.g. "Ibn Ezra on Genesis 6:1"
+        // where leaves are "6:1:X") IS a base key — look it up verbatim before
+        // canonicalBase(), which would strip one component too many and miss.
+        refsByBase[rangeStart]?.let { return listOf(it) }
         refsByBase[canonicalBase(rangeStart)]?.let { return listOf(it) }
         if (!rangeStart.contains(":")) {
             val baseWithOne = canonicalBase("$rangeStart 1")

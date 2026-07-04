@@ -1,0 +1,27 @@
+-- Queries for link_range / link_coverage (multi-line ranged links).
+
+-- Upsert keeping the widest range: when the same (linkId, side) arrives twice
+-- (duplicate CSV rows with different range ends), the larger endLineIndex wins
+-- deterministically regardless of file processing order.
+insertRange:
+INSERT INTO link_range (linkId, side, endLineId, endLineIndex)
+VALUES (?, ?, ?, ?)
+ON CONFLICT(linkId, side) DO UPDATE
+SET endLineId = excluded.endLineId, endLineIndex = excluded.endLineIndex
+WHERE excluded.endLineIndex > link_range.endLineIndex;
+
+insertCoverage:
+INSERT OR IGNORE INTO link_coverage (lineId, linkId, side)
+VALUES (?, ?, ?);
+
+selectRangesByLinkIds:
+SELECT * FROM link_range WHERE linkId IN ? ORDER BY linkId, side;
+
+selectCoveringLinks:
+SELECT linkId, side FROM link_coverage WHERE lineId = ? ORDER BY linkId, side;
+
+countRanges:
+SELECT COUNT(*) FROM link_range;
+
+countCoverage:
+SELECT COUNT(*) FROM link_coverage;
