@@ -81,7 +81,7 @@ internal class SefariaVersionsImporter(
         }
     }
 
-    private fun importVersionFiles(
+    private suspend fun importVersionFiles(
         input: BookInput,
         versionFiles: List<Path>,
         lineKeyToId: Map<Pair<String, Int>, Long>,
@@ -168,6 +168,9 @@ internal class SefariaVersionsImporter(
             if (rows.isNotEmpty()) versionsWithContent++
             versionLineRows += rows.size
             lineBatch += rows
+            // Flush per version file so lineBatch stays bounded even for books
+            // with many large editions.
+            flushIfNeeded()
         }
     }
 
