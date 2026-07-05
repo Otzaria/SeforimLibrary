@@ -70,13 +70,15 @@ class SefariaDirectImporter(
         // Without this, books like Tikkunei Zohar render broken ❌ placeholders
         // (issue 392). This scan reads all merged.json once; the embedder uses
         // a disk cache under build/sefaria/image-cache so re-runs skip network.
-        val mergedFiles = java.nio.file.Files.walk(jsonDir).use { stream ->
+        // Scans every book json (merged + per-version siblings) so version
+        // content also gets its textimages inlined from the warm cache.
+        val bookJsonFiles = java.nio.file.Files.walk(jsonDir).use { stream ->
             stream.filter {
                 java.nio.file.Files.isRegularFile(it) &&
-                    it.fileName.toString().equals("merged.json", ignoreCase = true)
+                    it.fileName.toString().endsWith(".json", ignoreCase = true)
             }.toList()
         }
-        SefariaImageEmbedder.prefetch(mergedFiles, logger = logger)
+        SefariaImageEmbedder.prefetch(bookJsonFiles, logger = logger)
 
         // Read and parse files in parallel
         logger.i { "Starting parallel file processing..." }
@@ -207,6 +209,9 @@ class SefariaDirectImporter(
         // Inputs for the inline-anchor pass (itags → link_anchor), collected in
         // the book loop so the pass can run after links exist.
         val anchorBookInputs = mutableListOf<SefariaInlineAnchors.BookInput>()
+        // Inputs for the versions pass (book_version / version_line), which
+        // runs after all lines are inserted so ref→lineId joins always land.
+        val versionBookInputs = mutableListOf<SefariaVersionsImporter.BookInput>()
 
         logger.i { "Inserting books and lines..." }
         var processedBooks = 0
@@ -307,6 +312,12 @@ class SefariaDirectImporter(
                 cleanShiftByLineIndex = payload.cleanShiftByLineIndex,
             )
 
+            versionBookInputs += SefariaVersionsImporter.BookInput(
+                payload = payload,
+                bookId = bookId,
+                bookPath = bookPath,
+            )
+
             payload.lines.forEachIndexed { idx, content ->
                 val refEntry = refsByLineIndex[idx]
                 // Prefer Sefaria's stable citation address (heRef) as natural key
@@ -382,6 +393,11 @@ class SefariaDirectImporter(
         }
 
         logger.i { "Inserted all books and lines" }
+
+        // Versions pass — after all lines exist so ref→lineId joins always land.
+        logger.i { "Importing book versions..." }
+        SefariaVersionsImporter(repository, allocator, json, bookPayloadReader, logger)
+            .import(versionBookInputs, lineKeyToId)
 
         // Apply default mappings
         if (defaultCommentatorsConfig.isNotEmpty()) {

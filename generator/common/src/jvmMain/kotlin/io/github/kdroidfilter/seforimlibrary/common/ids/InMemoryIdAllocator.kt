@@ -111,6 +111,10 @@ class InMemoryIdAllocator private constructor(
     override fun categoryId(canonicalPath: String): Long = allocateLookup(IdTable.CATEGORY, canonicalPath)
     override fun tocTextId(text: String): Long = allocateLookup(IdTable.TOC_TEXT, text)
 
+    // bookId is itself build-stable, so the encoded string key is stable too.
+    override fun bookVersionId(bookId: Long, versionTitle: String): Long =
+        allocateLookup(IdTable.BOOK_VERSION, "$bookId $versionTitle")
+
     // ─── Composite-keyed accessors ─────────────────────────────────────────────
 
     override fun bookId(sourceName: String, canonicalHeTitle: String): Long {

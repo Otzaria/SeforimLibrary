@@ -32,6 +32,9 @@ interface IdAllocator {
     fun categoryId(canonicalPath: String): Long
     fun tocTextId(text: String): Long
 
+    /** Stable id for a book edition; natural key = (bookId, versionTitle). */
+    fun bookVersionId(bookId: Long, versionTitle: String): Long
+
     // ─── Composite-keyed tables ────────────────────────────────────────────────
     fun bookId(sourceName: String, canonicalHeTitle: String): Long
     fun lineId(bookId: Long, contentHash: ByteArray, occurrenceIdx: Int): Long

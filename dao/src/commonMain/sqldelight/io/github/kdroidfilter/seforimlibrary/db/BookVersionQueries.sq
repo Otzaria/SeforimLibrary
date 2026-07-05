@@ -1,0 +1,37 @@
+-- Queries for book_version / version_line (alternative text editions).
+
+-- Upsert by stable id: metadata (priority, license, notes, hasContent) may change
+-- between exports while the id stays pinned to (bookId, versionTitle).
+insertVersion:
+INSERT INTO book_version (id, bookId, versionTitle, heVersionTitle, versionSource, priority, license, versionNotes, heVersionNotes, hasContent)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT(id) DO UPDATE
+SET heVersionTitle = excluded.heVersionTitle,
+    versionSource = excluded.versionSource,
+    priority = excluded.priority,
+    license = excluded.license,
+    versionNotes = excluded.versionNotes,
+    heVersionNotes = excluded.heVersionNotes,
+    hasContent = excluded.hasContent;
+
+insertVersionLine:
+INSERT INTO version_line (versionId, lineId, content, charCount)
+VALUES (?, ?, ?, ?)
+ON CONFLICT(versionId, lineId) DO UPDATE
+SET content = excluded.content, charCount = excluded.charCount;
+
+selectVersionsByBookId:
+SELECT * FROM book_version WHERE bookId = ? ORDER BY priority DESC, versionTitle;
+
+selectVersionLines:
+SELECT vl.lineId, vl.content, vl.charCount, l.lineIndex
+FROM version_line vl
+JOIN line l ON l.id = vl.lineId
+WHERE vl.versionId = ?
+ORDER BY l.lineIndex;
+
+countVersions:
+SELECT COUNT(*) FROM book_version;
+
+countVersionLines:
+SELECT COUNT(*) FROM version_line;

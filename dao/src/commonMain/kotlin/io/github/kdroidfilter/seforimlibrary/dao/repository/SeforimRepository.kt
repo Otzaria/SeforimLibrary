@@ -19,8 +19,10 @@ import io.github.kdroidfilter.seforimlibrary.core.models.LineAltTocMapping
 import io.github.kdroidfilter.seforimlibrary.core.models.LineTocMapping
 import io.github.kdroidfilter.seforimlibrary.core.models.Link
 import io.github.kdroidfilter.seforimlibrary.core.models.LinkAnchor
+import io.github.kdroidfilter.seforimlibrary.core.models.BookVersion
 import io.github.kdroidfilter.seforimlibrary.core.models.LinkCoverage
 import io.github.kdroidfilter.seforimlibrary.core.models.LinkRange
+import io.github.kdroidfilter.seforimlibrary.core.models.VersionLine
 import io.github.kdroidfilter.seforimlibrary.core.models.PubDate
 import io.github.kdroidfilter.seforimlibrary.core.models.PubPlace
 import io.github.kdroidfilter.seforimlibrary.core.models.Source
@@ -2280,6 +2282,47 @@ class SeforimRepository(databasePath: String, private val driver: SqlDriver) : L
                     lineId = row.lineId,
                     linkId = row.linkId,
                     side = row.side.toLong(),
+                )
+            }
+        }
+    }
+
+    /**
+     * Upserts multiple book versions in a single transaction (metadata may
+     * change between exports while the id stays pinned to bookId+versionTitle).
+     */
+    suspend fun insertBookVersionsBatch(versions: List<BookVersion>) = withContext(Dispatchers.IO) {
+        if (versions.isEmpty()) return@withContext
+        database.transaction {
+            versions.forEach { version ->
+                database.bookVersionQueriesQueries.insertVersion(
+                    id = version.id,
+                    bookId = version.bookId,
+                    versionTitle = version.versionTitle,
+                    heVersionTitle = version.heVersionTitle,
+                    versionSource = version.versionSource,
+                    priority = version.priority,
+                    license = version.license,
+                    versionNotes = version.versionNotes,
+                    heVersionNotes = version.heVersionNotes,
+                    hasContent = if (version.hasContent) 1L else 0L,
+                )
+            }
+        }
+    }
+
+    /**
+     * Upserts multiple version lines in a single transaction.
+     */
+    suspend fun insertVersionLinesBatch(rows: List<VersionLine>) = withContext(Dispatchers.IO) {
+        if (rows.isEmpty()) return@withContext
+        database.transaction {
+            rows.forEach { row ->
+                database.bookVersionQueriesQueries.insertVersionLine(
+                    versionId = row.versionId,
+                    lineId = row.lineId,
+                    content = row.content,
+                    charCount = row.charCount.toLong(),
                 )
             }
         }

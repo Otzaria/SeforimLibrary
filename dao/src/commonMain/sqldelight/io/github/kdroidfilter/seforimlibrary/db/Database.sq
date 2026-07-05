@@ -47,6 +47,9 @@
 --     link_range.endLineId            -> line(id)                ON DELETE CASCADE
 --     link_coverage.lineId            -> line(id)                ON DELETE CASCADE
 --     link_coverage.linkId            -> link(id)                ON DELETE CASCADE
+--     book_version.bookId             -> book(id)                ON DELETE CASCADE
+--     version_line.versionId          -> book_version(id)        ON DELETE CASCADE
+--     version_line.lineId             -> line(id)                ON DELETE CASCADE
 --     line_toc.lineId                 -> line(id)                ON DELETE CASCADE
 --     line_toc.tocEntryId             -> tocEntry(id)            ON DELETE CASCADE
 --     alt_toc_structure.bookId        -> book(id)                ON DELETE CASCADE
@@ -414,6 +417,42 @@ CREATE TABLE IF NOT EXISTS book_has_links (
 
 CREATE INDEX IF NOT EXISTS idx_book_has_source_links ON book_has_links(hasSourceLinks);
 CREATE INDEX IF NOT EXISTS idx_book_has_target_links ON book_has_links(hasTargetLinks);
+
+-- One Hebrew edition ("version") of a book. The book's own lines hold Sefaria's
+-- merged text (per-segment mosaic by priority); hasContent=1 means this edition's
+-- full text is stored in version_line, 0 means metadata-only (single-version books,
+-- where the merged text IS the edition).
+CREATE TABLE IF NOT EXISTS book_version (
+    id INTEGER PRIMARY KEY NOT NULL,
+    bookId INTEGER NOT NULL,
+    versionTitle TEXT NOT NULL,
+    heVersionTitle TEXT,
+    versionSource TEXT,
+    priority REAL,
+    license TEXT,
+    versionNotes TEXT,
+    heVersionNotes TEXT,
+    hasContent INTEGER NOT NULL DEFAULT 0,
+    UNIQUE (bookId, versionTitle),
+    FOREIGN KEY (bookId) REFERENCES book(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_book_version_book ON book_version(bookId);
+
+-- Per-edition text overlay: content of one book line in one edition. A missing
+-- (versionId, lineId) row means the edition lacks that segment — renderers must
+-- show it empty, never fall back to the merged text. Heading lines never appear here.
+CREATE TABLE IF NOT EXISTS version_line (
+    versionId INTEGER NOT NULL,
+    lineId INTEGER NOT NULL,
+    content TEXT NOT NULL,
+    charCount INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (versionId, lineId),
+    FOREIGN KEY (versionId) REFERENCES book_version(id) ON DELETE CASCADE,
+    FOREIGN KEY (lineId) REFERENCES line(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_version_line_line ON version_line(lineId);
 
 -- Mapping table: line -> owning TOC entry
 -- This denormalizes the relationship so every line can directly resolve

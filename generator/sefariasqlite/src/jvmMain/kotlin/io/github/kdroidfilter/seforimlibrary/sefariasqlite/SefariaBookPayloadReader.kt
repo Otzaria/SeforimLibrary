@@ -123,6 +123,12 @@ internal class SefariaBookPayloadReader(
                 ?.takeIf { it.size == 1 }
                 ?.let { (it.first() as? JsonArray)?.firstOrNull()?.stringOrNull() }
                 ?.trim()?.takeIf { it.isNotEmpty() }
+            val versionsMeta = (textJson["versions"] as? JsonArray)?.mapNotNull { el ->
+                val pair = el as? JsonArray ?: return@mapNotNull null
+                val title = pair.getOrNull(0)?.stringOrNull()?.trim()?.takeIf { it.isNotEmpty() }
+                    ?: return@mapNotNull null
+                VersionMeta(title = title, source = pair.getOrNull(1)?.stringOrNull())
+            } ?: emptyList()
             val description = extractDescription(schemaJson, schemaObj)
             val heShortDesc = extractShortDescription(schemaJson, schemaObj)
             val pubDates = extractPubDates(schemaJson, schemaObj)
@@ -161,6 +167,9 @@ internal class SefariaBookPayloadReader(
                 titleAliasKeys = titleAliasKeys,
                 singleVersionTitle = singleVersionTitle,
                 cleanShiftByLineIndex = cleanShifts,
+                versionsMeta = versionsMeta,
+                sourceDirPath = textPath.parent?.toString(),
+                schemaFilePath = schemaPath.toString(),
             )
         }.onFailure { e ->
             logger.w(e) { "Failed to prepare book from $textPath" }
@@ -351,6 +360,24 @@ internal class SefariaBookPayloadReader(
         val refs: List<RefEntry>,
         val headings: List<Heading>,
         val cleanShifts: Map<Int, Int>,
+    )
+
+    /**
+     * Walks an alternative version's text with the BOOK's schema — the exact
+     * walk merged.json went through, so identical addresses yield identical
+     * refs and identical line formatting. Join version→merged lines by ref.
+     */
+    internal fun walkTextWithSchema(
+        schemaObj: JsonObject,
+        textElement: JsonElement,
+        bookHeTitle: String,
+        bookEnTitle: String,
+    ): BuiltBookContent = buildBookContent(
+        schemaObj = schemaObj,
+        textElement = textElement,
+        bookHeTitle = bookHeTitle,
+        bookEnTitle = bookEnTitle,
+        authors = emptyList(),
     )
 
     private fun buildBookContent(

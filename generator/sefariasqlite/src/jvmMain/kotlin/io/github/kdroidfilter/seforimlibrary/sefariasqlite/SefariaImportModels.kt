@@ -82,6 +82,19 @@ internal data class BookPayload(
     //   n >= 0          -> stored content == "<prefix of raw-length n>" + raw
     //   CLEAN_MODIFIED  -> cleanSefariaLine changed the content; offsets unusable
     val cleanShiftByLineIndex: Map<Int, Int> = emptyMap(),
+    // All [versionTitle, versionSource] pairs from merged.json's `versions` array
+    // (the versions that CONTRIBUTED to the merge). book_version metadata-only
+    // fallback when no per-version sibling files exist.
+    val versionsMeta: List<VersionMeta> = emptyList(),
+    // Book directory (parent of merged.json, where per-version sibling files
+    // live) and the resolved schema file — inputs for the versions pass.
+    val sourceDirPath: String? = null,
+    val schemaFilePath: String? = null,
+)
+
+internal data class VersionMeta(
+    val title: String,
+    val source: String?,
 )
 
 internal data class RefEntry(
