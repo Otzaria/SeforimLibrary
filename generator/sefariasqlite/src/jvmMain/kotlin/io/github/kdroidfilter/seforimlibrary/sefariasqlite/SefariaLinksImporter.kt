@@ -41,6 +41,10 @@ internal class SefariaLinksImporter(
     private val rangeReversed = LongAdder()
     private val rangedRowsDropped = LongAdder()
 
+    // Whole perek/parasha range sides: range kept, coverage skipped. Counted per
+    // resolved ref pair, like the other range counters.
+    private val wholeUnitCoverageSuppressed = LongAdder()
+
     // Per-connection-type importer counters (QA plan §10.5). Thread-safe — link
     // files are processed in parallel. Semantics in [LinkImportTypeMetrics].
     private val rowsReadByType = ConcurrentHashMap<ConnectionType, LongAdder>()
@@ -65,7 +69,10 @@ internal class SefariaLinksImporter(
         // are processed in parallel. null = don't collect.
         charLevelPending: Queue<PendingCharLevelAnchor>? = null,
         // All RefEntries grouped by book path — range-end resolution input.
-        refsByPath: Map<String, List<RefEntry>> = emptyMap()
+        refsByPath: Map<String, List<RefEntry>> = emptyMap(),
+        // Canonical whole perek/parasha refs ([SefariaWholeUnitRefs]): such a
+        // citation keeps its link_range but gets no link_coverage.
+        wholeUnitCitations: Set<String> = emptySet()
     ) = coroutineScope {
         // Pre-register all connection types we'll use so their ids are stable
         // (so `link.connectionTypeId` is reproducible across builds).
@@ -109,7 +116,8 @@ internal class SefariaLinksImporter(
                     linkChannel = linkChannel,
                     charLevelPending = charLevelPending,
                     refsByPath = refsByPath,
-                    dafAlignedPairs = dafAlignedPairs
+                    dafAlignedPairs = dafAlignedPairs,
+                    wholeUnitCitations = wholeUnitCitations
                 )
             }
         }
@@ -237,7 +245,8 @@ internal class SefariaLinksImporter(
                 "${rangesResolved.sum()} range sides resolved (${ranges.size} range rows, " +
                 "${coverage.size} coverage rows), " +
                 "end-unresolved=${rangeEndUnresolved.sum()}, reversed=${rangeReversed.sum()}, " +
-                "rows dropped with unresolved citation=${rangedRowsDropped.sum()}"
+                "rows dropped with unresolved citation=${rangedRowsDropped.sum()}, " +
+                "whole perek/parasha range sides kept coverage-free=${wholeUnitCoverageSuppressed.sum()}"
         }
 
         // Per-connection-type importer summary (QA plan §10.5); semantics in
@@ -303,7 +312,8 @@ internal class SefariaLinksImporter(
         linkChannel: Channel<Link>,
         charLevelPending: Queue<PendingCharLevelAnchor>? = null,
         refsByPath: Map<String, List<RefEntry>> = emptyMap(),
-        dafAlignedPairs: Set<Pair<Long, Long>> = emptySet()
+        dafAlignedPairs: Set<Pair<Long, Long>> = emptySet(),
+        wholeUnitCitations: Set<String> = emptySet()
     ) {
         Files.newBufferedReader(file).use { reader ->
             val iter = reader.lineSequence().iterator()
@@ -364,9 +374,15 @@ internal class SefariaLinksImporter(
                 // Ranged citations ("Exodus 1:1-6:1") resolve to their FIRST
                 // line via resolveRefs; the range's remaining lines are added
                 // below as link_range + link_coverage rows.
-                val range1 = parseCitationRange(canonicalCitation(c1))
-                val range2 = parseCitationRange(canonicalCitation(c2))
+                val canonical1 = canonicalCitation(c1)
+                val canonical2 = canonicalCitation(c2)
+                val range1 = parseCitationRange(canonical1)
+                val range2 = parseCitationRange(canonical2)
                 if (range1 != null || range2 != null) rangedRowsSeen.increment()
+                // Whole perek/parasha side: range kept, coverage skipped, so the
+                // link surfaces once at the unit's head. [SefariaWholeUnitRefs]
+                val coverage1 = canonical1 !in wholeUnitCitations
+                val coverage2 = canonical2 !in wholeUnitCitations
 
                 val fromRefs = resolveRefs(c1, refsByCanonical, refsByBase)
                 val toRefs = resolveRefs(c2, refsByCanonical, refsByBase)
@@ -486,7 +502,7 @@ internal class SefariaLinksImporter(
                                 range = range1, entry = from, lineId = srcLine,
                                 storedSrcLine = storedSrcLine, linkId = linkId,
                                 lineKeyToId = lineKeyToId, headingLineIds = headingLineIds,
-                                refsByPath = refsByPath,
+                                refsByPath = refsByPath, emitCoverage = coverage1,
                             )
                         }
                         if (range2 != null) {
@@ -494,7 +510,7 @@ internal class SefariaLinksImporter(
                                 range = range2, entry = to, lineId = tgtLine,
                                 storedSrcLine = storedSrcLine, linkId = linkId,
                                 lineKeyToId = lineKeyToId, headingLineIds = headingLineIds,
-                                refsByPath = refsByPath,
+                                refsByPath = refsByPath, emitCoverage = coverage2,
                             )
                         }
 
@@ -539,6 +555,10 @@ internal class SefariaLinksImporter(
      * range START; the end resolves via the path's prefix index, so a range
      * cited at any depth ("13:11-13") covers through the LAST leaf line under
      * its end address. Unresolvable/reversed ends are counted, never guessed.
+     *
+     * [emitCoverage] false → the range row is still written (the panel shows the
+     * cited extent) but the per-line coverage is skipped, so the link surfaces
+     * only at the range's first line. Set for whole-perek/parasha citations.
      */
     private fun queueRangeSide(
         range: CitationRange,
@@ -549,6 +569,7 @@ internal class SefariaLinksImporter(
         lineKeyToId: Map<Pair<String, Int>, Long>,
         headingLineIds: Set<Long>,
         refsByPath: Map<String, List<RefEntry>>,
+        emitCoverage: Boolean = true,
     ) {
         val pathIndex = pathIndexCache.computeIfAbsent(entry.path) {
             PathRefPrefixIndex.build(refsByPath[it].orEmpty())
@@ -576,10 +597,14 @@ internal class SefariaLinksImporter(
             endLineId = endLineId,
             endLineIndex = endEntry.lineIndex - 1,
         )
-        for (lineIndex1 in (entry.lineIndex + 1)..endEntry.lineIndex) {
-            val coveredId = lineKeyToId[entry.path to (lineIndex1 - 1)] ?: continue
-            if (coveredId in headingLineIds) continue
-            pendingCoverage += LinkCoverage(lineId = coveredId, linkId = linkId, side = side)
+        if (emitCoverage) {
+            for (lineIndex1 in (entry.lineIndex + 1)..endEntry.lineIndex) {
+                val coveredId = lineKeyToId[entry.path to (lineIndex1 - 1)] ?: continue
+                if (coveredId in headingLineIds) continue
+                pendingCoverage += LinkCoverage(lineId = coveredId, linkId = linkId, side = side)
+            }
+        } else {
+            wholeUnitCoverageSuppressed.increment()
         }
         rangesResolved.increment()
     }

@@ -530,6 +530,30 @@ class SefariaDirectImporter(
         val linksDir = dbRoot.resolve("links")
         if (linksDir.exists()) {
             logger.i { "Processing links (${headingLineIds.size} heading lines will be excluded from link targets)..." }
+            // A citation that IS a whole perek/parasha keeps its link_range but
+            // gets no link_coverage — the exclusion Sefaria applies in get_links().
+            val wholeUnitRefs = SefariaWholeUnitRefs.build(orderedBookPayloads)
+            // Three independent sources, asserted separately: an empty set would
+            // silently put every whole-perek citation back on every segment, and
+            // one flat non-empty check would hide a break in either source.
+            // Mishnah/Tosefta are absent by design — their perakim are
+            // section-level refs, never ranged citations.
+            SEFARIA_RANGED_PEREK_FAMILIES.forEach { family ->
+                check(!wholeUnitRefs.perekByFamily[family].isNullOrEmpty()) {
+                    "No whole-perek refs for $family from ${orderedBookPayloads.size} books — " +
+                        "schema alts/match_templates shape changed"
+                }
+            }
+            check(wholeUnitRefs.parasha.isNotEmpty()) {
+                "No parasha refs from ${orderedBookPayloads.size} books — the Torah alt-struct " +
+                    "key is no longer 'Parasha'"
+            }
+            val wholeUnitCitations = wholeUnitRefs.all
+            logger.i {
+                "Whole-unit citation refs: ${wholeUnitCitations.size} " +
+                    "(${wholeUnitRefs.perekByFamily.entries.joinToString { "${it.key}=${it.value.size}" }}, " +
+                    "parasha=${wholeUnitRefs.parasha.size})"
+            }
             val charLevelPending = java.util.concurrent.ConcurrentLinkedQueue<PendingCharLevelAnchor>()
             linksImporter.processLinksInParallel(
                 linksDir = linksDir,
@@ -540,7 +564,8 @@ class SefariaDirectImporter(
                 bookMetaById = bookMetaById,
                 headingLineIds = headingLineIds,
                 charLevelPending = charLevelPending,
-                refsByPath = refsByPath
+                refsByPath = refsByPath,
+                wholeUnitCitations = wholeUnitCitations
             )
             linkImportMetrics = linksImporter.metricsSnapshot()
             logger.i { "Links processed" }
@@ -710,3 +735,7 @@ private fun detectTeamimAndNekudot(lines: List<String>): Pair<Boolean, Boolean> 
     }
     return hasTeamim to hasNekudot
 }
+
+// Perek families that actually yield ranged refs, and so must never come back
+// empty. Mishnah/Tosefta perakim are section-level and excluded on purpose.
+private val SEFARIA_RANGED_PEREK_FAMILIES = listOf("Talmud/Bavli", "Talmud/Yerushalmi")
