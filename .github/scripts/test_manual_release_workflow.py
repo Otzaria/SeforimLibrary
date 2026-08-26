@@ -62,6 +62,23 @@ class ManualReleaseWorkflowContractTest(unittest.TestCase):
         self.assertIn("for tool in gh sqlite3 zstd unzstd jq curl unzip", installer)
         self.assertIn("skipping package-manager work", installer)
 
+    def test_durable_host_uses_preinstalled_java_25_without_network_setup(self):
+        java = self.step("Verify durable Java 25 toolchain")
+
+        self.assertNotIn("actions/setup-java", self.workflow)
+        self.assertIn("command -v java", java)
+        self.assertIn("command -v javac", java)
+        self.assertIn('[[ "$java_version" == 25 || "$java_version" == 25.* ]]', java)
+        self.assertIn('echo "JAVA_HOME=$java_home" >> "$GITHUB_ENV"', java)
+
+    def test_durable_host_uses_preinstalled_gradle_without_wrapper_download(self):
+        gradle = self.step("Verify durable Gradle 9.1.0 toolchain")
+
+        self.assertIn("command -v gradle", gradle)
+        self.assertIn('[ "$gradle_version" = 9.1.0 ]', gradle)
+        self.assertNotIn("./gradlew", self.workflow)
+        self.assertNotIn("gradle/actions/setup-gradle", self.workflow)
+
     def test_release_write_is_probed_before_the_expensive_build(self):
         probe = self.step("Preflight release write credentials")
         self.assertLess(

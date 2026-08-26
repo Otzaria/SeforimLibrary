@@ -461,14 +461,34 @@ jobs:
           generatorHeap=8g
           EOF
 
-      - name: Set up Java 25
-        uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: "25"
+      - name: Verify durable Java 25 toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          command -v java
+          command -v javac
+          java_home="$(dirname "$(dirname "$(readlink -f "$(command -v javac)")")")"
+          java_version="$($java_home/bin/java -XshowSettings:properties -version 2>&1 \
+            | awk -F'= ' '/^[[:space:]]*java.version = / {print $2; exit}')"
+          [[ "$java_version" == 25 || "$java_version" == 25.* ]] || {
+            echo "::error::the durable runner must provide Java 25; found ${java_version:-missing}"
+            exit 1
+          }
+          echo "JAVA_HOME=$java_home" >> "$GITHUB_ENV"
+          echo "$java_home/bin" >> "$GITHUB_PATH"
+          "$java_home/bin/java" -version
 
-      - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@v4
+      - name: Verify durable Gradle 9.1.0 toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          command -v gradle
+          gradle_version="$(gradle --version | awk '/^Gradle / {print $2; exit}')"
+          [ "$gradle_version" = 9.1.0 ] || {
+            echo "::error::the durable runner must provide Gradle 9.1.0; found ${gradle_version:-missing}"
+            exit 1
+          }
+          gradle --version
 
       - name: Grant execute permission for gradlew
         run: chmod +x gradlew
@@ -689,7 +709,7 @@ jobs:
         run: |
           # -PlinkerSidecar makes the Sefaria import dump the RefEntry→lineId sidecar
           # this build's LINKER Phase-2 needs (see next step).
-          ./gradlew generateSeforimDb \
+          gradle generateSeforimDb \
             -PexportDir="$SEFARIA_EXTRACT_ROOT" \
             -PsourceDir="$OTZARIA_EXTRACT_ROOT" \
             -PreleaseName=${{ steps.release_meta.outputs.release_tag }} \
@@ -719,7 +739,7 @@ jobs:
           RAW_SNAPSHOT="$RUNNER_TEMP/lines-snapshot-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.db"
           rm -f "$RAW_SNAPSHOT"
           trap 'rm -f "$RAW_SNAPSHOT"' EXIT
-          ./gradlew :packaging:dumpLines \
+          gradle :packaging:dumpLines \
             -PseforimDb=$PWD/build/seforim.db \
             -PlinesSnapshot="$RAW_SNAPSHOT" \
             --no-daemon --stacktrace
@@ -1200,7 +1220,7 @@ jobs:
           print(f"LINKER_RELINK_RUN_ATTEMPT={m['relink_run_attempt']}")
           PY
           tar --use-compress-program=unzstd -xf build/linker/linker_links.zst -C build/linker
-          ./gradlew :sefariasqlite:generateLinkerLinks \
+          gradle :sefariasqlite:generateLinkerLinks \
             -PseforimDb=$PWD/build/seforim.db \
             -PlinkerArtifacts=$PWD/build/linker/artifacts \
             -PlinkerSidecar=$PWD/build/linker_sidecar.tsv \
@@ -1283,7 +1303,7 @@ jobs:
               continue
             fi
 
-            ./gradlew :generator-common:producePatchAndVerify \
+            gradle :generator-common:producePatchAndVerify \
               -PprevDb=$PWD/$PREV_DB \
               -PnewDb=$PWD/build/seforim.db \
               -Pout=$PWD/patches/patch-v${TARGET_VER}-v${THIS_VER}.db \
