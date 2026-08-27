@@ -45,8 +45,10 @@ class ManualGenerateReleaseWorkflowContractTest {
         assertTrue(workflow.contains("\"lineage_sha256\""))
         assertTrue(workflow.contains("build_provenance.json --argjson size"))
         assertTrue(workflow.contains("refresh-release-manifest:"))
-        assertTrue(workflow.contains("mapfile -t SEFARIA_DB_ROOTS"))
-        assertTrue(workflow.contains("test \"\${#SEFARIA_DB_ROOTS[@]}\" -eq 1"))
+        assertTrue(workflow.contains("SEFARIA_EXTRACT_ROOT=\"\$INPUTS/sefaria-extract\""))
+        assertTrue(workflow.contains("test -d \"\$SEFARIA_EXTRACT_ROOT/json\""))
+        assertTrue(workflow.contains("test -d \"\$SEFARIA_EXTRACT_ROOT/schemas\""))
+        assertFalse(workflow.contains("SEFARIA_DB_ROOTS"))
         assertTrue(workflow.contains(".sefaria.archive == \$metadata[0].archive"))
         assertTrue(workflow.contains("repos/otzaria/otzaria-library/commits/\$OTZARIA_TAG"))
         assertTrue(

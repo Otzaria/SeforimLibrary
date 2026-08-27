@@ -97,6 +97,51 @@ class ManualReleaseWorkflowContractTest(unittest.TestCase):
         self.assertIn('generatorHeap=8g', heaps)
         self.assertIn('linkerHeap=12g', heaps)
 
+    def test_recovery_overlays_exact_phase2_sources_from_workflow_revision(self):
+        checkout = self.step("Checkout immutable pipeline control scripts")
+        overlay = self.step("Overlay pinned recovery Phase-2 implementation")
+        apply_links = self.step("Apply LINKER links (Phase-2)")
+
+        disk_allocator = (
+            "generator/common/src/jvmMain/kotlin/io/github/kdroidfilter/"
+            "seforimlibrary/common/ids/DiskBackedLinkIdAllocator.kt"
+        )
+        importer = (
+            "generator/sefariasqlite/src/jvmMain/kotlin/io/github/kdroidfilter/"
+            "seforimlibrary/sefariasqlite/GenerateLinkerLinks.kt"
+        )
+        self.assertIn(disk_allocator, checkout)
+        self.assertIn(importer, checkout)
+        self.assertIn("if: inputs.relink_recovery_run_id != ''", overlay)
+        self.assertIn('install -m 0644 ".pipeline-control/$file" "$file"', overlay)
+        self.assertIn('old = \'jvmArgs = listOf("-Xmx6g")\'', overlay)
+        self.assertIn('new = \'jvmArgs = listOf("-Xmx12g", "-XX:+UseG1GC")\'', overlay)
+        self.assertIn("text.count(old) != 1", overlay)
+        self.assertIn("DiskBackedLinkIdAllocator", overlay)
+        self.assertIn("InMemoryIdAllocator", overlay)
+        self.assertIn("grep -Fq", overlay)
+        self.assertNotIn("rg -q", overlay)
+        self.assertIn("rm -rf generator/common/build generator/sefariasqlite/build", overlay)
+        self.assertLess(
+            self.workflow.index("      - name: Overlay pinned recovery Phase-2 implementation\n"),
+            self.workflow.index("      - name: Apply LINKER links (Phase-2)\n"),
+        )
+        self.assertIn("gradle :sefariasqlite:generateLinkerLinks", apply_links)
+
+    def test_phase2_implementation_commit_is_part_of_release_identity(self):
+        lookup = self.step("Find and verify exact provenance")
+        stage = self.step("Stage release assets")
+
+        expression = "${{ inputs.relink_recovery_run_id != '' && github.sha || inputs.source_commit }}"
+        self.assertGreaterEqual(self.workflow.count(f"PHASE2_IMPLEMENTATION_COMMIT: {expression}"), 3)
+        self.assertIn('--arg phase2 "$PHASE2_IMPLEMENTATION_COMMIT"', lookup)
+        self.assertIn(".phase2_implementation_commit==$phase2", lookup)
+        self.assertIn('"schema_version": 3', stage)
+        self.assertIn(
+            '"phase2_implementation_commit": os.environ["PHASE2_IMPLEMENTATION_COMMIT"]',
+            stage,
+        )
+
     def test_pinned_sefaria_archive_uses_its_explicit_root_contract(self):
         extract = self.step("Verify pinned lineage and extract exact inputs")
 
@@ -165,6 +210,12 @@ class ManualReleaseWorkflowContractTest(unittest.TestCase):
         relink = self.step("Run LinkerToOtzaria relink on this snapshot (and wait)")
         cleanup = self.step("Cancel any in-flight relink for this build (no orphaned linker run)")
         self.assertIn('echo "KAGGLE_TITLE=kaggle-relink request=$RELINK_REQUEST_ID', relink)
+        self.assertIn('echo "RELINK_DISPATCH_STARTED=1" >> "$GITHUB_ENV"', relink)
+        self.assertIn('[ "${RELINK_DISPATCH_STARTED:-}" = 1 ]', cleanup)
+        self.assertIn(
+            'actions/runs/$EXPECTED_PARENT_RUN_ID/attempts/$EXPECTED_PARENT_RUN_ATTEMPT',
+            relink,
+        )
         self.assertIn(': "${RELINK_TITLE:=}"', cleanup)
         self.assertIn(': "${KAGGLE_TITLE:=}"', cleanup)
 
@@ -176,11 +227,34 @@ class ManualReleaseWorkflowContractTest(unittest.TestCase):
         self.assertIn('digest=="sha256:"+sys.argv[3]', publish)
         self.assertNotIn("actions/upload-artifact", publish)
         self.assertNotIn("Upload snapshot artifact for the relink run", self.workflow)
-
         relink = self.step("Run LinkerToOtzaria relink on this snapshot (and wait)")
-        self.assertIn('SNAPSHOT_RELEASE_TAG="lines-snapshot-sha256-$SNAPSHOT_ZST_SHA256"', relink)
+        self.assertIn(
+            'SNAPSHOT_RELEASE_TAG="lines-snapshot-sha256-$EXPECTED_LINKER_SNAPSHOT_ZST_SHA256"',
+            relink,
+        )
         self.assertIn("recovery parent snapshot release is missing or not byte-exact", relink)
-        self.assertNotIn("recovery parent must retain exactly one live source snapshot artifact", relink)
+        self.assertNotIn(
+            "recovery parent must retain exactly one live source snapshot artifact",
+            relink,
+        )
+
+    def test_recovery_verifies_semantic_snapshot_before_phase2(self):
+        relink = self.step("Run LinkerToOtzaria relink on this snapshot (and wait)")
+        apply_links = self.step("Apply LINKER links (Phase-2)")
+
+        self.assertIn("EXPECTED_LINKER_SNAPSHOT_ZST_SHA256", relink)
+        self.assertIn("relink-recovery-manifest.json", relink)
+        self.assertIn(
+            'EXP_SNAPSHOT_SHA="$EXPECTED_LINKER_SNAPSHOT_ZST_SHA256"',
+            apply_links,
+        )
+        self.assertIn("verify_relink_recovery_snapshot.py", apply_links)
+        self.assertIn("--original \"$ORIGINAL_SNAPSHOT_DB\"", apply_links)
+        self.assertIn("--rebuilt \"$REBUILT_SNAPSHOT_DB\"", apply_links)
+        self.assertLess(
+            apply_links.index("verify_relink_recovery_snapshot.py"),
+            apply_links.index("gradle :sefariasqlite:generateLinkerLinks"),
+        )
 
     def test_weekly_workflow_has_no_actions_artifact_handoffs(self):
         self.assertNotIn("actions/upload-artifact", self.workflow)
