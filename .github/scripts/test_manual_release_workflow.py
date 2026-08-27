@@ -98,6 +98,25 @@ class ManualReleaseWorkflowContractTest(unittest.TestCase):
         self.assertIn("root schemas/ contains no JSON files", extract)
         self.assertNotIn("SEFARIA_DB_ROOTS", extract)
 
+    def test_self_hosted_release_digests_are_read_through_rest(self):
+        extract = self.step("Verify pinned lineage and extract exact inputs")
+        apply_links = self.step("Apply LINKER links (Phase-2)")
+        publish = self.step("Create draft, verify every uploaded asset, then publish")
+
+        self.assertIn(
+            'repos/otzaria/otzaria-library/releases/tags/$OTZARIA_TAG', extract
+        )
+        self.assertIn(
+            'repos/Otzaria/LinkerToOtzaria/releases/tags/$LINKER_RELEASE_TAG',
+            apply_links,
+        )
+        self.assertIn(
+            'repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG', publish
+        )
+        self.assertIn("release_assets_json", publish)
+        for step in (extract, apply_links, publish):
+            self.assertNotIn("gh release view", step)
+
     def test_release_write_is_probed_before_the_expensive_build(self):
         probe = self.step("Preflight release write credentials")
         self.assertLess(
@@ -127,6 +146,11 @@ class ManualReleaseWorkflowContractTest(unittest.TestCase):
         self.assertIn('exact-empty-draft', publish)
         self.assertIn('for asset_path in release-staging/*', publish)
         self.assertNotIn('gh release upload "$RELEASE_TAG" "$asset_path" --clobber', publish)
+        self.assertIn('gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100"', publish)
+        self.assertIn("Draft releases are not", publish)
+        self.assertIn('RELEASE_ID="$(list_matching_releases', publish)
+        self.assertIn('repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID', publish)
+        self.assertNotIn('releases/tags/$RELEASE_TAG" > "$output"', publish)
 
     def test_recovery_sets_both_cleanup_titles_and_cleanup_defaults_them(self):
         relink = self.step("Run LinkerToOtzaria relink on this snapshot (and wait)")
