@@ -62,10 +62,19 @@ class ManualReleaseWorkflowContractTest(unittest.TestCase):
         self.assertIn("for tool in gh sqlite3 zstd unzstd jq curl unzip", installer)
         self.assertIn("skipping package-manager work", installer)
 
+    def test_disk_probe_ignores_absent_optional_wsl_drives(self):
+        disk = self.step("Disk before build")
+
+        self.assertIn("df -h /", disk)
+        self.assertIn("if [ -d /mnt/c ]; then", disk)
+        self.assertIn("df -h /mnt/c", disk)
+        self.assertNotIn("run: df -h\n", disk)
+
     def test_durable_host_uses_preinstalled_java_25_without_network_setup(self):
         java = self.step("Verify durable Java 25 toolchain")
 
         self.assertNotIn("actions/setup-java", self.workflow)
+        self.assertNotIn("gradle/actions/setup-gradle", self.workflow)
         self.assertIn("command -v java", java)
         self.assertIn("command -v javac", java)
         self.assertIn('[[ "$java_version" == 25 || "$java_version" == 25.* ]]', java)
@@ -79,17 +88,33 @@ class ManualReleaseWorkflowContractTest(unittest.TestCase):
         self.assertNotIn("./gradlew", self.workflow)
         self.assertNotIn("gradle/actions/setup-gradle", self.workflow)
 
+    def test_pinned_sefaria_archive_uses_its_explicit_root_contract(self):
+        extract = self.step("Verify pinned lineage and extract exact inputs")
+
+        self.assertIn('SEFARIA_EXTRACT_ROOT="$INPUTS/sefaria-extract"', extract)
+        self.assertIn('test -d "$SEFARIA_EXTRACT_ROOT/json"', extract)
+        self.assertIn('test -d "$SEFARIA_EXTRACT_ROOT/schemas"', extract)
+        self.assertIn("root json/ contains no JSON files", extract)
+        self.assertIn("root schemas/ contains no JSON files", extract)
+        self.assertNotIn("SEFARIA_DB_ROOTS", extract)
+
     def test_release_write_is_probed_before_the_expensive_build(self):
         probe = self.step("Preflight release write credentials")
         self.assertLess(
             self.workflow.index("      - name: Preflight release write credentials\n"),
             self.workflow.index("      - name: Mount RAM-backed build dir (tmpfs)\n"),
         )
-        self.assertIn("[ \"$code\" = 422 ]", probe)
+        self.assertIn("[ \"$code\" = 200 ]", probe)
+        self.assertIn(".permissions.push == true", probe)
+        self.assertNotIn("--request POST", probe)
         self.assertIn("RELEASE_AUTOMATIC_WRITABLE", probe)
         self.assertIn("RELEASE_CROSS_REPO_WRITABLE", probe)
         self.assertIn("RELEASE_TOKEN_KIND=automatic", probe)
         self.assertIn("RELEASE_TOKEN_KIND=cross-repo", probe)
+        self.assertLess(
+            probe.index('if [ "$cross_repo_writable" = true ]'),
+            probe.index('elif [ "$automatic_writable" = true ]'),
+        )
 
     def test_publisher_reconciles_and_falls_back_only_to_preflighted_credentials(self):
         publish = self.step("Create draft, verify every uploaded asset, then publish")

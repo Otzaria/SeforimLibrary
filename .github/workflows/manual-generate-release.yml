@@ -335,43 +335,40 @@ jobs:
             .github/host
           persist-credentials: false
 
-      # `gh` gives GH_TOKEN precedence over GITHUB_TOKEN. Probe the exact write
-      # operation before spending hours on the DB, and select the narrow automatic
-      # token when it is writable. Probe the existing cross-repo PAT as well so
-      # the publisher has a previously verified fallback if either credential is
-      # revoked or GitHub returns a transient integration-policy failure after
-      # the expensive build. An empty
-      # release request is guaranteed not to mutate state: authorized callers get
-      # 422 (missing required tag_name), while a read-only token gets 403.
+      # `gh` gives GH_TOKEN precedence over GITHUB_TOKEN. Verify the repository
+      # permission exposed for each exact credential before spending hours on the
+      # DB. Do not use an intentionally malformed release POST as a write probe:
+      # GitHub can return validation status 422 before enforcing authorization,
+      # which previously classified read-only credentials as writable. Prefer the
+      # cross-repository credential because this pipeline necessarily performs
+      # cross-repository handoffs; keep GITHUB_TOKEN as the verified fallback.
       - name: Preflight release write credentials
         env:
           AUTOMATIC_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           CROSS_REPO_TOKEN: ${{ secrets.PIPELINE_TOKEN }}
         run: |
           set -euo pipefail
-          probe_release_write() {
-            local token="$1" code
+          probe_contents_write() {
+            local token="$1" response="$RUNNER_TEMP/repository-permissions.json" code
             [ -n "$token" ] || return 1
-            code=$(curl --silent --show-error --output "$RUNNER_TEMP/release-write-probe.json" \
-              --write-out '%{http_code}' --request POST \
+            code=$(curl --silent --show-error --output "$response" \
+              --write-out '%{http_code}' \
               --header "Authorization: Bearer $token" \
               --header 'Accept: application/vnd.github+json' \
-              --header 'Content-Type: application/json' \
               --header 'X-GitHub-Api-Version: 2022-11-28' \
-              "https://api.github.com/repos/$GITHUB_REPOSITORY/releases" \
-              --data '{}')
-            [ "$code" = 422 ]
+              "https://api.github.com/repos/$GITHUB_REPOSITORY")
+            [ "$code" = 200 ] && jq -e '.permissions.push == true' "$response" >/dev/null
           }
           automatic_writable=false
           cross_repo_writable=false
-          if probe_release_write "$AUTOMATIC_TOKEN"; then automatic_writable=true; fi
-          if probe_release_write "$CROSS_REPO_TOKEN"; then cross_repo_writable=true; fi
+          if probe_contents_write "$AUTOMATIC_TOKEN"; then automatic_writable=true; fi
+          if probe_contents_write "$CROSS_REPO_TOKEN"; then cross_repo_writable=true; fi
           echo "RELEASE_AUTOMATIC_WRITABLE=$automatic_writable" >> "$GITHUB_ENV"
           echo "RELEASE_CROSS_REPO_WRITABLE=$cross_repo_writable" >> "$GITHUB_ENV"
-          if [ "$automatic_writable" = true ]; then
-            echo 'RELEASE_TOKEN_KIND=automatic' >> "$GITHUB_ENV"
-          elif [ "$cross_repo_writable" = true ]; then
+          if [ "$cross_repo_writable" = true ]; then
             echo 'RELEASE_TOKEN_KIND=cross-repo' >> "$GITHUB_ENV"
+          elif [ "$automatic_writable" = true ]; then
+            echo 'RELEASE_TOKEN_KIND=automatic' >> "$GITHUB_ENV"
           else
             echo '::error::Neither GITHUB_TOKEN nor PIPELINE_TOKEN can create releases; refusing to start the expensive DB build.'
             exit 1
@@ -383,7 +380,16 @@ jobs:
           .pipeline-control/.github/host/otzaria-pipeline.tmpfiles.conf
 
       - name: Disk before build
-        run: df -h
+        run: |
+          set -euo pipefail
+          # Bare `df -h` asks WSL to stat every configured Windows drive and
+          # exits nonzero when an optional drive is currently absent.  The DB
+          # runner stores its distro and caches on C:, so inspect only the
+          # filesystems this build can actually use.
+          df -h /
+          if [ -d /mnt/c ]; then
+            df -h /mnt/c
+          fi
 
       # ─── RAM-backed build dir (tmpfs) ──────────────────────────────────────
       # The DB build is fsync-bound on the OCI network block volume: CPU and RAM
@@ -554,11 +560,27 @@ jobs:
           test "$(stat -c %s "$INPUTS/sefaria-archive.tar.zst")" = "$(jq -r .archive.size "$SEFARIA_METADATA")"
           echo "$SEFARIA_ARCHIVE_SHA  $INPUTS/sefaria-archive.tar.zst" | sha256sum -c -
           tar --use-compress-program=unzstd -xf "$INPUTS/sefaria-archive.tar.zst" -C "$INPUTS/sefaria-extract"
-          # The export root is the single directory holding both json/ and schemas/
-          # (the Docker-Compose archives no longer ship a database_export folder).
-          mapfile -t SEFARIA_DB_ROOTS < <(find "$INPUTS/sefaria-extract" -type d -name schemas -print | sort | while read -r s; do d="$(dirname "$s")"; test -d "$d/json" && printf '%s\n' "$d"; done)
-          test "${#SEFARIA_DB_ROOTS[@]}" -eq 1
-          SEFARIA_EXTRACT_ROOT="${SEFARIA_DB_ROOTS[0]}"
+          # The immutable Sefaria archive contract places json/ and schemas/
+          # directly at its root.  Do not rediscover that root with `find`: a
+          # silent cardinality test made a valid export look corrupt and hid
+          # which invariant had failed.
+          SEFARIA_EXTRACT_ROOT="$INPUTS/sefaria-extract"
+          test -d "$SEFARIA_EXTRACT_ROOT/json" || {
+            echo "::error::pinned Sefaria archive is missing root json/"
+            exit 1
+          }
+          test -d "$SEFARIA_EXTRACT_ROOT/schemas" || {
+            echo "::error::pinned Sefaria archive is missing root schemas/"
+            exit 1
+          }
+          test -n "$(find "$SEFARIA_EXTRACT_ROOT/json" -type f -name '*.json' -print -quit)" || {
+            echo "::error::pinned Sefaria archive root json/ contains no JSON files"
+            exit 1
+          }
+          test -n "$(find "$SEFARIA_EXTRACT_ROOT/schemas" -type f -name '*.json' -print -quit)" || {
+            echo "::error::pinned Sefaria archive root schemas/ contains no JSON files"
+            exit 1
+          }
 
           gh release download "$OTZARIA_TAG" -R otzaria/otzaria-library \
             --pattern otzaria_release_provenance.json --dir "$INPUTS/otzaria-assets"
