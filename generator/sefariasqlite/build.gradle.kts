@@ -9,10 +9,10 @@ val generatorHeap: String = (project.findProperty("generatorHeap") as String?)
     ?: System.getenv("SEFORIM_GENERATOR_HEAP")
     ?: "10g"
 
-// The full Phase-2 LINKER import retains the stable-ID allocator lineage for
-// ~6.1M lines and ~6.0M links while resolving the contextual payload. Keep its
-// heap independently tunable so increasing this one memory-bound stage does
-// not inflate every generator fork.
+// The full Phase-2 LINKER import holds the large sidecar/ref resolution indexes
+// while resolving the contextual payload. Keep its heap independently tunable
+// so increasing this one memory-bound stage does not inflate every generator
+// fork. Stable link IDs themselves are allocated through build_state.db.
 val linkerHeap: String = (project.findProperty("linkerHeap") as String?)
     ?: System.getenv("SEFORIM_LINKER_HEAP")
     ?: generatorHeap
@@ -184,10 +184,9 @@ tasks.register<JavaExec>("generateLinkerLinks") {
         if (project.hasProperty(p)) systemProperty(p, project.property(p) as String)
     }
 
-    // Phase-2 also retains the stable-ID lineage for ~6.1M lines and ~6.0M
-    // links. A full contextual payload proved that 8 GiB is insufficient even
-    // after removing duplicate importer structures, so this stage has its own
-    // measured budget while the other generator forks remain unchanged.
+    // Phase-2 holds the corpus-wide sidecar/ref indexes. It has its own measured
+    // budget while other generator forks remain unchanged; the stable-ID
+    // lineage is disk-backed and no longer consumes this heap.
     jvmArgs = listOf("-Xmx$linkerHeap", "-XX:+UseG1GC")
 }
 

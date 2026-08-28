@@ -5,8 +5,7 @@ import app.cash.sqldelight.driver.jdbc.sqlite.JdbcSqliteDriver
 import co.touchlab.kermit.Logger
 import co.touchlab.kermit.Severity
 import io.github.kdroidfilter.seforimlibrary.common.countVisibleChars
-import io.github.kdroidfilter.seforimlibrary.common.ids.IdAllocatorBindings
-import io.github.kdroidfilter.seforimlibrary.common.ids.InMemoryIdAllocator
+import io.github.kdroidfilter.seforimlibrary.common.ids.DiskBackedLinkIdAllocator
 import io.github.kdroidfilter.seforimlibrary.core.models.ConnectionType
 import io.github.kdroidfilter.seforimlibrary.core.models.Link
 import io.github.kdroidfilter.seforimlibrary.core.models.LinkAnchor
@@ -61,22 +60,32 @@ fun main(args: Array<String>) = runBlocking {
     // restore Info so this CLI's logs stay visible.
     Logger.setMinSeverity(Severity.Info)
     val buildStatePath = Paths.get(prop("buildStatePath", null) ?: "$dbPath.buildstate")
-    val prev = buildStatePath.takeIf { Files.exists(it) }
-    val allocator = InMemoryIdAllocator.load(prev, Logger.withTag("IdAllocator"))
-    val bindings = IdAllocatorBindings(allocator, repository)
-    ConnectionType.values().forEach { bindings.upsertConnectionType(it.name) }
-    val ctLinker = bindings.upsertConnectionType(ConnectionType.LINKER.name)
+    check(Files.isRegularFile(buildStatePath)) { "Phase-2 requires build_state.db at $buildStatePath" }
+    var ctLinker: Long? = null
+    driver.executeQuery(
+        null,
+        "SELECT id FROM connection_type WHERE name = ?",
+        { cursor ->
+            if (cursor.next().value) ctLinker = cursor.getLong(0)
+            QueryResult.Value(Unit)
+        },
+        1,
+    ) { bindString(0, ConnectionType.LINKER.name) }
+    val linkerTypeId = checkNotNull(ctLinker) { "Database has no LINKER connection type" }
 
     // Havrouta links sit at implicit rowids ABOVE the persisted link counter (they are
     // deleted+recreated each build outside the allocator), so allocating fresh LINKER
     // ids straight from the counter would collide with them: the link INSERT OR IGNOREs
     // away and its anchors attach to the Havrouta row. Raise the counter past the DB.
-    run {
-        var maxLinkId = 0L
-        driver.executeQuery(null, "SELECT COALESCE(MAX(id), 0) FROM link",
-            { c -> if (c.next().value) maxLinkId = c.getLong(0) ?: 0L; QueryResult.Value(Unit) }, 0)
-        allocator.ensureCounterAtLeast(io.github.kdroidfilter.seforimlibrary.common.buildstate.IdTable.LINK, maxLinkId + 1)
-    }
+    var maxLinkId = 0L
+    driver.executeQuery(null, "SELECT COALESCE(MAX(id), 0) FROM link",
+        { c -> if (c.next().value) maxLinkId = c.getLong(0) ?: 0L; QueryResult.Value(Unit) }, 0)
+    val allocator = DiskBackedLinkIdAllocator.open(
+        path = buildStatePath,
+        expectedConnectionTypeName = ConnectionType.LINKER.name,
+        expectedConnectionTypeId = linkerTypeId,
+        minimumNextId = maxLinkId + 1L,
+    )
 
     try {
         repository.executeRawQuery("PRAGMA foreign_keys = OFF")
@@ -95,13 +104,13 @@ fun main(args: Array<String>) = runBlocking {
                 QueryResult.Value(Unit)
             },
             1,
-        ) { bindLong(0, ctLinker) }
+        ) { bindLong(0, linkerTypeId) }
         if (replacedLinks > 0) {
-            val linkerIds = "SELECT id FROM link WHERE connectionTypeId = $ctLinker"
+            val linkerIds = "SELECT id FROM link WHERE connectionTypeId = $linkerTypeId"
             repository.executeRawQuery("DELETE FROM link_anchor WHERE linkId IN ($linkerIds)")
             repository.executeRawQuery("DELETE FROM link_range WHERE linkId IN ($linkerIds)")
             repository.executeRawQuery("DELETE FROM link_coverage WHERE linkId IN ($linkerIds)")
-            repository.executeRawQuery("DELETE FROM link WHERE connectionTypeId = $ctLinker")
+            repository.executeRawQuery("DELETE FROM link WHERE connectionTypeId = $linkerTypeId")
             logger.i { "Removed $replacedLinks existing LINKER links before deterministic rebuild" }
         }
 
@@ -287,7 +296,7 @@ fun main(args: Array<String>) = runBlocking {
 
                     // The allocator returns the same stable id for repeated (source,target,type)
                     // citations; INSERT OR IGNORE performs the dedup without an unbounded map.
-                    val linkId = allocator.linkId(srcLineId, tgtLineId, ctLinker)
+                    val linkId = allocator.linkId(srcLineId, tgtLineId, linkerTypeId)
                     linkBatch.add(Link(
                         id = linkId, sourceBookId = srcBookId, targetBookId = tgtMeta.bookId,
                         sourceLineId = srcLineId, targetLineId = tgtLineId,
@@ -333,13 +342,13 @@ fun main(args: Array<String>) = runBlocking {
             "SELECT COUNT(*) FROM link WHERE connectionTypeId = ?",
             { c -> if (c.next().value) links = c.getLong(0) ?: 0L; QueryResult.Value(Unit) },
             1,
-        ) { bindLong(0, ctLinker) }
+        ) { bindLong(0, linkerTypeId) }
         driver.executeQuery(
             null,
             "SELECT COUNT(*) FROM link_anchor WHERE linkId IN (SELECT id FROM link WHERE connectionTypeId = ?)",
             { c -> if (c.next().value) anchors = c.getLong(0) ?: 0L; QueryResult.Value(Unit) },
             1,
-        ) { bindLong(0, ctLinker) }
+        ) { bindLong(0, linkerTypeId) }
         if (rangeEndByLink.isNotEmpty()) {
             val ranges = rangeEndByLink.map { (linkId, end) ->
                 LinkRange(linkId = linkId, side = 1, endLineId = end.first, endLineIndex = end.second)
@@ -380,14 +389,16 @@ fun main(args: Array<String>) = runBlocking {
         repository.executeRawQuery("PRAGMA foreign_keys = ON")
         repository.executeRawQuery("PRAGMA synchronous = NORMAL")
         repository.executeRawQuery("PRAGMA journal_mode = WAL")
-        runCatching {
-            allocator.snapshotTo(buildStatePath, extraMeta = mapOf("generator" to "linkerlinks"))
-        }.onFailure { logger.w(it) { "Failed to write build_state" } }
+        allocator.commit(extraMeta = mapOf("generator" to "linkerlinks"))
+        logger.i {
+            "Disk-backed stable link IDs: reused=${allocator.reusedCount}, fresh=${allocator.freshCount}"
+        }
         Unit
     } catch (e: Exception) {
         logger.e(e) { "Error generating LINKER links" }
         throw e
     } finally {
+        allocator.close()
         repository.close()
     }
 }
