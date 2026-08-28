@@ -1,0 +1,193 @@
+#!/usr/bin/env python3
+"""Fail-closed semantic check for reusing a Linker recovery on a rebuilt DB.
+
+The normal serial pipeline requires a byte-identical lines snapshot. A recovery
+has to rebuild the DB, however, and Sefaria image embedding can legitimately
+change an image-only line from its remote ``textimages.sefaria.org`` URL to an
+inline data URI when a previously transient download succeeds. Such a change
+cannot affect Linker output, but every other source change must still fail.
+"""
+
+from __future__ import annotations
+
+import argparse
+import base64
+import hashlib
+import json
+import re
+import sqlite3
+from pathlib import Path
+
+
+IMAGE_TAG = re.compile(
+    r"(?P<prefix>\s*<img\s+[^>]*?\bsrc=)(?P<quote>[\"'])(?P<src>[^\"']+)"
+    r"(?P=quote)(?P<suffix>[^>]*/?>\s*)",
+    re.IGNORECASE,
+)
+TEXTIMAGE_PREFIX = "https://textimages.sefaria.org/"
+DATA_IMAGE = re.compile(
+    r"data:(image/(?:png|jpeg|gif|svg\+xml|webp));base64,"
+    r"(?P<payload>[A-Za-z0-9+/]*={0,2})\Z",
+    re.IGNORECASE,
+)
+MAX_IMAGE_BYTES = 5 * 1024 * 1024
+
+
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(8 * 1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _json(path: Path) -> dict:
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _image_only_equivalent(left: str, right: str) -> bool:
+    a = IMAGE_TAG.fullmatch(left)
+    b = IMAGE_TAG.fullmatch(right)
+    if a is None or b is None:
+        return False
+    if (a.group("prefix"), a.group("quote"), a.group("suffix")) != (
+        b.group("prefix"),
+        b.group("quote"),
+        b.group("suffix"),
+    ):
+        return False
+
+    src_a, src_b = a.group("src"), b.group("src")
+    if src_a.startswith(TEXTIMAGE_PREFIX):
+        remote, inline = src_a, src_b
+    elif src_b.startswith(TEXTIMAGE_PREFIX):
+        remote, inline = src_b, src_a
+    else:
+        return False
+    if not remote[len(TEXTIMAGE_PREFIX) :] or any(c.isspace() for c in remote):
+        return False
+    match = DATA_IMAGE.fullmatch(inline)
+    if match is None:
+        return False
+    try:
+        decoded = base64.b64decode(match.group("payload"), validate=True)
+    except ValueError:
+        return False
+    return 0 < len(decoded) <= MAX_IMAGE_BYTES
+
+
+def _schema(connection: sqlite3.Connection) -> list[tuple]:
+    return connection.execute(
+        "SELECT type,name,sql FROM sqlite_master "
+        "WHERE type IN ('table','index','view','trigger') ORDER BY type,name"
+    ).fetchall()
+
+
+def _meta(connection: sqlite3.Connection) -> list[tuple]:
+    return connection.execute(
+        "SELECT key,value FROM lines_snapshot_meta ORDER BY key"
+    ).fetchall()
+
+
+def verify(
+    original: Path,
+    rebuilt: Path,
+    artifacts: Path,
+    payload_meta: Path,
+    baseline_manifest: Path,
+) -> tuple[int, int]:
+    meta = _json(payload_meta)
+    baseline = _json(baseline_manifest)
+    original_sha = _sha256(original)
+    expected_sha = meta.get("snapshot", {}).get("sha256")
+    if not isinstance(expected_sha, str) or original_sha != expected_sha:
+        raise SystemExit("original raw snapshot SHA does not match Linker payload metadata")
+    if baseline.get("snapshot_sha256") != original_sha:
+        raise SystemExit("line baseline is not bound to the original raw snapshot")
+    if meta.get("schema_version") != 2 or baseline.get("schema_version") != 2:
+        raise SystemExit("recovery snapshot comparison requires schema 2")
+
+    connections = []
+    for path in (original, rebuilt):
+        connection = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        connection.execute("PRAGMA query_only=ON")
+        connection.execute("PRAGMA mmap_size=4294967296")
+        connection.execute("PRAGMA cache_size=-524288")
+        connections.append(connection)
+    old, new = connections
+    if _schema(old) != _schema(new):
+        raise SystemExit("rebuilt snapshot schema differs from the linked snapshot")
+    if _meta(old) != _meta(new):
+        raise SystemExit("rebuilt snapshot metadata differs from the linked snapshot")
+
+    query = (
+        "SELECT source_name,canonical_he_title,line_index,content,context_ref "
+        "FROM lines_snapshot ORDER BY source_name,canonical_he_title,line_index"
+    )
+    old_rows, new_rows = old.execute(query), new.execute(query)
+    safe_differences: set[tuple[str, str, int]] = set()
+    count = 0
+    while True:
+        before, after = old_rows.fetchone(), new_rows.fetchone()
+        if before is None or after is None:
+            if before is not None or after is not None:
+                raise SystemExit("rebuilt snapshot row count differs from linked snapshot")
+            break
+        count += 1
+        if before[:3] != after[:3]:
+            raise SystemExit(f"rebuilt snapshot line identity differs at row {count}")
+        if before[4] != after[4]:
+            raise SystemExit(f"rebuilt snapshot context_ref differs at {before[:3]!r}")
+        if before[3] != after[3]:
+            if not _image_only_equivalent(before[3], after[3]):
+                raise SystemExit(
+                    f"rebuilt snapshot text differs outside an image-only src at {before[:3]!r}"
+                )
+            safe_differences.add((before[0], before[1], before[2]))
+            if len(safe_differences) > 10_000:
+                raise SystemExit("too many image-only differences for a bounded recovery")
+
+    if safe_differences:
+        for artifact in artifacts.rglob("*.jsonl"):
+            with artifact.open(encoding="utf-8") as stream:
+                for number, line in enumerate(stream, 1):
+                    if not line.strip():
+                        continue
+                    record = json.loads(line)
+                    book = record.get("book_key", {})
+                    key = (
+                        book.get("source_name"),
+                        book.get("canonical_he_title"),
+                        record.get("line_index"),
+                    )
+                    if key in safe_differences:
+                        raise SystemExit(
+                            f"image-only changed line has a Linker record: {key!r} "
+                            f"({artifact}:{number})"
+                        )
+    return count, len(safe_differences)
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--original", required=True, type=Path)
+    parser.add_argument("--rebuilt", required=True, type=Path)
+    parser.add_argument("--artifacts", required=True, type=Path)
+    parser.add_argument("--payload-meta", required=True, type=Path)
+    parser.add_argument("--baseline-manifest", required=True, type=Path)
+    args = parser.parse_args()
+    rows, differences = verify(
+        args.original,
+        args.rebuilt,
+        args.artifacts,
+        args.payload_meta,
+        args.baseline_manifest,
+    )
+    print(
+        f"RECOVERY_SNAPSHOT_SEMANTIC_OK rows={rows} "
+        f"unlinked_image_only_differences={differences}"
+    )
+
+
+if __name__ == "__main__":
+    main()

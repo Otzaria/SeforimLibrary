@@ -137,7 +137,7 @@ jobs:
           ref: ${{ github.sha }}
           persist-credentials: false
       - name: Validate local orchestration boundary contracts
-        run: python3 .github/scripts/test_build_provenance.py && python3 .github/scripts/test_otzaria_provenance.py && python3 .github/scripts/test_host_safety.py && python3 .github/scripts/test_manual_release_workflow.py
+        run: python3 .github/scripts/test_build_provenance.py && python3 .github/scripts/test_otzaria_provenance.py && python3 .github/scripts/test_host_safety.py && python3 .github/scripts/test_manual_release_workflow.py && python3 .github/scripts/test_verify_relink_recovery_snapshot.py
       - name: Validate the complete immutable dispatch contract
         env:
           SOURCE_COMMIT: ${{ inputs.source_commit }}
@@ -933,7 +933,8 @@ jobs:
             # Explicit recovery is deliberately narrower than normal reuse: accept one
             # exact, already-successful relink-recovery run whose title binds it to one
             # exact failed build attempt with this correlation. The payload manifest is
-            # independently checked against the freshly regenerated snapshot below.
+            # independently checked against its original content-addressed snapshot;
+            # any rebuilt-snapshot drift is checked semantically before Phase-2.
             [[ "$RECOVERY_RUN_ID" =~ ^[1-9][0-9]*$ ]] || { echo "::error::relink_recovery_run_id must be a positive integer"; exit 1; }
             RECOVERY_JSON="$RUNNER_TEMP/relink-recovery-run.json"
             gh api "repos/Otzaria/LinkerToOtzaria/actions/runs/$RECOVERY_RUN_ID" > "$RECOVERY_JSON"
@@ -973,10 +974,24 @@ jobs:
                   names=={"linker_release_pointer.json","relink_manifest.json"}):
               raise SystemExit("recovery Linker output release identity/assets differ")
           PY
-            SNAPSHOT_RELEASE_TAG="lines-snapshot-sha256-$SNAPSHOT_ZST_SHA256"
+            RECOVERY_MANIFEST="$RUNNER_TEMP/relink-recovery-manifest.json"
+            rm -f "$RECOVERY_MANIFEST"
+            gh release download "$RECOVERY_OUTPUT_TAG" -R Otzaria/LinkerToOtzaria \
+              -p relink_manifest.json -O "$RECOVERY_MANIFEST"
+            EXPECTED_LINKER_SNAPSHOT_ZST_SHA256="$(jq -er \
+              --arg request "$RELINK_REQUEST_ID" --argjson run "$RECOVERY_RUN_ID" \
+              --argjson attempt "$RECOVERY_ATTEMPT" --argjson parent "$EXPECTED_PARENT_RUN_ID" \
+              --argjson parent_attempt "$EXPECTED_PARENT_RUN_ATTEMPT" '
+                select(.schema_version==2 and .relink_request_id==$request and
+                       .relink_run_id==$run and .relink_run_attempt==$attempt and
+                       .parent_run_id==$parent and .parent_run_attempt==$parent_attempt) |
+                .snapshot_zst_sha256 |
+                select(type=="string" and test("^[0-9a-f]{64}$"))
+              ' "$RECOVERY_MANIFEST")"
+            SNAPSHOT_RELEASE_TAG="lines-snapshot-sha256-$EXPECTED_LINKER_SNAPSHOT_ZST_SHA256"
             SNAPSHOT_RELEASE="$RUNNER_TEMP/relink-recovery-snapshot-release.json"
             gh api "repos/$GITHUB_REPOSITORY/releases/tags/$SNAPSHOT_RELEASE_TAG" > "$SNAPSHOT_RELEASE"
-            python3 - "$SNAPSHOT_RELEASE" "$SNAPSHOT_RELEASE_TAG" "$SNAPSHOT_ZST_SHA256" <<'PY'
+            python3 - "$SNAPSHOT_RELEASE" "$SNAPSHOT_RELEASE_TAG" "$EXPECTED_LINKER_SNAPSHOT_ZST_SHA256" <<'PY'
           import json,sys
           value=json.load(open(sys.argv[1],encoding="utf-8"))
           all_assets=value.get("assets",[])
@@ -1153,6 +1168,8 @@ jobs:
             --lock /run/lock/otzaria/host-heavy.lock \
             --state "$HOST_LEASE_STATE" --ttl 90000
           fi
+          : "${EXPECTED_LINKER_SNAPSHOT_ZST_SHA256:=$SNAPSHOT_ZST_SHA256}"
+          echo "EXPECTED_LINKER_SNAPSHOT_ZST_SHA256=$EXPECTED_LINKER_SNAPSHOT_ZST_SHA256" >> "$GITHUB_ENV"
 
       # Inject the payload the relink run just produced into THIS DB. The exact
       # request+attempt pointer names a content-addressed final Linker release; no
@@ -1195,8 +1212,8 @@ jobs:
           }
           # The relink manifest binds this payload to the exact inputs it was linked
           # against. Verify — fail-closed — that the payload matches its own digest, that
-          # the relink used THIS build's pinned Sefaria vintage + snapshot, and that it is
-          # the run we dispatched. Then record the linker's identity into provenance.
+          # the relink used the selected original snapshot, and that it is the run we
+          # selected. A recovery rebuild is compared semantically below before Phase-2.
           M=build/linker/relink_manifest.json
           test -f "$M"
           # Payload integrity — an independent cross-file digest check.
@@ -1207,7 +1224,7 @@ jobs:
           # types/formats, binding to this build's pinned Sefaria + snapshot, and — crucially —
           # that its self-reported linker_commit / relink_run_attempt EQUAL the relink run's
           # real head_sha / attempt. A forged or drifted manifest fails here, fail-closed.
-          MANIFEST="$M" EXP_SEFARIA_TAG="$SEFARIA_TAG" EXP_SNAPSHOT_SHA="$SNAPSHOT_ZST_SHA256" \
+          MANIFEST="$M" EXP_SEFARIA_TAG="$SEFARIA_TAG" EXP_SNAPSHOT_SHA="$EXPECTED_LINKER_SNAPSHOT_ZST_SHA256" \
           EXP_RUN_ID="$RELINK_RUN_ID" RUN_HEAD_SHA="$RUN_HEAD_SHA" RUN_ATTEMPT="$RUN_ATTEMPT" \
           EXP_REQUEST_ID="$EXPECTED_RELINK_REQUEST_ID" PARENT_RUN_ID="$EXPECTED_RELINK_PARENT_RUN_ID" PARENT_RUN_ATTEMPT="$EXPECTED_RELINK_PARENT_RUN_ATTEMPT" \
           python3 - >> "$GITHUB_ENV" <<'PY'
@@ -1252,6 +1269,34 @@ jobs:
           print(f"LINKER_RELINK_RUN_ATTEMPT={m['relink_run_attempt']}")
           PY
           tar --use-compress-program=unzstd -xf build/linker/linker_links.zst -C build/linker
+          if [ "$EXPECTED_LINKER_SNAPSHOT_ZST_SHA256" != "$SNAPSHOT_ZST_SHA256" ]; then
+            # A recovery rebuild can differ bytewise only because the source importer
+            # embeds textimages opportunistically. Compare all identities, context and
+            # content against the exact original snapshot. The verifier allows only an
+            # image-only URL/data-URI substitution on a line with zero Linker records.
+            RECOVERY_COMPARE_DIR="$RUNNER_TEMP/relink-snapshot-compare-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+            rm -rf "$RECOVERY_COMPARE_DIR"
+            mkdir -p "$RECOVERY_COMPARE_DIR"
+            trap 'rm -rf "$RECOVERY_COMPARE_DIR"' EXIT
+            ORIGINAL_SNAPSHOT_ZST="$RECOVERY_COMPARE_DIR/original.db.zst"
+            ORIGINAL_SNAPSHOT_DB="$RECOVERY_COMPARE_DIR/original.db"
+            REBUILT_SNAPSHOT_DB="$RECOVERY_COMPARE_DIR/rebuilt.db"
+            gh release download \
+              "lines-snapshot-sha256-$EXPECTED_LINKER_SNAPSHOT_ZST_SHA256" \
+              -R "$GITHUB_REPOSITORY" -p lines_snapshot.db.zst \
+              -O "$ORIGINAL_SNAPSHOT_ZST"
+            echo "$EXPECTED_LINKER_SNAPSHOT_ZST_SHA256  $ORIGINAL_SNAPSHOT_ZST" | sha256sum -c -
+            unzstd -f "$ORIGINAL_SNAPSHOT_ZST" -o "$ORIGINAL_SNAPSHOT_DB"
+            unzstd -f build/lines_snapshot.db.zst -o "$REBUILT_SNAPSHOT_DB"
+            python3 .pipeline-control/.github/scripts/verify_relink_recovery_snapshot.py \
+              --original "$ORIGINAL_SNAPSHOT_DB" \
+              --rebuilt "$REBUILT_SNAPSHOT_DB" \
+              --artifacts build/linker/artifacts \
+              --payload-meta build/linker/meta.json \
+              --baseline-manifest build/linker/line-baseline/manifest.json
+            rm -rf "$RECOVERY_COMPARE_DIR"
+            trap - EXIT
+          fi
           gradle :sefariasqlite:generateLinkerLinks \
             -PseforimDb=$PWD/build/seforim.db \
             -PlinkerArtifacts=$PWD/build/linker/artifacts \

@@ -168,11 +168,34 @@ class ManualReleaseWorkflowContractTest(unittest.TestCase):
         self.assertIn('digest=="sha256:"+sys.argv[3]', publish)
         self.assertNotIn("actions/upload-artifact", publish)
         self.assertNotIn("Upload snapshot artifact for the relink run", self.workflow)
-
         relink = self.step("Run LinkerToOtzaria relink on this snapshot (and wait)")
-        self.assertIn('SNAPSHOT_RELEASE_TAG="lines-snapshot-sha256-$SNAPSHOT_ZST_SHA256"', relink)
+        self.assertIn(
+            'SNAPSHOT_RELEASE_TAG="lines-snapshot-sha256-$EXPECTED_LINKER_SNAPSHOT_ZST_SHA256"',
+            relink,
+        )
         self.assertIn("recovery parent snapshot release is missing or not byte-exact", relink)
-        self.assertNotIn("recovery parent must retain exactly one live source snapshot artifact", relink)
+        self.assertNotIn(
+            "recovery parent must retain exactly one live source snapshot artifact",
+            relink,
+        )
+
+    def test_recovery_verifies_semantic_snapshot_before_phase2(self):
+        relink = self.step("Run LinkerToOtzaria relink on this snapshot (and wait)")
+        apply_links = self.step("Apply LINKER links (Phase-2)")
+
+        self.assertIn("EXPECTED_LINKER_SNAPSHOT_ZST_SHA256", relink)
+        self.assertIn("relink-recovery-manifest.json", relink)
+        self.assertIn(
+            'EXP_SNAPSHOT_SHA="$EXPECTED_LINKER_SNAPSHOT_ZST_SHA256"',
+            apply_links,
+        )
+        self.assertIn("verify_relink_recovery_snapshot.py", apply_links)
+        self.assertIn("--original \"$ORIGINAL_SNAPSHOT_DB\"", apply_links)
+        self.assertIn("--rebuilt \"$REBUILT_SNAPSHOT_DB\"", apply_links)
+        self.assertLess(
+            apply_links.index("verify_relink_recovery_snapshot.py"),
+            apply_links.index("gradle :sefariasqlite:generateLinkerLinks"),
+        )
 
     def test_weekly_workflow_has_no_actions_artifact_handoffs(self):
         self.assertNotIn("actions/upload-artifact", self.workflow)
