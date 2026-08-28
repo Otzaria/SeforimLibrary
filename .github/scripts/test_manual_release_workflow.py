@@ -62,6 +62,14 @@ class ManualReleaseWorkflowContractTest(unittest.TestCase):
         self.assertIn("for tool in gh sqlite3 zstd unzstd jq curl unzip", installer)
         self.assertIn("skipping package-manager work", installer)
 
+    def test_disk_probe_ignores_absent_optional_wsl_drives(self):
+        disk = self.step("Disk before build")
+
+        self.assertIn("df -h /", disk)
+        self.assertIn("if [ -d /mnt/c ]; then", disk)
+        self.assertIn("df -h /mnt/c", disk)
+        self.assertNotIn("run: df -h\n", disk)
+
     def test_durable_host_uses_preinstalled_java_25_without_network_setup(self):
         java = self.step("Verify durable Java 25 toolchain")
 

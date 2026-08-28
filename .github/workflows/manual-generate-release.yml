@@ -380,7 +380,16 @@ jobs:
           .pipeline-control/.github/host/otzaria-pipeline.tmpfiles.conf
 
       - name: Disk before build
-        run: df -h
+        run: |
+          set -euo pipefail
+          # Bare `df -h` asks WSL to stat every configured Windows drive and
+          # exits nonzero when an optional drive is currently absent.  The DB
+          # runner stores its distro and caches on C:, so inspect only the
+          # filesystems this build can actually use.
+          df -h /
+          if [ -d /mnt/c ]; then
+            df -h /mnt/c
+          fi
 
       # ─── RAM-backed build dir (tmpfs) ──────────────────────────────────────
       # The DB build is fsync-bound on the OCI network block volume: CPU and RAM
