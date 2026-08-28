@@ -9,6 +9,14 @@ val generatorHeap: String = (project.findProperty("generatorHeap") as String?)
     ?: System.getenv("SEFORIM_GENERATOR_HEAP")
     ?: "10g"
 
+// The full Phase-2 LINKER import retains the stable-ID allocator lineage for
+// ~6.1M lines and ~6.0M links while resolving the contextual payload. Keep its
+// heap independently tunable so increasing this one memory-bound stage does
+// not inflate every generator fork.
+val linkerHeap: String = (project.findProperty("linkerHeap") as String?)
+    ?: System.getenv("SEFORIM_LINKER_HEAP")
+    ?: generatorHeap
+
 
 kotlin {
     jvmToolchain(libs.versions.jvmToolchain.get().toInt())
@@ -176,11 +184,11 @@ tasks.register<JavaExec>("generateLinkerLinks") {
         if (project.hasProperty(p)) systemProperty(p, project.property(p) as String)
     }
 
-    // The two lineId↔(bookId,lineIndex) metadata maps plus the dedup/range state for a full
-    // ≈1.86M-record relink need the same generator headroom as the database build. Keep this
-    // wired to generatorHeap so CI's measured 8 GiB budget is actually applied to Phase-2;
-    // a separate hard-coded 6 GiB ceiling OOMed on the first complete contextual payload.
-    jvmArgs = listOf("-Xmx$generatorHeap", "-XX:+UseG1GC")
+    // Phase-2 also retains the stable-ID lineage for ~6.1M lines and ~6.0M
+    // links. A full contextual payload proved that 8 GiB is insufficient even
+    // after removing duplicate importer structures, so this stage has its own
+    // measured budget while the other generator forks remain unchanged.
+    jvmArgs = listOf("-Xmx$linkerHeap", "-XX:+UseG1GC")
 }
 
 // Post-processing step to rename categories after all generation is complete

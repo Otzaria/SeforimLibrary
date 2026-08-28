@@ -88,6 +88,15 @@ class ManualReleaseWorkflowContractTest(unittest.TestCase):
         self.assertNotIn("./gradlew", self.workflow)
         self.assertNotIn("gradle/actions/setup-gradle", self.workflow)
 
+    def test_phase2_has_dedicated_heap_and_matching_host_headroom(self):
+        mount = self.step("Mount RAM-backed build dir (tmpfs)")
+        heaps = self.step("Bridle daemon heaps + generator forks for the 16 GB runner")
+
+        self.assertIn('$((24*1024*1024))', mount)
+        self.assertIn('(<24 GiB)', mount)
+        self.assertIn('generatorHeap=8g', heaps)
+        self.assertIn('linkerHeap=12g', heaps)
+
     def test_pinned_sefaria_archive_uses_its_explicit_root_contract(self):
         extract = self.step("Verify pinned lineage and extract exact inputs")
 
