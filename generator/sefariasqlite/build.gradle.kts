@@ -176,9 +176,11 @@ tasks.register<JavaExec>("generateLinkerLinks") {
         if (project.hasProperty(p)) systemProperty(p, project.property(p) as String)
     }
 
-    // The two lineId↔(bookId,lineIndex) metadata maps for ≈5.9M lines need headroom; line
-    // `content` is fetched lazily (see GenerateLinkerLinks.kt), so this is metadata + batches only.
-    jvmArgs = listOf("-Xmx6g")
+    // The two lineId↔(bookId,lineIndex) metadata maps plus the dedup/range state for a full
+    // ≈1.86M-record relink need the same generator headroom as the database build. Keep this
+    // wired to generatorHeap so CI's measured 8 GiB budget is actually applied to Phase-2;
+    // a separate hard-coded 6 GiB ceiling OOMed on the first complete contextual payload.
+    jvmArgs = listOf("-Xmx$generatorHeap", "-XX:+UseG1GC")
 }
 
 // Post-processing step to rename categories after all generation is complete
