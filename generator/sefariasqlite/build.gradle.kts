@@ -9,6 +9,14 @@ val generatorHeap: String = (project.findProperty("generatorHeap") as String?)
     ?: System.getenv("SEFORIM_GENERATOR_HEAP")
     ?: "10g"
 
+// The full Phase-2 LINKER import holds the large sidecar/ref resolution indexes
+// while resolving the contextual payload. Keep its heap independently tunable
+// so increasing this one memory-bound stage does not inflate every generator
+// fork. Stable link IDs themselves are allocated through build_state.db.
+val linkerHeap: String = (project.findProperty("linkerHeap") as String?)
+    ?: System.getenv("SEFORIM_LINKER_HEAP")
+    ?: generatorHeap
+
 
 kotlin {
     jvmToolchain(libs.versions.jvmToolchain.get().toInt())
@@ -176,9 +184,10 @@ tasks.register<JavaExec>("generateLinkerLinks") {
         if (project.hasProperty(p)) systemProperty(p, project.property(p) as String)
     }
 
-    // The two lineId↔(bookId,lineIndex) metadata maps for ≈5.9M lines need headroom; line
-    // `content` is fetched lazily (see GenerateLinkerLinks.kt), so this is metadata + batches only.
-    jvmArgs = listOf("-Xmx6g")
+    // Phase-2 holds the corpus-wide sidecar/ref indexes. It has its own measured
+    // budget while other generator forks remain unchanged; the stable-ID
+    // lineage is disk-backed and no longer consumes this heap.
+    jvmArgs = listOf("-Xmx$linkerHeap", "-XX:+UseG1GC")
 }
 
 // Post-processing step to rename categories after all generation is complete

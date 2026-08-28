@@ -5,8 +5,7 @@ import app.cash.sqldelight.driver.jdbc.sqlite.JdbcSqliteDriver
 import co.touchlab.kermit.Logger
 import co.touchlab.kermit.Severity
 import io.github.kdroidfilter.seforimlibrary.common.countVisibleChars
-import io.github.kdroidfilter.seforimlibrary.common.ids.IdAllocatorBindings
-import io.github.kdroidfilter.seforimlibrary.common.ids.InMemoryIdAllocator
+import io.github.kdroidfilter.seforimlibrary.common.ids.DiskBackedLinkIdAllocator
 import io.github.kdroidfilter.seforimlibrary.core.models.ConnectionType
 import io.github.kdroidfilter.seforimlibrary.core.models.Link
 import io.github.kdroidfilter.seforimlibrary.core.models.LinkAnchor
@@ -61,22 +60,32 @@ fun main(args: Array<String>) = runBlocking {
     // restore Info so this CLI's logs stay visible.
     Logger.setMinSeverity(Severity.Info)
     val buildStatePath = Paths.get(prop("buildStatePath", null) ?: "$dbPath.buildstate")
-    val prev = buildStatePath.takeIf { Files.exists(it) }
-    val allocator = InMemoryIdAllocator.load(prev, Logger.withTag("IdAllocator"))
-    val bindings = IdAllocatorBindings(allocator, repository)
-    ConnectionType.values().forEach { bindings.upsertConnectionType(it.name) }
-    val ctLinker = bindings.upsertConnectionType(ConnectionType.LINKER.name)
+    check(Files.isRegularFile(buildStatePath)) { "Phase-2 requires build_state.db at $buildStatePath" }
+    var ctLinker: Long? = null
+    driver.executeQuery(
+        null,
+        "SELECT id FROM connection_type WHERE name = ?",
+        { cursor ->
+            if (cursor.next().value) ctLinker = cursor.getLong(0)
+            QueryResult.Value(Unit)
+        },
+        1,
+    ) { bindString(0, ConnectionType.LINKER.name) }
+    val linkerTypeId = checkNotNull(ctLinker) { "Database has no LINKER connection type" }
 
     // Havrouta links sit at implicit rowids ABOVE the persisted link counter (they are
     // deleted+recreated each build outside the allocator), so allocating fresh LINKER
     // ids straight from the counter would collide with them: the link INSERT OR IGNOREs
     // away and its anchors attach to the Havrouta row. Raise the counter past the DB.
-    run {
-        var maxLinkId = 0L
-        driver.executeQuery(null, "SELECT COALESCE(MAX(id), 0) FROM link",
-            { c -> if (c.next().value) maxLinkId = c.getLong(0) ?: 0L; QueryResult.Value(Unit) }, 0)
-        allocator.ensureCounterAtLeast(io.github.kdroidfilter.seforimlibrary.common.buildstate.IdTable.LINK, maxLinkId + 1)
-    }
+    var maxLinkId = 0L
+    driver.executeQuery(null, "SELECT COALESCE(MAX(id), 0) FROM link",
+        { c -> if (c.next().value) maxLinkId = c.getLong(0) ?: 0L; QueryResult.Value(Unit) }, 0)
+    val allocator = DiskBackedLinkIdAllocator.open(
+        path = buildStatePath,
+        expectedConnectionTypeName = ConnectionType.LINKER.name,
+        expectedConnectionTypeId = linkerTypeId,
+        minimumNextId = maxLinkId + 1L,
+    )
 
     try {
         repository.executeRawQuery("PRAGMA foreign_keys = OFF")
@@ -95,13 +104,13 @@ fun main(args: Array<String>) = runBlocking {
                 QueryResult.Value(Unit)
             },
             1,
-        ) { bindLong(0, ctLinker) }
+        ) { bindLong(0, linkerTypeId) }
         if (replacedLinks > 0) {
-            val linkerIds = "SELECT id FROM link WHERE connectionTypeId = $ctLinker"
+            val linkerIds = "SELECT id FROM link WHERE connectionTypeId = $linkerTypeId"
             repository.executeRawQuery("DELETE FROM link_anchor WHERE linkId IN ($linkerIds)")
             repository.executeRawQuery("DELETE FROM link_range WHERE linkId IN ($linkerIds)")
             repository.executeRawQuery("DELETE FROM link_coverage WHERE linkId IN ($linkerIds)")
-            repository.executeRawQuery("DELETE FROM link WHERE connectionTypeId = $ctLinker")
+            repository.executeRawQuery("DELETE FROM link WHERE connectionTypeId = $linkerTypeId")
             logger.i { "Removed $replacedLinks existing LINKER links before deterministic rebuild" }
         }
 
@@ -109,7 +118,10 @@ fun main(args: Array<String>) = runBlocking {
         logger.i { "Loading sidecar…" }
         val allRefs = ArrayList<RefEntry>()
         val lineIdByRefKey = HashMap<Pair<String, Int>, Long>()
-        val stableBookKeyByRefKey = HashMap<Pair<String, Int>, Pair<String, String>>()
+        // Stable book identity is invariant for every row of one sidecar path. Store it once
+        // per path instead of once per line: the full corpus has ≈2.8M ref rows but only
+        // thousands of paths.
+        val stableBookKeyByPath = HashMap<String, Pair<String, String>>()
         for (row in readLinkerSidecar(sidecarPath)) {
             val key = row.path to row.lineIndex
             val previousLineId = lineIdByRefKey.putIfAbsent(key, row.lineId)
@@ -117,9 +129,9 @@ fun main(args: Array<String>) = runBlocking {
                 "Conflicting line IDs in linker sidecar for $key"
             }
             val stableBookKey = row.sourceName to row.canonicalHeTitle
-            val previousBookKey = stableBookKeyByRefKey.putIfAbsent(key, stableBookKey)
+            val previousBookKey = stableBookKeyByPath.putIfAbsent(row.path, stableBookKey)
             check(previousBookKey == null || previousBookKey == stableBookKey) {
-                "Conflicting stable book identities in linker sidecar for $key"
+                "Conflicting stable book identities in linker sidecar for ${row.path}"
             }
             allRefs.add(RefEntry(row.ref, row.heRef, row.path, row.lineIndex))
         }
@@ -147,66 +159,69 @@ fun main(args: Array<String>) = runBlocking {
                 }
                 QueryResult.Value(Unit)
             }, 0)
-        // (bookId,lineIndex)→lineId for the source side, plus the reverse lineId→(bookId,lineIndex).
-        // METADATA ONLY — never `content`: on the real DB (≈5.9M lines / 2.4GiB text) loading all
-        // content OOMs. `content` is fetched lazily below, only for the few lines that get anchors.
-        val lineIdByBookLine = HashMap<Pair<Long, Int>, Long>()
+        // Target identity metadata stays resident because arbitrary target refs are resolved
+        // throughout the artifact stream. Source lines, however, are ordered by book/line in the
+        // artifacts and are fetched through the one-entry cache below; a second 5.9M-entry
+        // (bookId,lineIndex)→lineId HashMap duplicated the database index and consumed >1 GiB.
         data class TargetLineMeta(val bookId: Long, val lineIndex: Int, val heRef: String?)
         val lineMeta = HashMap<Long, TargetLineMeta>()
         driver.executeQuery(null, "SELECT id, bookId, lineIndex, heRef FROM line",
             { c ->
                 while (c.next().value) {
                     val id = c.getLong(0)!!; val bookId = c.getLong(1)!!; val idx = c.getLong(2)!!.toInt()
-                    lineIdByBookLine[bookId to idx] = id
                     lineMeta[id] = TargetLineMeta(bookId, idx, c.getString(3))
                 }
                 QueryResult.Value(Unit)
             }, 0)
-        logger.i { "DB maps: ${bookIdByKey.size} books, ${lineIdByBookLine.size} lines" }
+        logger.i { "DB maps: ${bookIdByKey.size} books, ${lineMeta.size} lines" }
 
-        // Content is fetched per source line only when a link/anchor needs it. Cache exactly ONE
-        // line: artifact records are written per book in line order, so consecutive records hit
-        // the same line; an unbounded cache holds every linked line's text and OOMs (~GBs).
-        var cachedLineId = Long.MIN_VALUE
-        var cachedContent = ""
-        var cachedContextRef = ""
-        fun contentFor(id: Long): String {
-            if (id != cachedLineId) {
-                var s = ""
-                var contextRef = ""
+        // Resolve and cache exactly ONE source line. Artifact records are written per book in line
+        // order, so consecutive citations hit this cache. This replaces both the corpus-sized
+        // source map and the old second lookup by line id while preserving exact row identity.
+        data class SourceLine(val id: Long, val content: String, val contextRef: String)
+        var cachedSourceBookId = Long.MIN_VALUE
+        var cachedSourceLineIndex = Int.MIN_VALUE
+        var cachedSourceLine: SourceLine? = null
+        fun sourceLineFor(bookId: Long, lineIndex: Int): SourceLine? {
+            if (bookId != cachedSourceBookId || lineIndex != cachedSourceLineIndex) {
+                var found: SourceLine? = null
                 driver.executeQuery(1001,
                     """
-                    SELECT l.content,
+                    SELECT l.id, l.content,
                            COALESCE(NULLIF(TRIM(l.heRef), ''), COALESCE(b.heRef, b.title))
-                    FROM line l JOIN book b ON l.bookId = b.id WHERE l.id = ?
+                    FROM line l JOIN book b ON l.bookId = b.id
+                    WHERE l.bookId = ? AND l.lineIndex = ?
                     """.trimIndent(),
                     { c ->
                         if (c.next().value) {
-                            s = c.getString(0) ?: ""
-                            contextRef = c.getString(1) ?: ""
+                            found = SourceLine(
+                                id = c.getLong(0)!!,
+                                content = c.getString(1) ?: "",
+                                contextRef = c.getString(2) ?: "",
+                            )
                         }
                         QueryResult.Value(Unit)
                     },
-                    1) { bindLong(0, id) }
-                cachedLineId = id
-                cachedContent = s
-                cachedContextRef = contextRef
+                    2,
+                ) {
+                    bindLong(0, bookId)
+                    bindLong(1, lineIndex.toLong())
+                }
+                cachedSourceBookId = bookId
+                cachedSourceLineIndex = lineIndex
+                cachedSourceLine = found
             }
-            return cachedContent
+            return cachedSourceLine
         }
-        fun contextRefFor(id: Long): String {
-            contentFor(id)
-            return cachedContextRef
-        }
-        // linkerContentHash MUST match linker_artifact.content_hash so the source-drift guard agrees.
-        fun hashFor(id: Long): String = linkerContentHash(contentFor(id))
 
         // ── walk artifacts → links + anchors ──
         val json = Json { ignoreUnknownKeys = true }
         val linkBatch = ArrayList<Link>()
         val anchorBatch = ArrayList<LinkAnchor>()
-        val linkIdByPair = HashMap<Pair<Long, Long>, Long>()   // (src,tgt) → linkId (dedup links)
-        val seenAnchor = HashSet<Triple<Long, Int, Int>>()      // (linkId, cs, ce) → dedup anchors
+        // Do not retain corpus-sized duplicate indexes here. The allocator already maps each
+        // (source,target,type) to its stable link id, and SQLite's INSERT OR IGNORE keys make both
+        // link and anchor writes idempotent. Keeping duplicate HashMap/HashSet projections of the
+        // full 1.86M-record payload was the remaining Phase-2 heap leak.
         // linkId → (endLineId, endLineIndex): target-side scope end for multi-line
         // citations (a whole amud/section or a dashed range). Written as link_range
         // side=1 so the app shows the range in the title and loads the full content
@@ -221,7 +236,7 @@ fun main(args: Array<String>) = runBlocking {
         // the key) or need per-anchor scope columns (schema+app change) — not worth
         // it for the ~0.07% of ranges affected.
         val rangeEndByLink = HashMap<Long, Pair<Long, Int>>()
-        var links = 0; var anchors = 0; var unresolvedTarget = 0; var ambiguousTarget = 0
+        var links = 0L; var anchors = 0L; var unresolvedTarget = 0; var ambiguousTarget = 0
         var targetIdentityMismatch = 0; var unmappedSource = 0; var staleSource = 0; var staleContext = 0
         var headingSource = 0
         var missingSourceHash = 0
@@ -256,7 +271,7 @@ fun main(args: Array<String>) = runBlocking {
                     val tgtLineId = tgtEntry?.let { lineIdByRefKey[it.path to it.lineIndex] }
                     val tgtMeta = tgtLineId?.let { lineMeta[it] }
                     if (tgtLineId == null || tgtMeta == null) { unresolvedTarget++; continue }
-                    val expectedTargetKey = stableBookKeyByRefKey[tgtEntry.path to tgtEntry.lineIndex]
+                    val expectedTargetKey = stableBookKeyByPath[tgtEntry.path]
                     val expectedTargetBookId = expectedTargetKey?.let { bookIdByKey[it] }
                     if (!targetIdentityMatches(tgtEntry, tgtMeta.bookId, tgtMeta.lineIndex, tgtMeta.heRef, expectedTargetBookId)) {
                         targetIdentityMismatch++
@@ -264,8 +279,9 @@ fun main(args: Array<String>) = runBlocking {
                     }
                     // source: BookKey → bookId → (bookId, line_index) → lineId
                     val srcBookId = bookIdByKey[rec.book_key.source_name to rec.book_key.canonical_he_title]
-                    val srcLineId = srcBookId?.let { lineIdByBookLine[it to rec.line_index] }
-                    if (srcBookId == null || srcLineId == null) { unmappedSource++; continue }
+                    val srcLine = srcBookId?.let { sourceLineFor(it, rec.line_index) }
+                    val srcLineId = srcLine?.id
+                    if (srcBookId == null || srcLine == null || srcLineId == null) { unmappedSource++; continue }
                     if (srcLineId == tgtLineId) continue
 
                     // Source-drift guard: the offsets index the snapshot the linker ran on. If this
@@ -273,30 +289,25 @@ fun main(args: Array<String>) = runBlocking {
                     // safe-drop the whole record (link + anchor); it recovers on the next re-link.
                     // A record with NO hash bypasses the guard — already counted at decode,
                     // fatal under -PlinkerStrict (every engine-produced record carries one).
-                    val content = contentFor(srcLineId)
+                    val content = srcLine.content
                     if (isHeadingContent(content)) { headingSource++; continue }
-                    if (rec.source_hash != null && hashFor(srcLineId) != rec.source_hash) { staleSource++; continue }
-                    if (rec.context_ref != null && contextRefFor(srcLineId) != rec.context_ref) { staleContext++; continue }
+                    if (rec.source_hash != null && linkerContentHash(content) != rec.source_hash) { staleSource++; continue }
+                    if (rec.context_ref != null && srcLine.contextRef != rec.context_ref) { staleContext++; continue }
 
-                    // One link per (src,tgt); reuse its id for repeated citations of the same ref.
-                    val pair = srcLineId to tgtLineId
-                    val linkId = linkIdByPair.getOrPut(pair) {
-                        val id = allocator.linkId(srcLineId, tgtLineId, ctLinker)
-                        linkBatch.add(Link(
-                            id = id, sourceBookId = srcBookId, targetBookId = tgtMeta.bookId,
-                            sourceLineId = srcLineId, targetLineId = tgtLineId,
-                            targetLineIndex = tgtMeta.lineIndex, connectionType = ConnectionType.LINKER,
-                        ))
-                        links++
-                        id
-                    }
+                    // The allocator returns the same stable id for repeated (source,target,type)
+                    // citations; INSERT OR IGNORE performs the dedup without an unbounded map.
+                    val linkId = allocator.linkId(srcLineId, tgtLineId, linkerTypeId)
+                    linkBatch.add(Link(
+                        id = linkId, sourceBookId = srcBookId, targetBookId = tgtMeta.bookId,
+                        sourceLineId = srcLineId, targetLineId = tgtLineId,
+                        targetLineIndex = tgtMeta.lineIndex, connectionType = ConnectionType.LINKER,
+                    ))
                     // A separate clickable anchor for EACH citation occurrence (same line may cite
                     // the same ref twice at different offsets → one link, two anchors).
                     val cs = countVisibleChars(content, rec.start)
                     val ce = countVisibleChars(content, rec.end)
-                    if (ce > cs && seenAnchor.add(Triple(linkId, cs, ce))) {
+                    if (ce > cs) {
                         anchorBatch.add(LinkAnchor(linkId = linkId, side = 0, charStart = cs, charEnd = ce))
-                        anchors++
                     }
 
                     // Multi-line citation scope (whole amud/section or dashed range) →
@@ -308,7 +319,7 @@ fun main(args: Array<String>) = runBlocking {
                     ) {
                         val endLineId = lineIdByRefKey[endEntry.path to endEntry.lineIndex]
                         val endMeta = endLineId?.let { lineMeta[it] }
-                        val expectedEndKey = stableBookKeyByRefKey[endEntry.path to endEntry.lineIndex]
+                        val expectedEndKey = stableBookKeyByPath[endEntry.path]
                         val expectedEndBookId = expectedEndKey?.let { bookIdByKey[it] }
                         if (endLineId != null && endMeta != null &&
                             targetIdentityMatches(endEntry, endMeta.bookId, endMeta.lineIndex, endMeta.heRef, expectedEndBookId)
@@ -326,6 +337,18 @@ fun main(args: Array<String>) = runBlocking {
             }
         }
         flush()
+        driver.executeQuery(
+            null,
+            "SELECT COUNT(*) FROM link WHERE connectionTypeId = ?",
+            { c -> if (c.next().value) links = c.getLong(0) ?: 0L; QueryResult.Value(Unit) },
+            1,
+        ) { bindLong(0, linkerTypeId) }
+        driver.executeQuery(
+            null,
+            "SELECT COUNT(*) FROM link_anchor WHERE linkId IN (SELECT id FROM link WHERE connectionTypeId = ?)",
+            { c -> if (c.next().value) anchors = c.getLong(0) ?: 0L; QueryResult.Value(Unit) },
+            1,
+        ) { bindLong(0, linkerTypeId) }
         if (rangeEndByLink.isNotEmpty()) {
             val ranges = rangeEndByLink.map { (linkId, end) ->
                 LinkRange(linkId = linkId, side = 1, endLineId = end.first, endLineIndex = end.second)
@@ -366,14 +389,16 @@ fun main(args: Array<String>) = runBlocking {
         repository.executeRawQuery("PRAGMA foreign_keys = ON")
         repository.executeRawQuery("PRAGMA synchronous = NORMAL")
         repository.executeRawQuery("PRAGMA journal_mode = WAL")
-        runCatching {
-            allocator.snapshotTo(buildStatePath, extraMeta = mapOf("generator" to "linkerlinks"))
-        }.onFailure { logger.w(it) { "Failed to write build_state" } }
+        allocator.commit(extraMeta = mapOf("generator" to "linkerlinks"))
+        logger.i {
+            "Disk-backed stable link IDs: reused=${allocator.reusedCount}, fresh=${allocator.freshCount}"
+        }
         Unit
     } catch (e: Exception) {
         logger.e(e) { "Error generating LINKER links" }
         throw e
     } finally {
+        allocator.close()
         repository.close()
     }
 }
