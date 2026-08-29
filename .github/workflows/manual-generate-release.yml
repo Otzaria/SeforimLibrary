@@ -1204,14 +1204,14 @@ jobs:
               raise SystemExit("pinned Phase-2 task no longer has exactly one expected 6g heap declaration")
           path.write_text(text.replace(old, new), encoding="utf-8")
           PY
-          rg -q 'import io.github.kdroidfilter.seforimlibrary.common.ids.DiskBackedLinkIdAllocator' \
+          grep -Fq 'import io.github.kdroidfilter.seforimlibrary.common.ids.DiskBackedLinkIdAllocator' \
             generator/sefariasqlite/src/jvmMain/kotlin/io/github/kdroidfilter/seforimlibrary/sefariasqlite/GenerateLinkerLinks.kt
-          if rg -q 'InMemoryIdAllocator' \
+          if grep -Fq 'InMemoryIdAllocator' \
             generator/sefariasqlite/src/jvmMain/kotlin/io/github/kdroidfilter/seforimlibrary/sefariasqlite/GenerateLinkerLinks.kt; then
             echo "::error::Recovery Phase-2 still references the unbounded in-memory allocator"
             exit 1
           fi
-          rg -q 'jvmArgs = listOf\("-Xmx12g", "-XX:\+UseG1GC"\)' generator/sefariasqlite/build.gradle.kts
+          grep -Fq 'jvmArgs = listOf("-Xmx12g", "-XX:+UseG1GC")' generator/sefariasqlite/build.gradle.kts
           rm -rf generator/common/build generator/sefariasqlite/build
           echo "Recovery Phase-2 implementation is pinned to $PHASE2_IMPLEMENTATION_COMMIT"
 

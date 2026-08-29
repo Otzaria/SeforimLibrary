@@ -119,6 +119,8 @@ class ManualReleaseWorkflowContractTest(unittest.TestCase):
         self.assertIn("text.count(old) != 1", overlay)
         self.assertIn("DiskBackedLinkIdAllocator", overlay)
         self.assertIn("InMemoryIdAllocator", overlay)
+        self.assertIn("grep -Fq", overlay)
+        self.assertNotIn("rg -q", overlay)
         self.assertIn("rm -rf generator/common/build generator/sefariasqlite/build", overlay)
         self.assertLess(
             self.workflow.index("      - name: Overlay pinned recovery Phase-2 implementation\n"),
