@@ -34,6 +34,8 @@ kotlin {
         jvmTest.dependencies {
             implementation(kotlin("test-junit"))
             implementation(libs.sqlDelight.driver.sqlite)
+            implementation(libs.kotlinx.serialization.json)
+            implementation(project(":core"))
         }
     }
 }
@@ -126,6 +128,18 @@ tasks.register<JavaExec>("stampSchemaVersion") {
     systemProperty("dbVersion", dbVersion)
     project.findProperty("dbSchemaVersion")?.let { systemProperty("dbSchemaVersion", it as String) }
     jvmArgs = listOf("-Xmx512m")
+}
+
+tasks.register<JavaExec>("buildLineRefIndex") {
+    group = "application"
+    description = "Rebuild line_ref — the canonical (bookId, refKeyHash) -> lineIndex reference index."
+    dependsOn("jvmJar")
+    mainClass.set("io.github.kdroidfilter.seforimlibrary.common.refs.BuildLineRefIndexCliKt")
+    classpath = files(tasks.named("jvmJar")) + configurations.getByName("jvmRuntimeClasspath")
+    val dbPath = project.findProperty("dbPath") as String?
+        ?: rootProject.layout.buildDirectory.file("seforim.db").get().asFile.absolutePath
+    systemProperty("dbPath", dbPath)
+    jvmArgs = listOf("-Xmx2g")
 }
 
 tasks.register<JavaExec>("diagnoseHashMismatch") {

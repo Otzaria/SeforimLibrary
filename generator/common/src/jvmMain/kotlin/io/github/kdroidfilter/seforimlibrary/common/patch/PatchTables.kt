@@ -58,6 +58,8 @@ internal val PATCH_TABLES_IN_FK_ORDER: List<PatchTable> = listOf(
     PatchTable("tocEntry",           listOf("id"),       updatable = true),
     PatchTable("line",               listOf("id"),       updatable = true),
     PatchTable("line_toc",           listOf("lineId"),   updatable = true),
+    // Pure key table — PK == all columns, so there is nothing to update.
+    PatchTable("line_ref",           listOf("bookId", "refKeyHash", "lineIndex"), updatable = false),
 
     // Links.
     PatchTable("link",               listOf("id"),       updatable = true),

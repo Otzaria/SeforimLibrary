@@ -92,6 +92,7 @@ class LogicalContentHasher(
             "tocEntry",
             "line",
             "line_toc",
+            "line_ref",
             "link",
             "book_has_links",
             "book_acronym",

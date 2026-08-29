@@ -16,6 +16,7 @@ tasks.register("generateSeforimDb") {
     dependsOn(":otzariasqlite:generateHavroutaLinks")
     dependsOn(":sefariasqlite:renameCategories")
     dependsOn(":sefariasqlite:seedGenerations")
+    dependsOn(":generator-common:buildLineRefIndex")
     dependsOn(":catalog:buildCatalog")
     dependsOn(":searchindex:buildLuceneIndexDefault")
     dependsOn(":packaging:writeReleaseInfo")
@@ -33,6 +34,16 @@ project(":generator-common").tasks.matching { it.name == "stampSchemaVersion" }.
     mustRunAfter(":packaging:writeReleaseInfo")
     mustRunAfter(":catalog:buildCatalog")
     mustRunAfter(":searchindex:buildLuceneIndexDefault")
+    mustRunAfter(":sefariasqlite:seedGenerations")
+    mustRunAfter(":generator-common:buildLineRefIndex")
+}
+
+// line_ref is derived from line.heRef + book.title, so it must be rebuilt
+// after every stage that writes or renames books and lines.
+project(":generator-common").tasks.matching { it.name == "buildLineRefIndex" }.configureEach {
+    mustRunAfter(":otzariasqlite:appendOtzaria")
+    mustRunAfter(":otzariasqlite:generateHavroutaLinks")
+    mustRunAfter(":sefariasqlite:renameCategories")
     mustRunAfter(":sefariasqlite:seedGenerations")
 }
 
