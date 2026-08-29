@@ -21,6 +21,16 @@ name: Delta pipeline — real diff test (ARM)
 
 on:
   workflow_dispatch:
+    inputs:
+      baseline_ref:
+        description: >-
+          Commit/ref to build v1 from. Empty (default) = same tree as v2, so the
+          patch reflects a SOURCE diff. Set it to a pre-feature commit to isolate
+          a CODE change: both builds then use the same staged sources, and the
+          patch contains exactly what the code change alters.
+        required: false
+        type: string
+        default: ''
 
 permissions:
   contents: read
@@ -38,6 +48,8 @@ jobs:
         uses: actions/checkout@v4
         with:
           submodules: recursive
+          # Full history so a baseline_ref older than HEAD can be checked out.
+          fetch-depth: 0
 
       - name: Disk before build
         run: df -h
@@ -85,15 +97,30 @@ jobs:
           # The Sefaria fetcher cache lives under build/sefaria/export and is
           # considered "valid" iff non-empty. We extract the N-1 archive
           # there so the fetcher uses it instead of /releases/latest.
-          URL=$(gh api repos/Otzaria/SefariaExport/releases \
-                  --jq '.[1].assets[] | select(.name | endswith(".tar.zst")) | .browser_download_url')
-          echo "Sefaria N-1 archive: $URL"
-          curl -L -o /tmp/sefaria.tar.zst "$URL"
+          # Content releases are the ones shipping a sefaria-exports-*.tar.zst.
+          # The repo also publishes downstream-intent/recovery releases, so an
+          # index into the unfiltered list picks an arbitrary one.
+          mapfile -t TAGS < <(gh api --paginate repos/Otzaria/SefariaExport/releases \
+            --jq '.[] | select([.assets[].name] | map(startswith("sefaria-exports-") and endswith(".tar.zst")) | any) | .tag_name')
+          if [ "${#TAGS[@]}" -lt 2 ]; then
+            echo "::error::need two Sefaria content releases, found ${#TAGS[@]}"; exit 1
+          fi
+          TAG="${TAGS[1]}"
+          echo "Sefaria N-1 content release: $TAG"
+          URL=$(gh api "repos/Otzaria/SefariaExport/releases/tags/$TAG" \
+                  --jq '.assets[] | select(.name | startswith("sefaria-exports-") and endswith(".tar.zst")) | .browser_download_url')
+          test -n "$URL"
+          curl -fL -o /tmp/sefaria.tar.zst "$URL"
           mkdir -p "$SEFARIA_CACHE/export"
           tar --use-compress-program=unzstd -xf /tmp/sefaria.tar.zst -C "$SEFARIA_CACHE/export"
           rm /tmp/sefaria.tar.zst
           echo "Sefaria cache layout:"
           ls "$SEFARIA_CACHE/export" | head -20
+          # Fail here, not 20 minutes later inside the generator.
+          for d in json schemas links; do
+            find "$SEFARIA_CACHE/export" -maxdepth 2 -type d -name "$d" | grep -q . || {
+              echo "::error::extracted Sefaria export has no $d/ directory"; exit 1; }
+          done
 
       - name: Pre-stage Otzaria N-1 source into fetcher cache
         run: |
@@ -102,19 +129,43 @@ jobs:
           mkdir -p "$OTZARIA_CACHE/source"
           # otzaria-library ships multiple .zip assets (otzaria_latest.zip +
           # otzaria_dicta_latest.zip etc). Grab all of N-1.
-          URLS=$(gh api repos/otzaria/otzaria-library/releases \
-                   --jq '.[1].assets[] | select(.name | endswith(".zip")) | .browser_download_url')
-          for url in $URLS; do
+          # Content releases are the ones shipping otzaria_latest.zip. The same
+          # repo also publishes ForDB, saga-state and library-links releases, so
+          # `.[1]` picked a ForDB release and staged only ForDB/ (2026-08-29).
+          mapfile -t TAGS < <(gh api --paginate repos/otzaria/otzaria-library/releases \
+            --jq '.[] | select([.assets[].name] | index("otzaria_latest.zip")) | .tag_name')
+          if [ "${#TAGS[@]}" -lt 2 ]; then
+            echo "::error::need two Otzaria content releases, found ${#TAGS[@]}"; exit 1
+          fi
+          TAG="${TAGS[1]}"
+          echo "Otzaria N-1 content release: $TAG"
+          mapfile -t URLS < <(gh api "repos/otzaria/otzaria-library/releases/tags/$TAG" \
+            --jq '.assets[] | select(.name | endswith(".zip")) | .browser_download_url')
+          test "${#URLS[@]}" -ge 1
+          for url in "${URLS[@]}"; do
             name=$(basename "$url")
             echo "Downloading Otzaria N-1 asset: $name"
-            curl -L -o "/tmp/$name" "$url"
+            curl -fL -o "/tmp/$name" "$url"
             unzip -q -o "/tmp/$name" -d "$OTZARIA_CACHE/source"
             rm "/tmp/$name"
           done
           echo "Otzaria cache layout (top of source/):"
           ls "$OTZARIA_CACHE/source" | head -20
+          # The generator's phase 1 requires this exact directory; assert it here
+          # so a wrong release fails the staging step with a readable message.
+          test -d "$OTZARIA_CACHE/source/אוצריא" || {
+            echo "::error::staged Otzaria source has no אוצריא/ directory (got: $(ls "$OTZARIA_CACHE/source" | tr '\n' ' '))"
+            exit 1; }
 
       # ─── BUILD v1 BASELINE ─────────────────────────────────────────────────
+      - name: Check out the baseline tree for v1
+        if: inputs.baseline_ref != ''
+        run: |
+          set -euo pipefail
+          git checkout --detach "${{ inputs.baseline_ref }}"
+          git submodule update --init --recursive
+          echo "v1 baseline tree: $(git rev-parse HEAD)"
+
       - name: Build v1 baseline (uses pre-staged N-1 sources)
         run: ./gradlew generateSeforimDb -PdbVersion=1 --no-daemon --stacktrace
 
@@ -131,17 +182,31 @@ jobs:
           mv build/seforim.db.buildstate build/seforim.db.buildstate.v1
           # Drop lexical.db; only need DB + buildstate
           rm -f build/lexical.db build/release_info.txt
-          # Clear cached sources so v2 re-fetches /releases/latest
-          rm -rf generator/sefariasqlite/build/sefaria
-          rm -rf generator/otzariasqlite/build/otzaria
-          # Also clear the acronymizer cache so it gets the current version
-          rm -rf generator/otzariasqlite/build/acronymizer
+          # Clear cached sources so v2 re-fetches /releases/latest — but only
+          # when v2 is meant to differ by SOURCE. With a baseline_ref the point
+          # is to isolate the CODE change, so both builds must see one snapshot.
+          if [ -z "${{ inputs.baseline_ref }}" ]; then
+            rm -rf generator/sefariasqlite/build/sefaria
+            rm -rf generator/otzariasqlite/build/otzaria
+            # Also clear the acronymizer cache so it gets the current version
+            rm -rf generator/otzariasqlite/build/acronymizer
+          else
+            echo "baseline_ref set — keeping staged sources so only the code differs."
+          fi
           ls -lah build/seforim.db.v1 build/seforim.db.buildstate.v1
           df -h
 
       # ─── BUILD v2 (LATEST sources, seeded by v1 buildstate) ────────────────
       - name: Re-seed allocator with v1 buildstate
         run: cp build/seforim.db.buildstate.v1 build/seforim.db.buildstate
+
+      - name: Restore the current tree for v2
+        if: inputs.baseline_ref != ''
+        run: |
+          set -euo pipefail
+          git checkout --detach "$GITHUB_SHA"
+          git submodule update --init --recursive
+          echo "v2 tree: $(git rev-parse HEAD)"
 
       - name: Build v2 (lets fetcher download /releases/latest)
         run: ./gradlew generateSeforimDb -PdbVersion=2 -PtoVersion=2 --no-daemon --stacktrace
