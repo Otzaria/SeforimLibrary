@@ -100,6 +100,9 @@ internal data class BookPayload(
     // live) and the resolved schema file — inputs for the versions pass.
     val sourceDirPath: String? = null,
     val schemaFilePath: String? = null,
+    // Raw English `categories` from the index record. Only the whole-unit ref
+    // sets need them (Sefaria's own gate is English-category based).
+    val categoriesEn: List<String> = emptyList(),
 )
 
 internal data class VersionMeta(
@@ -161,7 +164,10 @@ internal data class AltNodePayload(
     val skippedAddresses: List<Int>,
     val startingAddress: String?,
     val offset: Int?,
-    val children: List<AltNodePayload>
+    val children: List<AltNodePayload>,
+    // True when a `match_templates` entry has scope "any"/"alone" — Sefaria's
+    // own predicate for "this node can be cited on its own" (a whole perek).
+    val referenceableAlone: Boolean = false
 )
 
 @Serializable

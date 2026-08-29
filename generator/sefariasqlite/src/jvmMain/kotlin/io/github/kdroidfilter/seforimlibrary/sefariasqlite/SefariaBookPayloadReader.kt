@@ -176,6 +176,12 @@ internal class SefariaBookPayloadReader(
                 ?: textJson["categories"]?.jsonArray?.mapNotNull { it.jsonPrimitive.contentOrNull }
                 ?: emptyList()
 
+            // Unsanitized: the whole-unit ref sets gate on Sefaria's own
+            // English category paths ("Talmud/Bavli", "Mishnah", …).
+            val categoriesEn = schemaJson["categories"]?.jsonArray?.mapNotNull { it.jsonPrimitive.contentOrNull }
+                ?: schemaObj["categories"]?.jsonArray?.mapNotNull { it.jsonPrimitive.contentOrNull }
+                ?: emptyList()
+
             val authors = schemaJson["authors"]?.jsonArray?.mapNotNull { author ->
                 author.jsonObject["he"]?.stringOrNull()
             } ?: emptyList()
@@ -245,6 +251,7 @@ internal class SefariaBookPayloadReader(
                 versionsMeta = versionsMeta,
                 sourceDirPath = textPath.parent?.toString(),
                 schemaFilePath = schemaPath.toString(),
+                categoriesEn = categoriesEn,
             )
         }.onFailure { e ->
             logger.w(e) { "Failed to prepare book from $textPath" }
@@ -416,6 +423,11 @@ internal class SefariaBookPayloadReader(
         val childLabel = obj["heSectionNames"]?.jsonArray?.firstOrNull()?.jsonPrimitive?.contentOrNull
             ?: obj["sectionNames"]?.jsonArray?.firstOrNull()?.jsonPrimitive?.contentOrNull
         val children = obj["nodes"]?.jsonArray?.mapNotNull { parseAltNode(it.jsonObject) } ?: emptyList()
+        // Sefaria's `has_scope_alone_match_template()`; a scope-less template
+        // defaults to "combined" and does not make the node citable alone.
+        val referenceableAlone = obj["match_templates"]?.jsonArray?.any { template ->
+            template.jsonObject["scope"]?.stringOrNull() in ALONE_MATCH_TEMPLATE_SCOPES
+        } ?: false
         return AltNodePayload(
             title = title,
             heTitle = heTitle,
@@ -427,7 +439,8 @@ internal class SefariaBookPayloadReader(
             skippedAddresses = skippedAddresses,
             startingAddress = startingAddress,
             offset = offset,
-            children = children
+            children = children,
+            referenceableAlone = referenceableAlone
         )
     }
 
@@ -814,6 +827,9 @@ internal class SefariaBookPayloadReader(
         }
     }
 }
+
+/** `match_templates[].scope` values that make an alt-struct node citable alone. */
+private val ALONE_MATCH_TEMPLATE_SCOPES = setOf("any", "alone")
 
 // Leading printed marker of a line: "(אות) " or "{אות} ".
 private val SOURCE_MARKER_REGEX = Regex("""^\s*[({]([א-ת"׳״]{1,5})[)}]\s""")
