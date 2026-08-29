@@ -97,6 +97,49 @@ class ManualReleaseWorkflowContractTest(unittest.TestCase):
         self.assertIn('generatorHeap=8g', heaps)
         self.assertIn('linkerHeap=12g', heaps)
 
+    def test_recovery_overlays_exact_phase2_sources_from_workflow_revision(self):
+        checkout = self.step("Checkout immutable pipeline control scripts")
+        overlay = self.step("Overlay pinned recovery Phase-2 implementation")
+        apply_links = self.step("Apply LINKER links (Phase-2)")
+
+        disk_allocator = (
+            "generator/common/src/jvmMain/kotlin/io/github/kdroidfilter/"
+            "seforimlibrary/common/ids/DiskBackedLinkIdAllocator.kt"
+        )
+        importer = (
+            "generator/sefariasqlite/src/jvmMain/kotlin/io/github/kdroidfilter/"
+            "seforimlibrary/sefariasqlite/GenerateLinkerLinks.kt"
+        )
+        self.assertIn(disk_allocator, checkout)
+        self.assertIn(importer, checkout)
+        self.assertIn("if: inputs.relink_recovery_run_id != ''", overlay)
+        self.assertIn('install -m 0644 ".pipeline-control/$file" "$file"', overlay)
+        self.assertIn('old = \'jvmArgs = listOf("-Xmx6g")\'', overlay)
+        self.assertIn('new = \'jvmArgs = listOf("-Xmx12g", "-XX:+UseG1GC")\'', overlay)
+        self.assertIn("text.count(old) != 1", overlay)
+        self.assertIn("DiskBackedLinkIdAllocator", overlay)
+        self.assertIn("InMemoryIdAllocator", overlay)
+        self.assertIn("rm -rf generator/common/build generator/sefariasqlite/build", overlay)
+        self.assertLess(
+            self.workflow.index("      - name: Overlay pinned recovery Phase-2 implementation\n"),
+            self.workflow.index("      - name: Apply LINKER links (Phase-2)\n"),
+        )
+        self.assertIn("gradle :sefariasqlite:generateLinkerLinks", apply_links)
+
+    def test_phase2_implementation_commit_is_part_of_release_identity(self):
+        lookup = self.step("Find and verify exact provenance")
+        stage = self.step("Stage release assets")
+
+        expression = "${{ inputs.relink_recovery_run_id != '' && github.sha || inputs.source_commit }}"
+        self.assertGreaterEqual(self.workflow.count(f"PHASE2_IMPLEMENTATION_COMMIT: {expression}"), 3)
+        self.assertIn('--arg phase2 "$PHASE2_IMPLEMENTATION_COMMIT"', lookup)
+        self.assertIn(".phase2_implementation_commit==$phase2", lookup)
+        self.assertIn('"schema_version": 3', stage)
+        self.assertIn(
+            '"phase2_implementation_commit": os.environ["PHASE2_IMPLEMENTATION_COMMIT"]',
+            stage,
+        )
+
     def test_pinned_sefaria_archive_uses_its_explicit_root_contract(self):
         extract = self.step("Verify pinned lineage and extract exact inputs")
 

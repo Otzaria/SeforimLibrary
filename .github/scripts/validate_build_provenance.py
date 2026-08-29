@@ -24,6 +24,7 @@ V2_KEYS = V1_KEYS | {
     "linker_engine_fingerprint", "linker_relink_run_id", "linker_commit",
     "linker_relink_run_attempt", "linker_relink_request_id",
 }
+V3_KEYS = V2_KEYS | {"phase2_implementation_commit"}
 
 
 def load(path: Path) -> dict:
@@ -40,9 +41,9 @@ def load(path: Path) -> dict:
     if not isinstance(value, dict):
         raise ValueError("build provenance must be an object")
     version = value.get("schema_version")
-    if type(version) is not int or version not in (1, 2):
-        raise ValueError("schema_version must be integer 1 or 2")
-    expected_keys = V1_KEYS if version == 1 else V2_KEYS
+    if type(version) is not int or version not in (1, 2, 3):
+        raise ValueError("schema_version must be integer 1, 2 or 3")
+    expected_keys = {1: V1_KEYS, 2: V2_KEYS, 3: V3_KEYS}[version]
     if set(value) != expected_keys:
         raise ValueError("unknown build provenance key set")
     canonical = json.dumps(
@@ -81,7 +82,7 @@ def validate(value: dict) -> None:
         raise ValueError("correlation_id disagrees with pinned Sefaria fields")
     if value["expected_links_commit"] != value["otzaria_target_commit"]:
         raise ValueError("Otzaria target differs from expected links commit")
-    if version == 2:
+    if version >= 2:
         if not isinstance(value["linker_commit"], str) or not SHA40.fullmatch(value["linker_commit"]):
             raise ValueError("invalid linker_commit")
         for field in (
@@ -97,6 +98,10 @@ def validate(value: dict) -> None:
         fingerprint = value["linker_engine_fingerprint"]
         if not isinstance(fingerprint, str) or not re.fullmatch(r"[\x20-\x7e]{1,4096}", fingerprint):
             raise ValueError("invalid linker_engine_fingerprint")
+    if version >= 3:
+        phase2_commit = value["phase2_implementation_commit"]
+        if not isinstance(phase2_commit, str) or not SHA40.fullmatch(phase2_commit):
+            raise ValueError("invalid phase2_implementation_commit")
     assets = value["assets"]
     if not isinstance(assets, list) or not assets:
         raise ValueError("assets must be a non-empty array")

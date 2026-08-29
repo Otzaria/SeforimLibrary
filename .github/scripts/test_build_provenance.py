@@ -16,7 +16,7 @@ class BuildProvenanceContractTest(unittest.TestCase):
     def value(self):
         sha = "a" * 64
         return {
-            "schema_version": 2,
+            "schema_version": 3,
             "correlation_id": f"sefaria:1:2:export-v1:{sha}",
             "source_commit": "b" * 40,
             "sefaria_tag": "export-v1",
@@ -34,6 +34,7 @@ class BuildProvenanceContractTest(unittest.TestCase):
             "linker_commit": "2" * 40,
             "linker_relink_run_attempt": 1,
             "linker_relink_request_id": "3" * 64,
+            "phase2_implementation_commit": "4" * 40,
             "lineage_sha256": "4" * 64,
             "config_sha256": "5" * 64,
             "source_links_tree_sha256": "6" * 64,
@@ -60,7 +61,7 @@ class BuildProvenanceContractTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             value = self.value()
             value["schema_version"] = 1
-            for key in contract.V2_KEYS - contract.V1_KEYS:
+            for key in contract.V3_KEYS - contract.V1_KEYS:
                 del value[key]
             contract.validate(contract.load(self.write(tmp, value)))
 
@@ -75,11 +76,26 @@ class BuildProvenanceContractTest(unittest.TestCase):
 
     def test_duplicate_and_boolean_schema_are_rejected(self):
         with tempfile.TemporaryDirectory() as tmp:
-            raw = json.dumps(self.value(), sort_keys=True, separators=(",", ":"))[:-1] + ',"schema_version":2}\n'
+            raw = json.dumps(self.value(), sort_keys=True, separators=(",", ":"))[:-1] + ',"schema_version":3}\n'
             with self.assertRaises(ValueError):
                 contract.load(self.write(tmp, raw=raw.encode()))
             value = self.value()
             value["schema_version"] = True
+            with self.assertRaises(ValueError):
+                contract.validate(contract.load(self.write(tmp, value)))
+
+    def test_published_v2_contract_remains_readable(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            value = self.value()
+            value["schema_version"] = 2
+            for key in contract.V3_KEYS - contract.V2_KEYS:
+                del value[key]
+            contract.validate(contract.load(self.write(tmp, value)))
+
+    def test_phase2_commit_is_strict(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            value = self.value()
+            value["phase2_implementation_commit"] = "not-a-commit"
             with self.assertRaises(ValueError):
                 contract.validate(contract.load(self.write(tmp, value)))
 

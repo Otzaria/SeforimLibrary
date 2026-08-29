@@ -189,6 +189,7 @@ jobs:
           OTZARIA_TARGET_COMMIT: ${{ inputs.otzaria_target_commit }}
           FORDB_ARCHIVE_SHA: ${{ inputs.fordb_archive_sha256 }}
           FORDB_TAG: ${{ inputs.fordb_tag }}
+          PHASE2_IMPLEMENTATION_COMMIT: ${{ inputs.relink_recovery_run_id != '' && github.sha || inputs.source_commit }}
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/provenance-scan"
@@ -228,10 +229,12 @@ jobs:
               --arg ot "$OTZARIA_TAG" --arg oa "$OTZARIA_ASSET_SHA" \
               --arg ec "$EXPECTED_LINKS_COMMIT" --arg tc "$OTZARIA_TARGET_COMMIT" \
               --arg fd "$FORDB_ARCHIVE_SHA" --arg ft "$FORDB_TAG" \
+              --arg phase2 "$PHASE2_IMPLEMENTATION_COMMIT" \
               '.source_commit==$source and .sefaria_tag==$st and .sefaria_release_metadata_sha256==$sm and
                .sefaria_archive_sha256==$sa and .otzaria_tag==$ot and .otzaria_asset_sha256==$oa and
                .expected_links_commit==$ec and .otzaria_target_commit==$tc and
-               .fordb_archive_sha256==$fd and .fordb_tag==$ft' "$file" >/dev/null; then
+               .fordb_archive_sha256==$fd and .fordb_tag==$ft and
+               .phase2_implementation_commit==$phase2' "$file" >/dev/null; then
               test "$draft" = false
               test "$target" = "$SOURCE_COMMIT"
               [[ "$tag" =~ ^v[1-9][0-9]*-[0-9]{14}$ ]]
@@ -299,6 +302,7 @@ jobs:
       # Older clients chain through the anchors; the full bundle is the
       # ultimate fallback.
       PATCH_OFFSETS: "1 2 4 8 16"
+      PHASE2_IMPLEMENTATION_COMMIT: ${{ inputs.relink_recovery_run_id != '' && github.sha || inputs.source_commit }}
 
     steps:
       # MUST run before checkout. actions/checkout cleans the workspace with
@@ -333,6 +337,8 @@ jobs:
           sparse-checkout: |
             .github/scripts
             .github/host
+            generator/common/src/jvmMain/kotlin/io/github/kdroidfilter/seforimlibrary/common/ids/DiskBackedLinkIdAllocator.kt
+            generator/sefariasqlite/src/jvmMain/kotlin/io/github/kdroidfilter/seforimlibrary/sefariasqlite/GenerateLinkerLinks.kt
           persist-credentials: false
 
       # `gh` gives GH_TOKEN precedence over GITHUB_TOKEN. Verify the repository
@@ -1172,6 +1178,43 @@ jobs:
           : "${EXPECTED_LINKER_SNAPSHOT_ZST_SHA256:=$SNAPSHOT_ZST_SHA256}"
           echo "EXPECTED_LINKER_SNAPSHOT_ZST_SHA256=$EXPECTED_LINKER_SNAPSHOT_ZST_SHA256" >> "$GITHUB_ENV"
 
+      # Recovery keeps the expensive source/data build pinned to source_commit, but
+      # Phase-2 must run the fail-closed implementation shipped by this workflow
+      # revision. Copy only the two reviewed source files and make the one exact heap
+      # substitution required by the pinned task; all other payload code remains pinned.
+      - name: Overlay pinned recovery Phase-2 implementation
+        if: inputs.relink_recovery_run_id != ''
+        run: |
+          set -euo pipefail
+          files=(
+            generator/common/src/jvmMain/kotlin/io/github/kdroidfilter/seforimlibrary/common/ids/DiskBackedLinkIdAllocator.kt
+            generator/sefariasqlite/src/jvmMain/kotlin/io/github/kdroidfilter/seforimlibrary/sefariasqlite/GenerateLinkerLinks.kt
+          )
+          for file in "${files[@]}"; do
+            test -f ".pipeline-control/$file"
+            install -m 0644 ".pipeline-control/$file" "$file"
+          done
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path("generator/sefariasqlite/build.gradle.kts")
+          old = 'jvmArgs = listOf("-Xmx6g")'
+          new = 'jvmArgs = listOf("-Xmx12g", "-XX:+UseG1GC")'
+          text = path.read_text(encoding="utf-8")
+          if text.count(old) != 1:
+              raise SystemExit("pinned Phase-2 task no longer has exactly one expected 6g heap declaration")
+          path.write_text(text.replace(old, new), encoding="utf-8")
+          PY
+          rg -q 'import io.github.kdroidfilter.seforimlibrary.common.ids.DiskBackedLinkIdAllocator' \
+            generator/sefariasqlite/src/jvmMain/kotlin/io/github/kdroidfilter/seforimlibrary/sefariasqlite/GenerateLinkerLinks.kt
+          if rg -q 'InMemoryIdAllocator' \
+            generator/sefariasqlite/src/jvmMain/kotlin/io/github/kdroidfilter/seforimlibrary/sefariasqlite/GenerateLinkerLinks.kt; then
+            echo "::error::Recovery Phase-2 still references the unbounded in-memory allocator"
+            exit 1
+          fi
+          rg -q 'jvmArgs = listOf\("-Xmx12g", "-XX:\+UseG1GC"\)' generator/sefariasqlite/build.gradle.kts
+          rm -rf generator/common/build generator/sefariasqlite/build
+          echo "Recovery Phase-2 implementation is pinned to $PHASE2_IMPLEMENTATION_COMMIT"
+
       # Inject the payload the relink run just produced into THIS DB. The exact
       # request+attempt pointer names a content-addressed final Linker release; no
       # Actions artifact storage and no moving "latest" pointer are involved.
@@ -1418,6 +1461,7 @@ jobs:
           OTZARIA_TARGET_COMMIT: ${{ inputs.otzaria_target_commit }}
           FORDB_ARCHIVE_SHA: ${{ inputs.fordb_archive_sha256 }}
           FORDB_TAG: ${{ inputs.fordb_tag }}
+          PHASE2_IMPLEMENTATION_COMMIT: ${{ inputs.relink_recovery_run_id != '' && github.sha || inputs.source_commit }}
         run: |
           set -euo pipefail
           STAGE=release-staging
@@ -1461,7 +1505,7 @@ jobs:
           for path in sorted(stage.iterdir(), key=lambda p: p.name.encode()):
               assets.append({"name": path.name, "size": path.stat().st_size, "sha256": file_sha256(path)})
           value = {
-              "schema_version": 2,
+              "schema_version": 3,
               "correlation_id": os.environ["CORRELATION_ID"],
               "source_commit": os.environ["SOURCE_COMMIT"],
               "sefaria_tag": os.environ["SEFARIA_TAG"],
@@ -1479,6 +1523,7 @@ jobs:
               "linker_commit": os.environ["LINKER_COMMIT"],
               "linker_relink_run_attempt": int(os.environ["LINKER_RELINK_RUN_ATTEMPT"]),
               "linker_relink_request_id": os.environ["RELINK_REQUEST_ID"],
+              "phase2_implementation_commit": os.environ["PHASE2_IMPLEMENTATION_COMMIT"],
               "lineage_sha256": hashlib.sha256(lineage_path.read_bytes()).hexdigest(),
               "config_sha256": lineage["config_sha256"],
               "source_links_tree_sha256": lineage["source_links_tree_sha256"],
