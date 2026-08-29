@@ -1573,19 +1573,29 @@ jobs:
             exit 1
           }
 
-          # Print absent, exact-empty-draft, or conflict. A response-lost create
-          # is adopted only when every immutable field and the empty asset set
-          # match this invocation; an unrelated release is never overwritten.
+          list_matching_releases() {
+            gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" | \
+              jq -s --arg tag "$RELEASE_TAG" '[add[] | select(.tag_name == $tag)]'
+          }
+
+          # Print absent, exact-empty-draft, or conflict. Draft releases are not
+          # returned by GitHub's /releases/tags/{tag} REST route, so reconciliation
+          # must use the fully paginated release collection. A response-lost create
+          # is adopted only when every immutable field and the empty asset set match
+          # this invocation; an unrelated release is never overwritten.
           release_state() {
-            local output="$RUNNER_TEMP/release-state.json" error="$RUNNER_TEMP/release-state.err"
-            if ! gh api "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" > "$output" 2> "$error"; then
-              if grep -q 'HTTP 404' "$error"; then echo absent; return 0; fi
-              cat "$error" >&2
-              return 1
-            fi
+            local output="$RUNNER_TEMP/release-state.json"
+            list_matching_releases > "$output" || return 1
             python3 - "$output" "$RELEASE_TAG" "$SOURCE_COMMIT" <<'PY'
           import json,sys
-          value=json.load(open(sys.argv[1],encoding="utf-8"))
+          matches=json.load(open(sys.argv[1],encoding="utf-8"))
+          if not matches:
+              print("absent")
+              raise SystemExit(0)
+          if len(matches) != 1:
+              print("conflict")
+              raise SystemExit(0)
+          value=matches[0]
           exact=(
               value.get("tag_name")==sys.argv[2]
               and value.get("name")==sys.argv[2]
@@ -1636,11 +1646,18 @@ jobs:
             esac
           }
           ensure_draft
+          RELEASE_ID="$(list_matching_releases | jq -er \
+            --arg tag "$RELEASE_TAG" --arg target "$SOURCE_COMMIT" '
+              select(length == 1) | .[0] |
+              select(.tag_name == $tag and .name == $tag and .target_commitish == $target and
+                     .draft == true and (.assets | length) == 0) | .id |
+              select(type == "number" and . > 0)
+            ')" || { echo "::error::Could not resolve the exact empty draft release id"; exit 1; }
 
           # Upload one asset at a time. If an upload response is lost, reconcile
           # by exact name+size+digest and continue. Never use --clobber.
           release_assets_json() {
-            gh api "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" --jq \
+            gh api "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" --jq \
               '{assets:[.assets[]|{name,size,digest}]}'
           }
           asset_state() {

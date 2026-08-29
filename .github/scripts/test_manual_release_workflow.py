@@ -200,6 +200,11 @@ class ManualReleaseWorkflowContractTest(unittest.TestCase):
         self.assertIn('exact-empty-draft', publish)
         self.assertIn('for asset_path in release-staging/*', publish)
         self.assertNotIn('gh release upload "$RELEASE_TAG" "$asset_path" --clobber', publish)
+        self.assertIn('gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100"', publish)
+        self.assertIn("Draft releases are not", publish)
+        self.assertIn('RELEASE_ID="$(list_matching_releases', publish)
+        self.assertIn('repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID', publish)
+        self.assertNotIn('releases/tags/$RELEASE_TAG" > "$output"', publish)
 
     def test_recovery_sets_both_cleanup_titles_and_cleanup_defaults_them(self):
         relink = self.step("Run LinkerToOtzaria relink on this snapshot (and wait)")
