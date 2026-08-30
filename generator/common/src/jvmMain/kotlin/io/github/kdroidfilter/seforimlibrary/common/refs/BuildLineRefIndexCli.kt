@@ -91,20 +91,23 @@ internal fun indexAllBooks(conn: Connection, logger: Logger): LineRefIndexReport
         ).use { selectLines ->
             for ((bookId, title, bookHeRef) in bookRows) {
                 val aliases = listOfNotNull(bookHeRef, title).filter { it.isNotBlank() }
-                val titlePrefixes = aliases.map { "${RefKey.tokens(it).joinToString(" ")} " }
+                val titleAliasTokens = aliases.map(RefKey::tokens)
                 val seen = HashSet<Long>()
-                var stripped = 0
-                var total = 0
+                var hasTitleMismatch = false
 
                 selectLines.setLong(1, bookId)
                 selectLines.executeQuery().use { rs ->
                     while (rs.next()) {
                         val lineIndex = rs.getLong(1)
                         val heRef = rs.getString(2) ?: continue
-                        total++
-                        val key = RefKey.ofLine(heRef, aliases) ?: continue
-                        // A key still carrying the title means no alias matched.
-                        if (titlePrefixes.none { key.startsWith(it) }) stripped++
+                        val heRefTokens = RefKey.tokens(heRef)
+                        val hasTitlePrefix = titleAliasTokens.any { aliasTokens ->
+                            aliasTokens.isNotEmpty() &&
+                                aliasTokens.size <= heRefTokens.size &&
+                                heRefTokens.subList(0, aliasTokens.size) == aliasTokens
+                        }
+                        if (!hasTitlePrefix) hasTitleMismatch = true
+                        val key = RefKey.ofLineTokens(heRefTokens, titleAliasTokens) ?: continue
                         val hash = RefKey.hash(key)
                         if (!seen.add(hash)) ambiguous++
                         insert.setLong(1, bookId)
@@ -116,7 +119,7 @@ internal fun indexAllBooks(conn: Connection, logger: Logger): LineRefIndexReport
                 }
                 insert.executeBatch()
                 books++
-                if (total > 0 && stripped == 0) mismatched += title
+                if (hasTitleMismatch) mismatched += title
                 if (books % 1000 == 0) logger.i { "line_ref: $books books, $indexed keys" }
             }
         }

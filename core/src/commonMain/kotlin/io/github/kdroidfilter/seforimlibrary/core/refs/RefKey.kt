@@ -62,18 +62,29 @@ object RefKey {
      * itself. When no alias is a prefix the whole heRef is kept — the caller
      * reports that as a mismatch.
      */
-    fun ofLine(heRef: String, titleAliases: Iterable<String>): String? {
-        val tokens = tokens(heRef)
-        if (tokens.isEmpty()) return null
+    fun ofLine(heRef: String, titleAliases: Iterable<String>): String? =
+        ofLineTokens(
+            heRefTokens = tokens(heRef),
+            titleAliasTokens = titleAliases.map(::tokens),
+        )
 
-        for (alias in titleAliases) {
-            val aliasTokens = tokens(alias)
-            if (aliasTokens.isEmpty() || aliasTokens.size > tokens.size) continue
-            if (tokens.subList(0, aliasTokens.size) != aliasTokens) continue
-            if (aliasTokens.size == tokens.size) return null
-            return tokens.subList(aliasTokens.size, tokens.size).joinToString(" ")
+    /**
+     * Equivalent to [ofLine], for callers that already tokenised the reference
+     * and book-title aliases.
+     */
+    fun ofLineTokens(
+        heRefTokens: List<String>,
+        titleAliasTokens: Iterable<List<String>>,
+    ): String? {
+        if (heRefTokens.isEmpty()) return null
+
+        for (aliasTokens in titleAliasTokens) {
+            if (aliasTokens.isEmpty() || aliasTokens.size > heRefTokens.size) continue
+            if (heRefTokens.subList(0, aliasTokens.size) != aliasTokens) continue
+            if (aliasTokens.size == heRefTokens.size) return null
+            return heRefTokens.subList(aliasTokens.size, heRefTokens.size).joinToString(" ")
         }
-        return tokens.joinToString(" ")
+        return heRefTokens.joinToString(" ")
     }
 
     /** FNV-1a 64-bit over the UTF-8 bytes of [refKey] — the stored hash. */
