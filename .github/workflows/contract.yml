@@ -31,7 +31,7 @@ jobs:
         with:
           repository: Otzaria/SefariaExport
           # גשר הפצה זמני: להחזיר ל-master אחרי מיזוג חוזה הנראות.
-          ref: 9bfdb33eda4dba81b15a6ff7f0ce3a7e9cd5899a
+          ref: 513db46af6f96f7db00c1ff242a23e429af267c3
           path: sefaria-export
 
       # נתיב שגוי חייב להיכשל בקול רם, לא להתדלג בשקט
