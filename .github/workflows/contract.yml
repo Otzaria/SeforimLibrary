@@ -23,7 +23,7 @@ jobs:
         with:
           repository: Otzaria/otzaria_library_updater
           # גשר הפצה זמני: להחזיר ל-main אחרי מיזוג schema 3.
-          ref: b0acb2fc80633668a8fbad492c7f36fe356a1d44
+          ref: da4b5198ed0b89231f2cdb8c552a241eb9611302
           path: seforim-library-updater
 
       - name: Checkout Otzaria/SefariaExport visibility contract
