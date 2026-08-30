@@ -25,3 +25,18 @@ SELECT COUNT(*) FROM link_range;
 
 countCoverage:
 SELECT COUNT(*) FROM link_coverage;
+
+-- ── link_suppressed_side ──────────────────────────────────────────────────
+-- The disk-backed importer accumulator has already resolved all contributors;
+-- this is the exact final verdict. Update on conflict for deterministic reruns.
+insertSuppressedSide:
+INSERT INTO link_suppressed_side (linkId, side, reasonMask)
+VALUES (?, ?, ?)
+ON CONFLICT(linkId, side) DO UPDATE
+SET reasonMask = excluded.reasonMask;
+
+selectSuppressedSidesByLinkIds:
+SELECT linkId, side, reasonMask FROM link_suppressed_side WHERE linkId IN ?;
+
+countSuppressedSides:
+SELECT COUNT(*) FROM link_suppressed_side;

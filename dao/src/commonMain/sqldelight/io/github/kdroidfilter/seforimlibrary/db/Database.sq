@@ -424,6 +424,19 @@ CREATE TABLE IF NOT EXISTS link_coverage (
 
 CREATE INDEX IF NOT EXISTS idx_link_coverage_link ON link_coverage(linkId);
 
+-- One side of a link that Sefaria refuses to surface. Sparse: a row exists only
+-- when the side is hidden, so the reader must LEFT JOIN and skip matches rather
+-- than expect a row per link. `reasonMask` is a bitmask because a side can meet
+-- several of Sefaria's get_links() filters at once; it is never 0.
+-- No extra index: the primary key already leads with linkId.
+CREATE TABLE IF NOT EXISTS link_suppressed_side (
+    linkId INTEGER NOT NULL,
+    side INTEGER NOT NULL CHECK(side IN (0, 1)),
+    reasonMask INTEGER NOT NULL CHECK(reasonMask > 0 AND (reasonMask & -16) = 0),
+    PRIMARY KEY (linkId, side),
+    FOREIGN KEY (linkId) REFERENCES link(id) ON DELETE CASCADE
+);
+
 -- Removed legacy FTS view/table in favor of Lucene (10.x)
 
 -- Table to track whether books have links (as source or target)

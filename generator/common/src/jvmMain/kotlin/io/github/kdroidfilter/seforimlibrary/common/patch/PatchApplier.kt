@@ -38,6 +38,7 @@ class PatchApplier(
         conn: Connection,
         patchDb: Path,
         expectedToContentHash: String? = null,
+        expectedToSchemaVersion: Int? = null,
     ): Result {
         val wasAutoCommit = conn.autoCommit
         conn.autoCommit = false
@@ -58,7 +59,9 @@ class PatchApplier(
             }
 
             if (expectedToContentHash != null) {
-                val actual = LogicalContentHasher().compute(conn)
+                val schemaVersion = expectedToSchemaVersion
+                    ?: error("expectedToSchemaVersion is required with expectedToContentHash")
+                val actual = LogicalContentHasher.forSchemaVersion(schemaVersion).compute(conn)
                 if (actual != expectedToContentHash) {
                     throw IllegalStateException(
                         "Logical content hash after apply ($actual) does not match expected ($expectedToContentHash)",

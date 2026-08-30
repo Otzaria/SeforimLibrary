@@ -22,6 +22,7 @@ import io.github.kdroidfilter.seforimlibrary.core.models.LinkAnchor
 import io.github.kdroidfilter.seforimlibrary.core.models.BookVersion
 import io.github.kdroidfilter.seforimlibrary.core.models.LinkCoverage
 import io.github.kdroidfilter.seforimlibrary.core.models.LinkRange
+import io.github.kdroidfilter.seforimlibrary.core.models.LinkSuppressedSide
 import io.github.kdroidfilter.seforimlibrary.core.models.VersionLine
 import io.github.kdroidfilter.seforimlibrary.core.models.PubDate
 import io.github.kdroidfilter.seforimlibrary.core.models.PubPlace
@@ -2487,6 +2488,24 @@ class SeforimRepository(databasePath: String, private val driver: SqlDriver) : L
                 )
             }
         }
+    }
+
+    /** Upserts final hidden-side verdicts produced by the importer accumulator. */
+    suspend fun insertLinkSuppressedSidesBatch(rows: List<LinkSuppressedSide>) = withContext(Dispatchers.IO) {
+        if (rows.isEmpty()) return@withContext
+        database.transaction {
+            rows.forEach { row ->
+                database.linkRangeQueriesQueries.insertSuppressedSide(
+                    linkId = row.linkId,
+                    side = row.side.toLong(),
+                    reasonMask = row.reasonMask.toLong(),
+                )
+            }
+        }
+    }
+
+    suspend fun countLinkSuppressedSides(): Long = withContext(Dispatchers.IO) {
+        database.linkRangeQueriesQueries.countSuppressedSides().executeAsOne()
     }
 
     /**

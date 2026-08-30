@@ -64,7 +64,7 @@ fun main(args: Array<String>) {
     val target = outPath.resolveSibling("verify-${outPath.fileName}")
     Files.copy(prevPath, target, StandardCopyOption.REPLACE_EXISTING)
     val newHash = DriverManager.getConnection("jdbc:sqlite:${newPath.toAbsolutePath()}").use {
-        LogicalContentHasher().compute(it)
+        LogicalContentHasher.forSchemaVersion(toSchemaVersion).compute(it)
     }
     DriverManager.getConnection("jdbc:sqlite:${target.toAbsolutePath()}").use { conn ->
         conn.createStatement().use { it.execute("PRAGMA foreign_keys = ON") }
@@ -75,7 +75,7 @@ fun main(args: Array<String>) {
         // patch that does not reproduce the target byte-for-logical-byte is
         // a broken distribution artifact and must never ship with a warning.
         PatchApplier(logger).apply(conn = conn, patchDb = outPath)
-        val appliedHash = LogicalContentHasher().compute(conn)
+        val appliedHash = LogicalContentHasher.forSchemaVersion(toSchemaVersion).compute(conn)
         check(appliedHash == newHash) {
             "Patch verification FAILED: applied=$appliedHash expected=$newHash — " +
                 "inspect with diagnoseHashMismatch; refusing to publish this patch."
@@ -127,7 +127,7 @@ fun main(args: Array<String>) {
         fromSchemaVersion = fromSchemaVersion,
         toSchemaVersion = toSchemaVersion,
         fromContentHash = DriverManager.getConnection("jdbc:sqlite:${prevPath.toAbsolutePath()}").use {
-            LogicalContentHasher().compute(it)
+            LogicalContentHasher.forSchemaVersion(fromSchemaVersion).compute(it)
         },
         toContentHash = newHash,
         compressed = ReleaseManifestWriter.CompressedPatchSpec(

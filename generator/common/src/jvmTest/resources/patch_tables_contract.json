@@ -1,5 +1,5 @@
 {
-  "schemaVersion": 2,
+  "schemaVersion": 3,
   "fkOrder": [
     { "table": "source", "pk": ["id"], "updatable": true },
     { "table": "author", "pk": ["id"], "updatable": true },
@@ -26,6 +26,7 @@
     { "table": "link_anchor", "pk": ["linkId", "side", "charStart"], "updatable": true },
     { "table": "link_range", "pk": ["linkId", "side"], "updatable": true },
     { "table": "link_coverage", "pk": ["lineId", "linkId", "side"], "updatable": false },
+    { "table": "link_suppressed_side", "pk": ["linkId", "side"], "updatable": true },
     { "table": "book_has_links", "pk": ["bookId"], "updatable": true },
     { "table": "book_version", "pk": ["id"], "updatable": true },
     { "table": "version_line", "pk": ["versionId", "lineId"], "updatable": true },
@@ -61,6 +62,7 @@
     "link_anchor",
     "link_range",
     "link_coverage",
+    "link_suppressed_side",
     "book_has_links",
     "book_version",
     "version_line",

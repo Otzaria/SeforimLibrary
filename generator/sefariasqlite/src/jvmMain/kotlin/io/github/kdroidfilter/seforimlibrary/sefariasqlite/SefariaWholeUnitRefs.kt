@@ -70,6 +70,10 @@ internal object SefariaWholeUnitRefs {
         val perek = LinkedHashMap<String, MutableSet<String>>()
         val parasha = HashSet<String>()
         for (payload in payloads) {
+            // Sefaria's category helper excludes dependant texts by default.
+            // Keep the schema-2 fallback aligned instead of treating every
+            // commentary under Talmud/Bavli as a primary tractate.
+            if (payload.rawDependence != null) continue
             val categories = payload.categoriesEn
             val family = PEREK_CATEGORY_PATHS.entries
                 .firstOrNull { categories.startsWith(it.value) }?.key

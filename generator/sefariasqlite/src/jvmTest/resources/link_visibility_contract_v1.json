@@ -1,0 +1,9 @@
+{
+  "schemaVersion": 1,
+  "maskBits": {
+    "1": "anchor_not_segment_level",
+    "2": "other_side_too_coarse",
+    "4": "whole_talmud_perek",
+    "8": "whole_parasha"
+  }
+}

@@ -35,11 +35,12 @@ class SefariaWholeUnitRefsTest {
         enTitle: String,
         categoriesEn: List<String>,
         structures: List<AltStructurePayload>,
+        rawDependence: String? = null,
     ) = BookPayload(
         heTitle = enTitle, enTitle = enTitle, categoriesHe = emptyList(), lines = emptyList(),
         refEntries = emptyList(), headings = emptyList(), authors = emptyList(),
         description = null, heShortDesc = null, pubDates = emptyList(),
-        altStructures = structures, categoriesEn = categoriesEn,
+        altStructures = structures, categoriesEn = categoriesEn, rawDependence = rawDependence,
     )
 
     @Test
@@ -74,6 +75,40 @@ class SefariaWholeUnitRefsTest {
 
         assertEquals(setOf(canonicalCitation("Bava Batra 28a:1-60b:22")), refs.all)
         assertEquals(setOf("Talmud/Bavli"), refs.perekByFamily.keys)
+    }
+
+    @Test
+    fun excludesDependantBooksNestedUnderPrimaryCategoryPaths() {
+        val chapters = listOf(
+            AltStructurePayload(
+                key = "Chapters", title = null, heTitle = null,
+                nodes = listOf(node("Rashi on Bava Batra 2a:1-3b:4", alone = true)),
+            ),
+        )
+        val parasha = listOf(
+            AltStructurePayload(
+                key = "Parasha", title = null, heTitle = null,
+                nodes = listOf(node("Rashi on Genesis 1:1-6:8")),
+            ),
+        )
+        val refs = SefariaWholeUnitRefs.build(
+            listOf(
+                payload(
+                    "Rashi on Bava Batra",
+                    listOf("Talmud", "Bavli", "Rishonim on Talmud"),
+                    chapters,
+                    rawDependence = "commentary",
+                ),
+                payload(
+                    "Rashi on Genesis",
+                    listOf("Tanakh", "Torah", "Rishonim on Tanakh"),
+                    parasha,
+                    rawDependence = "commentary",
+                ),
+            ),
+        )
+
+        assertTrue(refs.all.isEmpty())
     }
 
     @Test
