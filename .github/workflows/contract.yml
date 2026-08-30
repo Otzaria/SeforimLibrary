@@ -22,12 +22,16 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: Otzaria/otzaria_library_updater
+          # גשר הפצה זמני: להחזיר ל-main אחרי מיזוג schema 3.
+          ref: b0acb2fc80633668a8fbad492c7f36fe356a1d44
           path: seforim-library-updater
 
       - name: Checkout Otzaria/SefariaExport visibility contract
         uses: actions/checkout@v4
         with:
           repository: Otzaria/SefariaExport
+          # גשר הפצה זמני: להחזיר ל-master אחרי מיזוג חוזה הנראות.
+          ref: 9bfdb33eda4dba81b15a6ff7f0ce3a7e9cd5899a
           path: sefaria-export
 
       # נתיב שגוי חייב להיכשל בקול רם, לא להתדלג בשקט
