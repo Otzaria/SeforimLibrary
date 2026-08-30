@@ -25,3 +25,23 @@ SELECT COUNT(*) FROM link_range;
 
 countCoverage:
 SELECT COUNT(*) FROM link_coverage;
+
+-- ── link_suppressed_side ──────────────────────────────────────────────────
+-- Upsert AND-ing the mask: several CSV rows can merge onto one link id, and a
+-- side may only stay hidden for the reasons EVERY contributor agrees on. A
+-- contributor that is visible (mask 0) is never queued, so the caller drops
+-- the row instead; see SefariaLinksImporter.
+insertSuppressedSide:
+INSERT INTO link_suppressed_side (linkId, side, reasonMask)
+VALUES (?, ?, ?)
+ON CONFLICT(linkId, side) DO UPDATE
+SET reasonMask = link_suppressed_side.reasonMask & excluded.reasonMask;
+
+deleteSuppressedSidesWithNoReason:
+DELETE FROM link_suppressed_side WHERE reasonMask = 0;
+
+selectSuppressedSidesByLinkIds:
+SELECT linkId, side, reasonMask FROM link_suppressed_side WHERE linkId IN ?;
+
+countSuppressedSides:
+SELECT COUNT(*) FROM link_suppressed_side;

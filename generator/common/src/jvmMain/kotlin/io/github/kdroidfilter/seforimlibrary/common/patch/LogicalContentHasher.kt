@@ -97,6 +97,7 @@ class LogicalContentHasher(
             "link_anchor",
             "link_range",
             "link_coverage",
+            "link_suppressed_side",
             "book_has_links",
             "book_version",
             "version_line",

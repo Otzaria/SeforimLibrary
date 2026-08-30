@@ -30,3 +30,42 @@ data class LinkCoverage(
     val linkId: Long,
     val side: Int,
 )
+
+/**
+ * One side of a [Link] that Sefaria would not surface, with the reason(s) why.
+ *
+ * The decision is made by SefariaExport (which alone has the TermSet, both
+ * `Ref`s and their `index_node` depths) and shipped per links-CSV row; the
+ * importer only AND-s the contributions that merge onto the same link.
+ *
+ * @property linkId The link this applies to
+ * @property side 0 = the stored source side is hidden, 1 = the target side
+ * @property reasonMask Bitwise OR of [SuppressionReason] values; never 0
+ */
+@Serializable
+data class LinkSuppressedSide(
+    val linkId: Long,
+    val side: Int,
+    val reasonMask: Int,
+)
+
+/**
+ * Why a link side is hidden. Mirrors the `continue` branches of Sefaria's
+ * `get_links()`; values match SefariaExport's `Suppression Mask 1/2` columns.
+ */
+object SuppressionReason {
+    /** The anchor ref is not at segment level (`len(sections) != node_depth`). */
+    const val ANCHOR_NOT_SEGMENT = 1
+
+    /** The other side sits more than one level above its own segment depth. */
+    const val OTHER_TOO_COARSE = 2
+
+    /** The anchor ref is a whole Talmud/Mishnah/Tosefta perek. */
+    const val WHOLE_PEREK = 4
+
+    /** The anchor ref is a whole Torah parasha. */
+    const val WHOLE_PARASHA = 8
+
+    /** Every bit currently defined — anything outside this is an unknown reason. */
+    const val ALL = ANCHOR_NOT_SEGMENT or OTHER_TOO_COARSE or WHOLE_PEREK or WHOLE_PARASHA
+}
