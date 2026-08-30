@@ -39,8 +39,8 @@ Suppression Mask 2
 ### `metadata/link-visibility-v1.json`
 
 לא מקור ההחלטה — כלי QA. מכיל: גרסת פורמט, שתי הקבוצות ממוינות, ספירות ו־hashes,
-ו**־SHA של `Sefaria-Project` ששימש בפועל**. מאפשר לאמת את ה־proxy של שלב 1 מול
-המקור הסמכותי, ולשחזר איזו גרסת מדיניות יצרה כל mask.
+ו**־SHA של `Sefaria-Project` ששימש בפועל**. מאפשר לעקוב אחרי מקור ההחלטה
+ולשחזר איזו גרסת מדיניות יצרה כל mask.
 
 ### תלות: קיבוע גרסת ספריא
 
@@ -67,8 +67,10 @@ Suppression Mask 2
 > **הכלל:** צד של קישור מאוחד מדוכא **רק אם כל** שורות המקור שתרמו לאותו
 > `(linkId, side)` מדוכאות. תרומה מוצגת אחת מספיקה כדי להשאיר את הצד מוצג.
 
-מימוש: לצבור AND של ה־masks פר `(linkId, side)` לאורך כל השורות התורמות, ולכתוב
-שורה רק אם התוצאה אינה אפס. **חייב טסט ייעודי** לשורות תורמות מעורבות.
+מימוש: לצבור בנפרד `hasVisible = OR(mask == 0)` ו־`reasonMask = OR(mask)` פר
+`(linkId, side)`. כותבים שורה רק כאשר `hasVisible = false`; הסיבות אינן צריכות
+להיות זהות כדי שכל התרומות יהיו מדוכאות. הצבירה נעשית ב־SQLite זמני כדי לא
+להחזיק מיליוני מפתחות boxed ב־heap.
 
 ## הסכמה
 
@@ -76,14 +78,15 @@ Suppression Mask 2
 CREATE TABLE IF NOT EXISTS link_suppressed_side (
     linkId     INTEGER NOT NULL,
     side       INTEGER NOT NULL,      -- 0 = צד המקור השמור, 1 = היעד
-    reasonMask INTEGER NOT NULL,      -- AND של כל התרומות; מעולם לא 0
+    reasonMask INTEGER NOT NULL,      -- OR של סיבות התרומות המדוכאות; מעולם לא 0
     PRIMARY KEY (linkId, side),
     FOREIGN KEY (linkId) REFERENCES link(id) ON DELETE CASCADE
 );
 ```
 
-טבלה דלילה, אומדן ~19.9K שורות. **אין אינדקס נוסף** — ה־PK כבר נותן `linkId`
-כ־left prefix.
+מספר השורות תלוי בכל ארבעת מסנני ספריא ובמיזוג שורות ה־CSV לאותו `linkId`, ולכן
+נמדד בכל ייצוא ואינו מקובע לאומדן של שלב 1. **אין אינדקס נוסף** — ה־PK כבר נותן
+`linkId` כ־left prefix.
 
 ## דו־כיווניות: מטריצה מלאה, לא רשימה
 
@@ -100,7 +103,7 @@ CREATE TABLE IF NOT EXISTS link_suppressed_side (
 `hashTableOrderForSchemaVersion` עוד לפני ההחלה. לכן צריכה להיות **מדיניות שחרור
 מפורשת** — אחוז אימוץ מינימלי או חלון זמן — ולא המתנה לא מוגדרת.
 
-1. `SefariaExport`: שני ה־masks, קובץ ה־metadata, קיבוע/תיעוד SHA של ספריא, מוני QA לפי סיבה וצד.
+1. `SefariaExport`: שני ה־masks, קובץ metadata מאומת, SHA חובה של ספריא, מוני QA לפי סיבה וצד.
 2. ייצוא אמיתי + ניתוח התנגשויות `linkId` על נתונים חיים.
 3. רק אז לסגור סופית את סכמת `link_suppressed_side`.
 4. `seforim_library_updater`: הטבלה בשתי הרשימות, `case 3` ב־`hashTableOrderForSchemaVersion`, שמירת סדר סכמה 2.
@@ -116,7 +119,8 @@ CREATE TABLE IF NOT EXISTS link_suppressed_side (
 4. החלה באפלייר האמיתי **ב־WAL** (האפליקציה מעבירה ל־WAL ומחזירה אחריה), כולל שיא גודל WAL. **טרם נמדד.**
 5. אפליקציה חדשה על DB ישן: אין דו־כיווניות, אין רגרסיה.
 6. אפליקציה ישנה על DB חדש: דחייה נקייה, לא שחיתות.
-7. השוואת ה־proxy של שלב 1 מול הקבוצות הסמכותיות — צריך להיות זהה (1,262 + 54).
+7. אימות מוני ה־metadata מול כל ערכי ה־mask ב־CSV, לפי צד וסיבת דיכוי. אין שער
+   שוויון מול ה־proxy הישן: הוא נשאר רק למסלול legacy של סכמה 2 ואינו מקור סמכות.
 
 ## מה שלב 2 **לא** משנה
 

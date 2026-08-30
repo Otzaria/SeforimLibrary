@@ -17,6 +17,31 @@ import kotlin.test.assertEquals
  */
 class PatchTablesContractTest {
 
+    @Test
+    fun `schema 2 contracts remain frozen when schema 3 adds visibility`() {
+        assertEquals(
+            PATCH_TABLES_IN_FK_ORDER.filterNot { it.name == "link_suppressed_side" },
+            PATCH_TABLES_SCHEMA_2,
+        )
+        assertEquals(
+            listOf(
+                "source", "author", "topic", "pub_place", "pub_date", "connection_type", "generation",
+                "category", "category_closure", "tocText", "book", "book_topic", "book_author",
+                "book_base_text", "book_pub_place", "book_pub_date", "book_generation", "tocEntry", "line",
+                "line_toc", "link", "link_anchor", "link_range", "link_coverage", "book_has_links",
+                "book_version", "version_line", "book_acronym", "alt_toc_structure", "alt_toc_entry",
+                "line_alt_toc", "default_commentator", "default_targum", "schema_meta",
+            ),
+            LogicalContentHasher.TABLES_SCHEMA_2,
+        )
+        assertEquals(
+            LogicalContentHasher.TABLES_SCHEMA_2.toMutableList().apply {
+                add(indexOf("link_coverage") + 1, "link_suppressed_side")
+            },
+            LogicalContentHasher.TABLES_SCHEMA_3,
+        )
+    }
+
     private fun canonicalContract(
         fkOrder: List<PatchTable>,
         hashOrder: List<String>,

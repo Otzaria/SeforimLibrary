@@ -71,8 +71,8 @@ class LogicalContentHasher(
     }
 
     companion object {
-        /** Tables tracked by the logical-hash. Order matters (foreign-key topology). */
-        val DEFAULT_TABLES: List<String> = listOf(
+        /** Schema 1/2 hash contract. Never append future tables here. */
+        val TABLES_SCHEMA_2: List<String> = listOf(
             "source",
             "author",
             "topic",
@@ -97,7 +97,6 @@ class LogicalContentHasher(
             "link_anchor",
             "link_range",
             "link_coverage",
-            "link_suppressed_side",
             "book_has_links",
             "book_version",
             "version_line",
@@ -109,5 +108,24 @@ class LogicalContentHasher(
             "default_targum",
             "schema_meta",
         )
+
+        /** Schema 3 adds the sparse per-side visibility table after link coverage. */
+        val TABLES_SCHEMA_3: List<String> = TABLES_SCHEMA_2.toMutableList().apply {
+            add(indexOf("link_coverage") + 1, "link_suppressed_side")
+        }
+
+        /** Current-schema default for build-time diagnostics and current DB tests. */
+        val DEFAULT_TABLES: List<String> = TABLES_SCHEMA_3
+
+        fun tablesForSchemaVersion(schemaVersion: Int): List<String> = when (schemaVersion) {
+            1, 2 -> TABLES_SCHEMA_2
+            3 -> TABLES_SCHEMA_3
+            else -> error("Unsupported logical-hash schema version $schemaVersion")
+        }
+
+        fun forSchemaVersion(
+            schemaVersion: Int,
+            logger: Logger = Logger.withTag("LogicalContentHasher"),
+        ): LogicalContentHasher = LogicalContentHasher(tablesForSchemaVersion(schemaVersion), logger)
     }
 }

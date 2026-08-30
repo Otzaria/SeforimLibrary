@@ -2490,11 +2490,7 @@ class SeforimRepository(databasePath: String, private val driver: SqlDriver) : L
         }
     }
 
-    /**
-     * Upserts hidden link sides, AND-ing `reasonMask` on conflict so a side
-     * only stays hidden for the reasons every contributing row agrees on.
-     * Call [dropSuppressedSidesWithNoReason] once the batch is complete.
-     */
+    /** Upserts final hidden-side verdicts produced by the importer accumulator. */
     suspend fun insertLinkSuppressedSidesBatch(rows: List<LinkSuppressedSide>) = withContext(Dispatchers.IO) {
         if (rows.isEmpty()) return@withContext
         database.transaction {
@@ -2506,11 +2502,6 @@ class SeforimRepository(databasePath: String, private val driver: SqlDriver) : L
                 )
             }
         }
-    }
-
-    /** Removes sides whose contributors disagreed, i.e. the AND collapsed to 0. */
-    suspend fun dropSuppressedSidesWithNoReason() = withContext(Dispatchers.IO) {
-        database.linkRangeQueriesQueries.deleteSuppressedSidesWithNoReason()
     }
 
     suspend fun countLinkSuppressedSides(): Long = withContext(Dispatchers.IO) {

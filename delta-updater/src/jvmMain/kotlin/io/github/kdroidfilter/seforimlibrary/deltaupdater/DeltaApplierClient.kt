@@ -59,7 +59,9 @@ class DeltaApplierClient(
         }
 
         // 2. Read current logical content hash and require it matches manifest.from.
-        val currentHash = openConn(seforimDb).use { LogicalContentHasher().compute(it) }
+        val currentHash = openConn(seforimDb).use {
+            LogicalContentHasher.forSchemaVersion(manifest.fromSchemaVersion).compute(it)
+        }
         if (currentHash != manifest.fromContentHash) {
             throw IllegalStateException(
                 "Local DB content_hash ($currentHash) does not match manifest.fromContentHash " +
@@ -108,6 +110,7 @@ class DeltaApplierClient(
                     conn = conn,
                     patchDb = patchDb,
                     expectedToContentHash = manifest.toContentHash,
+                    expectedToSchemaVersion = manifest.toSchemaVersion,
                 )
                 return Result(applied = applied, backupPath = backup, markerPath = marker)
             }

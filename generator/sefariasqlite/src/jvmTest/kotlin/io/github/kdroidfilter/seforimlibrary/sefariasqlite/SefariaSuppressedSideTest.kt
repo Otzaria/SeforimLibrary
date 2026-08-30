@@ -20,12 +20,12 @@ import kotlin.test.assertTrue
 
 /**
  * Stage 2: SefariaExport ships a per-side visibility verdict, the importer maps
- * it onto the stored direction and AND-s the rows that merge onto one link id.
+ * it onto the stored direction and aggregates rows that merge onto one link id.
  *
  * The merge rule is the sharp edge — `linkId` is
  * (sourceLineId, targetLineId, connectionTypeId), so distinct CSV rows collapse
- * (~78K for OTHER alone in the 2026-08 export). A side may only stay hidden for
- * the reasons every contributor agrees on.
+ * (~78K for OTHER alone in the 2026-08 export). A side stays hidden when every
+ * contributor is hidden; their diagnostic reasons are OR-ed.
  */
 class SefariaSuppressedSideTest {
 
@@ -38,10 +38,20 @@ class SefariaSuppressedSideTest {
     private val perekRef = "Bava Batra 28a:1-28b:1"
 
     /** [rows] are raw CSV lines appended after the header. */
-    private fun importWith(header: String, vararg rows: String): Imported = runBlocking {
+    private fun importWith(
+        header: String,
+        vararg rows: String,
+        requireExportedVisibility: Boolean = header.contains("Suppression Mask"),
+    ): Imported = runBlocking {
         val tempDir = Files.createTempDirectory("seforim-suppressed-side")
         val linksDir = Files.createDirectories(tempDir.resolve("links"))
         Files.writeString(linksDir.resolve("links0.csv"), (listOf(header) + rows).joinToString("\n"))
+        if (requireExportedVisibility) {
+            val visibilityRows = if (
+                header.contains("Suppression Mask 1") && header.contains("Suppression Mask 2")
+            ) rows.toList() else emptyList()
+            writeVisibilityMetadata(tempDir, visibilityRows)
+        }
 
         val driver = JdbcSqliteDriver(url = "jdbc:sqlite::memory:")
         SeforimDb.Schema.create(driver)
@@ -104,9 +114,17 @@ class SefariaSuppressedSideTest {
             lineIdToBookId = mapOf(1L to 1L, 2L to 1L, 3L to 1L, 4L to 1L, 10L to 2L, 11L to 2L),
             bookMetaById = mapOf(
                 1L to BookMeta(isBaseBook = true, categoryLevel = 0, priorityRank = 0),
-                2L to BookMeta(isBaseBook = false, categoryLevel = 1, priorityRank = null),
+                2L to BookMeta(
+                    isBaseBook = false,
+                    categoryLevel = 1,
+                    priorityRank = null,
+                    dependence = Dependence.COMMENTARY,
+                    baseTextBookIds = setOf(1L),
+                    sefariaDeclaredBaseTextBookIds = setOf(1L),
+                ),
             ),
             refsByPath = allRefs.groupBy { it.path },
+            requireExportedVisibility = requireExportedVisibility,
         )
 
         fun query(sql: String): List<List<Long>> {
@@ -135,8 +153,43 @@ class SefariaSuppressedSideTest {
             "Citation 1,Citation 2,Conection Type,Text 1,Text 2,Category 1,Category 2," +
                 "Char Level Data 1,Char Level Data 2,Suppression Mask 1,Suppression Mask 2"
         const val HEADER_LEGACY = "Citation 1,Citation 2,Conection Type"
-        fun row(c1: String, c2: String, m1: Int, m2: Int) =
-            """"$c1","$c2","reference","","","","","","",$m1,$m2"""
+        fun row(c1: String, c2: String, m1: Int, m2: Int, type: String = "reference") =
+            """"$c1","$c2","$type","","","","","","",$m1,$m2"""
+
+        fun writeVisibilityMetadata(root: java.nio.file.Path, rows: List<String>) {
+            fun sha256(value: String): String = java.security.MessageDigest.getInstance("SHA-256")
+                .digest(value.toByteArray())
+                .joinToString("") { "%02x".format(it) }
+            val perek = "Bava Batra 28a:1-28b:1"
+            val parasha = "Exodus 25:1-27:19"
+            val masks = rows.map { parseCsvLine(it).takeLast(2).map(String::toInt) }
+            fun suppressed(side: Int) = masks.count { it[side - 1] != 0 }
+            fun reason(side: Int, bit: Int) = masks.count { it[side - 1] and bit != 0 }
+            val metadata = Files.createDirectories(root.resolve("metadata"))
+                .resolve("link-visibility-v1.json")
+            Files.writeString(
+                metadata,
+                """
+                {
+                  "schema_version": 1,
+                  "sefaria_project_sha": "${"a".repeat(40)}",
+                  "mask_bits": {"1":"anchor_not_segment_level","2":"other_side_too_coarse","4":"whole_talmud_perek","8":"whole_parasha"},
+                  "counts": {
+                    "perek_refs":1,"parasha_refs":1,
+                    "suppressed_side_1":${suppressed(1)},"suppressed_side_2":${suppressed(2)},
+                    "suppressed_by_side_and_bit": {
+                      "1":{"anchor_not_segment_level":${reason(1, 1)},"other_side_too_coarse":${reason(1, 2)},"whole_parasha":${reason(1, 8)},"whole_talmud_perek":${reason(1, 4)}},
+                      "2":{"anchor_not_segment_level":${reason(2, 1)},"other_side_too_coarse":${reason(2, 2)},"whole_parasha":${reason(2, 8)},"whole_talmud_perek":${reason(2, 4)}}
+                    }
+                  },
+                  "perek_refs_sha256": "${sha256(perek)}",
+                  "parasha_refs_sha256": "${sha256(parasha)}",
+                  "perek_refs": ["$perek"],
+                  "parasha_refs": ["$parasha"]
+                }
+                """.trimIndent(),
+            )
+        }
     }
 
     @Test
@@ -150,6 +203,28 @@ class SefariaSuppressedSideTest {
         assertEquals(listOf(0L, SuppressionReason.WHOLE_PEREK.toLong()), imported.suppressed[0].drop(1))
         // Whole-unit reasons also suppress coverage, exactly as in stage 1.
         assertEquals(0, imported.coverage)
+    }
+
+    @Test
+    fun exportedSidesFollowTheStoredDirectionAfterLinkSwap() {
+        val imported = importWith(
+            HEADER_WITH_MASKS,
+            row(
+                "Migdal Oz 5:1",
+                "Bava Batra 28a:1",
+                SuppressionReason.ANCHOR_NOT_SEGMENT,
+                0,
+                type = "commentary",
+            ),
+        )
+
+        // The dependant→base CSV row is stored base→dependant. Citation 1's
+        // verdict must therefore land on stored side 1, not side 0.
+        assertEquals(1, imported.suppressed.size)
+        assertEquals(
+            listOf(1L, SuppressionReason.ANCHOR_NOT_SEGMENT.toLong()),
+            imported.suppressed[0].drop(1),
+        )
     }
 
     @Test
@@ -168,24 +243,31 @@ class SefariaSuppressedSideTest {
     }
 
     @Test
-    fun mergedSideKeepsOnlyTheReasonsAllContributorsAgreeOn() {
+    fun mergedSideKeepsAllReasonsFromHiddenContributors() {
         val imported = importWith(
             HEADER_WITH_MASKS,
             row(perekRef, "Migdal Oz 5:1", SuppressionReason.WHOLE_PEREK or SuppressionReason.ANCHOR_NOT_SEGMENT, 0),
             row("Bava Batra 28a:1", "Migdal Oz 5:1", SuppressionReason.WHOLE_PEREK, 0),
         )
         assertEquals(1, imported.suppressed.size)
-        assertEquals(SuppressionReason.WHOLE_PEREK.toLong(), imported.suppressed[0][2])
+        assertEquals(
+            (SuppressionReason.WHOLE_PEREK or SuppressionReason.ANCHOR_NOT_SEGMENT).toLong(),
+            imported.suppressed[0][2],
+        )
     }
 
     @Test
-    fun contributorsSuppressedForDisjointReasonsClearTheSide() {
+    fun contributorsSuppressedForDisjointReasonsKeepTheSideHidden() {
         val imported = importWith(
             HEADER_WITH_MASKS,
             row(perekRef, "Migdal Oz 5:1", SuppressionReason.WHOLE_PEREK, 0),
             row("Bava Batra 28a:1", "Migdal Oz 5:1", SuppressionReason.ANCHOR_NOT_SEGMENT, 0),
         )
-        assertTrue(imported.suppressed.isEmpty(), "disagreement is not agreement: ${imported.suppressed}")
+        assertEquals(1, imported.suppressed.size)
+        assertEquals(
+            (SuppressionReason.WHOLE_PEREK or SuppressionReason.ANCHOR_NOT_SEGMENT).toLong(),
+            imported.suppressed[0][2],
+        )
     }
 
     @Test
@@ -195,6 +277,7 @@ class SefariaSuppressedSideTest {
         val imported = importWith(
             HEADER_LEGACY,
             """"Bava Batra 28a:1-28a:2","Migdal Oz 5:3","reference"""",
+            requireExportedVisibility = false,
         )
         assertTrue(imported.suppressed.isEmpty())
         assertEquals(1, imported.coverage)
@@ -203,19 +286,41 @@ class SefariaSuppressedSideTest {
     @Test
     fun unparsableMaskFailsLoudly() {
         val error = assertFailsWith<IllegalStateException> {
-            parseSuppressionMask("not-a-number")
+            parseSuppressionMask("not-a-number", "test:2 side 1")
         }
         assertTrue(error.message!!.contains("Unparsable suppression mask"), error.message!!)
     }
 
     @Test
     fun maskOutsideKnownReasonsFailsLoudly() {
-        assertFailsWith<IllegalArgumentException> { parseSuppressionMask("64") }
+        assertFailsWith<IllegalArgumentException> { parseSuppressionMask("64", "test") }
     }
 
     @Test
-    fun blankMaskMeansDisplayed() {
-        assertEquals(0, parseSuppressionMask(""))
-        assertEquals(0, parseSuppressionMask(null))
+    fun blankOrMissingMaskFailsClosed() {
+        assertFailsWith<IllegalArgumentException> { parseSuppressionMask("", "test") }
+        assertFailsWith<IllegalArgumentException> { parseSuppressionMask(null, "test") }
+    }
+
+    @Test
+    fun schemaThreeProductionRejectsLegacyExport() {
+        assertFailsWith<IllegalArgumentException> {
+            importWith(
+                HEADER_LEGACY,
+                """"Bava Batra 28a:1","Migdal Oz 5:1","reference"""",
+                requireExportedVisibility = true,
+            )
+        }
+    }
+
+    @Test
+    fun oneSuppressionHeaderFailsClosed() {
+        val partial = "$HEADER_LEGACY,Suppression Mask 1"
+        assertFailsWith<IllegalArgumentException> {
+            importWith(
+                partial,
+                """"Bava Batra 28a:1","Migdal Oz 5:1","reference",0"""",
+            )
+        }
     }
 }

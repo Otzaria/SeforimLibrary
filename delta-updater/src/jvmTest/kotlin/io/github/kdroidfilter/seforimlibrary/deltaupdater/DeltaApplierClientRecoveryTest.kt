@@ -75,7 +75,7 @@ class DeltaApplierClientRecoveryTest {
             SeforimDb.Schema.create(driver)
         }
         val fromHash = DriverManager.getConnection("jdbc:sqlite:${seforim.toAbsolutePath()}").use {
-            LogicalContentHasher().compute(it)
+            LogicalContentHasher.forSchemaVersion(1).compute(it)
         }
         val originalBytes = Files.readAllBytes(seforim)
 
@@ -120,7 +120,7 @@ class DeltaApplierClientRecoveryTest {
             }
         }
         val fromHash = DriverManager.getConnection("jdbc:sqlite:${seforim.toAbsolutePath()}").use {
-            LogicalContentHasher().compute(it)
+            LogicalContentHasher.forSchemaVersion(1).compute(it)
         }
         val patch = tmp.newFile("patch.db").toPath()
         Files.writeString(patch, "irrelevant")
@@ -152,7 +152,7 @@ class DeltaApplierClientRecoveryTest {
             SeforimDb.Schema.create(driver)
         }
         val fromHash = DriverManager.getConnection("jdbc:sqlite:${seforim.toAbsolutePath()}").use {
-            LogicalContentHasher().compute(it)
+            LogicalContentHasher.forSchemaVersion(1).compute(it)
         }
         val marker = seforim.resolveSibling("seforim.db.applying")
         Files.writeString(marker, "from=1 to=2")

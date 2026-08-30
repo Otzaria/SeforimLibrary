@@ -6,7 +6,6 @@ import io.github.kdroidfilter.seforimlibrary.core.models.ConnectionType
 import io.github.kdroidfilter.seforimlibrary.core.models.Link
 import io.github.kdroidfilter.seforimlibrary.core.models.LinkCoverage
 import io.github.kdroidfilter.seforimlibrary.core.models.LinkRange
-import io.github.kdroidfilter.seforimlibrary.core.models.LinkSuppressedSide
 import io.github.kdroidfilter.seforimlibrary.core.models.SuppressionReason
 import io.github.kdroidfilter.seforimlibrary.dao.repository.SeforimRepository
 import kotlinx.coroutines.Dispatchers
@@ -47,11 +46,6 @@ internal class SefariaLinksImporter(
     // resolved ref pair, like the other range counters.
     private val wholeUnitCoverageSuppressed = LongAdder()
 
-    // (linkId, side) -> AND of every contributing row's mask. Several CSV rows
-    // can resolve to one link id (measured: ~78K for OTHER alone), so the
-    // verdicts must agree before a side is hidden.
-    private val suppressionMasks = ConcurrentHashMap<Pair<Long, Int>, Int>()
-
     // Per-connection-type importer counters (QA plan §10.5). Thread-safe — link
     // files are processed in parallel. Semantics in [LinkImportTypeMetrics].
     private val rowsReadByType = ConcurrentHashMap<ConnectionType, LongAdder>()
@@ -79,7 +73,11 @@ internal class SefariaLinksImporter(
         refsByPath: Map<String, List<RefEntry>> = emptyMap(),
         // Canonical whole perek/parasha refs ([SefariaWholeUnitRefs]): such a
         // citation keeps its link_range but gets no link_coverage.
-        wholeUnitCitations: Set<String> = emptySet()
+        wholeUnitCitations: Set<String> = emptySet(),
+        // Schema-3 production builds require SefariaExport's complete,
+        // authoritative per-side verdict. Tests and explicit schema-2 tooling
+        // may leave this false to exercise the legacy whole-unit fallback.
+        requireExportedVisibility: Boolean = false,
     ) = coroutineScope {
         // Pre-register all connection types we'll use so their ids are stable
         // (so `link.connectionTypeId` is reproducible across builds).
@@ -93,6 +91,14 @@ internal class SefariaLinksImporter(
                 if (skip) logger.i { "Skipping Sefaria aggregate summary file: ${file.fileName}" }
                 !skip
             }
+            .sorted()
+
+        val expectedVisibility = if (requireExportedVisibility) {
+            validateLinkVisibilityMetadata(linksDir.parent.resolve("metadata/link-visibility-v1.json")).also {
+                csvFiles.forEach(::requireVisibilityHeaders)
+            }
+        } else null
+        val observedVisibility = expectedVisibility?.let { LinkVisibilityObservedCounts() }
 
         logger.i { "Processing ${csvFiles.size} link files..." }
 
@@ -106,8 +112,11 @@ internal class SefariaLinksImporter(
             bookMetaById = bookMetaById,
         )
 
-        // Channel for collecting links from parallel processors
+        // Channels keep producer memory bounded. Visibility verdicts are sent
+        // in small lists to a single disk-backed accumulator.
         val linkChannel = Channel<Link>(Channel.BUFFERED)
+        val suppressionChannel = Channel<List<SuppressionContribution>>(Channel.BUFFERED)
+        val suppressionAccumulator = LinkSuppressionAccumulator.create()
 
         // Launch parallel file processors
         val processors = csvFiles.map { file ->
@@ -124,7 +133,9 @@ internal class SefariaLinksImporter(
                     charLevelPending = charLevelPending,
                     refsByPath = refsByPath,
                     dafAlignedPairs = dafAlignedPairs,
-                    wholeUnitCitations = wholeUnitCitations
+                    wholeUnitCitations = wholeUnitCitations,
+                    suppressionChannel = suppressionChannel,
+                    observedVisibility = observedVisibility,
                 )
             }
         }
@@ -149,17 +160,32 @@ internal class SefariaLinksImporter(
             flush()
         }
 
-        // Wait for all processors to finish
-        processors.joinAll()
-        linkChannel.close()
+        val suppressionInserter = launch(Dispatchers.IO) {
+            for (batch in suppressionChannel) suppressionAccumulator.addBatch(batch)
+        }
 
-        // Wait for inserter to finish
-        inserter.join()
+        try {
+            // Wait for all processors to finish
+            processors.joinAll()
+            linkChannel.close()
+            suppressionChannel.close()
 
-        // Ranges/coverage reference link ids, so they are inserted only after
-        // every link row exists.
-        insertPendingRangesAndCoverage()
-        insertSuppressedSides()
+            // Wait for both inserters to finish
+            inserter.join()
+            suppressionInserter.join()
+            if (expectedVisibility != null && observedVisibility != null) {
+                expectedVisibility.requireMatches(observedVisibility.snapshot())
+            }
+
+            // Ranges/coverage/suppression reference link ids, so they are
+            // inserted only after every link row exists.
+            insertPendingRangesAndCoverage()
+            insertSuppressedSides(suppressionAccumulator)
+        } finally {
+            linkChannel.close()
+            suppressionChannel.close()
+            suppressionAccumulator.close()
+        }
     }
 
     /**
@@ -239,26 +265,22 @@ internal class SefariaLinksImporter(
         aligned
     }
 
-    /** AND-merges one contribution; visible (0) collapses the side permanently. */
-    private fun mergeSuppressionMask(linkId: Long, side: Int, mask: Int) {
-        suppressionMasks.merge(linkId to side, mask) { a, b -> a and b }
-    }
-
-    private suspend fun insertSuppressedSides() {
-        val rows = suppressionMasks.entries
-            .filter { it.value != 0 }
-            .map { (key, mask) -> LinkSuppressedSide(linkId = key.first, side = key.second, reasonMask = mask) }
-        val contributedSides = suppressionMasks.size
-        suppressionMasks.clear()
-        rows.chunked(SefariaImportTuning.LINK_BATCH_SIZE).forEach {
+    private suspend fun insertSuppressedSides(accumulator: LinkSuppressionAccumulator) {
+        val result = accumulator.drainSuppressed(SefariaImportTuning.LINK_BATCH_SIZE) {
             repository.insertLinkSuppressedSidesBatch(it)
         }
-        // The upsert AND-s in SQL too, so a side whose contributors disagreed
-        // across batches can still land at 0 — drop those.
-        repository.dropSuppressedSidesWithNoReason()
         logger.i {
-            "Suppressed link sides: ${rows.size} hidden of $contributedSides sides carrying a verdict " +
-                "(${contributedSides - rows.size} cleared by a visible contribution)"
+            "Suppressed link sides: ${result.suppressedSides} hidden of ${result.contributedSides} sides carrying a verdict " +
+                "(${result.contributedSides - result.suppressedSides} cleared by a visible contribution)"
+        }
+    }
+
+    private fun requireVisibilityHeaders(file: Path) {
+        val header = Files.newBufferedReader(file).use { it.readLine() }
+            ?: error("Empty link file '${file.fileName}' — missing visibility headers")
+        val headers = parseCsvLine(header).map(::normalizeCitation)
+        require(headers.count { it == "Suppression Mask 1" } == 1 && headers.count { it == "Suppression Mask 2" } == 1) {
+            "Schema-3 link import requires exactly one of each Suppression Mask column in ${file.fileName}"
         }
     }
 
@@ -344,7 +366,9 @@ internal class SefariaLinksImporter(
         charLevelPending: Queue<PendingCharLevelAnchor>? = null,
         refsByPath: Map<String, List<RefEntry>> = emptyMap(),
         dafAlignedPairs: Set<Pair<Long, Long>> = emptySet(),
-        wholeUnitCitations: Set<String> = emptySet()
+        wholeUnitCitations: Set<String> = emptySet(),
+        suppressionChannel: Channel<List<SuppressionContribution>>,
+        observedVisibility: LinkVisibilityObservedCounts?,
     ) {
         Files.newBufferedReader(file).use { reader ->
             val iter = reader.lineSequence().iterator()
@@ -365,6 +389,10 @@ internal class SefariaLinksImporter(
             // whole-unit suppression locally (see [SefariaWholeUnitRefs]).
             val idxMask1 = headers.indexOf("Suppression Mask 1")
             val idxMask2 = headers.indexOf("Suppression Mask 2")
+            require((idxMask1 >= 0) == (idxMask2 >= 0)) {
+                "Link file '$fileName' must contain both Suppression Mask columns or neither"
+            }
+            val hasExportedMasks = idxMask1 >= 0
             if (idxC1 < 0 || idxC2 < 0 || idxConn < 0) {
                 val missing = buildList {
                     if (idxC1 < 0) add("Citation 1")
@@ -374,12 +402,30 @@ internal class SefariaLinksImporter(
                 error("Link file '$fileName' is missing required header(s): $missing")
             }
 
+            val suppressionBatch = ArrayList<SuppressionContribution>(SUPPRESSION_BATCH_SIZE)
+            suspend fun queueSuppression(linkId: Long, side: Int, mask: Int) {
+                suppressionBatch += SuppressionContribution(linkId, side, mask)
+                if (suppressionBatch.size >= SUPPRESSION_BATCH_SIZE) {
+                    suppressionChannel.send(suppressionBatch.toList())
+                    suppressionBatch.clear()
+                }
+            }
+
             // 1-based CSV line number (header consumed above = line 1).
             var lineNumber = 1
             while (iter.hasNext()) {
                 lineNumber++
                 val row = parseCsvLine(iter.next())
                 if (row.isEmpty()) continue
+                // New-format files require explicit verdicts on every data row,
+                // including malformed/unresolved rows that are dropped later.
+                val exportedMask1 = if (hasExportedMasks) {
+                    parseSuppressionMask(row.getOrNull(idxMask1), "$fileName:$lineNumber side 1")
+                } else 0
+                val exportedMask2 = if (hasExportedMasks) {
+                    parseSuppressionMask(row.getOrNull(idxMask2), "$fileName:$lineNumber side 2")
+                } else 0
+                observedVisibility?.record(exportedMask1, exportedMask2)
                 val conn = row.getOrNull(idxConn)?.trim().orEmpty()
                 // Validate the type BEFORE the empty-citation skip: an unmapped type
                 // must fail the build even on rows whose citations are blank/unresolved.
@@ -418,9 +464,6 @@ internal class SefariaLinksImporter(
                 // Whole perek/parasha side: range kept, coverage skipped, so the
                 // link surfaces once at the unit's head. [SefariaWholeUnitRefs]
                 // Exported verdict wins when present; otherwise derive locally.
-                val exportedMask1 = parseSuppressionMask(row.getOrNull(idxMask1))
-                val exportedMask2 = parseSuppressionMask(row.getOrNull(idxMask2))
-                val hasExportedMasks = idxMask1 >= 0 && idxMask2 >= 0
                 val coverage1 = if (hasExportedMasks) {
                     (exportedMask1 and WHOLE_UNIT_REASONS) == 0
                 } else {
@@ -499,7 +542,7 @@ internal class SefariaLinksImporter(
                         )
 
                         val (storedSrcBook, storedTgtBook, storedSrcLine, storedTgtLine,
-                            storedTgtLineIndex, storedType) =
+                            storedTgtLineIndex, storedType, wasSwapped) =
                             if (forwardType == ConnectionType.SOURCE) {
                                 // CSV had the dependant book as Citation 1; swap so
                                 // the stored row goes base→dependant with the
@@ -510,7 +553,8 @@ internal class SefariaLinksImporter(
                                     srcLineId = tgtLine,
                                     tgtLineId = srcLine,
                                     tgtLineIndex = srcLineIndex,
-                                    connectionType = baseConnectionType
+                                    connectionType = baseConnectionType,
+                                    wasSwapped = true,
                                 )
                             } else {
                                 StoredLink(
@@ -519,7 +563,8 @@ internal class SefariaLinksImporter(
                                     srcLineId = srcLine,
                                     tgtLineId = tgtLine,
                                     tgtLineIndex = tgtLineIndex,
-                                    connectionType = forwardType
+                                    connectionType = forwardType,
+                                    wasSwapped = false,
                                 )
                             }
 
@@ -544,32 +589,30 @@ internal class SefariaLinksImporter(
                         rowWroteLink = true
 
                         // Per-side visibility, mapped from CSV order onto the
-                        // STORED direction. AND-ed across every row that lands
-                        // on this link id: a side stays hidden only for the
-                        // reasons all of its contributors agree on, so one
-                        // visible contribution (mask 0) clears it.
+                        // stored direction. The disk-backed accumulator keeps a
+                        // side hidden iff every contributor is hidden; its
+                        // diagnostic reason mask is the OR of their reasons.
                         if (hasExportedMasks) {
-                            val swapped = storedSrcLine != srcLine
-                            val srcSideMask = if (swapped) exportedMask2 else exportedMask1
-                            val tgtSideMask = if (swapped) exportedMask1 else exportedMask2
-                            mergeSuppressionMask(linkId, side = 0, mask = srcSideMask)
-                            mergeSuppressionMask(linkId, side = 1, mask = tgtSideMask)
+                            val srcSideMask = if (wasSwapped) exportedMask2 else exportedMask1
+                            val tgtSideMask = if (wasSwapped) exportedMask1 else exportedMask2
+                            queueSuppression(linkId, side = 0, mask = srcSideMask)
+                            queueSuppression(linkId, side = 1, mask = tgtSideMask)
                         }
 
                         // Ranged sides: record the range end + per-line coverage.
                         // The side is relative to the STORED direction (0 = source).
                         if (range1 != null) {
                             queueRangeSide(
-                                range = range1, entry = from, lineId = srcLine,
-                                storedSrcLine = storedSrcLine, linkId = linkId,
+                                range = range1, entry = from,
+                                side = if (wasSwapped) 1 else 0, linkId = linkId,
                                 lineKeyToId = lineKeyToId, headingLineIds = headingLineIds,
                                 refsByPath = refsByPath, emitCoverage = coverage1,
                             )
                         }
                         if (range2 != null) {
                             queueRangeSide(
-                                range = range2, entry = to, lineId = tgtLine,
-                                storedSrcLine = storedSrcLine, linkId = linkId,
+                                range = range2, entry = to,
+                                side = if (wasSwapped) 0 else 1, linkId = linkId,
                                 lineKeyToId = lineKeyToId, headingLineIds = headingLineIds,
                                 refsByPath = refsByPath, emitCoverage = coverage2,
                             )
@@ -583,9 +626,9 @@ internal class SefariaLinksImporter(
                                 charLevelPending.add(
                                     cld1.toPending(
                                         entry = from,
-                                        lineId = srcLine,
                                         storedSrcLine = storedSrcLine,
                                         storedTgtLine = storedTgtLine,
+                                        side = if (wasSwapped) 1 else 0,
                                     )
                                 )
                             }
@@ -593,9 +636,9 @@ internal class SefariaLinksImporter(
                                 charLevelPending.add(
                                     cld2.toPending(
                                         entry = to,
-                                        lineId = tgtLine,
                                         storedSrcLine = storedSrcLine,
                                         storedTgtLine = storedTgtLine,
+                                        side = if (wasSwapped) 0 else 1,
                                     )
                                 )
                             }
@@ -606,6 +649,7 @@ internal class SefariaLinksImporter(
                 // missing line / heading / self-link) — count once under raw type.
                 if (!rowWroteLink) rowsDroppedByType.bump(csvConnectionType)
             }
+            if (suppressionBatch.isNotEmpty()) suppressionChannel.send(suppressionBatch.toList())
         }
     }
 
@@ -624,8 +668,7 @@ internal class SefariaLinksImporter(
     private fun queueRangeSide(
         range: CitationRange,
         entry: RefEntry,
-        lineId: Long,
-        storedSrcLine: Long,
+        side: Int,
         linkId: Long,
         lineKeyToId: Map<Pair<String, Int>, Long>,
         headingLineIds: Set<Long>,
@@ -651,7 +694,6 @@ internal class SefariaLinksImporter(
             rangeEndUnresolved.increment()
             return
         }
-        val side = if (lineId == storedSrcLine) 0 else 1
         pendingRanges += LinkRange(
             linkId = linkId,
             side = side,
@@ -677,6 +719,7 @@ internal class SefariaLinksImporter(
         val tgtLineId: Long,
         val tgtLineIndex: Int,
         val connectionType: ConnectionType,
+        val wasSwapped: Boolean,
     )
 
     /** A parsed `Char Level Data` CSV cell, before line/side resolution. */
@@ -689,15 +732,15 @@ internal class SefariaLinksImporter(
     ) {
         fun toPending(
             entry: RefEntry,
-            lineId: Long,
             storedSrcLine: Long,
             storedTgtLine: Long,
+            side: Int,
         ) = PendingCharLevelAnchor(
             path = entry.path,
             lineIndex0 = entry.lineIndex - 1,
             srcLineId = storedSrcLine,
             tgtLineId = storedTgtLine,
-            side = if (lineId == storedSrcLine) 0 else 1,
+            side = side,
             startChar = start,
             endChar = end,
             versionTitle = versionTitle,
@@ -969,6 +1012,8 @@ internal val SEFARIA_AGGREGATE_LINK_FILES = setOf(
     "links_by_book_without_commentary.csv",
 )
 
+private const val SUPPRESSION_BATCH_SIZE = 10_000
+
 private val charLevelJson = Json { ignoreUnknownKeys = true }
 
 /**
@@ -1048,16 +1093,17 @@ internal fun computeBaseProvenance(storedSrcBook: Long, storedTgtMeta: BookMeta?
 internal const val WHOLE_UNIT_REASONS = SuppressionReason.WHOLE_PEREK or SuppressionReason.WHOLE_PARASHA
 
 /**
- * A `Suppression Mask 1/2` cell. Blank/absent = 0 (displayed). An unparsable or
- * out-of-range value fails the build: a silently-zeroed verdict would quietly
- * restore the behaviour these columns exist to fix.
+ * A required `Suppression Mask 1/2` cell from a new-format export. Zero must be
+ * explicit: a blank/missing/unparsable/unknown value fails closed.
  */
-internal fun parseSuppressionMask(cell: String?): Int {
+internal fun parseSuppressionMask(cell: String?, source: String): Int {
     val raw = cell?.trim().orEmpty()
-    if (raw.isEmpty()) return 0
+    require(raw.isNotEmpty()) { "Missing suppression mask at $source" }
     val mask = raw.toIntOrNull()
-        ?: error("Unparsable suppression mask '$raw' in links CSV")
-    require(mask in 0..SuppressionReason.ALL) { "Suppression mask $mask outside known reasons" }
+        ?: error("Unparsable suppression mask '$raw' at $source")
+    require(mask >= 0 && (mask and SuppressionReason.ALL.inv()) == 0) {
+        "Suppression mask $mask contains unknown reasons at $source"
+    }
     return mask
 }
 

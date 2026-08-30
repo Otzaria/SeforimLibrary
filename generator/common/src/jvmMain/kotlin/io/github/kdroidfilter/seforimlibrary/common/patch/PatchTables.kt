@@ -65,8 +65,8 @@ internal val PATCH_TABLES_IN_FK_ORDER: List<PatchTable> = listOf(
     PatchTable("link_anchor",        listOf("linkId", "side", "charStart"), updatable = true),
     PatchTable("link_range",         listOf("linkId", "side"), updatable = true),
     PatchTable("link_coverage",      listOf("lineId", "linkId", "side"), updatable = false),
-    // Schema 3. Sparse and rewritten wholesale per build, like link_coverage.
-    PatchTable("link_suppressed_side", listOf("linkId", "side"), updatable = false),
+    // Schema 3. reasonMask can change while the composite key stays stable.
+    PatchTable("link_suppressed_side", listOf("linkId", "side"), updatable = true),
     PatchTable("book_has_links",     listOf("bookId"),   updatable = true),
 
     // Book editions — book_version depends on book, version_line on it + line.
@@ -85,3 +85,7 @@ internal val PATCH_TABLES_IN_FK_ORDER: List<PatchTable> = listOf(
     // Versioning. Keyed by a string `key` column.
     PatchTable("schema_meta",        listOf("key"),      updatable = true),
 )
+
+/** Schema-2 contract retained for updater compatibility tests. */
+internal val PATCH_TABLES_SCHEMA_2: List<PatchTable> =
+    PATCH_TABLES_IN_FK_ORDER.filterNot { it.name == "link_suppressed_side" }

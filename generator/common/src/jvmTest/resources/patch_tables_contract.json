@@ -26,7 +26,7 @@
     { "table": "link_anchor", "pk": ["linkId", "side", "charStart"], "updatable": true },
     { "table": "link_range", "pk": ["linkId", "side"], "updatable": true },
     { "table": "link_coverage", "pk": ["lineId", "linkId", "side"], "updatable": false },
-    { "table": "link_suppressed_side", "pk": ["linkId", "side"], "updatable": false },
+    { "table": "link_suppressed_side", "pk": ["linkId", "side"], "updatable": true },
     { "table": "book_has_links", "pk": ["bookId"], "updatable": true },
     { "table": "book_version", "pk": ["id"], "updatable": true },
     { "table": "version_line", "pk": ["versionId", "lineId"], "updatable": true },

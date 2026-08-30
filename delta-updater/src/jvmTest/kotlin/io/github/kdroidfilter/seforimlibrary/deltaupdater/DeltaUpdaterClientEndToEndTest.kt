@@ -61,9 +61,9 @@ class DeltaUpdaterClientEndToEndTest {
         }
 
         // Compute manifest hashes from the actual files.
-        val toHash = io.github.kdroidfilter.seforimlibrary.common.patch.LogicalContentHasher()
+        val toHash = io.github.kdroidfilter.seforimlibrary.common.patch.LogicalContentHasher.forSchemaVersion(1)
             .compute(DriverManager.getConnection("jdbc:sqlite:${targetDb.toAbsolutePath()}"))
-        val fromHash = io.github.kdroidfilter.seforimlibrary.common.patch.LogicalContentHasher()
+        val fromHash = io.github.kdroidfilter.seforimlibrary.common.patch.LogicalContentHasher.forSchemaVersion(1)
             .compute(DriverManager.getConnection("jdbc:sqlite:${liveDb.toAbsolutePath()}"))
         val uncompressedSha = sha256(patchDb)
         val uncompressedSize = Files.size(patchDb)
@@ -159,7 +159,7 @@ class DeltaUpdaterClientEndToEndTest {
 
             // After apply: target hash matches.
             val appliedHash = DriverManager.getConnection("jdbc:sqlite:${liveDb.toAbsolutePath()}").use {
-                io.github.kdroidfilter.seforimlibrary.common.patch.LogicalContentHasher().compute(it)
+                io.github.kdroidfilter.seforimlibrary.common.patch.LogicalContentHasher.forSchemaVersion(1).compute(it)
             }
             assertEquals(toHash, appliedHash, "applied DB must match target by logical hash")
 
@@ -222,9 +222,9 @@ class DeltaUpdaterClientEndToEndTest {
             }
         }
 
-        val toHash = io.github.kdroidfilter.seforimlibrary.common.patch.LogicalContentHasher()
+        val toHash = io.github.kdroidfilter.seforimlibrary.common.patch.LogicalContentHasher.forSchemaVersion(1)
             .compute(DriverManager.getConnection("jdbc:sqlite:${targetDb.toAbsolutePath()}"))
-        val fromHash = io.github.kdroidfilter.seforimlibrary.common.patch.LogicalContentHasher()
+        val fromHash = io.github.kdroidfilter.seforimlibrary.common.patch.LogicalContentHasher.forSchemaVersion(1)
             .compute(DriverManager.getConnection("jdbc:sqlite:${liveDb.toAbsolutePath()}"))
         val uncompressedSha = sha256(patchDb)
         val uncompressedSize = Files.size(patchDb)
@@ -300,7 +300,7 @@ class DeltaUpdaterClientEndToEndTest {
 
             // SQLite delta applied: logical hash matches the target.
             val appliedHash = DriverManager.getConnection("jdbc:sqlite:${liveDb.toAbsolutePath()}").use {
-                io.github.kdroidfilter.seforimlibrary.common.patch.LogicalContentHasher().compute(it)
+                io.github.kdroidfilter.seforimlibrary.common.patch.LogicalContentHasher.forSchemaVersion(1).compute(it)
             }
             assertEquals(toHash, appliedHash, "applied DB must match target by logical hash")
 
@@ -490,9 +490,9 @@ class DeltaUpdaterClientEndToEndTest {
             prevDb = liveDb, newDb = targetDb, outputPath = patchDb,
             fromVersion = 1, toVersion = 2,
         )
-        val toHash = io.github.kdroidfilter.seforimlibrary.common.patch.LogicalContentHasher()
+        val toHash = io.github.kdroidfilter.seforimlibrary.common.patch.LogicalContentHasher.forSchemaVersion(1)
             .compute(DriverManager.getConnection("jdbc:sqlite:${targetDb.toAbsolutePath()}"))
-        val fromHash = io.github.kdroidfilter.seforimlibrary.common.patch.LogicalContentHasher()
+        val fromHash = io.github.kdroidfilter.seforimlibrary.common.patch.LogicalContentHasher.forSchemaVersion(1)
             .compute(DriverManager.getConnection("jdbc:sqlite:${liveDb.toAbsolutePath()}"))
         val uncompressedSha = sha256(patchDb)
         val uncompressedSize = Files.size(patchDb)
@@ -552,7 +552,7 @@ class DeltaUpdaterClientEndToEndTest {
 
             // SQLite was rolled back in-process: hash matches the pre-apply hash.
             val recoveredHash = DriverManager.getConnection("jdbc:sqlite:${liveDb.toAbsolutePath()}").use {
-                io.github.kdroidfilter.seforimlibrary.common.patch.LogicalContentHasher().compute(it)
+                io.github.kdroidfilter.seforimlibrary.common.patch.LogicalContentHasher.forSchemaVersion(1).compute(it)
             }
             assertEquals(fromHash, recoveredHash, "seforim.db must be rolled back to fromContentHash")
 

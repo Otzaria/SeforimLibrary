@@ -36,7 +36,8 @@ data class LinkCoverage(
  *
  * The decision is made by SefariaExport (which alone has the TermSet, both
  * `Ref`s and their `index_node` depths) and shipped per links-CSV row; the
- * importer only AND-s the contributions that merge onto the same link.
+ * importer keeps the side hidden only when every merged contribution is
+ * hidden, and OR-s their diagnostic reasons.
  *
  * @property linkId The link this applies to
  * @property side 0 = the stored source side is hidden, 1 = the target side
