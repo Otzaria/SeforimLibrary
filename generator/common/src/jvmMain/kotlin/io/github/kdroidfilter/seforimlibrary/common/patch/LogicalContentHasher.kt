@@ -114,12 +114,18 @@ class LogicalContentHasher(
             add(indexOf("link_coverage") + 1, "link_suppressed_side")
         }
 
+        /** Schema 4 adds the canonical line-reference index right after line_toc. */
+        val TABLES_SCHEMA_4: List<String> = TABLES_SCHEMA_3.toMutableList().apply {
+            add(indexOf("line_toc") + 1, "line_ref")
+        }
+
         /** Current-schema default for build-time diagnostics and current DB tests. */
-        val DEFAULT_TABLES: List<String> = TABLES_SCHEMA_3
+        val DEFAULT_TABLES: List<String> = TABLES_SCHEMA_4
 
         fun tablesForSchemaVersion(schemaVersion: Int): List<String> = when (schemaVersion) {
             1, 2 -> TABLES_SCHEMA_2
             3 -> TABLES_SCHEMA_3
+            4 -> TABLES_SCHEMA_4
             else -> error("Unsupported logical-hash schema version $schemaVersion")
         }
 

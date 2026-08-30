@@ -19,7 +19,7 @@ import java.sql.Connection
  */
 internal object PatchDbSchema {
 
-    const val CURRENT_VERSION: Int = 3
+    const val CURRENT_VERSION: Int = 4
 
     /** Fixed-shape tables (metadata + auxiliaries). */
     val baseStatements: List<String> = listOf(

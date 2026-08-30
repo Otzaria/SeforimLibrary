@@ -59,6 +59,9 @@ internal val PATCH_TABLES_IN_FK_ORDER: List<PatchTable> = listOf(
     PatchTable("tocEntry",           listOf("id"),       updatable = true),
     PatchTable("line",               listOf("id"),       updatable = true),
     PatchTable("line_toc",           listOf("lineId"),   updatable = true),
+    // Schema 4. Canonical line-reference index — pure key table (PK == all
+    // columns), so there is nothing to update on conflict.
+    PatchTable("line_ref",           listOf("bookId", "refKeyHash", "lineIndex"), updatable = false),
 
     // Links.
     PatchTable("link",               listOf("id"),       updatable = true),
@@ -86,6 +89,10 @@ internal val PATCH_TABLES_IN_FK_ORDER: List<PatchTable> = listOf(
     PatchTable("schema_meta",        listOf("key"),      updatable = true),
 )
 
+/** Schema-3 contract retained for updater compatibility tests. */
+internal val PATCH_TABLES_SCHEMA_3: List<PatchTable> =
+    PATCH_TABLES_IN_FK_ORDER.filterNot { it.name == "line_ref" }
+
 /** Schema-2 contract retained for updater compatibility tests. */
 internal val PATCH_TABLES_SCHEMA_2: List<PatchTable> =
-    PATCH_TABLES_IN_FK_ORDER.filterNot { it.name == "link_suppressed_side" }
+    PATCH_TABLES_SCHEMA_3.filterNot { it.name == "link_suppressed_side" }

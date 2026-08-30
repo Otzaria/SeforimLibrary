@@ -18,9 +18,13 @@ import kotlin.test.assertEquals
 class PatchTablesContractTest {
 
     @Test
-    fun `schema 2 contracts remain frozen when schema 3 adds visibility`() {
+    fun `frozen schema contracts derive from the current list by dropping additions`() {
         assertEquals(
-            PATCH_TABLES_IN_FK_ORDER.filterNot { it.name == "link_suppressed_side" },
+            PATCH_TABLES_IN_FK_ORDER.filterNot { it.name == "line_ref" },
+            PATCH_TABLES_SCHEMA_3,
+        )
+        assertEquals(
+            PATCH_TABLES_SCHEMA_3.filterNot { it.name == "link_suppressed_side" },
             PATCH_TABLES_SCHEMA_2,
         )
         assertEquals(
@@ -39,6 +43,12 @@ class PatchTablesContractTest {
                 add(indexOf("link_coverage") + 1, "link_suppressed_side")
             },
             LogicalContentHasher.TABLES_SCHEMA_3,
+        )
+        assertEquals(
+            LogicalContentHasher.TABLES_SCHEMA_3.toMutableList().apply {
+                add(indexOf("line_toc") + 1, "line_ref")
+            },
+            LogicalContentHasher.TABLES_SCHEMA_4,
         )
     }
 
