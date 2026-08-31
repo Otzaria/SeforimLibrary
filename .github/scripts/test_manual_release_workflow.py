@@ -114,9 +114,15 @@ class ManualReleaseWorkflowContractTest(unittest.TestCase):
         self.assertIn(importer, checkout)
         self.assertIn("if: inputs.relink_recovery_run_id != ''", overlay)
         self.assertIn('install -m 0644 ".pipeline-control/$file" "$file"', overlay)
-        self.assertIn('old = \'jvmArgs = listOf("-Xmx6g")\'', overlay)
-        self.assertIn('new = \'jvmArgs = listOf("-Xmx12g", "-XX:+UseG1GC")\'', overlay)
-        self.assertIn("text.count(old) != 1", overlay)
+        self.assertIn('legacy = \'jvmArgs = listOf("-Xmx6g")\'', overlay)
+        self.assertIn(
+            'configured = \'jvmArgs = listOf("-Xmx$linkerHeap", "-XX:+UseG1GC")\'',
+            overlay,
+        )
+        self.assertIn("if legacy_count == 1 and configured_count == 0", overlay)
+        self.assertIn("elif legacy_count == 0 and configured_count == 1", overlay)
+        self.assertIn("text = text.replace(legacy, configured)", overlay)
+        self.assertIn("grep -Fxq 'linkerHeap=12g'", overlay)
         self.assertIn("DiskBackedLinkIdAllocator", overlay)
         self.assertIn("InMemoryIdAllocator", overlay)
         self.assertIn("grep -Fq", overlay)

@@ -1197,12 +1197,20 @@ jobs:
           python3 - <<'PY'
           from pathlib import Path
           path = Path("generator/sefariasqlite/build.gradle.kts")
-          old = 'jvmArgs = listOf("-Xmx6g")'
-          new = 'jvmArgs = listOf("-Xmx12g", "-XX:+UseG1GC")'
+          legacy = 'jvmArgs = listOf("-Xmx6g")'
+          configured = 'jvmArgs = listOf("-Xmx$linkerHeap", "-XX:+UseG1GC")'
           text = path.read_text(encoding="utf-8")
-          if text.count(old) != 1:
-              raise SystemExit("pinned Phase-2 task no longer has exactly one expected 6g heap declaration")
-          path.write_text(text.replace(old, new), encoding="utf-8")
+          legacy_count = text.count(legacy)
+          configured_count = text.count(configured)
+          if legacy_count == 1 and configured_count == 0:
+              text = text.replace(legacy, configured)
+              path.write_text(text, encoding="utf-8")
+          elif legacy_count == 0 and configured_count == 1:
+              pass  # The pinned source already uses the workflow-configured Phase-2 heap.
+          else:
+              raise SystemExit(
+                  "pinned Phase-2 task must contain exactly one legacy or configured heap declaration"
+              )
           PY
           grep -Fq 'import io.github.kdroidfilter.seforimlibrary.common.ids.DiskBackedLinkIdAllocator' \
             generator/sefariasqlite/src/jvmMain/kotlin/io/github/kdroidfilter/seforimlibrary/sefariasqlite/GenerateLinkerLinks.kt
@@ -1211,7 +1219,8 @@ jobs:
             echo "::error::Recovery Phase-2 still references the unbounded in-memory allocator"
             exit 1
           fi
-          grep -Fq 'jvmArgs = listOf("-Xmx12g", "-XX:+UseG1GC")' generator/sefariasqlite/build.gradle.kts
+          grep -Fq 'jvmArgs = listOf("-Xmx$linkerHeap", "-XX:+UseG1GC")' generator/sefariasqlite/build.gradle.kts
+          grep -Fxq 'linkerHeap=12g' ~/.gradle/gradle.properties
           rm -rf generator/common/build generator/sefariasqlite/build
           echo "Recovery Phase-2 implementation is pinned to $PHASE2_IMPLEMENTATION_COMMIT"
 
