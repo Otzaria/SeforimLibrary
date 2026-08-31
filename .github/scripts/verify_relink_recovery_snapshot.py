@@ -3,7 +3,7 @@
 
 The normal serial pipeline requires a byte-identical lines snapshot. A recovery
 has to rebuild the DB, however, and Sefaria image embedding can legitimately
-change an image-only line from its remote ``textimages.sefaria.org`` URL to an
+change an image ``src`` from its remote ``textimages.sefaria.org`` URL to an
 inline data URI when a previously transient download succeeds. Such a change
 cannot affect Linker output, but every other source change must still fail.
 """
@@ -20,8 +20,8 @@ from pathlib import Path
 
 
 IMAGE_TAG = re.compile(
-    r"(?P<prefix>\s*<img\s+[^>]*?\bsrc=)(?P<quote>[\"'])(?P<src>[^\"']+)"
-    r"(?P=quote)(?P<suffix>[^>]*/?>\s*)",
+    r"(?P<prefix><img\s+[^>]*?\bsrc\s*=\s*)(?P<quote>[\"'])"
+    r"(?P<src>[^\"']+)(?P=quote)(?P<suffix>[^>]*?/?>)",
     re.IGNORECASE,
 )
 TEXTIMAGE_PREFIX = "https://textimages.sefaria.org/"
@@ -45,19 +45,7 @@ def _json(path: Path) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def _image_only_equivalent(left: str, right: str) -> bool:
-    a = IMAGE_TAG.fullmatch(left)
-    b = IMAGE_TAG.fullmatch(right)
-    if a is None or b is None:
-        return False
-    if (a.group("prefix"), a.group("quote"), a.group("suffix")) != (
-        b.group("prefix"),
-        b.group("quote"),
-        b.group("suffix"),
-    ):
-        return False
-
-    src_a, src_b = a.group("src"), b.group("src")
+def _remote_inline_equivalent(src_a: str, src_b: str) -> bool:
     if src_a.startswith(TEXTIMAGE_PREFIX):
         remote, inline = src_a, src_b
     elif src_b.startswith(TEXTIMAGE_PREFIX):
@@ -74,6 +62,30 @@ def _image_only_equivalent(left: str, right: str) -> bool:
     except ValueError:
         return False
     return 0 < len(decoded) <= MAX_IMAGE_BYTES
+
+
+def _split_image_sources(value: str) -> tuple[list[str], list[str]]:
+    """Return exact non-src spans and ordered img src values."""
+    spans: list[str] = []
+    sources: list[str] = []
+    cursor = 0
+    for match in IMAGE_TAG.finditer(value):
+        spans.append(value[cursor : match.start("src")])
+        sources.append(match.group("src"))
+        cursor = match.end("src")
+    spans.append(value[cursor:])
+    return spans, sources
+
+
+def _image_src_equivalent(left: str, right: str) -> bool:
+    left_spans, left_sources = _split_image_sources(left)
+    right_spans, right_sources = _split_image_sources(right)
+    if not left_sources or left_spans != right_spans:
+        return False
+    return all(
+        src_a == src_b or _remote_inline_equivalent(src_a, src_b)
+        for src_a, src_b in zip(left_sources, right_sources, strict=True)
+    )
 
 
 def _schema(connection: sqlite3.Connection) -> list[tuple]:
@@ -139,13 +151,13 @@ def verify(
         if before[4] != after[4]:
             raise SystemExit(f"rebuilt snapshot context_ref differs at {before[:3]!r}")
         if before[3] != after[3]:
-            if not _image_only_equivalent(before[3], after[3]):
+            if not _image_src_equivalent(before[3], after[3]):
                 raise SystemExit(
-                    f"rebuilt snapshot text differs outside an image-only src at {before[:3]!r}"
+                    f"rebuilt snapshot text differs outside a safe image src at {before[:3]!r}"
                 )
             safe_differences.add((before[0], before[1], before[2]))
             if len(safe_differences) > 10_000:
-                raise SystemExit("too many image-only differences for a bounded recovery")
+                raise SystemExit("too many image-src differences for a bounded recovery")
 
     if safe_differences:
         for artifact in artifacts.rglob("*.jsonl"):
@@ -162,7 +174,7 @@ def verify(
                     )
                     if key in safe_differences:
                         raise SystemExit(
-                            f"image-only changed line has a Linker record: {key!r} "
+                            f"image-src changed line has a Linker record: {key!r} "
                             f"({artifact}:{number})"
                         )
     return count, len(safe_differences)
@@ -185,7 +197,7 @@ def main() -> None:
     )
     print(
         f"RECOVERY_SNAPSHOT_SEMANTIC_OK rows={rows} "
-        f"unlinked_image_only_differences={differences}"
+        f"unlinked_image_src_differences={differences}"
     )
 
 

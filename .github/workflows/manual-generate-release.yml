@@ -1326,7 +1326,7 @@ jobs:
             # A recovery rebuild can differ bytewise only because the source importer
             # embeds textimages opportunistically. Compare all identities, context and
             # content against the exact original snapshot. The verifier allows only an
-            # image-only URL/data-URI substitution on a line with zero Linker records.
+            # textimages URL/data-URI src substitutions on lines with zero Linker records.
             RECOVERY_COMPARE_DIR="$RUNNER_TEMP/relink-snapshot-compare-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
             rm -rf "$RECOVERY_COMPARE_DIR"
             mkdir -p "$RECOVERY_COMPARE_DIR"

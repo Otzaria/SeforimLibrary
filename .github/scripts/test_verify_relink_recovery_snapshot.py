@@ -82,7 +82,7 @@ class RecoverySnapshotVerifierTest(unittest.TestCase):
     def test_identical_snapshots_pass(self):
         result = self.run_case("טקסט", "טקסט")
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("unlinked_image_only_differences=0", result.stdout)
+        self.assertIn("unlinked_image_src_differences=0", result.stdout)
 
     def test_unlinked_remote_to_inline_image_passes(self):
         inline = base64.b64encode(b"png").decode()
@@ -91,7 +91,43 @@ class RecoverySnapshotVerifierTest(unittest.TestCase):
             f'<img src="data:image/png;base64,{inline}">',
         )
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("unlinked_image_only_differences=1", result.stdout)
+        self.assertIn("unlinked_image_src_differences=1", result.stdout)
+
+    def test_unlinked_image_inside_text_passes(self):
+        inline = base64.b64encode(b"png").decode()
+        result = self.run_case(
+            'לפני <img class="diagram" src="https://textimages.sefaria.org/book/image.png"> אחרי',
+            f'לפני <img class="diagram" src="data:image/png;base64,{inline}"> אחרי',
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("unlinked_image_src_differences=1", result.stdout)
+
+    def test_only_changed_remote_sources_may_be_embedded(self):
+        inline = base64.b64encode(b"png").decode()
+        result = self.run_case(
+            '<img src="data:image/png;base64,c2FtZQ=="> '
+            '<img src="https://textimages.sefaria.org/book/image.png">',
+            '<img src="data:image/png;base64,c2FtZQ=="> '
+            f'<img src="data:image/png;base64,{inline}">',
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_other_image_src_change_fails(self):
+        result = self.run_case(
+            '<img src="https://example.com/old.png">',
+            '<img src="https://example.com/new.png">',
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("text differs", result.stderr)
+
+    def test_text_around_image_difference_fails(self):
+        inline = base64.b64encode(b"png").decode()
+        result = self.run_case(
+            'טקסט ישן <img src="https://textimages.sefaria.org/book/image.png">',
+            f'טקסט חדש <img src="data:image/png;base64,{inline}">',
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("text differs", result.stderr)
 
     def test_linked_image_difference_fails(self):
         inline = base64.b64encode(b"png").decode()
@@ -102,6 +138,20 @@ class RecoverySnapshotVerifierTest(unittest.TestCase):
         result = self.run_case(
             '<img src="https://textimages.sefaria.org/book/image.png">',
             f'<img src="data:image/png;base64,{inline}">',
+            artifact_record=record,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("has a Linker record", result.stderr)
+
+    def test_linked_mixed_content_image_difference_fails(self):
+        inline = base64.b64encode(b"png").decode()
+        record = {
+            "book_key": {"source_name": "Sefaria", "canonical_he_title": "ספר"},
+            "line_index": 0,
+        }
+        result = self.run_case(
+            'טקסט <img src="https://textimages.sefaria.org/book/image.png">',
+            f'טקסט <img src="data:image/png;base64,{inline}">',
             artifact_record=record,
         )
         self.assertNotEqual(result.returncode, 0)
