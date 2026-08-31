@@ -14,7 +14,8 @@ import java.security.MessageDigest
  *
  *  - `<patchFile>.manifest.json` — the per-delta manifest. Pinned to
  *    `from_version`, `to_version`, `from_content_hash`, `to_content_hash`,
- *    plus the patch file's sha256 + size.
+ *    the independently-versioned patch format, plus the patch file's sha256
+ *    + size.
  *  - `release_meta.json` (optional, written if [releaseMetaPath] is set) —
  *    the release-level index that the client polls. Carries the
  *    `latestVersion`, the `fullBundle` info, and the list of available
@@ -61,6 +62,7 @@ class ReleaseManifestWriter(
             append("  \"toVersion\": ").append(toVersion).append(",\n")
             append("  \"fromSchemaVersion\": ").append(fromSchemaVersion).append(",\n")
             append("  \"toSchemaVersion\": ").append(toSchemaVersion).append(",\n")
+            append("  \"patchFormatVersion\": ").append(PatchDbSchema.CURRENT_VERSION).append(",\n")
             append("  \"fromContentHash\": ").appendString(fromContentHash).append(",\n")
             append("  \"toContentHash\": ").appendString(toContentHash).append(",\n")
             append("  \"patchFiles\": [\n")

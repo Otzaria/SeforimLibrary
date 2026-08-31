@@ -150,7 +150,8 @@ tasks.register<JavaExec>("buildLineDhIndex") {
     dependsOn("jvmJar")
     mainClass.set("io.github.kdroidfilter.seforimlibrary.common.dh.BuildLineDhIndexCliKt")
     classpath = files(tasks.named("jvmJar")) + configurations.getByName("jvmRuntimeClasspath")
-    val dbPath = project.findProperty("dbPath") as String?
+    val dbPath = (project.findProperty("dbPath") ?: project.findProperty("seforimDb")) as String?
+        ?: System.getenv("SEFORIM_DB")
         ?: rootProject.layout.buildDirectory.file("seforim.db").get().asFile.absolutePath
     systemProperty("dbPath", dbPath)
     jvmArgs = listOf("-Xmx2g")

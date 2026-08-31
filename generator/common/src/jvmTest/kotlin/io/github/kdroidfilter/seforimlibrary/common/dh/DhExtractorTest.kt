@@ -88,8 +88,15 @@ class DhExtractorTest {
     fun `structural markers are not dibburim`() {
         assertNull(DhExtractor.extract("<b>מתני'</b> ביצה שנולדה ביום טוב", Format.BOLD))
         assertNull(DhExtractor.extract("<b>גמרא</b> במאי אוקימתא", Format.BOLD))
+        assertNull(DhExtractor.extract("<b>(גמרא)</b> במאי אוקימתא", Format.BOLD))
+        assertNull(DhExtractor.extract("<b>גמרא!</b> במאי אוקימתא", Format.BOLD))
         assertNull(DhExtractor.extract("<b>שם</b> ד\"ה הורו, עד עפ\"י ב\"ד", Format.BOLD))
         assertNull(DhExtractor.extract("<b>תוד\"ה</b> חייב, בהקפת הראש", Format.BOLD))
+        assertNull(DhExtractor.extract("<b>ד״ה</b> הורו, עד עפ״י ב״ד", Format.BOLD))
+        assertNull(DhExtractor.extract("<b>בד״ה</b> הורו, עד עפ״י ב״ד", Format.BOLD))
+        assertNull(DhExtractor.extract("<b>תוד״ה</b> חייב, בהקפת הראש", Format.BOLD))
+        assertNull(DhExtractor.extract("<b>בד''ה</b> אתנו ב''ד", Format.BOLD))
+        assertNull(DhExtractor.extract("<b>רשי'</b> פירש כאן", Format.BOLD))
     }
 
     @Test

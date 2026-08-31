@@ -20,7 +20,10 @@ import java.sql.DriverManager
  * lines ([MIN_COVERAGE] of them, at least [MIN_LINES] hits). This book-level
  * gate is the main false-positive defence: books that merely bold an
  * occasional word, or use a spaced dash mid-sentence here and there, never
- * reach the threshold and contribute nothing.
+ * reach the threshold and contribute nothing. Base texts themselves are
+ * excluded; a book marked as a base is retained only when `book_base_text`
+ * also identifies it as dependent (some curated commentaries carry both
+ * flags).
  *
  * Required system property: `dbPath`.
  */
@@ -33,7 +36,23 @@ fun main() {
     require(Files.isRegularFile(path)) { "Database file not found: $dbPath" }
 
     DriverManager.getConnection("jdbc:sqlite:${path.toAbsolutePath()}").use { conn ->
-        conn.autoCommit = false
+        val report = rebuildLineDhIndex(conn, logger)
+        logger.i {
+            "line_dh: ${report.indexed} dibburim over ${report.boldBooks} bold-format + " +
+                "${report.dashBooks} dash-format books (${report.skippedBooks} books below threshold)"
+        }
+    }
+}
+
+/**
+ * Atomically replaces the existing index. If extraction or insertion fails,
+ * the previous table contents remain usable instead of leaving a partial or
+ * empty index behind.
+ */
+internal fun rebuildLineDhIndex(conn: Connection, logger: Logger): LineDhIndexReport {
+    check(conn.autoCommit) { "rebuildLineDhIndex requires an unowned JDBC connection" }
+    conn.autoCommit = false
+    return try {
         conn.createStatement().use { st ->
             st.execute(
                 """
@@ -47,14 +66,12 @@ fun main() {
             )
             st.execute("DELETE FROM line_dh")
         }
-
-        val report = indexAllBooks(conn, logger)
-        conn.commit()
-
-        logger.i {
-            "line_dh: ${report.indexed} dibburim over ${report.boldBooks} bold-format + " +
-                "${report.dashBooks} dash-format books (${report.skippedBooks} books below threshold)"
-        }
+        indexAllBooks(conn, logger).also { conn.commit() }
+    } catch (failure: Throwable) {
+        runCatching { conn.rollback() }.exceptionOrNull()?.let(failure::addSuppressed)
+        throw failure
+    } finally {
+        conn.autoCommit = true
     }
 }
 
@@ -78,7 +95,15 @@ internal fun indexAllBooks(conn: Connection, logger: Logger): LineDhIndexReport 
     var indexed = 0
 
     val bookIds = ArrayList<Long>()
-    conn.prepareStatement("SELECT id FROM book ORDER BY id").use { ps ->
+    conn.prepareStatement(
+        """
+        SELECT b.id
+        FROM book b
+        WHERE b.isBaseBook = 0
+           OR EXISTS (SELECT 1 FROM book_base_text bbt WHERE bbt.bookId = b.id)
+        ORDER BY b.id
+        """.trimIndent(),
+    ).use { ps ->
         ps.executeQuery().use { rs -> while (rs.next()) bookIds += rs.getLong(1) }
     }
 

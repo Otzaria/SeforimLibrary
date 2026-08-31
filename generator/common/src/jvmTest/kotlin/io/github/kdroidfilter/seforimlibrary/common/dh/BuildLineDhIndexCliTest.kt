@@ -3,15 +3,24 @@ package io.github.kdroidfilter.seforimlibrary.common.dh
 import co.touchlab.kermit.Logger
 import java.sql.Connection
 import java.sql.DriverManager
+import java.sql.SQLException
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 
 class BuildLineDhIndexCliTest {
 
     private fun withDb(block: (Connection) -> Unit) {
         DriverManager.getConnection("jdbc:sqlite::memory:").use { conn ->
             conn.createStatement().use { st ->
-                st.execute("CREATE TABLE book (id INTEGER PRIMARY KEY, title TEXT NOT NULL)")
+                st.execute(
+                    "CREATE TABLE book (id INTEGER PRIMARY KEY, title TEXT NOT NULL, " +
+                        "isBaseBook INTEGER NOT NULL DEFAULT 0)",
+                )
+                st.execute(
+                    "CREATE TABLE book_base_text (bookId INTEGER NOT NULL, baseBookId INTEGER NOT NULL, " +
+                        "PRIMARY KEY (bookId, baseBookId))",
+                )
                 st.execute("CREATE TABLE line (bookId INTEGER NOT NULL, lineIndex INTEGER NOT NULL, content TEXT NOT NULL)")
                 st.execute(
                     "CREATE TABLE line_dh (bookId INTEGER NOT NULL, dhText TEXT NOT NULL, " +
@@ -22,11 +31,11 @@ class BuildLineDhIndexCliTest {
         }
     }
 
-    private fun insertLines(conn: Connection, bookId: Long, lines: List<String>) {
+    private fun insertLines(conn: Connection, bookId: Long, lines: List<String>, startIndex: Int = 0) {
         conn.prepareStatement("INSERT INTO line VALUES (?, ?, ?)").use { ps ->
             lines.forEachIndexed { i, content ->
                 ps.setLong(1, bookId)
-                ps.setInt(2, i)
+                ps.setInt(2, startIndex + i)
                 ps.setString(3, content)
                 ps.addBatch()
             }
@@ -47,7 +56,7 @@ class BuildLineDhIndexCliTest {
     @Test
     fun `a dash-dominant book is indexed in dash format, headings skipped`() {
         withDb { conn ->
-            conn.createStatement().use { it.execute("INSERT INTO book VALUES (1, 'רש\"י על ברכות')") }
+            conn.createStatement().use { it.execute("INSERT INTO book (id, title) VALUES (1, 'רש\"י על ברכות')") }
             insertLines(
                 conn, 1,
                 listOf("<h1>רש\"י על ברכות</h1>", "<h2>דף ב.</h2>") +
@@ -69,7 +78,7 @@ class BuildLineDhIndexCliTest {
     @Test
     fun `a bold-dominant book is indexed in bold format`() {
         withDb { conn ->
-            conn.createStatement().use { it.execute("INSERT INTO book VALUES (2, 'רש\"י על בראשית')") }
+            conn.createStatement().use { it.execute("INSERT INTO book (id, title) VALUES (2, 'רש\"י על בראשית')") }
             insertLines(conn, 2, List(10) { "<b>דיבור $it.</b> פירוש כלשהו" })
 
             val report = indexAllBooks(conn, Logger.withTag("test"))
@@ -82,7 +91,7 @@ class BuildLineDhIndexCliTest {
     @Test
     fun `a book with only incidental dashes stays out of the index`() {
         withDb { conn ->
-            conn.createStatement().use { it.execute("INSERT INTO book VALUES (3, 'ספר רגיל')") }
+            conn.createStatement().use { it.execute("INSERT INTO book (id, title) VALUES (3, 'ספר רגיל')") }
             // 2 of 20 content lines have a spaced dash — below MIN_COVERAGE.
             insertLines(
                 conn, 3,
@@ -101,7 +110,7 @@ class BuildLineDhIndexCliTest {
     @Test
     fun `a dominant format below the absolute minimum stays out of the index`() {
         withDb { conn ->
-            conn.createStatement().use { it.execute("INSERT INTO book VALUES (4, 'ספר קצר')") }
+            conn.createStatement().use { it.execute("INSERT INTO book (id, title) VALUES (4, 'ספר קצר')") }
             insertLines(conn, 4, List(5) { "דיבור $it – פירוש" })
 
             val report = indexAllBooks(conn, Logger.withTag("test"))
@@ -112,18 +121,72 @@ class BuildLineDhIndexCliTest {
     }
 
     @Test
-    fun `rebuilding is idempotent`() {
+    fun `base texts are excluded even when dash extraction would dominate`() {
         withDb { conn ->
-            conn.createStatement().use { it.execute("INSERT INTO book VALUES (5, 'ספר')") }
+            conn.createStatement().use { it.execute("INSERT INTO book VALUES (7, 'בבא קמא', 1)") }
+            insertLines(conn, 7, List(12) { "הצד השוה $it – המשך הסוגיה" })
+
+            val report = indexAllBooks(conn, Logger.withTag("test"))
+
+            assertEquals(0, report.boldBooks + report.dashBooks)
+            assertEquals(emptyList(), dhRows(conn))
+        }
+    }
+
+    @Test
+    fun `a dependent commentary remains eligible when also marked as a base book`() {
+        withDb { conn ->
+            conn.createStatement().use { st ->
+                st.execute("INSERT INTO book VALUES (8, 'פירוש מסומן גם כבסיס', 1)")
+                st.execute("INSERT INTO book VALUES (9, 'ספר הבסיס', 1)")
+                st.execute("INSERT INTO book_base_text VALUES (8, 9)")
+            }
+            insertLines(conn, 8, List(10) { "<b>דיבור $it.</b> פירוש" })
+
+            val report = indexAllBooks(conn, Logger.withTag("test"))
+
+            assertEquals(1, report.boldBooks)
+            assertEquals(10, report.indexed)
+        }
+    }
+
+    @Test
+    fun `rebuilding replaces stale rows`() {
+        withDb { conn ->
+            conn.createStatement().use { it.execute("INSERT INTO book (id, title) VALUES (5, 'ספר')") }
             insertLines(conn, 5, List(10) { "דיבור $it – פירוש" })
+            conn.createStatement().use { it.execute("INSERT INTO line_dh VALUES (99, 'ישן', 99)") }
 
-            indexAllBooks(conn, Logger.withTag("test"))
-            val first = dhRows(conn)
-            // The CLI's main() deletes before rebuilding; INSERT OR IGNORE makes
-            // a second pass over existing rows a no-op either way.
-            indexAllBooks(conn, Logger.withTag("test"))
+            rebuildLineDhIndex(conn, Logger.withTag("test"))
 
-            assertEquals(first, dhRows(conn))
+            assertEquals(
+                (0L until 10L).map { Triple(5L, "דיבור $it", it) },
+                dhRows(conn),
+            )
+        }
+    }
+
+    @Test
+    fun `failed rebuild rolls back the previous index`() {
+        withDb { conn ->
+            conn.createStatement().use { st ->
+                st.execute("INSERT INTO book (id, title) VALUES (6, 'ספר')")
+                st.execute("INSERT INTO line VALUES (6, 0, '<b>דיבור.</b> פירוש')")
+                st.execute("INSERT INTO line_dh VALUES (99, 'ישן', 99)")
+                st.execute(
+                    "CREATE TRIGGER reject_line_dh BEFORE INSERT ON line_dh " +
+                        "BEGIN SELECT RAISE(ABORT, 'forced failure'); END",
+                )
+            }
+
+            // Ten rows are needed to pass the book-level minimum and reach the
+            // failing INSERT, so add the remaining distinct source rows here.
+            insertLines(conn, 6, (1 until 10).map { "<b>דיבור $it.</b> פירוש" }, startIndex = 1)
+
+            assertFailsWith<SQLException> {
+                rebuildLineDhIndex(conn, Logger.withTag("test"))
+            }
+            assertEquals(listOf(Triple(99L, "ישן", 99L)), dhRows(conn))
         }
     }
 }

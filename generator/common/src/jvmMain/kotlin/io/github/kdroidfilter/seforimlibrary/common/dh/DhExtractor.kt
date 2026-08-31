@@ -60,7 +60,7 @@ object DhExtractor {
      */
     private val STOP_MARKERS = setOf(
         "מתני'", "מתני", "מתניתין", "גמ'", "גמ", "גמרא", "שם", "בא\"ד", "באד",
-        "ד\"ה", "בד\"ה", "תוד\"ה", "תוס'", "תוס", "רש\"י", "רשי", "פירש\"י",
+        "ד\"ה", "בד\"ה", "תוד\"ה", "תוס'", "תוס", "רש\"י", "רשי'", "רשי", "פירש\"י",
         "הדרן", "סליק", "תשובה", "שאלה", "מכתב", "הקדמה", "הגה", "הג\"ה",
         "פרק", "משנה", "הלכה", "סימן", "סעיף", "ירושלמי", "וכו'", "וכו",
     )
@@ -100,7 +100,18 @@ object DhExtractor {
     }
 
     private fun accept(rawDh: String): String? {
-        val marker = POINTS.replace(rawDh, "").trim().trim { it in ".,:;" || it == ' ' }
+        // Match DhKey's edge trimming while deliberately preserving quote
+        // marks: תוד"ה is a locator, while תודה is a genuine Hebrew word.
+        val marker = POINTS.replace(rawDh, "")
+            .replace('״', '"')
+            .replace('”', '"')
+            .replace('“', '"')
+            .replace('׳', '\'')
+            .replace('’', '\'')
+            .replace('‘', '\'')
+            .replace("''", "\"")
+            .trim()
+            .trim { it in ".,:;?!()[]" || it == ' ' }
         if (marker in STOP_MARKERS) return null
         return DhKey.normalize(rawDh)
     }
