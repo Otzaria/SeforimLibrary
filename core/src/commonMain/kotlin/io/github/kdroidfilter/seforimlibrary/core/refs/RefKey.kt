@@ -57,16 +57,36 @@ object RefKey {
     fun of(ref: String): String? = tokens(ref).joinToString(" ").ifEmpty { null }
 
     /**
+     * Returns the part of [heRef] after a literal title alias, preferring the
+     * longest alias.  This deliberately runs before range parsing: hyphens are
+     * valid inside book titles, and treating one as a range boundary first
+     * collapses every line of that book to the heading key.
+     */
+    private fun suffixAfterTitleAlias(heRef: String, titleAliases: Iterable<String>): String? {
+        var longestMatch: String? = null
+        for (alias in titleAliases) {
+            if (alias.isBlank() || alias.length <= (longestMatch?.length ?: 0)) continue
+            if (!heRef.startsWith(alias)) continue
+            if (heRef.length > alias.length && heRef[alias.length].isLetterOrDigit()) continue
+            longestMatch = alias
+        }
+        return longestMatch?.let { heRef.substring(it.length) }
+    }
+
+    /**
      * Canonical key of a line: [heRef] with the leading book-title prefix
      * removed. Returns `null` for a heading line whose heRef is the title
      * itself. When no alias is a prefix the whole heRef is kept — the caller
      * reports that as a mismatch.
      */
-    fun ofLine(heRef: String, titleAliases: Iterable<String>): String? =
-        ofLineTokens(
+    fun ofLine(heRef: String, titleAliases: Iterable<String>): String? {
+        val aliases = titleAliases as? List<String> ?: titleAliases.toList()
+        suffixAfterTitleAlias(heRef, aliases)?.let { return of(it) }
+        return ofLineTokens(
             heRefTokens = tokens(heRef),
-            titleAliasTokens = titleAliases.map(::tokens),
+            titleAliasTokens = aliases.map(::tokens),
         )
+    }
 
     /**
      * Equivalent to [ofLine], for callers that already tokenised the reference
@@ -78,13 +98,15 @@ object RefKey {
     ): String? {
         if (heRefTokens.isEmpty()) return null
 
+        var longestMatch: List<String>? = null
         for (aliasTokens in titleAliasTokens) {
             if (aliasTokens.isEmpty() || aliasTokens.size > heRefTokens.size) continue
             if (heRefTokens.subList(0, aliasTokens.size) != aliasTokens) continue
-            if (aliasTokens.size == heRefTokens.size) return null
-            return heRefTokens.subList(aliasTokens.size, heRefTokens.size).joinToString(" ")
+            if (aliasTokens.size > (longestMatch?.size ?: 0)) longestMatch = aliasTokens
         }
-        return heRefTokens.joinToString(" ")
+        val prefix = longestMatch ?: return heRefTokens.joinToString(" ")
+        if (prefix.size == heRefTokens.size) return null
+        return heRefTokens.subList(prefix.size, heRefTokens.size).joinToString(" ")
     }
 
     /** FNV-1a 64-bit over the UTF-8 bytes of [refKey] — the stored hash. */

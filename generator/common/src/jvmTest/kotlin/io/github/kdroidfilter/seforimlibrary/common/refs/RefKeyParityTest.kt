@@ -57,4 +57,14 @@ class RefKeyParityTest {
     fun `a heading line gets no key`() {
         assertNull(RefKey.ofLine("ישעיהו", listOf("ישעיהו")))
     }
+
+    @Test
+    fun `line token matching prefers the longest alias regardless of order`() {
+        val heRef = RefKey.tokens("בית חדש ג")
+        val short = RefKey.tokens("בית")
+        val long = RefKey.tokens("בית חדש")
+
+        assertEquals("ג", RefKey.ofLineTokens(heRef, listOf(short, long)))
+        assertEquals("ג", RefKey.ofLineTokens(heRef, listOf(long, short)))
+    }
 }

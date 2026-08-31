@@ -107,7 +107,9 @@ internal fun indexAllBooks(conn: Connection, logger: Logger): LineRefIndexReport
                                 heRefTokens.subList(0, aliasTokens.size) == aliasTokens
                         }
                         if (!hasTitlePrefix) hasTitleMismatch = true
-                        val key = RefKey.ofLineTokens(heRefTokens, titleAliasTokens) ?: continue
+                        // ofLine strips a literal title before interpreting ranges. This matters
+                        // for titles that themselves contain a hyphen or Hebrew maqaf.
+                        val key = RefKey.ofLine(heRef, aliases) ?: continue
                         val hash = RefKey.hash(key)
                         if (!seen.add(hash)) ambiguous++
                         insert.setLong(1, bookId)

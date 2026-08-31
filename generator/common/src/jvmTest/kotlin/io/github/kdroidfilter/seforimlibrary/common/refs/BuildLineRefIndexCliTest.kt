@@ -20,16 +20,20 @@ class BuildLineRefIndexCliTest {
                 st.execute("INSERT INTO book VALUES (1, 'ישעיהו', 'ישעיהו')")
                 st.execute("INSERT INTO book VALUES (2, 'כותרת', 'כותרת')")
                 st.execute("INSERT INTO book VALUES (3, 'לא תואם', 'לא תואם')")
+                st.execute("INSERT INTO book VALUES (4, 'יד דוד על השס א-ב', 'יד דוד על השס א-ב')")
+                st.execute("INSERT INTO book VALUES (5, 'מגדל־עז או תמת ישרים', 'מגדל־עז או תמת ישרים')")
                 st.execute("INSERT INTO line VALUES (1, 0, 'ישעיהו')")
                 st.execute("INSERT INTO line VALUES (1, 1, 'ישעיהו לב, יא')")
                 st.execute("INSERT INTO line VALUES (2, 0, 'כותרת')")
                 st.execute("INSERT INTO line VALUES (3, 0, 'ברכות ב., א')")
+                st.execute("INSERT INTO line VALUES (4, 10, 'יד דוד על השס א-ב 10')")
+                st.execute("INSERT INTO line VALUES (5, 10, 'מגדל־עז או תמת ישרים 10')")
             }
 
             val report = indexAllBooks(conn, Logger.withTag("BuildLineRefIndexCliTest"))
 
             assertEquals(listOf("לא תואם"), report.titleMismatchBooks)
-            assertEquals(2, report.indexed)
+            assertEquals(4, report.indexed)
         }
     }
 }
