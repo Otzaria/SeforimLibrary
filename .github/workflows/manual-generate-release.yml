@@ -1424,13 +1424,17 @@ jobs:
             PREV_DB=prev-dbs/seforim.db
             test -s "$PREV_DB" || { echo "::error::seforim.db.zst not found in release $TAG"; exit 1; }
 
-            # Schema 2 → 3 is an explicitly supported migration: the producer
-            # emits CREATE TABLE/INDEX migrations and verifies a real apply.
-            # Other unknown schema transitions remain fail-closed per anchor.
+            # Explicitly supported schema transitions. The producer derives
+            # contract promotions from both signed schema versions, rebuilds
+            # newly tracked tables from a full snapshot, and verifies a real
+            # apply. Unknown transitions remain fail-closed per anchor.
             PREV_SCHEMA=$(read_schema "$PREV_DB") || exit 1
             if [ "$PREV_SCHEMA" != "$THIS_SCHEMA" ]; then
-              if [ "$PREV_SCHEMA" = 2 ] && [ "$THIS_SCHEMA" = 3 ]; then
-                echo "schema 2 → 3 — producing the supported cross-schema delta"
+              if { [ "$PREV_SCHEMA" = 2 ] && [ "$THIS_SCHEMA" = 3 ]; } || \
+                 { [ "$PREV_SCHEMA" = 1 ] && [ "$THIS_SCHEMA" = 4 ]; } || \
+                 { [ "$PREV_SCHEMA" = 2 ] && [ "$THIS_SCHEMA" = 4 ]; } || \
+                 { [ "$PREV_SCHEMA" = 3 ] && [ "$THIS_SCHEMA" = 4 ]; }; then
+                echo "schema $PREV_SCHEMA → $THIS_SCHEMA — producing the supported cross-schema delta"
               else
                 echo "schema $PREV_SCHEMA → $THIS_SCHEMA is unsupported — skip anchor"
                 rm -rf prev-dbs

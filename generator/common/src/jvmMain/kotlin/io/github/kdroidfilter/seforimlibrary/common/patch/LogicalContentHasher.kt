@@ -71,7 +71,7 @@ class LogicalContentHasher(
     }
 
     companion object {
-        /** Schema 1/2 hash contract. Never append future tables here. */
+        /** Schema-2 hash contract. Never append future tables here. */
         val TABLES_SCHEMA_2: List<String> = listOf(
             "source",
             "author",
@@ -109,17 +109,31 @@ class LogicalContentHasher(
             "schema_meta",
         )
 
+        /** Schema-1 hash contract predates the book_base_text junction. */
+        val TABLES_SCHEMA_1: List<String> = TABLES_SCHEMA_2.filterNot { it == "book_base_text" }
+
         /** Schema 3 adds the sparse per-side visibility table after link coverage. */
         val TABLES_SCHEMA_3: List<String> = TABLES_SCHEMA_2.toMutableList().apply {
             add(indexOf("link_coverage") + 1, "link_suppressed_side")
         }
 
+        /**
+         * Schema 4 adds the canonical line-reference index and the
+         * dibbur-hamatchil index right after line_toc.
+         */
+        val TABLES_SCHEMA_4: List<String> = TABLES_SCHEMA_3.toMutableList().apply {
+            add(indexOf("line_toc") + 1, "line_ref")
+            add(indexOf("line_ref") + 1, "line_dh")
+        }
+
         /** Current-schema default for build-time diagnostics and current DB tests. */
-        val DEFAULT_TABLES: List<String> = TABLES_SCHEMA_3
+        val DEFAULT_TABLES: List<String> = TABLES_SCHEMA_4
 
         fun tablesForSchemaVersion(schemaVersion: Int): List<String> = when (schemaVersion) {
-            1, 2 -> TABLES_SCHEMA_2
+            1 -> TABLES_SCHEMA_1
+            2 -> TABLES_SCHEMA_2
             3 -> TABLES_SCHEMA_3
+            4 -> TABLES_SCHEMA_4
             else -> error("Unsupported logical-hash schema version $schemaVersion")
         }
 

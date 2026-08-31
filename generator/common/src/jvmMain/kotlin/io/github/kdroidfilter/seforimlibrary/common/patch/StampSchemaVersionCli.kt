@@ -4,6 +4,7 @@ import co.touchlab.kermit.Logger
 import co.touchlab.kermit.Severity
 import java.nio.file.Files
 import java.nio.file.Paths
+import java.sql.Connection
 import java.sql.DriverManager
 
 /**
@@ -37,14 +38,55 @@ fun main() {
     require(Files.isRegularFile(path)) { "Database file not found: $dbPath" }
 
     DriverManager.getConnection("jdbc:sqlite:${path.toAbsolutePath()}").use { conn ->
+        stampSchemaVersion(conn, dbVersion, dbSchemaVersion)
+    }
+    logger.i {
+        "Stamped $dbPath: db_version=$dbVersion, db_schema_version=$dbSchemaVersion"
+    }
+}
+
+/** Writes release/schema metadata only after the DB satisfies that schema's table contract. */
+internal fun stampSchemaVersion(conn: Connection, dbVersion: Int, dbSchemaVersion: Int) {
+    require(dbVersion >= 1) { "dbVersion=$dbVersion must be positive" }
+    require(dbSchemaVersion in 1..PatchDbSchema.CURRENT_VERSION) {
+        "dbSchemaVersion=$dbSchemaVersion is outside the supported range 1..${PatchDbSchema.CURRENT_VERSION}"
+    }
+    check(conn.autoCommit) { "stampSchemaVersion requires an unowned JDBC connection" }
+
+    val requiredTables = when (dbSchemaVersion) {
+        4 -> setOf("line_ref", "line_dh")
+        else -> emptySet()
+    }
+    val existingTables = if (requiredTables.isEmpty()) {
+        emptySet()
+    } else {
+        conn.prepareStatement(
+            "SELECT name FROM sqlite_master WHERE type='table' " +
+                "AND name IN (${requiredTables.joinToString { "?" }})",
+        ).use { ps ->
+            requiredTables.forEachIndexed { index, table -> ps.setString(index + 1, table) }
+            ps.executeQuery().use { rs -> buildSet { while (rs.next()) add(rs.getString(1)) } }
+        }
+    }
+    val missingTables = requiredTables - existingTables
+    require(missingTables.isEmpty()) {
+        "Cannot stamp DB as schema $dbSchemaVersion; missing required tables: " +
+            missingTables.sorted().joinToString()
+    }
+
+    conn.autoCommit = false
+    try {
         conn.prepareStatement(
             "INSERT OR REPLACE INTO schema_meta(key, value) VALUES (?, ?)",
         ).use { ps ->
             ps.setString(1, "db_version"); ps.setString(2, dbVersion.toString()); ps.executeUpdate()
             ps.setString(1, "db_schema_version"); ps.setString(2, dbSchemaVersion.toString()); ps.executeUpdate()
         }
-    }
-    logger.i {
-        "Stamped $dbPath: db_version=$dbVersion, db_schema_version=$dbSchemaVersion"
+        conn.commit()
+    } catch (failure: Throwable) {
+        runCatching { conn.rollback() }.exceptionOrNull()?.let(failure::addSuppressed)
+        throw failure
+    } finally {
+        conn.autoCommit = true
     }
 }

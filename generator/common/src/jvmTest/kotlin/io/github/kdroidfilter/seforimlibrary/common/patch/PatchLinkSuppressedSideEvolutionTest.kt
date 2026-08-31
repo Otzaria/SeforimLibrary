@@ -31,8 +31,28 @@ class PatchLinkSuppressedSideEvolutionTest {
             "the regression is only caught if an absent schema-3 table changes the current-order hash",
         )
 
-        val produced = PatchDbProducer().produce(prev, next, patch, fromVersion = 22, toVersion = 23)
+        val produced = PatchDbProducer().produce(
+            prev,
+            next,
+            patch,
+            fromVersion = 22,
+            toVersion = 23,
+            fromSchemaVersion = 2,
+            toSchemaVersion = 3,
+        )
         assertEquals(1, produced.upsertCounts.getValue("link_suppressed_side"))
+        DriverManager.getConnection("jdbc:sqlite:${patch.toAbsolutePath()}").use { conn ->
+            conn.createStatement().use { st ->
+                st.executeQuery("SELECT value FROM patch_meta WHERE key='schema_version'").use { rs ->
+                    rs.next()
+                    assertEquals(
+                        PatchDbSchema.CURRENT_VERSION.toString(),
+                        rs.getString(1),
+                        "patch_meta carries the artifact format, not the target DB schema",
+                    )
+                }
+            }
+        }
 
         Files.copy(prev, target)
         val expectedV3Hash = hash(next, 3)
@@ -59,7 +79,15 @@ class PatchLinkSuppressedSideEvolutionTest {
 
         buildDb(prev, schemaVersion = 3, reasonMask = 4)
         buildDb(next, schemaVersion = 3, reasonMask = 5)
-        val produced = PatchDbProducer().produce(prev, next, patch, fromVersion = 23, toVersion = 24)
+        val produced = PatchDbProducer().produce(
+            prev,
+            next,
+            patch,
+            fromVersion = 23,
+            toVersion = 24,
+            fromSchemaVersion = 3,
+            toSchemaVersion = 3,
+        )
         assertEquals(1, produced.upsertCounts.getValue("link_suppressed_side"))
 
         Files.copy(prev, target)

@@ -18,10 +18,22 @@ import kotlin.test.assertEquals
 class PatchTablesContractTest {
 
     @Test
-    fun `schema 2 contracts remain frozen when schema 3 adds visibility`() {
+    fun `frozen schema contracts derive from the current list by dropping additions`() {
         assertEquals(
-            PATCH_TABLES_IN_FK_ORDER.filterNot { it.name == "link_suppressed_side" },
+            PATCH_TABLES_IN_FK_ORDER.filterNot { it.name in setOf("line_ref", "line_dh") },
+            PATCH_TABLES_SCHEMA_3,
+        )
+        assertEquals(
+            PATCH_TABLES_SCHEMA_3.filterNot { it.name == "link_suppressed_side" },
             PATCH_TABLES_SCHEMA_2,
+        )
+        assertEquals(
+            PATCH_TABLES_SCHEMA_2.filterNot { it.name == "book_base_text" },
+            PATCH_TABLES_SCHEMA_1,
+        )
+        assertEquals(
+            LogicalContentHasher.TABLES_SCHEMA_2.filterNot { it == "book_base_text" },
+            LogicalContentHasher.TABLES_SCHEMA_1,
         )
         assertEquals(
             listOf(
@@ -39,6 +51,13 @@ class PatchTablesContractTest {
                 add(indexOf("link_coverage") + 1, "link_suppressed_side")
             },
             LogicalContentHasher.TABLES_SCHEMA_3,
+        )
+        assertEquals(
+            LogicalContentHasher.TABLES_SCHEMA_3.toMutableList().apply {
+                add(indexOf("line_toc") + 1, "line_ref")
+                add(indexOf("line_ref") + 1, "line_dh")
+            },
+            LogicalContentHasher.TABLES_SCHEMA_4,
         )
     }
 
@@ -80,6 +99,32 @@ class PatchTablesContractTest {
             PATCH_TABLES_IN_FK_ORDER,
             LogicalContentHasher.DEFAULT_TABLES,
             PatchDbSchema.CURRENT_VERSION,
+        )
+        assertEquals(expected, actual)
+    }
+
+    @Test
+    fun `schema 3 canonical contract remains byte frozen`() {
+        val expected = javaClass.getResourceAsStream("/patch_tables_contract_schema_3.json")
+            ?.readBytes()?.toString(Charsets.UTF_8)
+            ?: error("fixture patch_tables_contract_schema_3.json missing from test resources")
+        val actual = canonicalContract(
+            PATCH_TABLES_SCHEMA_3,
+            LogicalContentHasher.TABLES_SCHEMA_3,
+            schemaVersion = 3,
+        )
+        assertEquals(expected, actual)
+    }
+
+    @Test
+    fun `schema 1 canonical contract remains byte frozen`() {
+        val expected = javaClass.getResourceAsStream("/patch_tables_contract_schema_1.json")
+            ?.readBytes()?.toString(Charsets.UTF_8)
+            ?: error("fixture patch_tables_contract_schema_1.json missing from test resources")
+        val actual = canonicalContract(
+            PATCH_TABLES_SCHEMA_1,
+            LogicalContentHasher.TABLES_SCHEMA_1,
+            schemaVersion = 1,
         )
         assertEquals(expected, actual)
     }
