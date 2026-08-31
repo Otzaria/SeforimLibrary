@@ -144,6 +144,18 @@ tasks.register<JavaExec>("buildLineRefIndex") {
     jvmArgs = listOf("-Xmx2g")
 }
 
+tasks.register<JavaExec>("buildLineDhIndex") {
+    group = "application"
+    description = "Rebuild line_dh — the (bookId, dhText) -> lineIndex dibbur-hamatchil index."
+    dependsOn("jvmJar")
+    mainClass.set("io.github.kdroidfilter.seforimlibrary.common.dh.BuildLineDhIndexCliKt")
+    classpath = files(tasks.named("jvmJar")) + configurations.getByName("jvmRuntimeClasspath")
+    val dbPath = project.findProperty("dbPath") as String?
+        ?: rootProject.layout.buildDirectory.file("seforim.db").get().asFile.absolutePath
+    systemProperty("dbPath", dbPath)
+    jvmArgs = listOf("-Xmx2g")
+}
+
 tasks.register<JavaExec>("diagnoseHashMismatch") {
     group = "verification"
     description = "Apply a patch.db onto a copy of prevDb and report which tables hash-differ from newDb."
