@@ -37,6 +37,8 @@ class ReleaseManifestWriterTest {
         assertTrue(body.contains("\"fromVersion\": 1"))
         assertTrue(body.contains("\"toVersion\": 2"))
         assertTrue(body.contains("\"fromSchemaVersion\": 3"))
+        assertTrue(body.contains("\"toSchemaVersion\": 3"))
+        assertTrue(body.contains("\"patchFormatVersion\": ${PatchDbSchema.CURRENT_VERSION}"))
         assertTrue(body.contains("\"fromContentHash\": \"aaaa\""))
         assertTrue(body.contains("\"toContentHash\": \"bbbb\""))
         assertTrue(body.contains("\"compression\": \"zstd\""))

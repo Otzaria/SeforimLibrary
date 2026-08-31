@@ -303,6 +303,20 @@ CREATE TABLE IF NOT EXISTS line_ref (
     PRIMARY KEY (bookId, refKeyHash, lineIndex)
 ) WITHOUT ROWID;
 
+-- Dibbur-hamatchil index: the normalised opening words of each commentary
+-- comment (the bold or dash-separated prefix of the line's content), keyed
+-- as text so the client can prefix-match while the user types, and render
+-- them as virtual sub-headings under the book's TOC. Populated by the
+-- buildLineDhIndex stage. Existing client DBs receive the table and its
+-- contents through the schema-4 delta migration registered by the patch
+-- pipeline; fresh DBs include it directly.
+CREATE TABLE IF NOT EXISTS line_dh (
+    bookId INTEGER NOT NULL,
+    dhText TEXT NOT NULL,
+    lineIndex INTEGER NOT NULL,
+    PRIMARY KEY (bookId, dhText, lineIndex)
+) WITHOUT ROWID;
+
 -- TOC texts table
 CREATE TABLE IF NOT EXISTS tocText (
     id INTEGER PRIMARY KEY NOT NULL,

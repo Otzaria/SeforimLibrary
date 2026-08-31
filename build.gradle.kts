@@ -18,6 +18,7 @@ tasks.register("generateSeforimDb") {
     dependsOn(":sefariasqlite:seedGenerations")
     dependsOn(":sefariasqlite:seedAllMetadata")
     dependsOn(":generator-common:buildLineRefIndex")
+    dependsOn(":generator-common:buildLineDhIndex")
     dependsOn(":packaging:writeReleaseInfo")
     dependsOn(":packaging:downloadLexicalDb")
     // Stamps schema_meta.db_version into the produced seforim.db so the
@@ -35,6 +36,7 @@ project(":generator-common").tasks.matching { it.name == "stampSchemaVersion" }.
     mustRunAfter(":sefariasqlite:seedGenerations")
     mustRunAfter(":sefariasqlite:seedAllMetadata")
     mustRunAfter(":generator-common:buildLineRefIndex")
+    mustRunAfter(":generator-common:buildLineDhIndex")
 }
 
 // line_ref is derived from line.heRef + book.title, so it must be rebuilt
@@ -45,6 +47,18 @@ project(":generator-common").tasks.matching { it.name == "buildLineRefIndex" }.c
     mustRunAfter(":sefariasqlite:renameCategories")
     mustRunAfter(":sefariasqlite:seedGenerations")
     mustRunAfter(":sefariasqlite:seedAllMetadata")
+}
+
+// line_dh is derived from line.content, so it must be rebuilt after every
+// stage that writes lines. Ordered after buildLineRefIndex as well so the
+// two index builders write to seforim.db sequentially rather than concurrently.
+project(":generator-common").tasks.matching { it.name == "buildLineDhIndex" }.configureEach {
+    mustRunAfter(":otzariasqlite:appendOtzaria")
+    mustRunAfter(":otzariasqlite:generateHavroutaLinks")
+    mustRunAfter(":sefariasqlite:renameCategories")
+    mustRunAfter(":sefariasqlite:seedGenerations")
+    mustRunAfter(":sefariasqlite:seedAllMetadata")
+    mustRunAfter(":generator-common:buildLineRefIndex")
 }
 
 // Ensure ordering inside the pipeline task graph
