@@ -17,6 +17,7 @@ tasks.register("generateSeforimDb") {
     dependsOn(":sefariasqlite:renameCategories")
     dependsOn(":sefariasqlite:seedGenerations")
     dependsOn(":sefariasqlite:seedAllMetadata")
+    dependsOn(":generator-common:buildLineRefIndex")
     dependsOn(":packaging:writeReleaseInfo")
     dependsOn(":packaging:downloadLexicalDb")
     // Stamps schema_meta.db_version into the produced seforim.db so the
@@ -31,6 +32,17 @@ tasks.register("generateSeforimDb") {
 project(":generator-common").tasks.matching { it.name == "stampSchemaVersion" }.configureEach {
     mustRunAfter(":packaging:writeReleaseInfo")
     mustRunAfter(":catalog:buildCatalog")
+    mustRunAfter(":sefariasqlite:seedGenerations")
+    mustRunAfter(":sefariasqlite:seedAllMetadata")
+    mustRunAfter(":generator-common:buildLineRefIndex")
+}
+
+// line_ref is derived from line.heRef + book.title, so it must be rebuilt
+// after every stage that writes or renames books and lines.
+project(":generator-common").tasks.matching { it.name == "buildLineRefIndex" }.configureEach {
+    mustRunAfter(":otzariasqlite:appendOtzaria")
+    mustRunAfter(":otzariasqlite:generateHavroutaLinks")
+    mustRunAfter(":sefariasqlite:renameCategories")
     mustRunAfter(":sefariasqlite:seedGenerations")
     mustRunAfter(":sefariasqlite:seedAllMetadata")
 }

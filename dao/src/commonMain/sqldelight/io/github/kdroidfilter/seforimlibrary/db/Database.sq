@@ -288,6 +288,21 @@ CREATE INDEX IF NOT EXISTS idx_line_book_index ON line(bookId, lineIndex);
 CREATE INDEX IF NOT EXISTS idx_line_toc ON line(tocEntryId);
 CREATE INDEX IF NOT EXISTS idx_line_heref ON line(heRef);
 
+-- Canonical line-reference index: (bookId, refKeyHash) -> lineIndex.
+-- refKeyHash is FNV-1a 64 of the RefKey normalisation of line.heRef with the
+-- book-title prefix stripped, so the client can resolve a typed reference
+-- ("ישעיהו לב יא") to an exact line with one indexed lookup instead of
+-- scanning a book's heRefs. WITHOUT ROWID: the PK btree is the whole table.
+-- Populated by the buildLineRefIndex stage. The schema-3 patch/hash contract
+-- deliberately remains frozen; the companion schema-4 change registers this
+-- table in the delta pipeline. Older clients fall back to TOC-level resolution.
+CREATE TABLE IF NOT EXISTS line_ref (
+    bookId INTEGER NOT NULL,
+    refKeyHash INTEGER NOT NULL,
+    lineIndex INTEGER NOT NULL,
+    PRIMARY KEY (bookId, refKeyHash, lineIndex)
+) WITHOUT ROWID;
+
 -- TOC texts table
 CREATE TABLE IF NOT EXISTS tocText (
     id INTEGER PRIMARY KEY NOT NULL,

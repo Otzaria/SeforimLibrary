@@ -1,0 +1,16 @@
+-- Queries for the canonical line-reference index
+
+selectLineIndicesByRefKeyHash:
+SELECT lineIndex FROM line_ref
+WHERE bookId = ? AND refKeyHash = ?
+ORDER BY lineIndex;
+
+insert:
+INSERT OR IGNORE INTO line_ref (bookId, refKeyHash, lineIndex)
+VALUES (?, ?, ?);
+
+deleteByBookId:
+DELETE FROM line_ref WHERE bookId = ?;
+
+countAll:
+SELECT COUNT(*) FROM line_ref;
