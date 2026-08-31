@@ -1424,13 +1424,18 @@ jobs:
             PREV_DB=prev-dbs/seforim.db
             test -s "$PREV_DB" || { echo "::error::seforim.db.zst not found in release $TAG"; exit 1; }
 
-            # אין patch חוצה-סכמה: אם הסכמה של ה-prev שונה — דלג על ה-anchor הזה בלבד
-            # (פרסום ה-bundle המלא נמשך). schema_meta חסר → ERROR ב-read_schema.
+            # Schema 2 → 3 is an explicitly supported migration: the producer
+            # emits CREATE TABLE/INDEX migrations and verifies a real apply.
+            # Other unknown schema transitions remain fail-closed per anchor.
             PREV_SCHEMA=$(read_schema "$PREV_DB") || exit 1
             if [ "$PREV_SCHEMA" != "$THIS_SCHEMA" ]; then
-              echo "schema $PREV_SCHEMA != $THIS_SCHEMA — cross-schema delta unsupported, skip anchor"
-              rm -rf prev-dbs
-              continue
+              if [ "$PREV_SCHEMA" = 2 ] && [ "$THIS_SCHEMA" = 3 ]; then
+                echo "schema 2 → 3 — producing the supported cross-schema delta"
+              else
+                echo "schema $PREV_SCHEMA → $THIS_SCHEMA is unsupported — skip anchor"
+                rm -rf prev-dbs
+                continue
+              fi
             fi
 
             gradle :generator-common:producePatchAndVerify \
