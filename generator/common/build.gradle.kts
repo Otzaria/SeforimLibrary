@@ -34,6 +34,8 @@ kotlin {
         jvmTest.dependencies {
             implementation(kotlin("test-junit"))
             implementation(libs.sqlDelight.driver.sqlite)
+            implementation(libs.kotlinx.serialization.json)
+            implementation(project(":core"))
         }
     }
 }
@@ -115,7 +117,8 @@ tasks.register<JavaExec>("stampSchemaVersion") {
     classpath = files(tasks.named("jvmJar")) + configurations.getByName("jvmRuntimeClasspath")
     // Default the dbPath to <root>/build/seforim.db (where generateSeforimDb
     // emits) so the operator only needs to pass -PdbVersion in the common case.
-    val dbPath = project.findProperty("dbPath") as String?
+    val dbPath = (project.findProperty("dbPath") ?: project.findProperty("seforimDb")) as String?
+        ?: System.getenv("SEFORIM_DB")
         ?: rootProject.layout.buildDirectory.file("seforim.db").get().asFile.absolutePath
     // dbVersion falls back to toVersion (release timeline) for convenience
     // when called through publishRelease, then to "1" for the first release.
@@ -126,6 +129,19 @@ tasks.register<JavaExec>("stampSchemaVersion") {
     systemProperty("dbVersion", dbVersion)
     project.findProperty("dbSchemaVersion")?.let { systemProperty("dbSchemaVersion", it as String) }
     jvmArgs = listOf("-Xmx512m")
+}
+
+tasks.register<JavaExec>("buildLineRefIndex") {
+    group = "application"
+    description = "Rebuild line_ref — the canonical (bookId, refKeyHash) -> lineIndex reference index."
+    dependsOn("jvmJar")
+    mainClass.set("io.github.kdroidfilter.seforimlibrary.common.refs.BuildLineRefIndexCliKt")
+    classpath = files(tasks.named("jvmJar")) + configurations.getByName("jvmRuntimeClasspath")
+    val dbPath = (project.findProperty("dbPath") ?: project.findProperty("seforimDb")) as String?
+        ?: System.getenv("SEFORIM_DB")
+        ?: rootProject.layout.buildDirectory.file("seforim.db").get().asFile.absolutePath
+    systemProperty("dbPath", dbPath)
+    jvmArgs = listOf("-Xmx2g")
 }
 
 tasks.register<JavaExec>("diagnoseHashMismatch") {
