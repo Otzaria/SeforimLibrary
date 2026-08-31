@@ -77,6 +77,23 @@ class PatchApplierSchemaGuardTest {
     }
 
     @Test
+    fun `applier refuses non-positive patch schema versions`() {
+        for (schemaVersion in listOf(0, -1)) {
+            val seforim = tmp.newFolder().toPath().resolve("seforim-$schemaVersion.db")
+            buildSeforimDb(seforim)
+            val patch = tmp.newFolder().toPath().resolve("patch-$schemaVersion.db")
+            buildPatchDb(patch, schemaVersion = schemaVersion)
+
+            DriverManager.getConnection("jdbc:sqlite:${seforim.toAbsolutePath()}").use { conn ->
+                val ex = assertFailsWith<IllegalStateException> {
+                    PatchApplier().apply(conn = conn, patchDb = patch)
+                }
+                assertTrue("schema_version=$schemaVersion" in ex.message.orEmpty())
+            }
+        }
+    }
+
+    @Test
     fun `applier refuses a patch missing patch_meta schema_version`() {
         val seforim = tmp.newFolder().toPath().resolve("seforim.db")
         buildSeforimDb(seforim)

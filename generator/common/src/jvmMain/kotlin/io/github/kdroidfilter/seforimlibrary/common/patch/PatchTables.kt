@@ -98,3 +98,16 @@ internal val PATCH_TABLES_SCHEMA_3: List<PatchTable> =
 /** Schema-2 contract retained for updater compatibility tests. */
 internal val PATCH_TABLES_SCHEMA_2: List<PatchTable> =
     PATCH_TABLES_SCHEMA_3.filterNot { it.name == "link_suppressed_side" }
+
+/** Schema-1 contract predates the book_base_text junction. */
+internal val PATCH_TABLES_SCHEMA_1: List<PatchTable> =
+    PATCH_TABLES_SCHEMA_2.filterNot { it.name == "book_base_text" }
+
+/** Exact patch-table contract used to produce a database schema version. */
+internal fun patchTablesForSchemaVersion(schemaVersion: Int): List<PatchTable> = when (schemaVersion) {
+    1 -> PATCH_TABLES_SCHEMA_1
+    2 -> PATCH_TABLES_SCHEMA_2
+    3 -> PATCH_TABLES_SCHEMA_3
+    4 -> PATCH_TABLES_IN_FK_ORDER
+    else -> error("Unsupported patch-table schema version $schemaVersion")
+}

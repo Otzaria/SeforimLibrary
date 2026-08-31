@@ -148,17 +148,26 @@ class ManualReleaseWorkflowContractTest(unittest.TestCase):
             stage,
         )
 
-    def test_patch_fan_allows_only_the_supported_schema_transition(self):
+    def test_patch_fan_allows_only_the_supported_schema_transitions(self):
         patch_fan = self.step("Produce + verify patch fan")
 
-        self.assertIn('[ "$PREV_SCHEMA" = 2 ] && [ "$THIS_SCHEMA" = 3 ]', patch_fan)
+        supported = (
+            '[ "$PREV_SCHEMA" = 1 ] && [ "$THIS_SCHEMA" = 4 ]',
+            '[ "$PREV_SCHEMA" = 2 ] && [ "$THIS_SCHEMA" = 3 ]',
+            '[ "$PREV_SCHEMA" = 2 ] && [ "$THIS_SCHEMA" = 4 ]',
+            '[ "$PREV_SCHEMA" = 3 ] && [ "$THIS_SCHEMA" = 4 ]',
+        )
+        for transition in supported:
+            self.assertIn(transition, patch_fan)
+            self.assertLess(
+                patch_fan.index(transition),
+                patch_fan.index("gradle :generator-common:producePatchAndVerify"),
+            )
         self.assertIn("producing the supported cross-schema delta", patch_fan)
         self.assertIn("is unsupported — skip anchor", patch_fan)
         self.assertNotIn("cross-schema delta unsupported", patch_fan)
-        self.assertLess(
-            patch_fan.index('[ "$PREV_SCHEMA" = 2 ] && [ "$THIS_SCHEMA" = 3 ]'),
-            patch_fan.index("gradle :generator-common:producePatchAndVerify"),
-        )
+        self.assertNotIn('[ "$PREV_SCHEMA" = 1 ] && [ "$THIS_SCHEMA" = 2 ]', patch_fan)
+        self.assertNotIn('[ "$PREV_SCHEMA" = 1 ] && [ "$THIS_SCHEMA" = 3 ]', patch_fan)
 
     def test_pinned_sefaria_archive_uses_its_explicit_root_contract(self):
         extract = self.step("Verify pinned lineage and extract exact inputs")

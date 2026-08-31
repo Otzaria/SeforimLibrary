@@ -53,6 +53,8 @@ fun main(args: Array<String>) {
         outputPath = outPath,
         fromVersion = from,
         toVersion = to,
+        fromSchemaVersion = fromSchemaVersion,
+        toSchemaVersion = toSchemaVersion,
     )
     val totalUpserts = output.upsertCounts.values.sum()
     val totalDeletes = output.deleteCounts.values.sum()
@@ -74,7 +76,12 @@ fun main(args: Array<String>) {
         // exactly across the v13→v14/v14→v15 verifications. HARD gate: a
         // patch that does not reproduce the target byte-for-logical-byte is
         // a broken distribution artifact and must never ship with a warning.
-        PatchApplier(logger).apply(conn = conn, patchDb = outPath)
+        PatchApplier(logger).apply(
+            conn = conn,
+            patchDb = outPath,
+            expectedToContentHash = newHash,
+            expectedToSchemaVersion = toSchemaVersion,
+        )
         val appliedHash = LogicalContentHasher.forSchemaVersion(toSchemaVersion).compute(conn)
         check(appliedHash == newHash) {
             "Patch verification FAILED: applied=$appliedHash expected=$newHash — " +

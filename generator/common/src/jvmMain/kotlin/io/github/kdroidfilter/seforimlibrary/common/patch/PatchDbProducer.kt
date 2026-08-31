@@ -10,7 +10,7 @@ import java.sql.DriverManager
 /**
  * Produces a `patch.db` from two seforim.db snapshots (previous + current).
  *
- * For each table in [PATCH_TABLES_IN_FK_ORDER]:
+ * For each table in the signed `toSchemaVersion` contract:
  *   1. Reads the column list + PK from the **new** DB.
  *   2. Creates `upsert_<table>` mirroring those columns + PK.
  *   3. Inserts every row of `new.<table>` that either isn't in `prev.<table>`
@@ -19,6 +19,11 @@ import java.sql.DriverManager
  *      `(pk…)` tuple present in `prev` but missing from `new`.
  *
  * See `DELTA_UPDATE_PLAN.md` §6.6.
+ *
+ * A table promoted between schema contracts is rebuilt from the target DB's
+ * full snapshot even when it already exists physically in the previous full
+ * DB. Its unsigned physical state was never guaranteed to exist on clients
+ * that reached that release through an older-schema patch.
  */
 class PatchDbProducer(
     private val logger: Logger = Logger.withTag("PatchDbProducer"),
@@ -39,7 +44,17 @@ class PatchDbProducer(
         fromVersion: Int,
         toVersion: Int,
         migrations: List<Pair<Int, String>> = emptyList(),
+        fromSchemaVersion: Int = PatchDbSchema.CURRENT_VERSION,
+        toSchemaVersion: Int = PatchDbSchema.CURRENT_VERSION,
     ): Output {
+        require(fromSchemaVersion <= toSchemaVersion) {
+            "Schema downgrade $fromSchemaVersion -> $toSchemaVersion is not supported"
+        }
+        val fromTables = patchTablesForSchemaVersion(fromSchemaVersion)
+        val targetTables = patchTablesForSchemaVersion(toSchemaVersion)
+        val fromTableNames = fromTables.mapTo(HashSet()) { it.name }
+        val promotedTables = targetTables.mapTo(HashSet()) { it.name } - fromTableNames
+
         Files.createDirectories(outputPath.toAbsolutePath().parent)
         val tmp = outputPath.resolveSibling("${outputPath.fileName}.tmp")
         if (Files.exists(tmp)) Files.delete(tmp)
@@ -51,26 +66,46 @@ class PatchDbProducer(
         DriverManager.getConnection("jdbc:sqlite:${tmp.toAbsolutePath()}").use { conn ->
             conn.autoCommit = false
             applyBaseDdl(conn)
+            // patch_meta.schema_version describes the patch artifact format
+            // understood by PatchApplier. It is deliberately independent of
+            // the target DB's logical schema version carried by the release
+            // manifest (and may therefore be 4 for a 2 -> 3 DB transition).
             writeMetadata(conn, fromVersion, toVersion)
             attach(conn, "prev", prevDb)
             attach(conn, "new", newDb)
             val nextMigrationVersion = (migrations.maxOfOrNull { it.first } ?: 0) + 1
-            writeMigrations(conn, migrations + inferCreateTableMigrations(conn, nextMigrationVersion))
+            writeMigrations(
+                conn,
+                migrations + inferCreateTableMigrations(
+                    conn = conn,
+                    firstVersion = nextMigrationVersion,
+                    targetTables = targetTables,
+                    promotedTables = promotedTables,
+                ),
+            )
 
             // Materialise upsert_/delete_ tables based on the new DB's actual
             // schema. The producer is generic — every table in our config list
             // is processed identically.
-            for (table in PATCH_TABLES_IN_FK_ORDER) {
+            for (table in targetTables) {
                 if (!tableExists(conn, "new", table.name)) continue
                 PatchDbSchema.createUpsertTable(conn, "new", table)
                 PatchDbSchema.createDeleteTable(conn, "new", table)
             }
 
-            for (table in PATCH_TABLES_IN_FK_ORDER) {
-                upsertCounts[table.name] = scanUpserts(conn, table)
+            for (table in targetTables) {
+                upsertCounts[table.name] = scanUpserts(
+                    conn,
+                    table,
+                    forceFullSnapshot = table.name in promotedTables,
+                )
             }
-            for (table in PATCH_TABLES_IN_FK_ORDER) {
-                deleteCounts[table.name] = scanDeletes(conn, table)
+            for (table in targetTables) {
+                deleteCounts[table.name] = scanDeletes(
+                    conn,
+                    table,
+                    ignorePrevious = table.name in promotedTables,
+                )
             }
 
             // Fail fast on secondary-UNIQUE collisions: catches the case
@@ -78,7 +113,7 @@ class PatchDbProducer(
             // lineages (e.g. same `topic.name` allocated under different ids),
             // which would otherwise blow up mid-transaction in the applier
             // with an opaque "UNIQUE constraint failed" error.
-            assertNoSecondaryUniqueCollisions(conn)
+            assertNoSecondaryUniqueCollisions(conn, targetTables)
 
             // Commit BEFORE detach so SQLite isn't holding locks on the
             // attached DBs through an open transaction.
@@ -126,12 +161,24 @@ class PatchDbProducer(
         }
     }
 
-    private fun inferCreateTableMigrations(conn: Connection, firstVersion: Int): List<Pair<Int, String>> {
+    private fun inferCreateTableMigrations(
+        conn: Connection,
+        firstVersion: Int,
+        targetTables: List<PatchTable>,
+        promotedTables: Set<String>,
+    ): List<Pair<Int, String>> {
         val out = ArrayList<Pair<Int, String>>()
         var version = firstVersion
-        for (table in PATCH_TABLES_IN_FK_ORDER) {
+        for (table in targetTables) {
             if (!tableExists(conn, "new", table.name)) continue
-            if (tableExists(conn, "prev", table.name)) continue
+            val promoted = table.name in promotedTables
+            if (!promoted && tableExists(conn, "prev", table.name)) continue
+
+            // A table that existed physically in a previous DB but was not in
+            // its signed schema contract may be absent (or carry arbitrary
+            // stale rows) on clients that reached that release by delta. Reset
+            // it and ship a full snapshot so both client shapes converge.
+            if (promoted) out += version++ to "DROP TABLE IF EXISTS \"${table.name}\""
 
             readCreateSql(conn, "new", "table", table.name)?.let { sql ->
                 out += version++ to sql
@@ -184,11 +231,11 @@ class PatchDbProducer(
         conn.createStatement().use { it.execute("DETACH DATABASE $alias") }
     }
 
-    private fun scanUpserts(conn: Connection, table: PatchTable): Int {
+    private fun scanUpserts(conn: Connection, table: PatchTable, forceFullSnapshot: Boolean = false): Int {
         val cols = PatchDbSchema.readTableInfo(conn, "new", table.name).map { it.name }
         if (cols.isEmpty()) return 0
         val colsCsv = cols.joinToString(",") { "\"$it\"" }
-        if (!tableExists(conn, "prev", table.name)) {
+        if (forceFullSnapshot || !tableExists(conn, "prev", table.name)) {
             val sql = """
                 INSERT INTO "upsert_${table.name}" ($colsCsv)
                 SELECT $colsCsv
@@ -218,8 +265,9 @@ class PatchDbProducer(
         return conn.createStatement().use { it.executeUpdate(sql) }
     }
 
-    private fun scanDeletes(conn: Connection, table: PatchTable): Int {
+    private fun scanDeletes(conn: Connection, table: PatchTable, ignorePrevious: Boolean = false): Int {
         if (table.primaryKey.isEmpty()) return 0
+        if (ignorePrevious) return 0
         if (!tableExists(conn, "prev", table.name)) return 0
         val pkCsv = table.primaryKey.joinToString(",") { "\"$it\"" }
         val joinCond = table.primaryKey.joinToString(" AND ") { "new.\"$it\" = prev.\"$it\"" }
@@ -245,8 +293,8 @@ class PatchDbProducer(
      * surfacing them here gives the operator a clear, actionable error
      * instead of a mid-transaction crash in [PatchApplier].
      */
-    private fun assertNoSecondaryUniqueCollisions(conn: Connection) {
-        for (table in PATCH_TABLES_IN_FK_ORDER) {
+    private fun assertNoSecondaryUniqueCollisions(conn: Connection, tables: List<PatchTable>) {
+        for (table in tables) {
             if (!tableExists(conn, "new", table.name)) continue
             if (!tableExists(conn, "prev", table.name)) continue
             if (!tableExists(conn, "main", "upsert_${table.name}")) continue

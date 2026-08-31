@@ -96,17 +96,16 @@ class PatchApplier(
     }
 
     private fun runMigrations(conn: Connection): Int {
-        var count = 0
-        conn.createStatement().use { st ->
+        // Materialise the attached patch rows before executing DDL. Keeping a
+        // live sqlite_master-backed result set open while DROP/CREATE changes
+        // the main schema can produce SQLITE_LOCKED on SQLite JDBC.
+        val migrations = conn.createStatement().use { st ->
             st.executeQuery("SELECT sql FROM patch.migrations ORDER BY version ASC").use { rs ->
-                while (rs.next()) {
-                    val sql = rs.getString(1)
-                    conn.createStatement().use { it.execute(sql) }
-                    count++
-                }
+                buildList { while (rs.next()) add(rs.getString(1)) }
             }
         }
-        return count
+        for (sql in migrations) conn.createStatement().use { it.execute(sql) }
+        return migrations.size
     }
 
     private fun runUpserts(conn: Connection): Map<String, Int> {
@@ -169,7 +168,9 @@ class PatchApplier(
 
     /**
      * Reads `patch.patch_meta.schema_version` and refuses to apply a patch
-     * whose schema is newer than [PatchDbSchema.CURRENT_VERSION]. Without
+     * whose format version is outside the supported 1..[PatchDbSchema.CURRENT_VERSION]
+     * range. This is the patch artifact format, not the target DB schema from
+     * the release manifest. Without
      * this check, an older client could silently mis-apply a future-schema
      * patch.db (new tables ignored, new patch_meta keys not honoured),
      * producing a DB that "passed" the FK check but is semantically wrong.
@@ -180,10 +181,11 @@ class PatchApplier(
                 "patch.db is missing patch_meta.schema_version — refusing to apply " +
                     "(likely a corrupt or hand-built patch).",
             )
-        if (patchSchemaVersion > PatchDbSchema.CURRENT_VERSION) {
+        if (patchSchemaVersion !in 1..PatchDbSchema.CURRENT_VERSION) {
             throw IllegalStateException(
                 "patch.db carries schema_version=$patchSchemaVersion but this build " +
-                    "of the applier only understands up to ${PatchDbSchema.CURRENT_VERSION}. " +
+                    "of the applier only understands versions " +
+                    "1..${PatchDbSchema.CURRENT_VERSION}. " +
                     "Upgrade the client before applying this patch.",
             )
         }
