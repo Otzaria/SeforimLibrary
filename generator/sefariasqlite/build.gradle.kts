@@ -161,6 +161,34 @@ tasks.register<JavaExec>("seedGenerations") {
     jvmArgs = listOf("-Xmx512m")
 }
 
+// Seifim alt-TOC synthesis — runs after all book- and link-writing stages so
+// the COMMENTARY links from the Shulchan Aruch are already present.
+// Usage:
+//   ./gradlew :sefariasqlite:synthesizeSeifimAltToc
+//   ./gradlew :sefariasqlite:synthesizeSeifimAltToc -PseforimDb=/path/to/seforim.db
+tasks.register<JavaExec>("synthesizeSeifimAltToc") {
+    group = "application"
+    description = "Synthesize a Seifim alt-TOC for nosei-kelim on the Shulchan Aruch from COMMENTARY links."
+
+    dependsOn("jvmJar")
+    mainClass.set("io.github.kdroidfilter.seforimlibrary.sefariasqlite.SynthesizeSeifimAltTocPostProcessKt")
+    classpath = files(tasks.named("jvmJar")) + configurations.getByName("jvmRuntimeClasspath")
+
+    if (project.hasProperty("seforimDb")) {
+        systemProperty("seforimDb", project.property("seforimDb") as String)
+    } else if (System.getenv("SEFORIM_DB") != null) {
+        systemProperty("seforimDb", System.getenv("SEFORIM_DB"))
+    } else {
+        val defaultDbPath = rootProject.layout.buildDirectory.file("seforim.db").get().asFile.absolutePath
+        systemProperty("seforimDb", defaultDbPath)
+    }
+    if (project.hasProperty("buildStatePath")) {
+        systemProperty("buildStatePath", project.property("buildStatePath") as String)
+    }
+
+    jvmArgs = listOf("-Xmx1g")
+}
+
 // Phase-2 LINKER importer: resolve ref-based artifacts (LinkerToOtzaria) into clickable links.
 // Usage:
 //   ./gradlew :sefariasqlite:generateLinkerLinks -PseforimDb=/path/seforim.db \

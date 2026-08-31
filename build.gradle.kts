@@ -19,6 +19,7 @@ tasks.register("generateSeforimDb") {
     dependsOn(":sefariasqlite:seedAllMetadata")
     dependsOn(":generator-common:buildLineRefIndex")
     dependsOn(":generator-common:buildLineDhIndex")
+    dependsOn(":sefariasqlite:synthesizeSeifimAltToc")
     dependsOn(":packaging:writeReleaseInfo")
     dependsOn(":packaging:downloadLexicalDb")
     // Stamps schema_meta.db_version into the produced seforim.db so the
@@ -35,6 +36,7 @@ project(":generator-common").tasks.matching { it.name == "stampSchemaVersion" }.
     mustRunAfter(":catalog:buildCatalog")
     mustRunAfter(":sefariasqlite:seedGenerations")
     mustRunAfter(":sefariasqlite:seedAllMetadata")
+    mustRunAfter(":sefariasqlite:synthesizeSeifimAltToc")
     mustRunAfter(":generator-common:buildLineRefIndex")
     mustRunAfter(":generator-common:buildLineDhIndex")
 }
@@ -47,6 +49,7 @@ project(":generator-common").tasks.matching { it.name == "buildLineRefIndex" }.c
     mustRunAfter(":sefariasqlite:renameCategories")
     mustRunAfter(":sefariasqlite:seedGenerations")
     mustRunAfter(":sefariasqlite:seedAllMetadata")
+    mustRunAfter(":sefariasqlite:synthesizeSeifimAltToc")
 }
 
 // line_dh is derived from line.content, so it must be rebuilt after every
@@ -96,10 +99,22 @@ project(":sefariasqlite").tasks.matching { it.name == "seedAllMetadata" }.config
     mustRunAfter(":sefariasqlite:renameCategories")
     mustRunAfter(":sefariasqlite:seedGenerations")
 }
+// synthesizeSeifimAltToc reads COMMENTARY links and the final main TOC, so it
+// runs after every book- and link-writing stage. Ordered after the other
+// post-process seeders so they write to seforim.db sequentially.
+project(":sefariasqlite").tasks.matching { it.name == "synthesizeSeifimAltToc" }.configureEach {
+    mustRunAfter(":otzariasqlite:appendOtzaria")
+    mustRunAfter(":otzariasqlite:generateHavroutaLinks")
+    mustRunAfter(":sefariasqlite:renameCategories")
+    mustRunAfter(":sefariasqlite:seedGenerations")
+    mustRunAfter(":sefariasqlite:seedAllMetadata")
+}
 project(":catalog").tasks.matching { it.name == "buildCatalog" }.configureEach {
     mustRunAfter(":otzariasqlite:generateHavroutaLinks")
     mustRunAfter(":sefariasqlite:seedGenerations")
     mustRunAfter(":sefariasqlite:seedAllMetadata")
+    mustRunAfter(":sefariasqlite:synthesizeSeifimAltToc")
+    mustRunAfter(":generator-common:buildLineDhIndex")
 }
 project(":packaging").tasks.matching { it.name == "writeReleaseInfo" }.configureEach {
     mustRunAfter(":catalog:buildCatalog")
