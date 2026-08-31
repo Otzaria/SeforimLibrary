@@ -62,6 +62,8 @@ internal val PATCH_TABLES_IN_FK_ORDER: List<PatchTable> = listOf(
     // Schema 4. Canonical line-reference index — pure key table (PK == all
     // columns), so there is nothing to update on conflict.
     PatchTable("line_ref",           listOf("bookId", "refKeyHash", "lineIndex"), updatable = false),
+    // Schema 4. Dibbur-hamatchil index — pure key table, same shape.
+    PatchTable("line_dh",            listOf("bookId", "dhText", "lineIndex"), updatable = false),
 
     // Links.
     PatchTable("link",               listOf("id"),       updatable = true),
@@ -91,7 +93,7 @@ internal val PATCH_TABLES_IN_FK_ORDER: List<PatchTable> = listOf(
 
 /** Schema-3 contract retained for updater compatibility tests. */
 internal val PATCH_TABLES_SCHEMA_3: List<PatchTable> =
-    PATCH_TABLES_IN_FK_ORDER.filterNot { it.name == "line_ref" }
+    PATCH_TABLES_IN_FK_ORDER.filterNot { it.name in setOf("line_ref", "line_dh") }
 
 /** Schema-2 contract retained for updater compatibility tests. */
 internal val PATCH_TABLES_SCHEMA_2: List<PatchTable> =

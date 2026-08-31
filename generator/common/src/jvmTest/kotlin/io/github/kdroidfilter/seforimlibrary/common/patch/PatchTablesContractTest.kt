@@ -20,7 +20,7 @@ class PatchTablesContractTest {
     @Test
     fun `frozen schema contracts derive from the current list by dropping additions`() {
         assertEquals(
-            PATCH_TABLES_IN_FK_ORDER.filterNot { it.name == "line_ref" },
+            PATCH_TABLES_IN_FK_ORDER.filterNot { it.name in setOf("line_ref", "line_dh") },
             PATCH_TABLES_SCHEMA_3,
         )
         assertEquals(
@@ -47,6 +47,7 @@ class PatchTablesContractTest {
         assertEquals(
             LogicalContentHasher.TABLES_SCHEMA_3.toMutableList().apply {
                 add(indexOf("line_toc") + 1, "line_ref")
+                add(indexOf("line_ref") + 1, "line_dh")
             },
             LogicalContentHasher.TABLES_SCHEMA_4,
         )

@@ -11,9 +11,10 @@ import kotlin.test.assertNotEquals
 import kotlin.test.assertTrue
 
 /**
- * Schema 3 → 4 evolution: the `line_ref` reference index appears as a brand
- * new table. The producer must auto-infer its CREATE TABLE migration (it
- * exists in `new` but not in `prev`), ship its full contents as upserts, and
+ * Schema 3 → 4 evolution: the `line_ref` reference index and the `line_dh`
+ * dibbur-hamatchil index appear as brand new tables. The producer must
+ * auto-infer their CREATE TABLE migrations (they exist in `new` but not in
+ * `prev`), ship their full contents as upserts, and
  * the applier must materialise it while both hash contracts stay intact —
  * schema-3 DBs keep their released hash, the post-apply DB matches the
  * schema-4 hash of the directly-built target.
@@ -42,15 +43,20 @@ class PatchLineRefEvolutionTest {
 
         val produced = PatchDbProducer().produce(prev, next, patch, fromVersion = 30, toVersion = 31)
         assertEquals(2, produced.upsertCounts.getValue("line_ref"))
+        assertEquals(2, produced.upsertCounts.getValue("line_dh"))
 
-        // The CREATE TABLE migration for line_ref must have been auto-inferred.
+        // The CREATE TABLE migrations for line_ref + line_dh must have been auto-inferred.
         DriverManager.getConnection("jdbc:sqlite:${patch.toAbsolutePath()}").use { conn ->
             conn.createStatement().use { st ->
-                st.executeQuery("SELECT sql FROM migrations ORDER BY version").use { rs ->
-                    rs.next()
+                val migrations = buildList {
+                    st.executeQuery("SELECT sql FROM migrations ORDER BY version").use { rs ->
+                        while (rs.next()) add(rs.getString(1))
+                    }
+                }
+                for (table in listOf("line_ref", "line_dh")) {
                     assertTrue(
-                        rs.getString(1).contains("line_ref"),
-                        "expected an inferred CREATE TABLE migration for line_ref",
+                        migrations.any { it.contains(table) },
+                        "expected an inferred CREATE TABLE migration for $table",
                     )
                 }
             }
@@ -134,6 +140,17 @@ class PatchLineRefEvolutionTest {
                     for ((key, lineIndex) in keys) {
                         st.execute("INSERT INTO line_ref VALUES (1, $key, $lineIndex)")
                     }
+                    st.execute(
+                        """
+                        CREATE TABLE line_dh (
+                            bookId INTEGER NOT NULL,
+                            dhText TEXT NOT NULL,
+                            lineIndex INTEGER NOT NULL,
+                            PRIMARY KEY(bookId, dhText, lineIndex)
+                        ) WITHOUT ROWID
+                        """.trimIndent(),
+                    )
+                    st.execute("INSERT INTO line_dh VALUES (1, 'מאימתי קורין', 0), (1, 'עד סוף האשמורה', 1)")
                 }
             }
         }

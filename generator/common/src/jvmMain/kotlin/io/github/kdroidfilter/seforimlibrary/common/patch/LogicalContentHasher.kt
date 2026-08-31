@@ -114,9 +114,13 @@ class LogicalContentHasher(
             add(indexOf("link_coverage") + 1, "link_suppressed_side")
         }
 
-        /** Schema 4 adds the canonical line-reference index right after line_toc. */
+        /**
+         * Schema 4 adds the canonical line-reference index and the
+         * dibbur-hamatchil index right after line_toc.
+         */
         val TABLES_SCHEMA_4: List<String> = TABLES_SCHEMA_3.toMutableList().apply {
             add(indexOf("line_toc") + 1, "line_ref")
+            add(indexOf("line_ref") + 1, "line_dh")
         }
 
         /** Current-schema default for build-time diagnostics and current DB tests. */
