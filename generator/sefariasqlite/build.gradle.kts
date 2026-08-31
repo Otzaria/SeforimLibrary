@@ -182,6 +182,9 @@ tasks.register<JavaExec>("synthesizeSeifimAltToc") {
         val defaultDbPath = rootProject.layout.buildDirectory.file("seforim.db").get().asFile.absolutePath
         systemProperty("seforimDb", defaultDbPath)
     }
+    if (project.hasProperty("buildStatePath")) {
+        systemProperty("buildStatePath", project.property("buildStatePath") as String)
+    }
 
     jvmArgs = listOf("-Xmx1g")
 }

@@ -2,6 +2,10 @@ package io.github.kdroidfilter.seforimlibrary.sefariasqlite
 
 import co.touchlab.kermit.Logger
 import co.touchlab.kermit.Severity
+import io.github.kdroidfilter.seforimlibrary.common.buildstate.IdTable
+import java.nio.file.Files
+import java.nio.file.Path
+import java.nio.file.Paths
 import java.sql.Connection
 import java.sql.DriverManager
 import kotlin.io.path.exists
@@ -31,10 +35,10 @@ import kotlin.system.exitProcess
  *
  * All writes run on one JDBC connection in a single transaction with batched
  * statements — the line_alt_toc map alone is hundreds of thousands of rows,
- * and per-row autocommit turns that into hours of fsyncs. Ids are assigned
- * sequentially from MAX(id), which is deterministic (candidates ordered by
- * bookId, rows by lineIndex) — the same determinism the rest of the alt-TOC
- * machinery relies on for stable delta patches.
+ * and per-row autocommit turns that into hours of fsyncs. Structure and newly
+ * created tocText ids come from the build-state allocator, so they remain
+ * stable across releases. Entry ids follow the existing alt-TOC policy: a
+ * deterministic wholesale rebuild per book.
  *
  * Runs AFTER all book- and link-writing stages (Sefaria links carry the
  * COMMENTARY rows this reads).
@@ -54,34 +58,31 @@ fun main(args: Array<String>) {
     logger.i { "Synthesizing Seifim alt-TOC in $dbPath" }
 
     try {
+        val buildStatePath = resolveSeifimBuildStatePath(dbPath)
+        check(Files.exists(buildStatePath)) {
+            "build_state not found at $buildStatePath; run the DB generation pipeline first"
+        }
         DriverManager.getConnection("jdbc:sqlite:$dbPath").use { conn ->
+            conn.prepareStatement("ATTACH DATABASE ? AS seifim_state").use { st ->
+                st.setString(1, buildStatePath.toAbsolutePath().toString())
+                st.execute()
+            }
+            val stableIds = AttachedBuildStateIds(conn)
             val snapshots = readSeifimCandidateSnapshots(conn)
             logger.i { "Candidates with derivable seif markers: ${snapshots.size}" }
-
-            conn.autoCommit = false
-            val result = try {
-                var structures = 0
-                var leaves = 0
-                for (snapshot in snapshots) {
-                    val written = writeSeifimAltToc(conn, snapshot)
-                    if (written > 0) {
-                        structures++
-                        leaves += written
-                    }
-                }
-                conn.commit()
-                structures to leaves
-            } catch (e: Exception) {
-                runCatching { conn.rollback() }.onFailure { logger.w(it) { "Rollback failed" } }
-                throw e
-            }
-
-            logger.i { "Seifim alt-TOC done: structures=${result.first} leaves=${result.second}" }
+            val result = synthesizeSeifimAltTocs(conn, snapshots, stableIds)
+            logger.i { "Seifim alt-TOC done: structures=${result.structures} leaves=${result.leaves}" }
         }
     } catch (e: Exception) {
         logger.e(e) { "Failed to synthesize Seifim alt-TOC; aborting" }
         exitProcess(1)
     }
+}
+
+/** Resolves -DbuildStatePath / BUILD_STATE_PATH, else `<db>.buildstate`. */
+private fun resolveSeifimBuildStatePath(dbPath: Path): Path {
+    val explicit = System.getProperty("buildStatePath") ?: System.getenv("BUILD_STATE_PATH")
+    return if (explicit != null) Paths.get(explicit) else Paths.get("$dbPath.buildstate")
 }
 
 /** One derivable-seif candidate: everything the write phase needs, pre-read. */
@@ -111,6 +112,120 @@ internal data class SeifLinkRow(
     val lineIndex: Long,
     val baseHeRef: String,
 )
+
+internal data class SeifimSynthesisResult(val structures: Int, val leaves: Int)
+
+/**
+ * Small, disk-backed allocator for the two stable-id namespaces this
+ * post-process touches. The build-state DB is ATTACHed to [conn], so its
+ * natural-key rows and the generated library rows commit or roll back together
+ * without loading the very large line/link maps into memory.
+ */
+internal class AttachedBuildStateIds(private val conn: Connection) {
+    fun altTocStructureId(bookId: Long, key: String): Long {
+        conn.prepareStatement(
+            "SELECT id FROM seifim_state.id_alt_toc_structure WHERE book_id = ? AND key = ?",
+        ).use { st ->
+            st.setLong(1, bookId)
+            st.setString(2, key)
+            st.executeQuery().use { rs -> if (rs.next()) return rs.getLong(1) }
+        }
+        val id = allocate(IdTable.ALT_TOC_STRUCTURE, queryMaxId(conn, "alt_toc_structure"))
+        conn.prepareStatement(
+            "INSERT INTO seifim_state.id_alt_toc_structure(book_id, key, id) VALUES (?, ?, ?)",
+        ).use { st ->
+            st.setLong(1, bookId)
+            st.setString(2, key)
+            st.setLong(3, id)
+            st.executeUpdate()
+        }
+        return id
+    }
+
+    fun tocTextId(text: String): Long {
+        conn.prepareStatement(
+            "SELECT id FROM seifim_state.id_lookup WHERE kind = 'toc_text' AND natural_key = ?",
+        ).use { st ->
+            st.setString(1, text)
+            st.executeQuery().use { rs -> if (rs.next()) return rs.getLong(1) }
+        }
+        val id = allocate(IdTable.TOC_TEXT, queryMaxId(conn, "tocText"))
+        conn.prepareStatement(
+            "INSERT INTO seifim_state.id_lookup(kind, natural_key, id) VALUES ('toc_text', ?, ?)",
+        ).use { st ->
+            st.setString(1, text)
+            st.setLong(2, id)
+            st.executeUpdate()
+        }
+        return id
+    }
+
+    private fun allocate(table: IdTable, currentDbMax: Long): Long {
+        val persistedNext = conn.prepareStatement(
+            "SELECT next_id FROM seifim_state.id_counters WHERE table_name = ?",
+        ).use { st ->
+            st.setString(1, table.tableName)
+            st.executeQuery().use { rs -> if (rs.next()) rs.getLong(1) else 1L }
+        }
+        val id = maxOf(persistedNext, currentDbMax + 1, 1L)
+        conn.prepareStatement(
+            """
+            INSERT INTO seifim_state.id_counters(table_name, next_id) VALUES (?, ?)
+            ON CONFLICT(table_name) DO UPDATE SET next_id = excluded.next_id
+            """.trimIndent(),
+        ).use { st ->
+            st.setString(1, table.tableName)
+            st.setLong(2, id + 1)
+            st.executeUpdate()
+        }
+        return id
+    }
+}
+
+/** Atomically writes all candidate structures and restores JDBC ownership. */
+internal fun synthesizeSeifimAltTocs(
+    conn: Connection,
+    snapshots: List<SeifimBookSnapshot>,
+    stableIds: AttachedBuildStateIds? = null,
+): SeifimSynthesisResult {
+    check(conn.autoCommit) { "synthesizeSeifimAltTocs requires an unowned JDBC connection" }
+    conn.autoCommit = false
+    return try {
+        var structures = 0
+        var leaves = 0
+        for (snapshot in snapshots) {
+            val written = writeSeifimAltToc(conn, snapshot, stableIds)
+            if (written > 0) {
+                structures++
+                leaves += written
+            }
+        }
+        // The catalog and clients use this denormalized flag as their cheap
+        // capability gate. Repair it for both newly-created structures and a
+        // structure left by an older run whose flag was not updated.
+        conn.prepareStatement(
+            """
+            UPDATE book
+            SET hasAltStructures = 1
+            WHERE hasAltStructures = 0
+              AND EXISTS (
+                SELECT 1 FROM alt_toc_structure s
+                WHERE s.bookId = book.id AND s.key = ?
+              )
+            """.trimIndent(),
+        ).use { st ->
+            st.setString(1, SEIFIM_STRUCTURE_KEY)
+            st.executeUpdate()
+        }
+        conn.commit()
+        SeifimSynthesisResult(structures, leaves)
+    } catch (failure: Throwable) {
+        runCatching { conn.rollback() }.exceptionOrNull()?.let(failure::addSuppressed)
+        throw failure
+    } finally {
+        conn.autoCommit = true
+    }
+}
 
 /**
  * Derives the group-opening markers from COMMENTARY link rows.
@@ -149,18 +264,29 @@ internal fun computeSeifMarkers(rows: List<SeifLinkRow>): List<SeifMarker> {
  * structure) and returns those whose links yield at least one marker.
  */
 internal fun readSeifimCandidateSnapshots(conn: Connection): List<SeifimBookSnapshot> {
-    data class Candidate(val bookId: Long, val baseBookIds: MutableList<Long>, val title: String)
+    data class Candidate(
+        val bookId: Long,
+        val title: String,
+        val baseBookIds: MutableList<Long>,
+        val shulchanAruchBaseBookIds: MutableList<Long>,
+    )
+    data class HeadingRow(val id: Long, val parentId: Long?, val heading: SeifimHeading)
 
     // ספר יכול להצהיר על כמה ספרי בסיס (קול יעקב: שולחן ערוך + שולחן ערוך
     // הרב) — מקבצים לפי bookId כדי לא לנסות ליצור מבנה כפול.
     val candidatesByBook = LinkedHashMap<Long, Candidate>()
     conn.prepareStatement(
         """
-        SELECT bbt.bookId, bbt.baseBookId, b.title
+        SELECT bbt.bookId, bbt.baseBookId, bb.title, b.title
         FROM book_base_text bbt
         JOIN book b ON b.id = bbt.bookId
         JOIN book bb ON bb.id = bbt.baseBookId
-        WHERE bb.title LIKE 'שולחן ערוך%'
+        WHERE EXISTS (
+            SELECT 1
+            FROM book_base_text sa_bbt
+            JOIN book sa ON sa.id = sa_bbt.baseBookId
+            WHERE sa_bbt.bookId = bbt.bookId AND sa.title LIKE 'שולחן ערוך%'
+          )
           AND NOT EXISTS (
             SELECT 1 FROM alt_toc_structure s
             WHERE s.bookId = bbt.bookId AND s.key = '$SEIFIM_STRUCTURE_KEY'
@@ -171,9 +297,13 @@ internal fun readSeifimCandidateSnapshots(conn: Connection): List<SeifimBookSnap
         st.executeQuery().use { rs ->
             while (rs.next()) {
                 val bookId = rs.getLong(1)
-                candidatesByBook
-                    .getOrPut(bookId) { Candidate(bookId, mutableListOf(), rs.getString(3)) }
-                    .baseBookIds += rs.getLong(2)
+                val candidate = candidatesByBook.getOrPut(bookId) {
+                    Candidate(bookId, rs.getString(4), mutableListOf(), mutableListOf())
+                }
+                candidate.baseBookIds += rs.getLong(2)
+                if (rs.getString(3).startsWith("שולחן ערוך")) {
+                    candidate.shulchanAruchBaseBookIds += rs.getLong(2)
+                }
             }
         }
     }
@@ -182,48 +312,80 @@ internal fun readSeifimCandidateSnapshots(conn: Connection): List<SeifimBookSnap
     for (candidate in candidatesByBook.values) {
         val linkRows = mutableListOf<SeifLinkRow>()
         val basePlaceholders = candidate.baseBookIds.joinToString(",") { "?" }
+        val shulchanAruchBaseIds = candidate.shulchanAruchBaseBookIds.toHashSet()
+        var declaredBaseLinkCount = 0
         conn.prepareStatement(
             """
-            SELECT ml.id, ml.lineIndex, bl.heRef
-            FROM link k
+            SELECT ml.id, ml.lineIndex, bl.heRef, k.sourceBookId
+            FROM link k INDEXED BY idx_link_target_book
             JOIN connection_type c ON c.id = k.connectionTypeId
             JOIN line ml ON ml.id = k.targetLineId
             JOIN line bl ON bl.id = k.sourceLineId
             WHERE k.sourceBookId IN ($basePlaceholders) AND k.targetBookId = ?
               AND c.name = 'COMMENTARY' AND bl.heRef IS NOT NULL
-            ORDER BY ml.lineIndex, bl.lineIndex
+            ORDER BY ml.lineIndex, bl.lineIndex, k.sourceBookId, k.id
             """.trimIndent(),
         ).use { st ->
             candidate.baseBookIds.forEachIndexed { i, baseId -> st.setLong(i + 1, baseId) }
             st.setLong(candidate.baseBookIds.size + 1, candidate.bookId)
             st.executeQuery().use { rs ->
                 while (rs.next()) {
-                    linkRows += SeifLinkRow(rs.getLong(1), rs.getLong(2), rs.getString(3))
+                    declaredBaseLinkCount++
+                    if (rs.getLong(4) in shulchanAruchBaseIds) {
+                        linkRows += SeifLinkRow(rs.getLong(1), rs.getLong(2), rs.getString(3))
+                    }
                 }
             }
         }
 
+        // A few incidental direct-SA links do not turn a super-commentary
+        // into a usable se'if-by-se'if commentary. Require the direct SA links
+        // to be at least half of its links from all declared bases. This keeps
+        // genuine multi-SA works (e.g. Kol Yaakov) while excluding works such
+        // as Pri Megadim whose real base is Magen Avraham/Taz.
+        if (linkRows.size * 2 < declaredBaseLinkCount) continue
+
         val markers = computeSeifMarkers(linkRows)
         if (markers.isEmpty()) continue
 
-        val headings = mutableListOf<SeifimHeading>()
+        val headingRows = mutableListOf<HeadingRow>()
         conn.prepareStatement(
             """
-            SELECT e.level, t.text, l.id, l.lineIndex
+            SELECT e.id, e.parentId, e.level, t.text, l.id, l.lineIndex
             FROM tocEntry e
             JOIN tocText t ON t.id = e.textId
             JOIN line l ON l.id = e.lineId
-            WHERE e.bookId = ? AND e.level >= 1
-            ORDER BY l.lineIndex
+            WHERE e.bookId = ?
+            ORDER BY l.lineIndex, e.level, e.id
             """.trimIndent(),
         ).use { st ->
             st.setLong(1, candidate.bookId)
             st.executeQuery().use { rs ->
                 while (rs.next()) {
-                    headings += SeifimHeading(rs.getInt(1), rs.getString(2), rs.getLong(3), rs.getLong(4))
+                    val parentId = rs.getLong(2).let { if (rs.wasNull()) null else it }
+                    headingRows += HeadingRow(
+                        id = rs.getLong(1),
+                        parentId = parentId,
+                        heading = SeifimHeading(rs.getInt(3), rs.getString(4), rs.getLong(5), rs.getLong(6)),
+                    )
                 }
             }
         }
+        val headingById = headingRows.associateBy { it.id }
+        val relevantHeadingIds = HashSet<Long>()
+        for (row in headingRows) {
+            if (!isSimanHeading(row.heading.text)) continue
+            var current: HeadingRow? = row
+            while (current != null && relevantHeadingIds.add(current.id)) {
+                current = current.parentId?.let(headingById::get)
+            }
+        }
+        // Keep only siman headings and their structural ancestors. Lower-level
+        // headings such as "סעיף קטן א" are content inside the new se'if
+        // group, not containers above it.
+        val headings = headingRows
+            .filter { it.id in relevantHeadingIds && it.heading.tocLevel >= 1 }
+            .map { it.heading }
         if (headings.isEmpty()) continue
 
         val lines = mutableListOf<Pair<Long, Long>>()
@@ -249,19 +411,34 @@ internal fun readSeifimCandidateSnapshots(conn: Connection): List<SeifimBookSnap
     return snapshots
 }
 
+private fun isSimanHeading(text: String): Boolean {
+    val trimmed = text.trimStart()
+    return trimmed.startsWith("סימן") &&
+        trimmed.length > "סימן".length &&
+        trimmed["סימן".length].isWhitespace()
+}
+
 private fun queryMaxId(conn: Connection, table: String): Long =
     conn.prepareStatement("SELECT COALESCE(MAX(id), 0) FROM $table").use { st ->
         st.executeQuery().use { rs -> rs.next(); rs.getLong(1) }
     }
 
-/** get-or-create over tocText's UNIQUE text, without touching id-allocator state. */
-private fun tocTextId(conn: Connection, text: String): Long {
+/** Get-or-create over tocText's UNIQUE text, using build-state for a new id. */
+private fun tocTextId(conn: Connection, text: String, stableIds: AttachedBuildStateIds?): Long {
     conn.prepareStatement("SELECT id FROM tocText WHERE text = ?").use { st ->
         st.setString(1, text)
         st.executeQuery().use { rs -> if (rs.next()) return rs.getLong(1) }
     }
-    conn.prepareStatement("INSERT INTO tocText (text) VALUES (?)").use { st ->
-        st.setString(1, text)
+    val stableId = stableIds?.tocTextId(text)
+    val sql = if (stableId == null) {
+        "INSERT INTO tocText (text) VALUES (?)"
+    } else {
+        "INSERT INTO tocText (id, text) VALUES (?, ?)"
+    }
+    conn.prepareStatement(sql).use { st ->
+        var parameter = 1
+        if (stableId != null) st.setLong(parameter++, stableId)
+        st.setString(parameter, text)
         st.executeUpdate()
     }
     conn.prepareStatement("SELECT id FROM tocText WHERE text = ?").use { st ->
@@ -277,7 +454,11 @@ private fun tocTextId(conn: Connection, text: String): Long {
  * and `isLastChild` land in the initial batched INSERTs. Returns the number
  * of leaves written (0 = nothing usable, and then nothing is written at all).
  */
-internal fun writeSeifimAltToc(conn: Connection, snapshot: SeifimBookSnapshot): Int {
+internal fun writeSeifimAltToc(
+    conn: Connection,
+    snapshot: SeifimBookSnapshot,
+    stableIds: AttachedBuildStateIds? = null,
+): Int {
     val headingLineIndices = snapshot.headings.map { it.lineIndex }.toHashSet()
     // A marker can only hang beneath a preceding heading; a heading line
     // itself never opens a group (headings carry no ס"ק content).
@@ -350,7 +531,8 @@ internal fun writeSeifimAltToc(conn: Connection, snapshot: SeifimBookSnapshot): 
     }
 
     // Flush: structure row, entry batch, then the per-line owner map.
-    val structureId = queryMaxId(conn, "alt_toc_structure") + 1
+    val structureId = stableIds?.altTocStructureId(snapshot.bookId, SEIFIM_STRUCTURE_KEY)
+        ?: (queryMaxId(conn, "alt_toc_structure") + 1)
     conn.prepareStatement(
         "INSERT INTO alt_toc_structure (id, bookId, key, title, heTitle) VALUES (?, ?, ?, ?, ?)",
     ).use { st ->
@@ -374,7 +556,7 @@ internal fun writeSeifimAltToc(conn: Connection, snapshot: SeifimBookSnapshot): 
             st.setLong(1, entry.id)
             st.setLong(2, structureId)
             if (entry.parentId != null) st.setLong(3, entry.parentId) else st.setNull(3, java.sql.Types.INTEGER)
-            st.setLong(4, textIds.getOrPut(entry.text) { tocTextId(conn, entry.text) })
+            st.setLong(4, textIds.getOrPut(entry.text) { tocTextId(conn, entry.text, stableIds) })
             st.setInt(5, entry.level)
             st.setLong(6, entry.lineId)
             st.setInt(7, if (entry.isLastChild) 1 else 0)

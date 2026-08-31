@@ -1,6 +1,11 @@
 package io.github.kdroidfilter.seforimlibrary.sefariasqlite
 
 import app.cash.sqldelight.driver.jdbc.sqlite.JdbcSqliteDriver
+import io.github.kdroidfilter.seforimlibrary.common.buildstate.AltTocStructureKey
+import io.github.kdroidfilter.seforimlibrary.common.buildstate.BuildStateReader
+import io.github.kdroidfilter.seforimlibrary.common.buildstate.BuildStateSnapshot
+import io.github.kdroidfilter.seforimlibrary.common.buildstate.BuildStateWriter
+import io.github.kdroidfilter.seforimlibrary.common.buildstate.IdTable
 import io.github.kdroidfilter.seforimlibrary.core.models.Book
 import io.github.kdroidfilter.seforimlibrary.core.models.Category
 import io.github.kdroidfilter.seforimlibrary.core.models.ConnectionType
@@ -12,9 +17,11 @@ import io.github.kdroidfilter.seforimlibrary.db.SeforimDb
 import kotlinx.coroutines.runBlocking
 import java.nio.file.Files
 import java.sql.DriverManager
+import java.sql.SQLException
 import kotlin.test.AfterTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertTrue
 
 class ComputeSeifMarkersTest {
@@ -102,8 +109,9 @@ class SynthesizeSeifimAltTocIntegrationTest {
 
     /**
      * Base book "שולחן ערוך, אורח חיים": seif lines with heRefs.
-     * Commentary "משנה ברורה": intro line (unlinked), <h2>סימן א</h2> heading
-     * with a toc entry, then ס"ק lines linked to seifim א,א,ג.
+     * Commentary "משנה ברורה": intro line (unlinked), a section + siman +
+     * se'if-katan main-TOC hierarchy, then ס"ק lines linked to seifim א,א,ג.
+     * The synthesized tree must retain section/siman but drop se'if-katan.
      */
     private fun seedMiniDb(): Pair<Long, Long> = runBlocking {
         SeforimDb.Schema.create(driver)
@@ -130,13 +138,23 @@ class SynthesizeSeifimAltTocIntegrationTest {
         repo.insertBookBaseText(mbId, saRavId)
 
         val intro = repo.insertLine(Line(bookId = mbId, lineIndex = 0, content = "הקדמה"))
-        val heading = repo.insertLine(Line(bookId = mbId, lineIndex = 1, content = "<h2>סימן א</h2>"))
-        val sk1 = repo.insertLine(Line(bookId = mbId, lineIndex = 2, content = "(א) ס\"ק ראשון"))
-        val sk2 = repo.insertLine(Line(bookId = mbId, lineIndex = 3, content = "(ב) ס\"ק שני"))
-        val sk3 = repo.insertLine(Line(bookId = mbId, lineIndex = 4, content = "(ג) ס\"ק שלישי"))
+        val section = repo.insertLine(Line(bookId = mbId, lineIndex = 1, content = "<h2>אורח חיים</h2>"))
+        val siman = repo.insertLine(Line(bookId = mbId, lineIndex = 2, content = "<h3>סימן א</h3>"))
+        val seifKatan = repo.insertLine(Line(bookId = mbId, lineIndex = 3, content = "<h4>סעיף קטן א</h4>"))
+        val sk1 = repo.insertLine(Line(bookId = mbId, lineIndex = 4, content = "(א) ס\"ק ראשון"))
+        val sk2 = repo.insertLine(Line(bookId = mbId, lineIndex = 5, content = "(ב) ס\"ק שני"))
+        val sk3 = repo.insertLine(Line(bookId = mbId, lineIndex = 6, content = "(ג) ס\"ק שלישי"))
         check(intro > 0)
 
-        repo.insertTocEntry(TocEntry(bookId = mbId, parentId = null, text = "סימן א", level = 1, lineId = heading))
+        val sectionEntry = repo.insertTocEntry(
+            TocEntry(bookId = mbId, parentId = null, text = "אורח חיים", level = 1, lineId = section),
+        )
+        val simanEntry = repo.insertTocEntry(
+            TocEntry(bookId = mbId, parentId = sectionEntry, text = "סימן א", level = 2, lineId = siman),
+        )
+        repo.insertTocEntry(
+            TocEntry(bookId = mbId, parentId = simanEntry, text = "סעיף קטן א", level = 3, lineId = seifKatan),
+        )
 
         for ((skLine, saLine) in listOf(sk1 to saSeifA, sk2 to saSeifA, sk3 to saSeifC)) {
             repo.insertLink(
@@ -153,31 +171,50 @@ class SynthesizeSeifimAltTocIntegrationTest {
         saId to mbId
     }
 
+    private fun attachEmptyBuildState(conn: java.sql.Connection): java.nio.file.Path {
+        val state = Files.createTempFile("seifim-buildstate", ".db")
+        Files.delete(state)
+        BuildStateWriter().write(BuildStateSnapshot.empty(), state)
+        conn.prepareStatement("ATTACH DATABASE ? AS seifim_state").use { st ->
+            st.setString(1, state.toString())
+            st.execute()
+        }
+        return state
+    }
+
     @Test
     fun `synthesizes a Seifim structure with heading mirror and seif leaves`() = runBlocking {
         val (_, mbId) = seedMiniDb()
 
-        val leaves = DriverManager.getConnection("jdbc:sqlite:$dbFile").use { conn ->
+        val result = DriverManager.getConnection("jdbc:sqlite:$dbFile").use { conn ->
             val snapshots = readSeifimCandidateSnapshots(conn)
             assertEquals(1, snapshots.size)
             val snapshot = snapshots.single()
             assertEquals(mbId, snapshot.bookId)
             assertEquals(listOf("סעיף א", "סעיף ג"), snapshot.markers.map { it.label })
-            writeSeifimAltToc(conn, snapshot)
+            assertEquals(listOf("אורח חיים", "סימן א"), snapshot.headings.map { it.text })
+            synthesizeSeifimAltTocs(conn, snapshots)
         }
-        assertEquals(2, leaves)
+        assertEquals(SeifimSynthesisResult(structures = 1, leaves = 2), result)
+        assertTrue(repo.getBook(mbId)!!.hasAltStructures)
 
         // Structure row exists with the Seifim key.
         val structures = repo.getAltTocStructuresForBook(mbId)
         assertEquals(listOf(SEIFIM_STRUCTURE_KEY), structures.map { it.key })
         val structureId = structures.single().id
 
-        // One container (the mirrored heading, now a parent) + two leaves.
+        // The section + siman hierarchy is mirrored, but the main TOC's
+        // se'if-katan heading is deliberately absent. Both leaves hang from
+        // the siman, not from the se'if-katan.
         val entries = repo.getAltTocEntriesForStructure(structureId)
-        val container = entries.single { it.parentId == null }
-        assertEquals("סימן א", container.text)
-        assertTrue(container.hasChildren)
-        val leafEntries = entries.filter { it.parentId == container.id }.sortedBy { it.id }
+        assertTrue(entries.none { it.text == "סעיף קטן א" })
+        val sectionEntry = entries.single { it.parentId == null }
+        assertEquals("אורח חיים", sectionEntry.text)
+        val simanEntry = entries.single { it.parentId == sectionEntry.id }
+        assertEquals("סימן א", simanEntry.text)
+        assertTrue(sectionEntry.hasChildren)
+        assertTrue(simanEntry.hasChildren)
+        val leafEntries = entries.filter { it.parentId == simanEntry.id }.sortedBy { it.id }
         assertEquals(listOf("סעיף א", "סעיף ג"), leafEntries.map { it.text })
         assertEquals(listOf(false, true), leafEntries.map { it.isLastChild })
     }
@@ -187,12 +224,100 @@ class SynthesizeSeifimAltTocIntegrationTest {
         seedMiniDb()
 
         DriverManager.getConnection("jdbc:sqlite:$dbFile").use { conn ->
-            writeSeifimAltToc(conn, readSeifimCandidateSnapshots(conn).single())
+            synthesizeSeifimAltTocs(conn, readSeifimCandidateSnapshots(conn))
         }
+        repo.updateHasAltStructures(repo.getBookByTitle("משנה ברורה")!!.id, false)
 
         val second = DriverManager.getConnection("jdbc:sqlite:$dbFile").use { conn ->
-            readSeifimCandidateSnapshots(conn)
+            val snapshots = readSeifimCandidateSnapshots(conn)
+            synthesizeSeifimAltTocs(conn, snapshots)
+            snapshots
         }
         assertTrue(second.isEmpty(), "a book with a Seifim structure must not be re-synthesized")
+        assertTrue(repo.getBookByTitle("משנה ברורה")!!.hasAltStructures, "a rerun must repair a stale flag")
+    }
+
+    @Test
+    fun `incidental SA links do not qualify a commentary on another declared base`() = runBlocking {
+        val (_, mbId) = seedMiniDb()
+        val sourceId = repo.insertSource("Other")
+        val categoryId = repo.getBook(mbId)!!.categoryId
+        val otherBaseId = repo.insertBook(
+            Book(categoryId = categoryId, sourceId = sourceId, title = "מגן אברהם", heRef = "מגן אברהם"),
+        )
+        repo.insertBookBaseText(mbId, otherBaseId)
+        val targets = (4..6).map { repo.getLineByIndex(mbId, it)!!.id }
+        repeat(4) { index ->
+            val sourceLine = repo.insertLine(
+                Line(bookId = otherBaseId, lineIndex = index, content = "בסיס $index", heRef = "מגן אברהם $index"),
+            )
+            repo.insertLink(
+                Link(
+                    sourceBookId = otherBaseId,
+                    targetBookId = mbId,
+                    sourceLineId = sourceLine,
+                    targetLineId = targets[index % targets.size],
+                    targetLineIndex = 0,
+                    connectionType = ConnectionType.COMMENTARY,
+                ),
+            )
+        }
+
+        DriverManager.getConnection("jdbc:sqlite:$dbFile").use { conn ->
+            assertTrue(readSeifimCandidateSnapshots(conn).isEmpty())
+        }
+    }
+
+    @Test
+    fun `stable ids are persisted in attached buildstate`() = runBlocking {
+        val (_, mbId) = seedMiniDb()
+        val state = DriverManager.getConnection("jdbc:sqlite:$dbFile").use { conn ->
+            val state = attachEmptyBuildState(conn)
+            synthesizeSeifimAltTocs(conn, readSeifimCandidateSnapshots(conn), AttachedBuildStateIds(conn))
+            state
+        }
+        try {
+            val structureId = repo.getAltTocStructuresForBook(mbId).single().id
+            val snapshot = BuildStateReader().read(state)
+            assertEquals(structureId, snapshot.altTocStructures[AltTocStructureKey(mbId, SEIFIM_STRUCTURE_KEY)])
+            val tocTextIds = snapshot.lookups[IdTable.TOC_TEXT].orEmpty()
+            assertTrue(tocTextIds.keys.containsAll(listOf("סעיף א", "סעיף ג")))
+        } finally {
+            Files.deleteIfExists(state)
+        }
+    }
+
+    @Test
+    fun `failed synthesis rolls back every table and restores auto-commit`() = runBlocking {
+        seedMiniDb()
+
+        var state: java.nio.file.Path? = null
+        DriverManager.getConnection("jdbc:sqlite:$dbFile").use { conn ->
+            val snapshots = readSeifimCandidateSnapshots(conn)
+            state = attachEmptyBuildState(conn)
+            conn.createStatement().use {
+                it.execute(
+                    "CREATE TRIGGER reject_seifim_entry BEFORE INSERT ON alt_toc_entry " +
+                        "BEGIN SELECT RAISE(ABORT, 'forced failure'); END",
+                )
+            }
+
+            assertFailsWith<SQLException> {
+                synthesizeSeifimAltTocs(conn, snapshots, AttachedBuildStateIds(conn))
+            }
+            assertTrue(conn.autoCommit)
+            assertTrue(!repo.getBookByTitle("משנה ברורה")!!.hasAltStructures)
+            conn.createStatement().use { st ->
+                st.executeQuery("SELECT COUNT(*) FROM alt_toc_structure WHERE key = 'Seifim'").use { rs ->
+                    assertTrue(rs.next())
+                    assertEquals(0, rs.getInt(1))
+                }
+            }
+        }
+        val rolledBackState = BuildStateReader().read(state!!)
+        assertTrue(rolledBackState.altTocStructures.isEmpty())
+        assertTrue(IdTable.ALT_TOC_STRUCTURE !in rolledBackState.counters)
+        Files.deleteIfExists(state)
+        Unit
     }
 }
