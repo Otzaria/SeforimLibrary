@@ -37,7 +37,6 @@ internal data class ManualLinksCounters(
     var relevant: Int = 0,
     var sourceRelevant: Int = 0,
     var targetRelevant: Int = 0,
-    var excluded: Int = 0,
     var irrelevant: Int = 0,
     var unchanged: Int = 0,
     var shifted: Int = 0,
@@ -60,6 +59,7 @@ internal class ManualLinksRefresh(
     private val counters = ManualLinksCounters()
     private lateinit var config: ManualLinksConfig
     private lateinit var index: SefariaCorpusIndex
+    private lateinit var titleAliases: SefariaTitleAliases
     private val documents = LinkedHashMap<String, ManualLinksDocument>()
     private val usedOverrides = LinkedHashSet<Pair<String, String>>()
     private var currentFailureFile: String? = null
@@ -76,6 +76,7 @@ internal class ManualLinksRefresh(
     private fun runInternal(): ManualLinksResult {
         validateInputs()
         config = ManualLinksConfig.read(arguments.configPath)
+        titleAliases = SefariaTitleAliases(config.heTitleAliases)
         val configSha = ManualLinksJson.rawSha256(arguments.configPath)
         val releaseDigest = ManualLinksJson.rawSha256(arguments.releaseMetadataPath)
         require(releaseDigest == arguments.releaseMetadataSha256) { "Sefaria release metadata digest mismatch" }
@@ -107,6 +108,8 @@ internal class ManualLinksRefresh(
             fullLineTitles = if (requiresTashmaProof) setOf("משנה ברורה") else emptySet(),
             logger = logger,
         )
+        titleAliases.requireEachAliasResolvesToOneBook(index)
+        titleAliases.requireEveryAliasIsUsed()
         val tashmaProof = if (requiresTashmaProof) {
             proveTashmaVector()
         } else null
@@ -281,7 +284,7 @@ internal class ManualLinksRefresh(
             documents[newPath] = documents.remove(oldPath)!!
             counters.filesRenamed++
         }
-        documents.forEach { (_, document) ->
+        documents.forEach { (repositoryPath, document) ->
             repeat(document.records.size()) { index ->
                 val record = document.record(index)
                 val path = record.get("path_2").textValue()
@@ -296,22 +299,27 @@ internal class ManualLinksRefresh(
                     document.setString(index, "path_2", renamedPath)
                     document.setString(index, "heRef_2", renamedHeRef)
                 } else if (renamedHeRef != null) {
-                    error("heRef_2 has the old Hebrew title but path_2 does not")
+                    error(hebrewTargetRenameFailure(repositoryPath, index, oldHe, newHe))
                 }
             }
         }
     }
 
+    /** path_2 keeps the Otzaria title, so an aliased target rename is a config edit, never an automatic rewrite. */
+    private fun hebrewTargetRenameFailure(repositoryPath: String, recordIndex: Int, oldHe: String, newHe: String): String {
+        val otzariaTitle = titleAliases.otzariaTitleFor(repositoryPath, oldHe)
+            ?: return "$repositoryPath[$recordIndex] heRef_2 has the old Hebrew title but path_2 does not"
+        return "$repositoryPath[$recordIndex]: Sefaria renamed '$oldHe' to '$newHe' but path_2 keeps the Otzaria " +
+            "title '$otzariaTitle'; repoint he_title_aliases['$otzariaTitle'] to '$newHe' and re-run in migrate mode"
+    }
+
     private fun collectCandidateTitles(chain: List<VerifiedChangelog>): Set<String> = buildSet {
         documents.forEach { (path, document) ->
-            add(sourceTitle(Path.of(path).name))
+            add(titleAliases.sefariaHeTitle(path, sourceTitle(Path.of(path).name)))
             repeat(document.records.size()) { index ->
-                targetTitleOrNull(document.record(index).get("path_2").textValue())?.let(::add)
+                targetTitleOrNull(document.record(index).get("path_2").textValue())
+                    ?.let { add(titleAliases.sefariaHeTitle(path, it)) }
             }
-        }
-        config.excludedFiles.forEach {
-            add(it.sourceSefariaPrimaryHeTitle)
-            add(it.legacySelfTargetBasename)
         }
         chain.flatMap { it.renames }.forEach { event ->
             event.oldHe?.let(::add)
@@ -327,7 +335,7 @@ internal class ManualLinksRefresh(
 
         val requirements = linkedMapOf<String, MutableRequirements>()
         documents.forEach { (path, document) ->
-            val title = sourceTitle(Path.of(path).name)
+            val title = titleAliases.sefariaHeTitle(path, sourceTitle(Path.of(path).name))
             repeat(document.records.size()) { recordIndex ->
                 val record = document.record(recordIndex)
                 if (!record.has("start")) return@repeat
@@ -347,15 +355,7 @@ internal class ManualLinksRefresh(
     }
 
     private fun processDocuments(initialBootstrap: Boolean, mayBootstrap: Boolean, tashmaProof: TashmaProof?) {
-        val excludes = config.excludedFiles.associateBy { it.path }
-        val usedExcludes = linkedSetOf<String>()
         documents.forEach { (path, document) ->
-            val exclude = excludes[path]
-            if (exclude != null) {
-                require(usedExcludes.add(path)) { "Excluded file processed twice: $path" }
-                validateExcluded(path, document, exclude)
-                return@forEach
-            }
             repeat(document.records.size()) { recordIndex ->
                 counters.recordsScanned++
                 val record = document.record(recordIndex)
@@ -364,8 +364,9 @@ internal class ManualLinksRefresh(
                 currentFailureRecordHash = document.stableRecordHash(recordIndex)
                 val before = ManualLinksJson.canonicalString(record.deepCopy())
                 require(!(record.has("ref_1") && record.has("ref_2"))) { "$path[$recordIndex] has both ref_1 and ref_2" }
-                val sourceTitle = sourceTitle(Path.of(path).name)
+                val sourceTitle = titleAliases.sefariaHeTitle(path, sourceTitle(Path.of(path).name))
                 val targetTitle = targetTitleOrNull(record.get("path_2").textValue())
+                    ?.let { titleAliases.sefariaHeTitle(path, it) }
                 val sourceCount = index.primaryHeTitleCount(sourceTitle)
                 val targetCount = targetTitle?.let(index::primaryHeTitleCount) ?: 0
                 require(sourceCount <= 1) { "$path[$recordIndex] source book is ambiguous" }
@@ -400,7 +401,7 @@ internal class ManualLinksRefresh(
                             verifyBootstrapAdapter = mayBootstrap,
                         )
                     }
-                    sourceIsSefaria && targetIsSefaria -> error("$path[$recordIndex] is unexcluded Sefaria↔Sefaria")
+                    sourceIsSefaria && targetIsSefaria -> error("$path[$recordIndex] is Sefaria↔Sefaria")
                     sourceIsSefaria -> {
                         counters.relevant++
                         counters.sourceRelevant++
@@ -427,8 +428,7 @@ internal class ManualLinksRefresh(
             val expected = config.bootstrapRecordOverrides.map { it.path to it.recordSha256 }.toSet()
             require(usedOverrides == expected) { "Bootstrap overrides not used exactly once: missing=${expected - usedOverrides}" }
         }
-        require(usedExcludes == excludes.keys) { "Excluded files were not used exactly once: missing=${excludes.keys - usedExcludes}" }
-        require(counters.recordsScanned == counters.relevant + counters.excluded + counters.irrelevant) {
+        require(counters.recordsScanned == counters.relevant + counters.irrelevant) {
             "Record accounting is not closed"
         }
     }
@@ -449,6 +449,10 @@ internal class ManualLinksRefresh(
                 index.resolveHeRef(book, heRef)
             }
             "morebooks_heref_v1" -> resolveExistingMoreBooks(path, document, recordIndex, book)
+            "dicta_heref_v1" -> index.resolveHeRef(
+                book,
+                ManualLinksBootstrap.dictaHeRef(record.get("heRef_2").textValue(), expectedHeTitle),
+            )
             null -> null
             else -> error("Unknown bootstrap adapter for $path")
         }
@@ -481,6 +485,10 @@ internal class ManualLinksRefresh(
                 index.resolveHeRefOrNullIfMissing(book, built)
                     ?: resolveOverride(path, document, recordIndex, book)
             }
+            "dicta_heref_v1" -> index.resolveHeRef(
+                book,
+                ManualLinksBootstrap.dictaHeRef(record.get("heRef_2").textValue(), expectedHeTitle),
+            )
             else -> error("Unknown bootstrap adapter: $adapter")
         }
         document.setString(recordIndex, "ref_2", entry.ref)
@@ -587,41 +595,6 @@ internal class ManualLinksRefresh(
         counters.anchorsChecked++
     }
 
-    private fun validateExcluded(path: String, document: ManualLinksDocument, exclude: ExcludedFile) {
-        require(ManualLinksJson.rawSha256(arguments.output.resolve(path)) == exclude.rawFileSha256) { "Excluded file hash changed: $path" }
-        require(document.records.size() == exclude.expectedRecordCount) { "Excluded file count changed: $path" }
-        val sourceBook = index.bookByEnTitle(exclude.sourceSefariaPrimaryEnTitle)
-        require(sourceBook.heTitle == exclude.sourceSefariaPrimaryHeTitle) { "Excluded source title proof failed" }
-        var legacy = 0
-        var external = 0
-        repeat(document.records.size()) { recordIndex ->
-            counters.recordsScanned++
-            counters.excluded++
-            currentFailureFile = path
-            currentFailureRecordIndex = recordIndex
-            currentFailureRecordHash = document.stableRecordHash(recordIndex)
-            val record = document.record(recordIndex)
-            val sourceIndex = ManualLinksDocument.exactInt(record.get("line_index_1"), "line_index_1")
-            require(sourceIndex in 1..sourceBook.lineCount) { "Excluded source index out of range" }
-            val targetTitle = targetTitle(record.get("path_2").textValue())
-            val targetIndex = ManualLinksDocument.exactInt(record.get("line_index_2"), "line_index_2")
-            if (targetTitle == exclude.legacySelfTargetBasename) {
-                legacy++
-                require(record.get("heRef_2").textValue().startsWith(exclude.requiredHeRefPrefix)) { "Legacy self-target heRef proof failed" }
-                require(targetIndex in 1..sourceBook.lineCount) { "Legacy self-target index out of range" }
-            } else {
-                external++
-                val targetBook = index.bookByHeTitle(targetTitle)
-                require(targetIndex in 1..targetBook.lineCount) { "Excluded external target index out of range" }
-                index.resolveHeRef(targetBook, record.get("heRef_2").textValue().trimEnd { it == ',' || it == ' ' })
-            }
-            clearFailureContext()
-        }
-        require(legacy == exclude.legacySelfTargetCount && external == exclude.externalPrimaryTargetCount) {
-            "Excluded target partition changed: legacy=$legacy external=$external"
-        }
-    }
-
     private fun persistChangedDocuments() {
         documents.forEach { (path, document) ->
             if (!document.changed) return@forEach
@@ -652,7 +625,6 @@ internal class ManualLinksRefresh(
                 put("relevant", counters.relevant)
                 put("source_sefaria_relevant", counters.sourceRelevant)
                 put("target_sefaria_relevant", counters.targetRelevant)
-                put("excluded", counters.excluded)
                 put("irrelevant", counters.irrelevant)
                 put("unchanged", counters.unchanged)
                 put("shifted", counters.shifted)

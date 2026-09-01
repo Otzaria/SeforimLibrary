@@ -87,7 +87,7 @@ tasks.register<JavaExec>("manualLinksCorpusTest") {
         "expectedOldConfigSha256", "expectedOldToolCommit", "sefariaExport",
         "sefariaReleaseMetadata", "sefariaReleaseMetadataSha256", "sefariaChangelogDir",
         "seforimToolCommit", "manualLinksOutput", "expectedTargetSefariaRecords",
-        "expectedSourceSefariaRecords", "expectedExcludedRecords", "expectedAnchors",
+        "expectedSourceSefariaRecords", "expectedAnchors",
     )
     properties.forEach { name ->
         if (project.hasProperty(name)) systemProperty(name, project.property(name) as String)

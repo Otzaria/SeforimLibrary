@@ -6,9 +6,9 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: 'bootstrap for a pre-lineage fixture; refresh for an enriched pinned commit'
+        description: 'bootstrap for a pre-lineage fixture; refresh for an enriched pinned commit; migrate for a config or tool change'
         type: choice
-        options: [refresh, bootstrap]
+        options: [refresh, bootstrap, migrate]
         default: refresh
         required: true
       otzaria_commit:
@@ -31,6 +31,16 @@ on:
         description: 'Full SeforimLibrary commit containing the updater under test'
         type: string
         required: true
+      expected_old_config_sha256:
+        description: 'migrate only: raw SHA-256 of the config recorded in the pinned lineage'
+        type: string
+        required: false
+        default: ''
+      expected_old_tool_commit:
+        description: 'migrate only: tool commit recorded in the pinned lineage'
+        type: string
+        required: false
+        default: ''
 
 permissions:
   contents: read
@@ -51,19 +61,26 @@ jobs:
       SEFARIA_METADATA_SHA: ${{ inputs.sefaria_release_metadata_sha256 }}
       SEFARIA_ARCHIVE_SHA: ${{ inputs.sefaria_archive_sha256 }}
       TOOL_COMMIT: ${{ inputs.seforim_tool_commit }}
-      EXPECTED_TARGET_RECORDS: '65397'
+      EXPECTED_OLD_CONFIG_SHA: ${{ inputs.expected_old_config_sha256 }}
+      EXPECTED_OLD_TOOL_COMMIT: ${{ inputs.expected_old_tool_commit }}
+      EXPECTED_TARGET_RECORDS: '81496'
       EXPECTED_SOURCE_RECORDS: '17980'
-      EXPECTED_EXCLUDED_RECORDS: '174'
       EXPECTED_ANCHORS: '17980'
     steps:
       - name: Validate immutable inputs
         run: |
           set -euo pipefail
-          [[ "$MODE" == refresh || "$MODE" == bootstrap ]]
+          [[ "$MODE" == refresh || "$MODE" == bootstrap || "$MODE" == migrate ]]
           [[ "$OTZARIA_COMMIT" =~ ^[0-9a-f]{40}$ ]]
           [[ "$TOOL_COMMIT" =~ ^[0-9a-f]{40}$ ]]
           [[ "$SEFARIA_METADATA_SHA" =~ ^[0-9a-f]{64}$ ]]
           [[ "$SEFARIA_ARCHIVE_SHA" =~ ^[0-9a-f]{64}$ ]]
+          if [[ "$MODE" == migrate ]]; then
+            [[ "$EXPECTED_OLD_CONFIG_SHA" =~ ^[0-9a-f]{64}$ ]]
+            [[ "$EXPECTED_OLD_TOOL_COMMIT" =~ ^[0-9a-f]{40}$ ]]
+          else
+            [[ -z "$EXPECTED_OLD_CONFIG_SHA" && -z "$EXPECTED_OLD_TOOL_COMMIT" ]]
+          fi
 
       - name: Checkout the exact updater
         uses: actions/checkout@v4
@@ -144,12 +161,18 @@ jobs:
           OUTPUT="$RUNNER_TEMP/manual-links-corpus-output"
           rm -rf "$OUTPUT"
           EXTRA_ARGS=()
-          if [[ "$MODE" == refresh ]]; then
+          if [[ "$MODE" == refresh || "$MODE" == migrate ]]; then
             test -f otzaria-source/manual_links_lineage.json
             mkdir -p "$INPUTS/empty-changelog"
             EXTRA_ARGS+=(
               -PmanualLinksLineage="$GITHUB_WORKSPACE/otzaria-source/manual_links_lineage.json"
               -PsefariaChangelogDir="$INPUTS/empty-changelog"
+            )
+          fi
+          if [[ "$MODE" == migrate ]]; then
+            EXTRA_ARGS+=(
+              -PexpectedOldConfigSha256="$EXPECTED_OLD_CONFIG_SHA"
+              -PexpectedOldToolCommit="$EXPECTED_OLD_TOOL_COMMIT"
             )
           fi
           ./gradlew :sefariasqlite:manualLinksCorpusTest --no-daemon --max-workers=2 \
@@ -163,7 +186,6 @@ jobs:
             -PmanualLinksOutput="$OUTPUT" \
             -PexpectedTargetSefariaRecords="$EXPECTED_TARGET_RECORDS" \
             -PexpectedSourceSefariaRecords="$EXPECTED_SOURCE_RECORDS" \
-            -PexpectedExcludedRecords="$EXPECTED_EXCLUDED_RECORDS" \
             -PexpectedAnchors="$EXPECTED_ANCHORS" \
             "${EXTRA_ARGS[@]}"
           jq -e '.refs.missing == 0 and .refs.duplicate == 0 and .anchors.drifted == 0 and .packaging_collisions == 0' \

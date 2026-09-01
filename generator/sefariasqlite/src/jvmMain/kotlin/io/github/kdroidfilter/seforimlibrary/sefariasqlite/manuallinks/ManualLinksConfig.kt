@@ -8,19 +8,6 @@ internal enum class ExpectedState { PRESENT, ABSENT }
 
 internal data class LinksRoot(val path: String, val expectedState: ExpectedState)
 
-internal data class ExcludedFile(
-    val path: String,
-    val reason: String,
-    val rawFileSha256: String,
-    val expectedRecordCount: Int,
-    val sourceSefariaPrimaryEnTitle: String,
-    val sourceSefariaPrimaryHeTitle: String,
-    val externalPrimaryTargetCount: Int,
-    val legacySelfTargetCount: Int,
-    val legacySelfTargetBasename: String,
-    val requiredHeRefPrefix: String,
-)
-
 internal data class BootstrapFileRename(
     val from: String,
     val to: String,
@@ -41,7 +28,7 @@ internal data class ManualLinksConfig(
     val seforimToolRef: String,
     val linksRoots: List<LinksRoot>,
     val bootstrapAdapters: Map<String, String>,
-    val excludedFiles: List<ExcludedFile>,
+    val heTitleAliases: Map<String, Map<String, String>>,
     val bootstrapFileRenames: List<BootstrapFileRename>,
     val bootstrapRecordOverrides: List<BootstrapRecordOverride>,
 ) {
@@ -68,27 +55,22 @@ internal data class ManualLinksConfig(
                 checkedRelativePath(key) to value.requireText("bootstrap_adapters.$key")
             }
 
-            val excluded = root.requiredArray("excluded_files").mapIndexed { index, node ->
-                val item = node.requireObject("excluded_files[$index]")
-                val legacy = item.requiredObject("legacy_self_target")
-                ExcludedFile(
-                    path = checkedRelativePath(item.requiredText("path")),
-                    reason = item.requiredText("reason").also {
-                        require(it == "both-sides-sefaria; owned by SefariaLinksImporter") {
-                            "excluded_files[$index].reason must identify SefariaLinksImporter ownership"
-                        }
-                    },
-                    rawFileSha256 = item.requiredSha256("raw_file_sha256"),
-                    expectedRecordCount = item.requiredInt("expected_record_count"),
-                    sourceSefariaPrimaryEnTitle = item.requiredText("source_sefaria_primary_en_title"),
-                    sourceSefariaPrimaryHeTitle = item.requiredText("source_sefaria_primary_he_title"),
-                    externalPrimaryTargetCount = item.requiredInt("external_primary_target_count"),
-                    legacySelfTargetCount = legacy.requiredInt("count"),
-                    legacySelfTargetBasename = legacy.requiredText("basename"),
-                    requiredHeRefPrefix = legacy.requiredText("required_heRef_prefix"),
-                )
+            // Otzaria titles are quote-stripped; this per-root map is the only bridge to Sefaria heTitles.
+            val heTitleAliases = root.requiredObject("he_title_aliases").fields().asSequence().associate { (key, node) ->
+                val rootPath = checkedRelativePath(key)
+                require(linksRoots.any { it.path == rootPath }) { "he_title_aliases[$key] is not a declared links root" }
+                val aliases = node.requireObject("he_title_aliases[$key]").fields().asSequence().associate { (title, value) ->
+                    checkedBookTitle(title, "he_title_aliases[$key] key") to
+                        checkedBookTitle(value.requireText("he_title_aliases[$key].$title"), "he_title_aliases[$key][$title]")
+                }
+                require(aliases.isNotEmpty()) { "he_title_aliases[$key] must not be empty" }
+                aliases.forEach { (title, heTitle) ->
+                    require(title != heTitle) { "he_title_aliases[$key][$title] must differ from the Otzaria title" }
+                    require(heTitle !in aliases) { "he_title_aliases[$key][$title] must not chain into another alias" }
+                }
+                require(aliases.values.distinct().size == aliases.size) { "Duplicate Sefaria heTitle in he_title_aliases[$key]" }
+                rootPath to aliases
             }
-            require(excluded.map { it.path }.distinct().size == excluded.size) { "Duplicate excluded file path" }
 
             val renames = root.requiredArray("bootstrap_file_renames").mapIndexed { index, node ->
                 val item = node.requireObject("bootstrap_file_renames[$index]")
@@ -118,12 +100,18 @@ internal data class ManualLinksConfig(
                 seforimToolRef = root.requiredText("seforim_tool_ref"),
                 linksRoots = linksRoots,
                 bootstrapAdapters = adapters,
-                excludedFiles = excluded,
+                heTitleAliases = heTitleAliases,
                 bootstrapFileRenames = renames,
                 bootstrapRecordOverrides = overrides,
             )
         }
     }
+}
+
+internal fun checkedBookTitle(value: String, location: String): String {
+    require(value.isNotBlank() && value.trim() == value) { "$location must be a trimmed non-blank title" }
+    require('/' !in value && '\\' !in value && '\u0000' !in value) { "$location must be a bare book title: $value" }
+    return value
 }
 
 internal fun checkedRelativePath(value: String): String {

@@ -39,7 +39,7 @@ class ManualLinksTreeHashTest {
         seforimToolRef = "refs/heads/test",
         linksRoots = roots.toList(),
         bootstrapAdapters = emptyMap(),
-        excludedFiles = emptyList(),
+        heTitleAliases = emptyMap(),
         bootstrapFileRenames = emptyList(),
         bootstrapRecordOverrides = emptyList(),
     )

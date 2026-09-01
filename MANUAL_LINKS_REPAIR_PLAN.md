@@ -74,39 +74,71 @@ Havrouta אינה מעבירה אותו ל־JVM ולכן עלולה להוריד
 - תיקון אוטומטי של offset לאחר שינוי תוכן; מצב כזה חוסם release.
 - טיפול כללי בכל warning היסטורי שאינו משפיע על קישור בעל צד Sefaria.
 
-### 1.3 קורפוס היעד המאומת
+### 1.3 קורפוס היעד המדוד
 
-נכון ל־baseline שנבדק:
+כל מספר כאן הוא **baseline מדוד** ולא קבוע שרירותי: הוא נספר ישירות מעץ
+הקישורים, ולא נגזר בהוספת דלתא למספר קודם. המדידה היא מול `otzaria-library`
+`f3ddc7fb1cafa85629eaa3dea7ffaf8e0dda9c92` בתוספת מחיקת `דרך ה_links.json`
+(§1.4) — כלומר מצב ה־PR — ומול `manual_links_sync.json` שבאותו עץ.
 
-- 65,397 רשומות ידניות רלוונטיות עם יעד Sefaria: ‏63,107 National Library
-  ועוד 2,290 MoreBooks. קובץ `דרך ה` כולו מוחרג (174 both-Sefaria); מתוכו 86
-  targets היו נכנסים לספירת primary-target ללא ההחרגה ו־88 הם self-target
-  המוכח במיפוי המפורש שב־§4.1.
-- 17,980 רשומות משנה ברורה→שער הציון עם מקור Sefaria.
-- בסך הכול 83,377 רשומות עם צד Sefaria יחיד.
-- 65,372 יעדים מיושרים כיום.
-- 23 קישורים שגויים חיים דורשים תיקון חד־פעמי.
-- 2 קישורי אבודרהם חסרים מפני שהאינדקס פוגע בכותרת.
-- 0 רשומות רלוונטיות נשארות בלתי־פתירות לאחר Grammar A וארבעת ה־overrides
-  המפורשים.
+- **81,496 רשומות רלוונטיות עם יעד Sefaria** (`records.target_sefaria_relevant`):
+  - 63,107 ב־`National-LibraryToOtzaria/links`, כולן כבר נושאות `ref_2`.
+  - 3,151 ב־`MoreBooks/links`, כולן כבר נושאות `ref_2`.
+  - 15,238 ב־`DictaToOtzaria/ערוך/links`: ‏14,499 נושאות `ref_2` כבר היום
+    ועוד 739 שנפתרות רק דרך `he_title_aliases` (§4.1). ‏2,566 הרשומות הנותרות
+    בשורש הזה הן `הערות על שות רבי משולם איגרא` — יעד שאינו Sefaria, ולכן
+    irrelevant נכון וקבוע.
+- **17,980 רשומות** משנה ברורה→שער הציון עם מקור Sefaria
+  (`records.source_sefaria_relevant`). לכולן יש `start`, ולכן
+  `anchors.checked` הוא אף הוא 17,980.
+- בסך הכול 99,476 רשומות עם צד Sefaria יחיד.
+
+איך נגזר 81,496: רשומה שכבר נושאת `ref_2` נאכפת בכל ריצה כ־target-Sefaria
+(`ref_2 side classification changed`), ולכן ספירת ה־`ref_2` בעץ — 80,757 — היא
+הרצפה המדויקת. רשומה ללא ref שיעדה כן Sefaria הייתה נכשלת רועש
+(`no bootstrap adapter for` ב־bootstrap/migrate, `new_target_ref_required`
+ב־refresh), ולכן התוספת האפשרית היחידה היא רשומות שהמיפוי החדש הופך לפתירות:
+בדיוק 739, שהן כל הרשומות חסרות ה־ref בשורש דיקטא ששם היעד שלהן הוא מפתח
+ב־`he_title_aliases` (‏24 מפתחות, כולם בשימוש). ‏80,757 + 739 = 81,496.
+
+הקבוע הישן `65,397` = 63,107 + 2,290 היה נכון ל־`ec6971b0c3e9489fac27e94ed09276e542caf5b3`
+בלבד. מאז גדלו MoreBooks ושורש דיקטא, ולכן הוא היה מיושן עוד לפני התיקון הזה —
+ואסור היה לעדכן אותו בהוספת 739. קבוע כזה נמדד מחדש, לעולם לא נגזר בדלתא.
 
 מאזן הקורפוס המלא:
 
 ```text
-401 root files = 364 parsed *_links.json + 37 headings
-167,958 source records = 83,377 relevant + 174 excluded both-Sefaria
-                         + 84,407 irrelevant + 0 failures
+462 root files = 425 parsed *_links.json + 37 headings
+184,925 source records = 99,476 relevant + 85,449 irrelevant + 0 failures
 ```
 
 המספר 167,793 הוא תוצאת ה־ZIP הישן אחרי last-wins שהעלים 165 רשומות Wiki
 `טורי אבן`; הוא אינו baseline חוקי ל־source scan. אחרי rename+collision gate כל
-167,958 הרשומות נשמרות באריזה.
+184,925 הרשומות נשמרות באריזה.
+
+מדידות המיגרציה הבאות נותרו מ־`ec6971b0…` ולא נמדדו מחדש כאן: ‏65,372 יעדים
+מיושרים, 23 קישורים שגויים חיים, 2 קישורי אבודרהם חסרים, ו־0 רשומות רלוונטיות
+בלתי־פתירות לאחר Grammar A וארבעת ה־overrides המפורשים.
 
 המספרים הם baseline למיגרציה, לא constants בקוד. הכלי מחשב אותם ודורש מאזן סגור בכל ריצה.
-הם נמדדו מול `otzaria-library` commit
-`ec6971b0c3e9489fac27e94ed09276e542caf5b3`; ה־corpus fixture חייב לנעול גם
-את Sefaria `release_metadata.json` ואת tool commit ששימשו בפועל. סטייה דורשת
-דוח diff ו־review, לא עדכון אוטומטי של expected counts.
+ה־corpus fixture חייב לנעול גם את Sefaria `release_metadata.json` ואת tool commit
+ששימשו בפועל. סטייה דורשת דוח diff ו־review, לא עדכון אוטומטי של expected counts.
+
+### 1.4 מחיקת `דרך ה_links.json`
+
+הקובץ הוסר מ־`otzaria-library` יחד עם מנגנון `excluded_files` כולו. הנימוק
+שהוחזק בקונפיג — both-sides-sefaria — היה שגוי: `sourceTitle` מחזיר `דרך ה`
+בעוד ש־heTitle בספריא הוא `דרך ה'` עם גרש, ולכן `primaryHeTitleCount("דרך ה")`
+הוא 0 וההחרגה גישרה ידנית מעל אי־התאמת כותרת, לא מעל סיווג both-Sefaria.
+
+הסיבה האמיתית היא יתמות: אין ספר בשם `דרך ה` בספרייה הארוזה ולא ב־DB (רק
+`דרך ה'`), ולכן `Generator.kt` נופל על `Source book not found for links` וכל
+174 הרשומות נזרקות. תרומת הקובץ ל־DB היא אפס.
+
+מדידה מול ה־DB: ‏88 רשומות ה־self מכוסות במלואן ע"י ספריא (44/44 זוגות),
+‏69 מתוך 86 החיצוניות קיימות, וספריא מוסיפה 49 שאין בקובץ. ‏17 קישורים ייחודיים
+לאוצריא אבודים כבר היום ואינם ניתנים לשחזור דרך המסלול הידני — ההכרעה היא
+לאבד אותם ביודעין ולא להנציח גשר ידני שבור.
 
 ---
 
@@ -316,24 +348,14 @@ docs/קישורים-וכותרות.md  (פרק 9, רק לאחר שהמימוש �
   ],
   "bootstrap_adapters": {
     "National-LibraryToOtzaria/links": "national_library_mishneh_torah_v1",
-    "MoreBooks/links": "morebooks_heref_v1"
+    "MoreBooks/links": "morebooks_heref_v1",
+    "DictaToOtzaria/ערוך/links": "dicta_heref_v1"
   },
-  "excluded_files": [
-    {
-      "path": "MoreBooks/links/דרך ה_links.json",
-      "reason": "both-sides-sefaria; owned by SefariaLinksImporter",
-      "raw_file_sha256": "60a867f71bc8faa7d9570f15c306dbdd66224debbd44af4e2dcba07ee97591ac",
-      "expected_record_count": 174,
-      "source_sefaria_primary_en_title": "Derekh Hashem",
-      "source_sefaria_primary_he_title": "דרך ה'",
-      "external_primary_target_count": 86,
-      "legacy_self_target": {
-        "count": 88,
-        "basename": "דרך ה",
-        "required_heRef_prefix": "דרך ה', "
-      }
+  "he_title_aliases": {
+    "DictaToOtzaria/ערוך/links": {
+      "רשי על שבת": "רש\"י על שבת"
     }
-  ],
+  },
   "bootstrap_file_renames": [
     {
       "from": "National-LibraryToOtzaria/links/טורי אבן_links.json",
@@ -424,6 +446,40 @@ docs/קישורים-וכותרות.md  (פרק 9, רק לאחר שהמימוש �
   הזקוקה ל־override. אין lookup לפי ordinal; המספרים 47, 66, 67 ו־1948 הם
   diagnostics בלבד.
 
+#### `he_title_aliases`
+
+שמות קבצי אוצריא מנוקים מגרשיים, ולכן `רשי על שבת.txt` אינו מתאים ל־heTitle
+`רש"י על שבת` שבספריא. `he_title_aliases` היא הגשר המפורש היחיד: מפה per־root
+מכותרת אוצריא לכותרת ספריא, ללא נורמליזציה וללא fuzzy. היא מוחלת על שני צדי
+הקישור, כלומר גם על `sourceTitle` וגם על היעד שנגזר מ־`path_2`.
+
+חוזים נאכפים (גם ב־bootstrap, גם ב־migrate וגם ב־refresh):
+
+- כל שורש במפה חייב להיות שורש קישורים מוצהר, והמפה שלו לא ריקה.
+- alias חייב להיות שונה מכותרת אוצריא, אסור לו לשרשר ל־alias אחר, ואין שתי
+  כותרות אוצריא שמצביעות לאותה כותרת ספריא.
+- כל alias חייב להיפתר לספר ספריא אחד בדיוק (`requireEachAliasResolvesToOneBook`).
+- כל alias חייב להיות בשימוש בפועל בקורפוס (`requireEveryAliasIsUsed`).
+
+אותם חוקים בדיוק נאכפים גם ב־`manual_links_packaging.py` שבצד `otzaria-library`.
+
+**שינוי שם עברי בספריא לכותרת שיש לה alias.** `path_2` נושא את שם הקובץ
+באוצריא, ששינוי שם בספריא אינו נוגע בו, בעוד `heRef_2` הוא verbatim של ספריא
+ולכן כן משתנה. לכן `applyHebrewRename` אינו יכול — ואינו אמור — לגזור את
+הכותרת דרך המפה ולשכתב את `path_2`: התיקון הנכון הוא לעדכן את הערך ב־alias
+בקונפיג ולהריץ `migrate`. הכלי נכשל רועש ומנחה במפורש:
+
+```text
+<file>[<i>]: Sefaria renamed '<old>' to '<new>' but path_2 keeps the Otzaria
+title '<otzaria>'; repoint he_title_aliases['<otzaria>'] to '<new>' and re-run
+in migrate mode
+```
+
+בצד המקור אין שכתוב שם קובץ מקביל (שם הקובץ הוא כותרת אוצריא), והכשל הרועש
+מגיע מ־`requireEachAliasResolvesToOneBook` שכבר מצביע על ערך ה־alias המדויק.
+המפה היא קלט חתום־SHA שהכלי לעולם אינו כותב אליו.
+
+
 ### 4.2 שדות חדשים ברשומת קישור
 
 | שדה | מתי | משמעות |
@@ -510,7 +566,7 @@ docs/קישורים-וכותרות.md  (פרק 9, רק לאחר שהמימוש �
 ```text
 mode; input/output lineage; tool commit
 files scanned/changed/renamed
-records scanned/relevant/excluded/unchanged/shifted/enriched
+records scanned/relevant/unchanged/shifted/enriched
 refs renamed/missing/duplicate
 anchors checked/drifted
 packaging collisions
@@ -695,13 +751,7 @@ targetIsSefaria = exactPrimaryHeTitle(targetTitle) has exactly one candidate
 
 - רשומה רגילה חייבת `sourceIsSefaria xor targetIsSefaria`; אחרת היא irrelevant
   למסלול או כשל סיווג, לפי הקובץ.
-- קובץ ב־`excluded_files` חייב להתקיים, וכל רשומה בו חייבת להיות both-Sefaria.
-  בקורפוס הנוכחי `דרך ה_links.json` וה־raw file hash שלו מכילים 174 רשומות:
-  source נפתר exact ל־English primary `Derekh Hashem`/Hebrew primary `דרך ה'`
-  וכל 174 source indices בתחום; ‏88 targets בשם legacy `דרך ה` דורשים קידומת
-  `heRef` מדויקת ואינדקס בתחום אותו payload, ו־86 targets אחרים מתאימים primary
-  title ו־ref יחיד בעצמם. exclude שלא
-  נוצל, רשומה שאינה both-Sefaria או קובץ both-Sefaria שאינו מוחרג — כשל.
+- אין מנגנון החרגה. רשומה both-Sefaria היא כשל רועש בכל קובץ ידני.
 
 לאחר bootstrap נוכחות `ref_1`/`ref_2` היא מקור האמת לצד המנוהל: בדיוק אחד מהם
 חייב להיות קיים בכל רשומה רלוונטית. בכל refresh עדיין מאמתים שה־ref side הוא
@@ -736,9 +786,7 @@ National-LibraryToOtzaria/links/טורי אבן_links.json
 `expected_db_title`. אין לפתור שלושת ספרי המקור האלה מול Sefaria — הם ספרי
 Otzaria מקומיים.
 
-3. `MoreBooks/links/דרך ה_links.json` אינו משתנה; הוא נכנס ל־`excluded_files` משום ששני הצדדים Sefaria.
-
-4. collision scan חייב להסתיים ב־0 כפילויות.
+3. collision scan חייב להסתיים ב־0 כפילויות.
 
 ### 7.2 National Library adapter
 
@@ -786,8 +834,8 @@ builtHeRef = heRef_2 אחרי הסרת פסיק/רווח סופיים בלבד
 אין שינוי פנימי נוסף. נדרש RefEntry יחיד בספר הצפוי.
 
 Baseline מדויק: Grammar A פותר 2,286/2,290 רשומות MoreBooks הרלוונטיות,
-exact ו־unique. כל 174 רשומות `דרך ה` מוחרגות; 86 מהן היו target-primary ולכן
-הופיעו בספירת ה־2,376 הגולמית. המספר ההיסטורי 2,349 היה שגוי
+exact ו־unique. ‏174 רשומות `דרך ה` נמחקו (§1.4); ‏86 מהן היו target-primary
+והופיעו בספירת ה־2,376 הגולמית. המספר ההיסטורי 2,349 היה שגוי
 ואסור להנציחו ב־test.
 
 #### ארבעה חריגים מפורשים
@@ -859,13 +907,13 @@ encoding/newlines: UTF-8, LF-only, trailing LF אחד
 
 ```text
 scanned_records
-  = relevant_records + excluded_both_sefaria + irrelevant_records + classification_failures
+  = relevant_records + irrelevant_records + classification_failures
 
 relevant_records
   = unchanged_and_enriched + shifted_and_corrected + relevant_failures
 ```
 
-ליצירת commit נדרש שכל קבוצות ה־failure יהיו 0 ושכל exclude נוצל בדיוק.
+ליצירת commit נדרש שכל קבוצות ה־failure יהיו 0.
 
 ### 7.6 delta צפוי במיגרציה
 
@@ -874,7 +922,7 @@ relevant_records
 - `טורי אבן`: 163 שגויים נמחקים, 175 נכונים מתווספים, 165 Wiki משוחזרים.
 - מהרי״ק + נר שמואל: 176 links מתווספים.
 - יעדי Sefaria: 23 links שגויים מוחלפים ו־2 אבודרהם מתווספים.
-- `דרך ה`: אפס שינוי DB — Sefaria↔Sefaria.
+- `דרך ה`: אפס שינוי DB — הקובץ יתום ומעולם לא תרם קישור (§1.4).
 
 את הסט המדויק מחשבים מהקבצים; אין hard-code של link IDs.
 
@@ -959,7 +1007,7 @@ config דורש migration. tool commit חדש נבחר רק עבור Sefaria tar
 - adapters ו־overrides קיימים ב־bootstrap בלבד. יעד Sefaria חדש ללא `ref_2`
   נכשל `new_target_ref_required`; מקור Sefaria חדש ללא `ref_1` נכשל
   `new_source_ref_required`. יוצר הרשומה חייב לספק ref מפורש.
-- שני צדדים Sefaria: חייבים להיות excluded או מחוץ לקבצי הידניים.
+- שני צדדים Sefaria: חייבים להיות מחוץ לקבצי הידניים.
 
 ### 8.6 כתיבה אטומית
 
@@ -1276,7 +1324,10 @@ correlation_id
 4. `en_renamed` ו־`he_renamed`, כולל export שמכיל רק `new_he` וה־selective
    candidate scan עדיין טוען אותו.
 5. record חדש ללא ref בצד Sefaria נכשל בשני הכיוונים; אין adapter ב־refresh.
-6. both-Sefaria excluded.
+6. both-Sefaria נכשל רועש.
+6א. `he_title_aliases`: alias שאינו בשימוש ו־alias שנעשה דו־משמעי נכשלים גם
+   ב־refresh, לא רק ב־bootstrap; ‏`dicta_heref_v1` נאכף מחדש על רשומה קיימת
+   בעלת `ref_2` דרך `processExistingTarget` ב־migrate.
 7. packaged-path collision.
 8. rerun byte-identical.
 9. changelog chain חסרה.
@@ -1287,18 +1338,23 @@ correlation_id
 ### 11.4 Corpus
 
 ```text
-65,397 target-Sefaria relevant
+81,496 target-Sefaria relevant
 17,980 source-Sefaria relevant
+17,980 anchors checked
 0 unresolved
 0 duplicate refs touched
 0 anchor drift
 0 collisions after rename
 ```
 
-שינוי baseline דורש review והסבר; אין auto-accept.
+שינוי baseline דורש review והסבר; אין auto-accept. המספרים למעלה נמדדו מחדש
+לפי §1.3 ולא נגזרו בדלתא מהקבועים הקודמים.
 
 Corpus suite רץ ב־workflow ייעודי עם Otzaria commit, Sefaria metadata/export
 ו־tool commit נעולים. הוא אינו חלק מ־`:sefariasqlite:jvmTest` הרגיל.
+ה־workflow תומך בשלושת המצבים `refresh`, `bootstrap` ו־`migrate`; ‏`migrate`
+דורש בנוסף `expected_old_config_sha256` ו־`expected_old_tool_commit` מתוך
+ה־lineage הנעוץ, ובשאר המצבים שני הקלטים האלה חייבים להישאר ריקים.
 
 ### 11.5 Workflow fault/recovery
 
@@ -1354,7 +1410,7 @@ shift פוזיציונלי לבדו משאיר lineId/linkId יציבים; הא�
 3. להקפיא golden hashes וטבלאות החריגים.
 4. אין workflow ואין שינוי links.
 
-יציאה: `jvmTest` עובר ללא sibling repo, export גדול או snapshot מלא. בדיקות 83,377
+יציאה: `jvmTest` עובר ללא sibling repo, export גדול או snapshot מלא. בדיקות 99,476
 הרשומות שייכות ל־corpus suite נפרד, לא ל־unit suite.
 
 ### B — כלי read-only
@@ -1393,7 +1449,7 @@ shift פוזיציונלי לבדו משאיר lineId/linkId יציבים; הא�
 3. להחיל output ולבדוק diff לפי source.
 4. rerun bootstrap חייב לזהות את שלושת renames כ־already-applied; refresh על
    output חייב להיות no-op byte-identical.
-5. corpus workflow מוריד checkout/export נעולים ומריץ את כל 83,377 הרשומות,
+5. corpus workflow מוריד checkout/export נעולים ומריץ את כל 99,476 הרשומות,
    ה־snapshot המלא וה־blacklist regression.
 
 יציאה: 100% כיסוי, 0 unresolved/collision.
@@ -1506,12 +1562,12 @@ ci(release): publish immutable lineage and dispatch link sync
 
 ## 17. Definition of Done
 
-- [ ] ‏83,377 הרשומות הרלוונטיות נושאות ref בצד הספריאתי.
+- [ ] ‏99,476 הרשומות הרלוונטיות נושאות ref בצד הספריאתי.
 - [ ] ‏17,980 רשומות משנה ברורה נושאות SHA-256 תקף של מחרוזת BookPayload המדויקת.
-- [ ] ‏65,397/65,397 יעדי Sefaria פתירים exact.
+- [ ] ‏81,496/81,496 יעדי Sefaria פתירים exact.
 - [ ] ‏0 refs חסרים/כפולים בקורפוס הנצרך.
 - [ ] ‏0 packaged-path collisions.
-- [ ] `דרך ה` מסומן both-Sefaria ואינו עובר במסלול הידני.
+- [ ] `דרך ה_links.json` נמחק ואין יותר מנגנון `excluded_files`.
 - [ ] אין DB, sidecar, fuzzy, LCS עמום או positional fallback ב־updater.
 - [ ] input checkout אינו משתנה; marker נוצר רק בהצלחה.
 - [ ] rerun על אותו full input tuple הוא byte-identical no-op ומשלים downstream חסר.

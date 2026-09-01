@@ -22,6 +22,27 @@ class ManualLinksBootstrapTest {
     }
 
     @Test
+    fun dictaGrammarKeepsTheVerbatimHeRefAndProvesItsTitleBoundary() {
+        assertEquals(
+            "רש\"י על שבת כו:, א, א",
+            ManualLinksBootstrap.dictaHeRef("רש\"י על שבת כו:, א, א", "רש\"י על שבת"),
+        )
+        // The quote-stripped Otzaria basename must never satisfy the Sefaria heTitle boundary.
+        assertFailsWith<IllegalArgumentException> {
+            ManualLinksBootstrap.dictaHeRef("רשי על שבת כו:, א, א", "רש\"י על שבת")
+        }
+        assertFailsWith<IllegalArgumentException> {
+            ManualLinksBootstrap.dictaHeRef("רש\"י על שבת כו:, א, א,", "רש\"י על שבת")
+        }
+        assertFailsWith<IllegalArgumentException> {
+            ManualLinksBootstrap.dictaHeRef("רש\"י על שבת", "רש\"י על שבת")
+        }
+        assertFailsWith<IllegalArgumentException> {
+            ManualLinksBootstrap.dictaHeRef("רש\"י על שבתא כו:, א, א", "רש\"י על שבת")
+        }
+    }
+
+    @Test
     fun renameBoundariesAndCrossPlatformPathsAreExact() {
         assertEquals("New 1:2", ManualLinksRefresh.rewriteAtTitleBoundary("Old 1:2", "Old", "New"))
         assertEquals("New, Part 1", ManualLinksRefresh.rewriteAtTitleBoundary("Old, Part 1", "Old", "New"))

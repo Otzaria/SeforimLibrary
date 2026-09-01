@@ -246,6 +246,8 @@ class ManualGenerateReleaseWorkflowContractTest {
             "sefaria_release_metadata_sha256:",
             "sefaria_archive_sha256:",
             "seforim_tool_commit:",
+            "expected_old_config_sha256:",
+            "expected_old_tool_commit:",
         ).forEach { input ->
             assertTrue(workflow.contains(input), "pinned corpus workflow must expose $input")
         }
@@ -253,10 +255,17 @@ class ManualGenerateReleaseWorkflowContractTest {
         assertTrue(workflow.contains("ref: \${{ inputs.otzaria_commit }}"))
         assertTrue(workflow.contains("validate-sefaria-release-metadata.py"))
         assertTrue(workflow.contains(":sefariasqlite:manualLinksCorpusTest"))
-        assertTrue(workflow.contains("EXPECTED_TARGET_RECORDS: '65397'"))
+        assertTrue(workflow.contains("EXPECTED_TARGET_RECORDS: '81496'"))
         assertTrue(workflow.contains("EXPECTED_SOURCE_RECORDS: '17980'"))
-        assertTrue(workflow.contains("EXPECTED_EXCLUDED_RECORDS: '174'"))
+        assertFalse(
+            workflow.contains(Regex("excluded", RegexOption.IGNORE_CASE)),
+            "the excluded_files mechanism is gone, in any casing",
+        )
         assertTrue(workflow.contains("EXPECTED_ANCHORS: '17980'"))
+        assertTrue(workflow.contains("options: [refresh, bootstrap, migrate]"), "migrate must be dispatchable")
+        assertTrue(workflow.contains("\"\$MODE\" == refresh || \"\$MODE\" == migrate"), "migrate consumes the pinned lineage")
+        assertTrue(workflow.contains("-PexpectedOldConfigSha256=\"\$EXPECTED_OLD_CONFIG_SHA\""))
+        assertTrue(workflow.contains("-PexpectedOldToolCommit=\"\$EXPECTED_OLD_TOOL_COMMIT\""))
         assertTrue(workflow.contains("test \"\${#EXPORT_ROOTS[@]}\" -eq 1"))
         assertTrue(workflow.contains(".refs.missing == 0"))
         assertTrue(workflow.contains(".refs.duplicate == 0"))

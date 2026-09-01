@@ -10,4 +10,13 @@ internal object ManualLinksBootstrap {
     }
 
     fun moreBooksHeRef(heRef2: String): String = heRef2.trimEnd { it == ',' || it == ' ' }
+
+    /** Dicta stores the verbatim Sefaria heRef; only its exact title boundary is re-proved. */
+    fun dictaHeRef(heRef2: String, expectedTargetTitle: String): String {
+        require(heRef2 == heRef2.trim() && !heRef2.endsWith(',')) { "Malformed Dicta heRef_2" }
+        require(heRef2.startsWith("$expectedTargetTitle ") && heRef2.length > expectedTargetTitle.length + 1) {
+            "Dicta heRef_2 does not open with the Sefaria heTitle '$expectedTargetTitle'"
+        }
+        return heRef2
+    }
 }

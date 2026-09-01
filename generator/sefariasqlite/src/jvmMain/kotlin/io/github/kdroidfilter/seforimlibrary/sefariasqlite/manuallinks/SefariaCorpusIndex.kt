@@ -49,7 +49,6 @@ internal data class SefariaCorpusStats(
 
 internal class SefariaCorpusIndex private constructor(
     private val byPrimaryHeTitle: Map<String, List<ManualBookIndex>>,
-    private val byPrimaryEnTitle: Map<String, List<ManualBookIndex>>,
     val stats: SefariaCorpusStats,
 ) {
     fun primaryHeTitleCount(title: String): Int = byPrimaryHeTitle[title]?.size ?: 0
@@ -57,8 +56,6 @@ internal class SefariaCorpusIndex private constructor(
     fun hasPrimaryHeTitle(title: String): Boolean = primaryHeTitleCount(title) == 1
 
     fun bookByHeTitle(title: String): ManualBookIndex = exactlyOne(byPrimaryHeTitle[title], "Sefaria book heTitle '$title'")
-
-    fun bookByEnTitle(title: String): ManualBookIndex = exactlyOne(byPrimaryEnTitle[title], "Sefaria book enTitle '$title'")
 
     fun resolveRef(book: ManualBookIndex, ref: String): RefEntry = exactlyOne(book.refsByRef[ref], "ref '$ref' in ${book.enTitle}")
 
@@ -108,7 +105,6 @@ internal class SefariaCorpusIndex private constructor(
             }
             return SefariaCorpusIndex(
                 byPrimaryHeTitle = accepted.groupBy { it.heTitle },
-                byPrimaryEnTitle = accepted.groupBy { it.enTitle },
                 stats = SefariaCorpusStats(
                     mergedFilesScanned = readerStats.mergedFilesScanned,
                     payloadsLoaded = readerStats.payloadsLoaded,
@@ -123,7 +119,6 @@ internal class SefariaCorpusIndex private constructor(
 
         internal fun fromBooks(books: List<ManualBookIndex>): SefariaCorpusIndex = SefariaCorpusIndex(
             byPrimaryHeTitle = books.groupBy { it.heTitle },
-            byPrimaryEnTitle = books.groupBy { it.enTitle },
             stats = SefariaCorpusStats(
                 mergedFilesScanned = books.size,
                 payloadsLoaded = books.size,
@@ -160,13 +155,47 @@ internal fun BookPayload.toManualIndex(
     )
 }
 
+/** Explicit per-root Otzaria-title to Sefaria-heTitle bridge; no normalization and no fuzzy fallback. */
+internal class SefariaTitleAliases(private val aliasesByRoot: Map<String, Map<String, String>>) {
+    private val used = linkedSetOf<Pair<String, String>>()
+
+    /** Applies to both link sides, so a source-side alias needs no further plumbing. */
+    fun sefariaHeTitle(repositoryPath: String, title: String): String {
+        val root = rootFor(repositoryPath) ?: return title
+        val alias = root.value[title] ?: return title
+        used += root.key to title
+        return alias
+    }
+
+    /** Reverse lookup used only to explain a Sefaria rename that invalidates a declared alias. */
+    fun otzariaTitleFor(repositoryPath: String, sefariaHeTitle: String): String? =
+        rootFor(repositoryPath)?.value?.entries?.singleOrNull { it.value == sefariaHeTitle }?.key
+
+    private fun rootFor(repositoryPath: String): Map.Entry<String, Map<String, String>>? {
+        val matches = aliasesByRoot.entries.filter { repositoryPath.startsWith(it.key + "/") }
+        require(matches.size <= 1) { "Multiple he_title_aliases roots match $repositoryPath" }
+        return matches.singleOrNull()
+    }
+
+    fun requireEachAliasResolvesToOneBook(index: SefariaCorpusIndex) {
+        aliasesByRoot.forEach { (root, aliases) ->
+            aliases.forEach { (title, heTitle) ->
+                require(index.primaryHeTitleCount(heTitle) == 1) {
+                    "he_title_aliases[$root][$title] must resolve to exactly one Sefaria book: $heTitle"
+                }
+            }
+        }
+    }
+
+    fun requireEveryAliasIsUsed() {
+        val declared = aliasesByRoot.flatMap { (root, aliases) -> aliases.keys.map { root to it } }.toSet()
+        require(used == declared) { "Unused he_title_aliases: ${declared - used}" }
+    }
+}
+
 internal fun sourceTitle(fileName: String): String {
     require(fileName.endsWith("_links.json")) { "Not a links file: $fileName" }
     return fileName.removeSuffix("_links.json").takeIf { it.isNotBlank() } ?: error("Empty source title")
-}
-
-internal fun targetTitle(path2: String): String {
-    return targetTitleOrNull(path2) ?: error("Invalid target path_2: $path2")
 }
 
 /** Non-Sefaria records outside this tool's scope may use extensionless paths. */

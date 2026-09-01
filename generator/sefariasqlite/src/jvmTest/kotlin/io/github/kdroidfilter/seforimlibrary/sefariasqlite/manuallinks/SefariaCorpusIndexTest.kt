@@ -9,6 +9,15 @@ import kotlin.test.assertNull
 
 class SefariaCorpusIndexTest {
     @Test
+    fun theReverseAliasLookupIsScopedToTheDeclaringRoot() {
+        val aliases = SefariaTitleAliases(mapOf("DictaToOtzaria/ערוך/links" to mapOf("רשי על שבת" to "רש\"י על שבת")))
+
+        assertEquals("רשי על שבת", aliases.otzariaTitleFor("DictaToOtzaria/ערוך/links/קרן אורה על שבת_links.json", "רש\"י על שבת"))
+        assertNull(aliases.otzariaTitleFor("DictaToOtzaria/ערוך/links/קרן אורה על שבת_links.json", "רש\"י על יבמות"))
+        assertNull(aliases.otzariaTitleFor("MoreBooks/links/אחר_links.json", "רש\"י על שבת"))
+    }
+
+    @Test
     fun retainsOnlyRequestedAnchorContentUnlessFullProofIsExplicit() {
         val payload = BookPayload(
             heTitle = "ספר",

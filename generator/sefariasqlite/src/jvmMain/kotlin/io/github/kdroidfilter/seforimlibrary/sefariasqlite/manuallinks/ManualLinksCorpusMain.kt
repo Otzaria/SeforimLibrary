@@ -17,7 +17,6 @@ fun main() {
         val anchors = report.requiredObject("anchors")
         require(records.requiredInt("target_sefaria_relevant") == expected("expectedTargetSefariaRecords"))
         require(records.requiredInt("source_sefaria_relevant") == expected("expectedSourceSefariaRecords"))
-        require(records.requiredInt("excluded") == expected("expectedExcludedRecords"))
         require(anchors.requiredInt("checked") == expected("expectedAnchors"))
         require(report.requiredInt("packaging_collisions") == 0)
         println("manual-links corpus gate passed: ${result.reportPath}")
