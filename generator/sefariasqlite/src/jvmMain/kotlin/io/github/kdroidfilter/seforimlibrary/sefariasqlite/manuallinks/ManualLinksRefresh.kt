@@ -59,7 +59,6 @@ internal class ManualLinksRefresh(
     private val counters = ManualLinksCounters()
     private lateinit var config: ManualLinksConfig
     private lateinit var index: SefariaCorpusIndex
-    private lateinit var titleAliases: SefariaTitleAliases
     private val documents = LinkedHashMap<String, ManualLinksDocument>()
     private val usedOverrides = LinkedHashSet<Pair<String, String>>()
     private var currentFailureFile: String? = null
@@ -76,7 +75,6 @@ internal class ManualLinksRefresh(
     private fun runInternal(): ManualLinksResult {
         validateInputs()
         config = ManualLinksConfig.read(arguments.configPath)
-        titleAliases = SefariaTitleAliases(config.heTitleAliases)
         val configSha = ManualLinksJson.rawSha256(arguments.configPath)
         val releaseDigest = ManualLinksJson.rawSha256(arguments.releaseMetadataPath)
         require(releaseDigest == arguments.releaseMetadataSha256) { "Sefaria release metadata digest mismatch" }
@@ -108,8 +106,6 @@ internal class ManualLinksRefresh(
             fullLineTitles = if (requiresTashmaProof) setOf("משנה ברורה") else emptySet(),
             logger = logger,
         )
-        titleAliases.requireEachAliasResolvesToOneBook(index)
-        titleAliases.requireEveryAliasIsUsed()
         val tashmaProof = if (requiresTashmaProof) {
             proveTashmaVector()
         } else null
@@ -284,7 +280,7 @@ internal class ManualLinksRefresh(
             documents[newPath] = documents.remove(oldPath)!!
             counters.filesRenamed++
         }
-        documents.forEach { (repositoryPath, document) ->
+        documents.forEach { (_, document) ->
             repeat(document.records.size()) { index ->
                 val record = document.record(index)
                 val path = record.get("path_2").textValue()
@@ -299,26 +295,17 @@ internal class ManualLinksRefresh(
                     document.setString(index, "path_2", renamedPath)
                     document.setString(index, "heRef_2", renamedHeRef)
                 } else if (renamedHeRef != null) {
-                    error(hebrewTargetRenameFailure(repositoryPath, index, oldHe, newHe))
+                    error("heRef_2 has the old Hebrew title but path_2 does not")
                 }
             }
         }
     }
 
-    /** path_2 keeps the Otzaria title, so an aliased target rename is a config edit, never an automatic rewrite. */
-    private fun hebrewTargetRenameFailure(repositoryPath: String, recordIndex: Int, oldHe: String, newHe: String): String {
-        val otzariaTitle = titleAliases.otzariaTitleFor(repositoryPath, oldHe)
-            ?: return "$repositoryPath[$recordIndex] heRef_2 has the old Hebrew title but path_2 does not"
-        return "$repositoryPath[$recordIndex]: Sefaria renamed '$oldHe' to '$newHe' but path_2 keeps the Otzaria " +
-            "title '$otzariaTitle'; repoint he_title_aliases['$otzariaTitle'] to '$newHe' and re-run in migrate mode"
-    }
-
     private fun collectCandidateTitles(chain: List<VerifiedChangelog>): Set<String> = buildSet {
         documents.forEach { (path, document) ->
-            add(titleAliases.sefariaHeTitle(path, sourceTitle(Path.of(path).name)))
+            add(sourceTitle(Path.of(path).name))
             repeat(document.records.size()) { index ->
-                targetTitleOrNull(document.record(index).get("path_2").textValue())
-                    ?.let { add(titleAliases.sefariaHeTitle(path, it)) }
+                targetTitleOrNull(document.record(index).get("path_2").textValue())?.let(::add)
             }
         }
         chain.flatMap { it.renames }.forEach { event ->
@@ -335,7 +322,7 @@ internal class ManualLinksRefresh(
 
         val requirements = linkedMapOf<String, MutableRequirements>()
         documents.forEach { (path, document) ->
-            val title = titleAliases.sefariaHeTitle(path, sourceTitle(Path.of(path).name))
+            val title = sourceTitle(Path.of(path).name)
             repeat(document.records.size()) { recordIndex ->
                 val record = document.record(recordIndex)
                 if (!record.has("start")) return@repeat
@@ -364,9 +351,8 @@ internal class ManualLinksRefresh(
                 currentFailureRecordHash = document.stableRecordHash(recordIndex)
                 val before = ManualLinksJson.canonicalString(record.deepCopy())
                 require(!(record.has("ref_1") && record.has("ref_2"))) { "$path[$recordIndex] has both ref_1 and ref_2" }
-                val sourceTitle = titleAliases.sefariaHeTitle(path, sourceTitle(Path.of(path).name))
+                val sourceTitle = sourceTitle(Path.of(path).name)
                 val targetTitle = targetTitleOrNull(record.get("path_2").textValue())
-                    ?.let { titleAliases.sefariaHeTitle(path, it) }
                 val sourceCount = index.primaryHeTitleCount(sourceTitle)
                 val targetCount = targetTitle?.let(index::primaryHeTitleCount) ?: 0
                 require(sourceCount <= 1) { "$path[$recordIndex] source book is ambiguous" }

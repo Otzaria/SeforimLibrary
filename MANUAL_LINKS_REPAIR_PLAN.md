@@ -85,7 +85,7 @@ Havrouta אינה מעבירה אותו ל־JVM ולכן עלולה להוריד
   - 63,107 ב־`National-LibraryToOtzaria/links`, כולן כבר נושאות `ref_2`.
   - 3,151 ב־`MoreBooks/links`, כולן כבר נושאות `ref_2`.
   - 15,238 ב־`DictaToOtzaria/ערוך/links`: ‏14,499 נושאות `ref_2` כבר היום
-    ועוד 739 שנפתרות רק דרך `he_title_aliases` (§4.1). ‏2,566 הרשומות הנותרות
+    ועוד 739 שכתיב ה־`path_2` שלהן תוקן לכתיב ספריא (§4.1). ‏2,566 הרשומות הנותרות
     בשורש הזה הן `הערות על שות רבי משולם איגרא` — יעד שאינו Sefaria, ולכן
     irrelevant נכון וקבוע.
 - **17,980 רשומות** משנה ברורה→שער הציון עם מקור Sefaria
@@ -97,9 +97,9 @@ Havrouta אינה מעבירה אותו ל־JVM ולכן עלולה להוריד
 (`ref_2 side classification changed`), ולכן ספירת ה־`ref_2` בעץ — 80,757 — היא
 הרצפה המדויקת. רשומה ללא ref שיעדה כן Sefaria הייתה נכשלת רועש
 (`no bootstrap adapter for` ב־bootstrap/migrate, `new_target_ref_required`
-ב־refresh), ולכן התוספת האפשרית היחידה היא רשומות שהמיפוי החדש הופך לפתירות:
-בדיוק 739, שהן כל הרשומות חסרות ה־ref בשורש דיקטא ששם היעד שלהן הוא מפתח
-ב־`he_title_aliases` (‏24 מפתחות, כולם בשימוש). ‏80,757 + 739 = 81,496.
+ב־refresh), ולכן התוספת האפשרית היחידה היא רשומות שתיקון הנתונים הופך לפתירות:
+בדיוק 739, שהן כל הרשומות חסרות ה־ref בשורש דיקטא ששם היעד שלהן הוא כותרת ספריא
+עם גרשיים (‏24 כותרות). ‏80,757 + 739 = 81,496.
 
 הקבוע הישן `65,397` = 63,107 + 2,290 היה נכון ל־`ec6971b0c3e9489fac27e94ed09276e542caf5b3`
 בלבד. מאז גדלו MoreBooks ושורש דיקטא, ולכן הוא היה מיושן עוד לפני התיקון הזה —
@@ -351,11 +351,6 @@ docs/קישורים-וכותרות.md  (פרק 9, רק לאחר שהמימוש �
     "MoreBooks/links": "morebooks_heref_v1",
     "DictaToOtzaria/ערוך/links": "dicta_heref_v1"
   },
-  "he_title_aliases": {
-    "DictaToOtzaria/ערוך/links": {
-      "רשי על שבת": "רש\"י על שבת"
-    }
-  },
   "bootstrap_file_renames": [
     {
       "from": "National-LibraryToOtzaria/links/טורי אבן_links.json",
@@ -446,39 +441,20 @@ docs/קישורים-וכותרות.md  (פרק 9, רק לאחר שהמימוש �
   הזקוקה ל־override. אין lookup לפי ordinal; המספרים 47, 66, 67 ו־1948 הם
   diagnostics בלבד.
 
-#### `he_title_aliases`
+#### כתיב הגרשיים ב־`path_2`
 
 שמות קבצי אוצריא מנוקים מגרשיים, ולכן `רשי על שבת.txt` אינו מתאים ל־heTitle
-`רש"י על שבת` שבספריא. `he_title_aliases` היא הגשר המפורש היחיד: מפה per־root
-מכותרת אוצריא לכותרת ספריא, ללא נורמליזציה וללא fuzzy. היא מוחלת על שני צדי
-הקישור, כלומר גם על `sourceTitle` וגם על היעד שנגזר מ־`path_2`.
+`רש"י על שבת` שבספריא. אין גשר, אין מפה ואין נורמליזציה: ההתאמה היא מחרוזתית
+מדויקת מול ה־heTitle הראשי, בשני צדי הקישור.
 
-חוזים נאכפים (גם ב־bootstrap, גם ב־migrate וגם ב־refresh):
+739 רשומות דיקטא שנשאו את הכתיב המנוקה תוקנו **בנתונים** — `path_2` שלהן שוכתב
+לכתיב של ספריא ב־`otzaria-library` — ולא בשכבת תרגום. הסיבה: קובצי דיקטא קפואים
+ואין ייבוא חוזר שיחזיר את הכתיב השגוי, ומפת גישור הייתה יוצרת חוב חדש (שינוי שם
+עברי בספריא לכותרת ממופה לא היה ניתן לתיקון באף מצב ריצה קיים).
 
-- כל שורש במפה חייב להיות שורש קישורים מוצהר, והמפה שלו לא ריקה.
-- alias חייב להיות שונה מכותרת אוצריא, אסור לו לשרשר ל־alias אחר, ואין שתי
-  כותרות אוצריא שמצביעות לאותה כותרת ספריא.
-- כל alias חייב להיפתר לספר ספריא אחד בדיוק (`requireEachAliasResolvesToOneBook`).
-- כל alias חייב להיות בשימוש בפועל בקורפוס (`requireEveryAliasIsUsed`).
-
-אותם חוקים בדיוק נאכפים גם ב־`manual_links_packaging.py` שבצד `otzaria-library`.
-
-**שינוי שם עברי בספריא לכותרת שיש לה alias.** `path_2` נושא את שם הקובץ
-באוצריא, ששינוי שם בספריא אינו נוגע בו, בעוד `heRef_2` הוא verbatim של ספריא
-ולכן כן משתנה. לכן `applyHebrewRename` אינו יכול — ואינו אמור — לגזור את
-הכותרת דרך המפה ולשכתב את `path_2`: התיקון הנכון הוא לעדכן את הערך ב־alias
-בקונפיג ולהריץ `migrate`. הכלי נכשל רועש ומנחה במפורש:
-
-```text
-<file>[<i>]: Sefaria renamed '<old>' to '<new>' but path_2 keeps the Otzaria
-title '<otzaria>'; repoint he_title_aliases['<otzaria>'] to '<new>' and re-run
-in migrate mode
-```
-
-בצד המקור אין שכתוב שם קובץ מקביל (שם הקובץ הוא כותרת אוצריא), והכשל הרועש
-מגיע מ־`requireEachAliasResolvesToOneBook` שכבר מצביע על ערך ה־alias המדויק.
-המפה היא קלט חתום־SHA שהכלי לעולם אינו כותב אליו.
-
+לכן `applyHebrewRename` מטפל בכל הרשומות באותו מסלול: `path_2` ו־`heRef_2` נושאים
+שניהם את כותרת ספריא, ושניהם משוכתבים יחד בגבול הכותרת. אי־התאמה ביניהם היא כשל
+רועש (`heRef_2 has the old Hebrew title but path_2 does not`).
 
 ### 4.2 שדות חדשים ברשומת קישור
 
@@ -735,9 +711,8 @@ exactPrimaryHeTitle -> List<BookPayload>
 - התאמה exact ל־`BookPayload.heTitle` הראשי בלבד, אחרי blacklist filtering.
 - לא משתמשים ב־`titleAliasKeys`: הם מנורמלים, וה־baseline כולו פתיר מול הכותרת
   הראשית. alias אוטומטי גם עלול לסווג ספר מקומי בטעות כ־Sefaria.
-- אם בעתיד יתגלה alias הכרחי, מוסיפים mapping מפורש וחד־ערכי ל־config יחד עם
-  fixture; אין פתיחה גורפת של `titleVariants`/`heTitleVariants`.
-- אין נרמול גרשיים, punctuation או רווחים; אי־התאמות היסטוריות מתוקנות חד־פעמית.
+- אין נרמול גרשיים, punctuation או רווחים, ואין מפת גישור; אי־התאמות היסטוריות
+  מתוקנות חד־פעמית בנתונים עצמם (ראו §4.1).
 - אחרי `he_renamed`, משנים exact את filename/path ורק אז פותרים.
 
 ### 6.4 סיווג הצד הספריאתי
@@ -1325,9 +1300,9 @@ correlation_id
    candidate scan עדיין טוען אותו.
 5. record חדש ללא ref בצד Sefaria נכשל בשני הכיוונים; אין adapter ב־refresh.
 6. both-Sefaria נכשל רועש.
-6א. `he_title_aliases`: alias שאינו בשימוש ו־alias שנעשה דו־משמעי נכשלים גם
-   ב־refresh, לא רק ב־bootstrap; ‏`dicta_heref_v1` נאכף מחדש על רשומה קיימת
-   בעלת `ref_2` דרך `processExistingTarget` ב־migrate.
+6א. יעד שכותרתו כוללת גרשיים נפתר בהתאמה ישירה, וכותרת שנושאים אותה שני ספרי
+   ספריא נכשלת רועש; ‏`dicta_heref_v1` נאכף מחדש על רשומה קיימת בעלת `ref_2`
+   דרך `processExistingTarget` ב־migrate.
 7. packaged-path collision.
 8. rerun byte-identical.
 9. changelog chain חסרה.

@@ -143,48 +143,33 @@ class ManualLinksRefreshIntegrationTest {
     }
 
     @Test
-    fun quotedSefariaTargetsAreOnlyReachableThroughAnExplicitAlias() {
-        val unmapped = quotedTargetFixture(emptyMap())
-        val silent = ManualLinksRefresh(unmapped.arguments, Logger.withTag("ManualLinksRefreshIntegrationTest")).run()
-        val records = ManualLinksJson.readStrict(silent.reportPath).get("records")
-        assertEquals(0, records.get("relevant").intValue())
-        assertEquals(1, records.get("irrelevant").intValue())
+    fun aQuotedSefariaTargetIsMatchedByItsHeTitleWithNoTitleMapping() {
+        val fixture = quotedTargetFixture()
 
-        val mapped = quotedTargetFixture(mapOf("MoreBooks/links" to mapOf("יעדן" to "יעד\"ן")))
-        val enriched = ManualLinksRefresh(mapped.arguments, Logger.withTag("ManualLinksRefreshIntegrationTest")).run()
+        val enriched = ManualLinksRefresh(fixture.arguments, logger).run()
 
         assertEquals("ok", enriched.status)
-        val record = ManualLinksDocument.read(mapped.output.resolve("MoreBooks/links/מקומי_links.json")).record(0)
+        val records = ManualLinksJson.readStrict(enriched.reportPath).get("records")
+        assertEquals(1, records.get("relevant").intValue())
+        assertEquals(0, records.get("irrelevant").intValue())
+        val record = ManualLinksDocument.read(fixture.output.resolve("MoreBooks/links/מקומי_links.json")).record(0)
         assertEquals("Target 2", record.get("ref_2").textValue())
         assertEquals(3, record.get("line_index_2").intValue())
     }
 
     @Test
-    fun anAliasThatNoRecordUsesIsFatal() {
-        val fixture = fixture("יעד א,", aliases = mapOf("MoreBooks/links" to mapOf("לא בשימוש" to "יעד")))
+    fun aTargetTitleCarriedByTwoSefariaBooksIsFatal() {
+        val fixture = quotedTargetFixture(duplicateTargetBook = true)
 
         val error = assertFailsWith<IllegalArgumentException> {
-            ManualLinksRefresh(fixture.arguments, Logger.withTag("ManualLinksRefreshIntegrationTest")).run()
+            ManualLinksRefresh(fixture.arguments, logger).run()
         }
-        assertTrue(error.message!!.contains("Unused he_title_aliases"))
-    }
-
-    @Test
-    fun anAliasThatMatchesTwoSefariaBooksIsFatal() {
-        val fixture = quotedTargetFixture(
-            mapOf("MoreBooks/links" to mapOf("יעדן" to "יעד\"ן")),
-            duplicateTargetBook = true,
-        )
-
-        val error = assertFailsWith<IllegalArgumentException> {
-            ManualLinksRefresh(fixture.arguments, Logger.withTag("ManualLinksRefreshIntegrationTest")).run()
-        }
-        assertTrue(error.message!!.contains("exactly one Sefaria book"))
+        assertTrue(error.message!!.contains("target book is ambiguous"))
     }
 
     @Test
     fun existingDictaTargetsAreReprovedThroughTheAdapterOnMigrate() {
-        val fixture = quotedTargetFixture(mapOf("MoreBooks/links" to mapOf("יעדן" to "יעד\"ן")))
+        val fixture = quotedTargetFixture()
         ManualLinksRefresh(fixture.arguments, logger).run()
         val lineage = feedOutputBackIntoTheCheckout(fixture)
 
@@ -203,32 +188,6 @@ class ManualLinksRefreshIntegrationTest {
             ManualLinksRefresh(rerun(fixture, lineage, ManualLinksMode.MIGRATE, "migrate-tampered"), logger).run()
         }
         assertTrue(error.message!!.contains("does not match the deterministic heRef_2 adapter"))
-    }
-
-    @Test
-    fun aliasContractsAreEnforcedInRefreshAndNotOnlyInBootstrap() {
-        val dropped = quotedTargetFixture(mapOf("MoreBooks/links" to mapOf("יעדן" to "יעד\"ן")))
-        ManualLinksRefresh(dropped.arguments, logger).run()
-        val droppedLineage = feedOutputBackIntoTheCheckout(dropped)
-        // The corpus now spells the target with Sefaria's own quoted title, so the alias is dead.
-        Files.writeString(
-            dropped.linkFile,
-            """[{"line_index_1":1,"heRef_2":"יעד\"ן ב","path_2":"folder\\יעד\"ן.txt","line_index_2":3}]""",
-        )
-        val unused = assertFailsWith<IllegalArgumentException> {
-            ManualLinksRefresh(rerun(dropped, droppedLineage, ManualLinksMode.REFRESH, "refresh-unused"), logger).run()
-        }
-        assertTrue(unused.message!!.contains("Unused he_title_aliases"))
-
-        val collided = quotedTargetFixture(mapOf("MoreBooks/links" to mapOf("יעדן" to "יעד\"ן")))
-        ManualLinksRefresh(collided.arguments, logger).run()
-        val collidedLineage = feedOutputBackIntoTheCheckout(collided)
-        // Sefaria later published a second book carrying the same heTitle.
-        writeSefariaBook(collided.export, "Target Two", "יעד\"ן")
-        val ambiguous = assertFailsWith<IllegalArgumentException> {
-            ManualLinksRefresh(rerun(collided, collidedLineage, ManualLinksMode.REFRESH, "refresh-collided"), logger).run()
-        }
-        assertTrue(ambiguous.message!!.contains("exactly one Sefaria book"))
     }
 
     @Test
@@ -268,24 +227,18 @@ class ManualLinksRefreshIntegrationTest {
         output = fixture.output.parent.resolve(outputName),
     )
 
-    private fun quotedTargetFixture(
-        aliases: Map<String, Map<String, String>>,
-        duplicateTargetBook: Boolean = false,
-    ): Fixture = fixture(
+    /** Mirrors the Dicta records whose path_2 carries Sefaria's own gershayim spelling. */
+    private fun quotedTargetFixture(duplicateTargetBook: Boolean = false): Fixture = fixture(
         heRef = "יעד\"ן ב",
         targetHeTitle = "יעד\"ן",
-        targetFileTitle = "יעדן",
         adapter = "dicta_heref_v1",
-        aliases = aliases,
         duplicateTargetBook = duplicateTargetBook,
     )
 
     private fun fixture(
         heRef: String,
         targetHeTitle: String = "יעד",
-        targetFileTitle: String = "יעד",
         adapter: String = "morebooks_heref_v1",
-        aliases: Map<String, Map<String, String>> = emptyMap(),
         duplicateTargetBook: Boolean = false,
         sourceIsSefaria: Boolean = false,
     ): Fixture {
@@ -300,7 +253,7 @@ class ManualLinksRefreshIntegrationTest {
                   {
                     "line_index_1": 1,
                     "heRef_2": ${jsonText(heRef)},
-                    "path_2": "folder\\$targetFileTitle.txt",
+                    "path_2": ${jsonText("folder\\" + targetHeTitle + ".txt")},
                     "line_index_2": 99,
                     "unknown": "preserved"
                   }
@@ -318,7 +271,6 @@ class ManualLinksRefreshIntegrationTest {
                     {"path": "MoreBooks/links", "expected_state": "present"}
                   ],
                   "bootstrap_adapters": {"MoreBooks/links": "$adapter"},
-                  "he_title_aliases": ${jsonText(aliases)},
                   "bootstrap_file_renames": [],
                   "bootstrap_record_overrides": []
                 }
