@@ -62,8 +62,8 @@ internal val PATCH_TABLES_IN_FK_ORDER: List<PatchTable> = listOf(
     // Schema 4. Canonical line-reference index — pure key table (PK == all
     // columns), so there is nothing to update on conflict.
     PatchTable("line_ref",           listOf("bookId", "refKeyHash", "lineIndex"), updatable = false),
-    // Schema 4. Dibbur-hamatchil index — pure key table, same shape.
-    PatchTable("line_dh",            listOf("bookId", "dhText", "lineIndex"), updatable = false),
+    // Schema 4. Dibbur-hamatchil index — dhDisplay rides along the key.
+    PatchTable("line_dh",            listOf("bookId", "dhText", "lineIndex"), updatable = true),
 
     // Links.
     PatchTable("link",               listOf("id"),       updatable = true),

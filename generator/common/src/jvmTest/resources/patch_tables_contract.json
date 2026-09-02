@@ -23,7 +23,7 @@
     { "table": "line", "pk": ["id"], "updatable": true },
     { "table": "line_toc", "pk": ["lineId"], "updatable": true },
     { "table": "line_ref", "pk": ["bookId", "refKeyHash", "lineIndex"], "updatable": false },
-    { "table": "line_dh", "pk": ["bookId", "dhText", "lineIndex"], "updatable": false },
+    { "table": "line_dh", "pk": ["bookId", "dhText", "lineIndex"], "updatable": true },
     { "table": "link", "pk": ["id"], "updatable": true },
     { "table": "link_anchor", "pk": ["linkId", "side", "charStart"], "updatable": true },
     { "table": "link_range", "pk": ["linkId", "side"], "updatable": true },

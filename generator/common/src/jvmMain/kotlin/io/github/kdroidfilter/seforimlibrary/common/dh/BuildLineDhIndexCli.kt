@@ -10,7 +10,7 @@ import java.sql.DriverManager
 /**
  * Fills `line_dh` — the (bookId, dhText) -> lineIndex dibbur-hamatchil index
  * the Otzaria client uses to search commentaries by their opening words and
- * to render them as virtual sub-headings.
+ * to render them as virtual sub-headings (dhDisplay carries the printed form).
  *
  * Runs as a late DB-writing stage (`:generator-common:buildLineDhIndex`),
  * after every book-writing stage, and is idempotent: the table is rebuilt
@@ -60,6 +60,7 @@ internal fun rebuildLineDhIndex(conn: Connection, logger: Logger): LineDhIndexRe
                     bookId INTEGER NOT NULL,
                     dhText TEXT NOT NULL,
                     lineIndex INTEGER NOT NULL,
+                    dhDisplay TEXT NOT NULL,
                     PRIMARY KEY (bookId, dhText, lineIndex)
                 ) WITHOUT ROWID
                 """.trimIndent(),
@@ -108,15 +109,15 @@ internal fun indexAllBooks(conn: Connection, logger: Logger): LineDhIndexReport 
     }
 
     conn.prepareStatement(
-        "INSERT OR IGNORE INTO line_dh (bookId, dhText, lineIndex) VALUES (?, ?, ?)",
+        "INSERT OR IGNORE INTO line_dh (bookId, dhText, lineIndex, dhDisplay) VALUES (?, ?, ?, ?)",
     ).use { insert ->
         conn.prepareStatement(
             "SELECT lineIndex, content FROM line WHERE bookId = ? ORDER BY lineIndex",
         ).use { selectLines ->
             for (bookId in bookIds) {
                 var contentLines = 0
-                val bold = ArrayList<Pair<Long, String>>()
-                val dash = ArrayList<Pair<Long, String>>()
+                val bold = ArrayList<Pair<Long, DhExtractor.Dh>>()
+                val dash = ArrayList<Pair<Long, DhExtractor.Dh>>()
 
                 selectLines.setLong(1, bookId)
                 selectLines.executeQuery().use { rs ->
@@ -141,10 +142,11 @@ internal fun indexAllBooks(conn: Connection, logger: Logger): LineDhIndexReport 
                     continue
                 }
 
-                for ((lineIndex, dhText) in winner) {
+                for ((lineIndex, dh) in winner) {
                     insert.setLong(1, bookId)
-                    insert.setString(2, dhText)
+                    insert.setString(2, dh.key)
                     insert.setLong(3, lineIndex)
+                    insert.setString(4, dh.display)
                     insert.addBatch()
                 }
                 insert.executeBatch()

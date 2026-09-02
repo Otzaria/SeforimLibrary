@@ -1,20 +1,20 @@
 -- Queries for the dibbur-hamatchil index
 
 selectByBook:
-SELECT dhText, lineIndex FROM line_dh WHERE bookId = ? ORDER BY lineIndex;
+SELECT dhText, lineIndex, dhDisplay FROM line_dh WHERE bookId = ? ORDER BY lineIndex;
 
 -- Prefix match over the PK btree: the caller passes the normalised prefix
 -- and the same prefix with its last character incremented (exclusive bound),
 -- which keeps the scan index-only regardless of LIKE collation rules.
 selectByBookAndPrefixRange:
-SELECT dhText, lineIndex FROM line_dh
+SELECT dhText, lineIndex, dhDisplay FROM line_dh
 WHERE bookId = ? AND dhText >= :prefix AND dhText < :prefixEnd
 ORDER BY dhText, lineIndex
 LIMIT :limit;
 
 insert:
-INSERT OR IGNORE INTO line_dh (bookId, dhText, lineIndex)
-VALUES (?, ?, ?);
+INSERT OR IGNORE INTO line_dh (bookId, dhText, lineIndex, dhDisplay)
+VALUES (?, ?, ?, ?);
 
 deleteByBookId:
 DELETE FROM line_dh WHERE bookId = ?;
