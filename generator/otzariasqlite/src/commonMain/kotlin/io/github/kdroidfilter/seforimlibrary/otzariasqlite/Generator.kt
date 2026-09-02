@@ -990,13 +990,7 @@ class DatabaseGenerator(
         // Pre-resolve author / pubPlace / pubDate IDs through the IdAllocator
         // so they remain stable across builds (required for the delta producer's
         // secondary-UNIQUE collision pre-check).
-        // `authors` (list) wins over `author` (single) so a co-authored book can be
-        // expressed; order is preserved and blank/duplicate names are dropped.
-        val authorNames = (meta?.authors ?: listOfNotNull(meta?.author))
-            .map { it.trim() }
-            .filter { it.isNotEmpty() }
-            .distinct()
-        val authors = authorNames.map { authorName ->
+        val authors = (meta?.resolveAuthorNames() ?: emptyList()).map { authorName ->
             Author(id = bindings.upsertAuthor(authorName), name = authorName)
         }
         val pubPlaces = meta?.pubPlace?.let { pubPlaceName ->
