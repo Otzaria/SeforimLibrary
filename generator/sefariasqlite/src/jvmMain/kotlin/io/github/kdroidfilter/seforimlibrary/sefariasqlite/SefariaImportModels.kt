@@ -62,6 +62,11 @@ internal data class BookPayload(
     val refEntries: List<RefEntry>,
     val headings: List<Heading>,
     val authors: List<String>,
+    // Every name form these authors are known by: the bare schema names plus
+    // the honorific/acronym variants from authors.json. `authors` holds only
+    // the chosen display name, so blacklist matching must use this instead —
+    // otherwise a titled display name walks past an entry listed bare.
+    val authorMatchKeys: List<String> = emptyList(),
     // Long description (Sefaria heDesc) → book.heDesc
     val description: String?,
     // Short one-line summary (Sefaria heShortDesc) → book.heShortDesc

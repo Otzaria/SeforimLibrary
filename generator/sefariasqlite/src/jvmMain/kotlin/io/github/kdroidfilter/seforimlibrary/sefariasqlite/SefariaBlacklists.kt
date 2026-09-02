@@ -164,8 +164,15 @@ private fun isBookBlacklisted(payload: BookPayload, blacklists: SefariaBlacklist
 }
 
 private fun isAuthorBlacklisted(payload: BookPayload, blacklists: SefariaBlacklists): Boolean {
-    if (payload.authors.isEmpty() || blacklists.authorKeys.isEmpty()) return false
-    return payload.authors.any { author ->
+    if (blacklists.authorKeys.isEmpty()) return false
+    // Match on every name form the author is known by, not just the one chosen
+    // for display. authors.json can turn a bare schema name into an honorific
+    // one, and an entry listed bare would then no longer match. Checking all
+    // forms can only ever block more, never less — the right direction for a
+    // content filter.
+    val candidates = payload.authorMatchKeys.ifEmpty { payload.authors }
+    if (candidates.isEmpty()) return false
+    return candidates.any { author ->
         normalizeTitleKey(author)?.let { it in blacklists.authorKeys } == true
     }
 }

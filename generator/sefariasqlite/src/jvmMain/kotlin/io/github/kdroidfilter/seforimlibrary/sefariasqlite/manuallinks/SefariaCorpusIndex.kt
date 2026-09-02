@@ -3,6 +3,7 @@ package io.github.kdroidfilter.seforimlibrary.sefariasqlite.manuallinks
 import co.touchlab.kermit.Logger
 import io.github.kdroidfilter.seforimlibrary.sefariasqlite.BookPayload
 import io.github.kdroidfilter.seforimlibrary.sefariasqlite.RefEntry
+import io.github.kdroidfilter.seforimlibrary.sefariasqlite.SefariaAuthorTitles
 import io.github.kdroidfilter.seforimlibrary.sefariasqlite.SefariaBookPayloadReader
 import io.github.kdroidfilter.seforimlibrary.sefariasqlite.filterBlacklistedPayloads
 import io.github.kdroidfilter.seforimlibrary.sefariasqlite.findDatabaseExportRoot
@@ -86,7 +87,15 @@ internal class SefariaCorpusIndex private constructor(
             val dbRoot = findDatabaseExportRoot(exportRoot)
             val jsonDir = dbRoot.resolve("json")
             val schemaDir = dbRoot.resolve("schemas")
-            val reader = SefariaBookPayloadReader(Json { ignoreUnknownKeys = true; coerceInputValues = true }, logger)
+            // Same author titles as the importer: both paths run the same
+            // blacklist, and a book must not be accepted here and rejected
+            // there (or the reverse) because the names differ.
+            val corpusJson = Json { ignoreUnknownKeys = true; coerceInputValues = true }
+            val reader = SefariaBookPayloadReader(
+                corpusJson,
+                logger,
+                SefariaAuthorTitles.load(dbRoot, corpusJson, logger),
+            )
             val schemaLookup = reader.buildSchemaLookup(schemaDir)
             val blacklists = loadSefariaBlacklists(SefariaCorpusIndex::class.java.classLoader, logger)
             require(!blacklists.isEmpty()) { "Sefaria book/author blacklist resources are missing" }

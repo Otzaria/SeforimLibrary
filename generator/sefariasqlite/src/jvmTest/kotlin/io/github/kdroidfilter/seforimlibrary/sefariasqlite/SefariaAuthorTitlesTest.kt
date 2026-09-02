@@ -7,6 +7,7 @@ import org.junit.Test
 import org.junit.rules.TemporaryFolder
 import kotlin.io.path.writeText
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 
 /**
  * A book schema gives one bare Hebrew author name; authors.json holds every
@@ -19,6 +20,18 @@ class SefariaAuthorTitlesTest {
 
     private val json = Json { ignoreUnknownKeys = true; coerceInputValues = true }
     private val logger = Logger.withTag("test")
+
+    /** Present in every fixture: if this one stops being upgraded, the file
+     *  did not load, and the negative assertions around it mean nothing. */
+    private val control = record("control-slug", "אברהם יצחק הכהן קוק", "הרב אברהם יצחק הכהן קוק")
+
+    private fun assertLoaded(t: SefariaAuthorTitles) {
+        assertEquals(
+            "הרב אברהם יצחק הכהן קוק",
+            t.displayName("control-slug", "אברהם יצחק הכהן קוק"),
+            "control: authors.json did not load, so this test proves nothing",
+        )
+    }
 
     private fun titles(vararg records: String): SefariaAuthorTitles {
         val root = tmp.newFolder().toPath()
@@ -67,33 +80,38 @@ class SefariaAuthorTitlesTest {
 
     @Test
     fun `an acronym never replaces the name`() {
-        val t = titles(record("segal", "דוד הלוי סגל", "ט\"ז"))
+        val t = titles(control, record("segal", "דוד הלוי סגל", "ט\"ז"))
+        assertLoaded(t)
         assertEquals("דוד הלוי סגל", t.displayName("segal", "דוד הלוי סגל"))
     }
 
     @Test
     fun `a fuller name is not an honorific`() {
         // "אברהם אבן עזרא" completes the name; it does not title it.
-        val t = titles(record("ibn-ezra", "אבן עזרא", "אברהם אבן עזרא"))
+        val t = titles(control, record("ibn-ezra", "אבן עזרא", "אברהם אבן עזרא"))
+        assertLoaded(t)
         assertEquals("אבן עזרא", t.displayName("ibn-ezra", "אבן עזרא"))
     }
 
     @Test
     fun `a suffix is not an honorific`() {
-        val t = titles(record("h", "נפתלי צבי הורוביץ", "נפתלי צבי הורוביץ מרופשיץ"))
+        val t = titles(control, record("h", "נפתלי צבי הורוביץ", "נפתלי צבי הורוביץ מרופשיץ"))
+        assertLoaded(t)
         assertEquals("נפתלי צבי הורוביץ", t.displayName("h", "נפתלי צבי הורוביץ"))
     }
 
     @Test
     fun `trailing punctuation is not an honorific`() {
-        val t = titles(record("a", "אהרן הלוי", "אהרן הלוי,"))
+        val t = titles(control, record("a", "אהרן הלוי", "אהרן הלוי,"))
+        assertLoaded(t)
         assertEquals("אהרן הלוי", t.displayName("a", "אהרן הלוי"))
     }
 
     @Test
     fun `a partial word match is rejected`() {
         // "יעקב לנדא" is a substring of "יעקב לנדאו" but not a prefix-honorific of it.
-        val t = titles(record("landa", "יעקב לנדא", "יעקב לנדאו"))
+        val t = titles(control, record("landa", "יעקב לנדא", "יעקב לנדאו"))
+        assertLoaded(t)
         assertEquals("יעקב לנדא", t.displayName("landa", "יעקב לנדא"))
     }
 
@@ -101,13 +119,15 @@ class SefariaAuthorTitlesTest {
 
     @Test
     fun `unknown slug keeps the schema name`() {
-        val t = titles(record("known", "א", "רבי א"))
+        val t = titles(control, record("known", "א", "רבי א"))
+        assertLoaded(t)
         assertEquals("ב", t.displayName("missing", "ב"))
     }
 
     @Test
     fun `null slug keeps the schema name`() {
-        val t = titles(record("known", "א", "רבי א"))
+        val t = titles(control, record("known", "א", "רבי א"))
+        assertLoaded(t)
         assertEquals("ב", t.displayName(null, "ב"))
     }
 
@@ -118,11 +138,71 @@ class SefariaAuthorTitlesTest {
     }
 
     @Test
-    fun `an unreadable authors file leaves every name untouched`() {
+    fun `an unreadable authors file throws instead of degrading every name`() {
         val root = tmp.newFolder().toPath()
         root.resolve(SefariaAuthorTitles.FILE_NAME).writeText("{ not json")
+        assertFailsWith<IllegalStateException> { SefariaAuthorTitles.load(root, json, logger) }
+    }
+
+    @Test
+    fun `a non-object entry throws`() {
+        val root = tmp.newFolder().toPath()
+        root.resolve(SefariaAuthorTitles.FILE_NAME).writeText("""["just a string"]""")
+        assertFailsWith<IllegalStateException> { SefariaAuthorTitles.load(root, json, logger) }
+    }
+
+    @Test
+    fun `a duplicate slug throws rather than dropping one set of forms`() {
+        val root = tmp.newFolder().toPath()
+        root.resolve(SefariaAuthorTitles.FILE_NAME).writeText(
+            "[${record("dup", "א", "רבי א")},${record("dup", "ב", "רבי ב")}]"
+        )
+        assertFailsWith<IllegalArgumentException> { SefariaAuthorTitles.load(root, json, logger) }
+    }
+
+    @Test
+    fun `an honorific glued on without a space is rejected`() {
+        val t = titles(control, record("g", "אברהם יצחק הכהן קוק", "הרבאברהם יצחק הכהן קוק"))
+        assertLoaded(t)
+        assertEquals("אברהם יצחק הכהן קוק", t.displayName("g", "אברהם יצחק הכהן קוק"))
+    }
+
+    @Test
+    fun `the definite article is only accepted on an acronym`() {
+        val t = titles(control, record("levi", "לוי", "הלוי"), record("m", "מלבי\"ם", "המלבי\"ם"))
+        assertLoaded(t)
+        // "הלוי" is a different name, not a titled "לוי".
+        assertEquals("לוי", t.displayName("levi", "לוי"))
+        assertEquals("המלבי\"ם", t.displayName("m", "מלבי\"ם"))
+    }
+
+    @Test
+    fun `a non-breaking space does not hide the honorific`() {
+        val t = titles(control, record("nb", "יונתן זקס", "הרב\u00A0יונתן זקס"))
+        assertLoaded(t)
+        assertEquals("הרב\u00A0יונתן זקס", t.displayName("nb", "יונתן זקס"))
+    }
+
+    @Test
+    fun `all name forms are exposed for blacklist matching`() {
+        val t = titles(control, record("sacks", "יונתן זקס", "הרב לורד יונתן זקס", "זקס"))
+        assertEquals(
+            listOf("יונתן זקס", "הרב לורד יונתן זקס", "זקס"),
+            t.allNameForms("sacks"),
+        )
+        assertEquals(emptyList(), t.allNameForms("nobody"))
+        assertEquals(emptyList(), t.allNameForms(null))
+    }
+
+    @Test
+    fun `a slug with only english forms is not indexed`() {
+        val root = tmp.newFolder().toPath()
+        root.resolve(SefariaAuthorTitles.FILE_NAME).writeText(
+            """[{"slug":"en-only","primaryHe":"","primaryEn":"A","titles":[{"text":"A","lang":"en"}]}]"""
+        )
         val t = SefariaAuthorTitles.load(root, json, logger)
-        assertEquals("א", t.displayName("kook", "א"))
+        assertEquals(emptyList(), t.allNameForms("en-only"))
+        assertEquals("א", t.displayName("en-only", "א"))
     }
 
     @Test

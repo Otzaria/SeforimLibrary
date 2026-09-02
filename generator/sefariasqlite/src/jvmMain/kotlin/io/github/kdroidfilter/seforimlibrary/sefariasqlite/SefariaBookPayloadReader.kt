@@ -191,12 +191,18 @@ internal class SefariaBookPayloadReader(
             // `slug` is the topic id authors.json is keyed by; it is what lets a
             // bare "אברהם יצחק הכהן קוק" become "הרב אברהם יצחק הכהן קוק".
             // Without authors.json this resolves to the schema name unchanged.
-            val authors = schemaJson["authors"]?.jsonArray?.mapNotNull { author ->
+            val authorEntries = schemaJson["authors"]?.jsonArray?.mapNotNull { author ->
                 val entry = author.jsonObject
                 entry["he"]?.stringOrNull()?.let { he ->
-                    authorTitles.displayName(entry["slug"]?.stringOrNull(), he)
+                    val slug = entry["slug"]?.stringOrNull()
+                    he to slug
                 }
             } ?: emptyList()
+            val authors = authorEntries.map { (he, slug) -> authorTitles.displayName(slug, he) }
+            // Keep every form for blacklist matching — see BookPayload.authorMatchKeys.
+            val authorMatchKeys = authorEntries.flatMap { (he, slug) ->
+                listOf(he) + authorTitles.allNameForms(slug)
+            }.distinct()
 
             val (lines, refs, headings, cleanShifts) = buildBookContent(
                 schemaObj = schemaObj,
@@ -247,6 +253,7 @@ internal class SefariaBookPayloadReader(
                 refEntries = refs,
                 headings = headings,
                 authors = authors,
+                authorMatchKeys = authorMatchKeys,
                 description = description,
                 heShortDesc = heShortDesc,
                 pubDates = pubDates,
