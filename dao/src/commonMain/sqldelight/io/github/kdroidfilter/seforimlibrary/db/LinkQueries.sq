@@ -116,7 +116,12 @@ JOIN connection_type ct ON l.connectionTypeId = ct.id
 WHERE l.sourceBookId = ?;
 
 selectCommentatorsByBook:
-SELECT DISTINCT l.targetBookId, b.title AS targetBookTitle, a.name AS author, COUNT(*) AS linkCount
+-- A book may have several authors. Grouping by a.name would list the book once
+-- per author, and COUNT(*) would be multiplied by the author-join fan-out — so
+-- the names are concatenated and the links counted by distinct link id.
+SELECT l.targetBookId, b.title AS targetBookTitle,
+       GROUP_CONCAT(DISTINCT a.name) AS author,
+       COUNT(DISTINCT l.id) AS linkCount
 FROM link l
 JOIN connection_type ct ON l.connectionTypeId = ct.id
 JOIN book b ON l.targetBookId = b.id
@@ -124,7 +129,7 @@ LEFT JOIN book_author ba ON b.id = ba.bookId
 LEFT JOIN author a ON ba.authorId = a.id
 WHERE l.sourceBookId = ?
 AND ct.name IN ('COMMENTARY', 'SUPER_COMMENTARY', 'TARGUM', 'MIDRASH', 'PARSHANUT', 'DIBUR_HAMATCHIL', 'ELUCIDATION')
-GROUP BY l.targetBookId, b.title, a.name
+GROUP BY l.targetBookId, b.title
 ORDER BY b.orderIndex, b.title;
 
 selectIdsBySourceAndTargetLine:
@@ -329,7 +334,10 @@ ORDER BY l.baseProvenance DESC, b.isBaseBook DESC, b.orderIndex, sl.lineIndex;
 
 -- "Source-side commentators" — books that appear as base/source for this book's lines.
 selectSourcesByBook:
-SELECT DISTINCT l.sourceBookId AS targetBookId, b.title AS targetBookTitle, a.name AS author, COUNT(*) AS linkCount
+-- Same multi-author aggregation as selectCommentatorsByBook.
+SELECT l.sourceBookId AS targetBookId, b.title AS targetBookTitle,
+       GROUP_CONCAT(DISTINCT a.name) AS author,
+       COUNT(DISTINCT l.id) AS linkCount
 FROM link l
 JOIN connection_type ct ON l.connectionTypeId = ct.id
 JOIN book b ON l.sourceBookId = b.id
@@ -338,5 +346,5 @@ LEFT JOIN author a ON ba.authorId = a.id
 WHERE l.targetBookId = ?
   AND ct.name IN ('COMMENTARY','SUPER_COMMENTARY','TARGUM','MIDRASH','PARSHANUT','DIBUR_HAMATCHIL','EIN_MISHPAT','ELUCIDATION')
   AND l.sourceBookId != l.targetBookId
-GROUP BY l.sourceBookId, b.title, a.name
+GROUP BY l.sourceBookId, b.title
 ORDER BY MAX(l.baseProvenance) DESC, b.isBaseBook DESC, b.orderIndex, b.title;
