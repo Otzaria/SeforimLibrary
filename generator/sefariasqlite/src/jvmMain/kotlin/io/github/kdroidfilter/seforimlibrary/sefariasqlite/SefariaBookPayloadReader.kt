@@ -30,7 +30,10 @@ import kotlin.io.path.readText
 
 internal class SefariaBookPayloadReader(
     private val json: Json,
-    private val logger: Logger
+    private val logger: Logger,
+    // Sefaria's wider author-name vocabulary. Defaults to empty so an export
+    // without authors.json — and every existing caller — behaves as before.
+    private val authorTitles: SefariaAuthorTitles = SefariaAuthorTitles.EMPTY,
 ) {
     internal data class SelectedBookReadStats(
         val mergedFilesScanned: Int,
@@ -185,8 +188,14 @@ internal class SefariaBookPayloadReader(
                 ?: schemaObj["categories"]?.jsonArray?.mapNotNull { it.jsonPrimitive.contentOrNull }
                 ?: emptyList()
 
+            // `slug` is the topic id authors.json is keyed by; it is what lets a
+            // bare "אברהם יצחק הכהן קוק" become "הרב אברהם יצחק הכהן קוק".
+            // Without authors.json this resolves to the schema name unchanged.
             val authors = schemaJson["authors"]?.jsonArray?.mapNotNull { author ->
-                author.jsonObject["he"]?.stringOrNull()
+                val entry = author.jsonObject
+                entry["he"]?.stringOrNull()?.let { he ->
+                    authorTitles.displayName(entry["slug"]?.stringOrNull(), he)
+                }
             } ?: emptyList()
 
             val (lines, refs, headings, cleanShifts) = buildBookContent(
