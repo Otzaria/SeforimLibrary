@@ -46,8 +46,8 @@ class SefariaResponsaTocTest {
 
         // heRef for the first paragraph of the first teshuva should use the Hebrew label chain
         assertTrue(
-            payload.refEntries.any { it.heRef == "חוות יאיר א, א" },
-            "expected refEntry heRef='חוות יאיר א, א'"
+            payload.refEntries.any { it.heRef == "חוות יאיר, א, א" },
+            "expected refEntry heRef='חוות יאיר, א, א'"
         )
     }
 

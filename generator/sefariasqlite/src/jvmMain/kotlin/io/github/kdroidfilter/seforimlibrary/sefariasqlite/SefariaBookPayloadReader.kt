@@ -616,7 +616,10 @@ internal class SefariaBookPayloadReader(
                 output = output,
                 refEntries = refs,
                 refPrefix = "$bookEnTitle ",
-                heRefPrefix = "$bookHeTitle ",
+                // Comma after the title, like the named-nodes path above: consumers
+                // count ", "-separated address levels, and a space-glued title made
+                // the first level uncountable (e.g. "רש"י על חולין ו., ה, ב").
+                heRefPrefix = "$bookHeTitle, ",
                 bookEnTitle = bookEnTitle,
                 bookHeTitle = bookHeTitle,
                 headings = headings,
