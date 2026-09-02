@@ -775,16 +775,24 @@ class DatabaseGenerator(
             try {
                 // Try to parse as Map first (original format)
                 json.decodeFromString<Map<String, BookMetadata>>(content)
-            } catch (e: Exception) {
+            } catch (mapError: Exception) {
                 // If that fails, try to parse as List and convert to Map
                 try {
                     val metadataList = json.decodeFromString<List<BookMetadata>>(content)
                     logger.i { "Parsed metadata as List with ${metadataList.size} entries" }
                     // Convert list to map using title as key
                     metadataList.associateBy { it.title }
-                } catch (e: Exception) {
-                    logger.i(e) { "Failed to parse metadata.json" }
-                    emptyMap()
+                } catch (listError: Exception) {
+                    // Do NOT fall back to an empty map: metadata.json carries the
+                    // author, descriptions and order for every Otzaria book, so a
+                    // silent empty map builds a whole DB with none of them. A typo
+                    // here must stop the build, not degrade it.
+                    throw IllegalStateException(
+                        "metadata.json is present but parses as neither an object nor an array " +
+                            "(${metadataFile}). As an object: ${mapError.message}. " +
+                            "As an array: ${listError.message}",
+                        listError,
+                    )
                 }
             }
         } else {
