@@ -65,6 +65,11 @@ internal class ManualLinksRefresh(
     private var currentFailureRecordIndex: Int? = null
     private var currentFailureRecordHash: String? = null
 
+    // Anchor drift is fatal, but failing on the FIRST record hides the size and shape
+    // of the problem: an upstream Sefaria content change can move one anchor or all of
+    // them, and the operator has to see which before deciding how to re-anchor.
+    private val anchorDrifts = mutableListOf<String>()
+
     fun run(): ManualLinksResult = try {
         runInternal()
     } catch (error: Throwable) {
@@ -110,6 +115,15 @@ internal class ManualLinksRefresh(
             proveTashmaVector()
         } else null
         processDocuments(initialBootstrap = inputLineage == null, mayBootstrap = mayBootstrap, tashmaProof = tashmaProof)
+        if (anchorDrifts.isNotEmpty()) {
+            // Nothing has been persisted yet, so the working tree stays exactly as it was.
+            logger.e { "anchor_content_drift: ${anchorDrifts.size} record(s) no longer match their stored source hash" }
+            anchorDrifts.take(200).forEach { logger.e { it } }
+            if (anchorDrifts.size > 200) {
+                logger.e { "... ${anchorDrifts.size - 200} further drifted record(s) not listed" }
+            }
+            throw IllegalArgumentException("anchor_content_drift: ${anchorDrifts.size} record(s)")
+        }
         persistChangedDocuments()
 
         val scan = ManualLinksTreeHash.scan(arguments.output, config)
@@ -576,7 +590,19 @@ internal class ManualLinksRefresh(
             require(allowEnrich) { "pending_anchor_hash is forbidden in refresh" }
             document.setString(recordIndex, "anchor_src_hash", expectedHash)
         } else {
-            require(anchorNode.isTextual && anchorNode.textValue() == expectedHash) { "anchor_content_drift" }
+            val stored = if (anchorNode.isTextual) anchorNode.textValue() else anchorNode.toString()
+            if (stored != expectedHash) {
+                val from = maxOf(0, start - 30)
+                val around = content.substring(from, minOf(content.length, start + 50))
+                    .replace('\n', ' ')
+                    .replace('\t', ' ')
+                anchorDrifts.add(
+                    "${currentFailureFile ?: "?"}[$recordIndex] ref_1=${entry.ref} " +
+                        "line_index=${entry.lineIndex} start=$start content_length=${content.length} " +
+                        "stored=$stored actual=$expectedHash around_start=\"$around\""
+                )
+                return
+            }
         }
         counters.anchorsChecked++
     }
