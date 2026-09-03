@@ -70,6 +70,10 @@ internal class ManualLinksRefresh(
     // them, and the operator has to see which before deciding how to re-anchor.
     private val anchorDrifts = mutableListOf<String>()
 
+    // One drifted segment usually carries several anchors: keep its full text once so
+    // the operator can compute the new offsets instead of guessing from a window.
+    private val anchorDriftLines = LinkedHashMap<String, String>()
+
     fun run(): ManualLinksResult = try {
         runInternal()
     } catch (error: Throwable) {
@@ -121,6 +125,12 @@ internal class ManualLinksRefresh(
             anchorDrifts.take(200).forEach { logger.e { it } }
             if (anchorDrifts.size > 200) {
                 logger.e { "... ${anchorDrifts.size - 200} further drifted record(s) not listed" }
+            }
+            anchorDriftLines.entries.take(20).forEach { (key, dump) ->
+                logger.e { "drifted_source_line $key $dump" }
+            }
+            if (anchorDriftLines.size > 20) {
+                logger.e { "... ${anchorDriftLines.size - 20} further drifted source line(s) not dumped" }
             }
             throw IllegalArgumentException("anchor_content_drift: ${anchorDrifts.size} record(s)")
         }
@@ -600,6 +610,10 @@ internal class ManualLinksRefresh(
                     "${currentFailureFile ?: "?"}[$recordIndex] ref_1=${entry.ref} " +
                         "line_index=${entry.lineIndex} start=$start content_length=${content.length} " +
                         "stored=$stored actual=$expectedHash around_start=\"$around\""
+                )
+                anchorDriftLines.putIfAbsent(
+                    "${currentFailureFile ?: "?"}#${entry.lineIndex}",
+                    "ref=${entry.ref} length=${content.length} text=<<<${content.replace('\n', ' ')}>>>",
                 )
                 return
             }
