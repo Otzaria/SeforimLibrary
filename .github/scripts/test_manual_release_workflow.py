@@ -148,21 +148,38 @@ class ManualReleaseWorkflowContractTest(unittest.TestCase):
             stage,
         )
 
-    def test_patch_fan_skips_anchors_whose_previous_db_lacks_columns(self):
+    def test_patch_fan_skips_only_anchors_the_producer_declares_unpatchable(self):
         # A column added without a db_schema_version bump (category.heShortDesc,
-        # 2026-07-16) made the v9 anchor unpatchable: the producer diffs every
-        # column of the new schema and no patch can ADD a column. Such anchors
-        # must be skipped with a warning, never fail the release.
+        # 2026-07-16) is now handled inside PatchDbProducer, which emits an
+        # ALTER TABLE … ADD COLUMN migration. The old shell pre-check that
+        # compared PRAGMA table_info and dropped the anchor must be gone: the
+        # producer is the single authority on what is patchable, and it says so
+        # by exiting 3 and writing "<out>.unpatchable" next to the patch.
         patch_fan = self.step("Produce + verify patch fan")
+        self.assertNotIn("MISSING_COLUMNS", patch_fan)
+        self.assertNotIn('PRAGMA table_info("{t}")', patch_fan)
+        self.assertNotIn("patches cannot add columns", patch_fan)
+
         gradle_at = patch_fan.index("gradle :generator-common:producePatchAndVerify")
-        check_at = patch_fan.index('MISSING_COLUMNS=$(python3 - "$PREV_DB" build/seforim.db')
-        self.assertLess(check_at, gradle_at)
-        self.assertIn('PRAGMA table_info("{t}")', patch_fan)
-        self.assertIn("patches cannot add columns; skip anchor", patch_fan)
-        skip_at = patch_fan.index("patches cannot add columns; skip anchor")
-        self.assertLess(check_at, skip_at)
-        self.assertLess(skip_at, gradle_at)
-        self.assertIn("rm -rf prev-dbs\n              continue", patch_fan[skip_at:gradle_at])
+        # The marker is cleared before the producer runs, so a stale file from
+        # an earlier anchor can never skip a good one.
+        clear_at = patch_fan.index('rm -f "$PATCH_OUT.unpatchable"')
+        self.assertLess(clear_at, gradle_at)
+        self.assertIn("-Pout=$PATCH_OUT", patch_fan)
+        skip_at = patch_fan.index("producer declared the anchor unpatchable; skip anchor")
+        self.assertLess(gradle_at, skip_at)
+        self.assertIn('if [ -f "$PATCH_OUT.unpatchable" ]; then', patch_fan)
+        # A skipped anchor must leave patches/ clean: the marker, the producer's
+        # half-built .tmp and any stale .db all go.
+        self.assertIn(
+            'rm -f "$PATCH_OUT.unpatchable" "$PATCH_OUT" "$PATCH_OUT.tmp"',
+            patch_fan[skip_at:],
+        )
+        self.assertIn("rm -rf prev-dbs\n              continue", patch_fan[skip_at:])
+        # Exit 3 is the only tolerated failure mode; everything else still
+        # aborts the job through set -e.
+        self.assertIn("exits 3", patch_fan)
+        self.assertIn("Every other non-zero exit still fails the release", patch_fan)
         # Patch compression at L19 parallelises across cores; L22 ran single-core.
         self.assertIn('ZSTD_LEVEL: "19"', patch_fan)
         # Skips are warnings, but zero patches with prior releases must fail.

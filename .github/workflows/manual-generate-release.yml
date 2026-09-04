@@ -1453,43 +1453,38 @@ jobs:
               fi
             fi
 
-            # The producer diffs every column the NEW schema has, and neither it
-            # nor PatchApplier can ADD a column to a client DB. A prior release
-            # whose table lacks a column that was added without a schema-version
-            # bump (e.g. category.heShortDesc, 2026-07-16, still schema 1) is
-            # therefore not patchable: skip that anchor with a warning instead
-            # of failing the whole release. Older clients fall back to the full
-            # bundle, exactly as for an unsupported schema transition. (This is
-            # deliberately stricter than the producer, which snapshots promoted
-            # tables without joining prev: losing a delta is always safe.)
-            MISSING_COLUMNS=$(python3 - "$PREV_DB" build/seforim.db <<'PY'
-          import sqlite3, sys
-          prev, new = (sqlite3.connect(f"file:{p}?mode=ro", uri=True) for p in sys.argv[1:3])
-          def tables(c):
-              return {r[0] for r in c.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")}
-          def cols(c, t):
-              return [r[1] for r in c.execute(f'PRAGMA table_info("{t}")')]
-          out = []
-          for t in sorted(tables(new) & tables(prev)):
-              have = set(cols(prev, t))
-              missing = [c for c in cols(new, t) if c not in have]
-              if missing:
-                  out.append(f"{t}({','.join(missing)})")
-          print(" ".join(out))
-          PY
-            )
-            if [ -n "$MISSING_COLUMNS" ]; then
-              echo "::warning::anchor v${TARGET_VER} ($TAG): previous DB lacks column(s) $MISSING_COLUMNS — patches cannot add columns; skip anchor"
-              rm -rf prev-dbs
-              continue
-            fi
-
+            # A column added without a db_schema_version bump (e.g.
+            # category.heShortDesc, 2026-07-16, still schema 1) no longer costs
+            # us the anchor: PatchDbProducer emits an
+            # `ALTER TABLE … ADD COLUMN` migration — plain SQL that every
+            # released PatchApplier already runs before the upserts — and ships
+            # every row whose new value is non-NULL. The shell pre-check that
+            # compared PRAGMA table_info is therefore gone; the producer itself
+            # is now the single authority on what is patchable.
+            #
+            # It declares an anchor unpatchable only when no patch could ever
+            # express the change (a PRIMARY KEY column missing from prev, or a
+            # column dropped without a bump): PatchPipelineCli then exits 3
+            # (UnpatchableAnchor) and drops "<out>.unpatchable" carrying the
+            # reason, and the Gradle task lets the build succeed for that one
+            # code. Every other non-zero exit still fails the release (set -e).
+            PATCH_OUT=$PWD/patches/patch-v${TARGET_VER}-v${THIS_VER}.db
+            rm -f "$PATCH_OUT.unpatchable"
             gradle :generator-common:producePatchAndVerify \
               -PprevDb=$PWD/$PREV_DB \
               -PnewDb=$PWD/build/seforim.db \
-              -Pout=$PWD/patches/patch-v${TARGET_VER}-v${THIS_VER}.db \
+              -Pout=$PATCH_OUT \
               -PfromVersion=$TARGET_VER -PtoVersion=$THIS_VER \
               --no-daemon --stacktrace
+            if [ -f "$PATCH_OUT.unpatchable" ]; then
+              echo "::warning::anchor v${TARGET_VER} ($TAG): $(cat "$PATCH_OUT.unpatchable") — producer declared the anchor unpatchable; skip anchor"
+              # Leave nothing behind: the marker plus the producer's half-built
+              # .tmp (and any stale .db) must not clutter patches/, which the
+              # release staging step globs.
+              rm -f "$PATCH_OUT.unpatchable" "$PATCH_OUT" "$PATCH_OUT.tmp"
+              rm -rf prev-dbs
+              continue
+            fi
             T_DONE=$(date +%s)
             echo "anchor v${TARGET_VER} timings: download=$((T_DOWNLOADED - T_START))s extract=$((T_EXTRACTED - T_DOWNLOADED))s produce+verify+compress=$((T_DONE - T_EXTRACTED))s total=$((T_DONE - T_START))s"
 

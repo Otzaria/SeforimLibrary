@@ -97,8 +97,20 @@ internal object PatchDbSchema {
         }
     }
 
-    /** Schema info for a single column. */
-    data class ColumnInfo(val name: String, val type: String, val notNull: Boolean)
+    /**
+     * Schema info for a single column.
+     *
+     * [defaultValue] is the raw `dflt_value` text from `PRAGMA table_info`,
+     * i.e. an SQL literal already quoted the way the DDL declared it
+     * (`'x'`, `0`, `NULL`, …) — or `null` when the column has no DEFAULT.
+     * [PatchDbProducer] splices it verbatim into `ALTER TABLE … ADD COLUMN`.
+     */
+    data class ColumnInfo(
+        val name: String,
+        val type: String,
+        val notNull: Boolean,
+        val defaultValue: String? = null,
+    )
 
     /**
      * Reads `PRAGMA <schema>.table_info(<table>)` and returns columns in
@@ -113,6 +125,7 @@ internal object PatchDbSchema {
                         name = rs.getString("name"),
                         type = rs.getString("type").ifBlank { "BLOB" },
                         notNull = rs.getInt("notnull") == 1,
+                        defaultValue = rs.getString("dflt_value"),
                     )
                 }
             }

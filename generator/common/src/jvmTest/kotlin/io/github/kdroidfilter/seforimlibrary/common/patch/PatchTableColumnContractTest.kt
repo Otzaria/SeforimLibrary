@@ -1,0 +1,99 @@
+package io.github.kdroidfilter.seforimlibrary.common.patch
+
+import app.cash.sqldelight.driver.jdbc.sqlite.JdbcSqliteDriver
+import io.github.kdroidfilter.seforimlibrary.db.SeforimDb
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
+import org.junit.Rule
+import org.junit.Test
+import org.junit.rules.TemporaryFolder
+import java.nio.file.Files
+import java.sql.DriverManager
+import kotlin.test.assertEquals
+
+/**
+ * Guard against the 2026-07-16 recurrence: `category.heShortDesc` was added to
+ * the SQLDelight schema without bumping `db_schema_version`, so the released
+ * v9–v13 DBs and the v25 DB claimed the same schema 1 while carrying different
+ * physical columns. The patch fan then died on `no such column: prev.heShortDesc`.
+ *
+ * The producer now survives that (it emits an `ALTER TABLE … ADD COLUMN`
+ * migration), but a silent column change is still a schema change: it must be
+ * a *deliberate* one. This test pins the physical column set of every patch
+ * table in a freshly created DB against a committed expectation keyed by
+ * `db_schema_version`, so any add/rename/drop fails CI until someone either
+ * bumps the version or consciously records the new column list.
+ */
+class PatchTableColumnContractTest {
+    @JvmField @Rule
+    val tmp = TemporaryFolder()
+
+    // The fixture is keyed by the DB's `schema_meta.db_schema_version`. There is
+    // no compile-time constant for it: StampSchemaVersionCli defaults it to
+    // PatchDbSchema.CURRENT_VERSION (the *patch format* version, documented as
+    // independent), and the two happen to coincide at 4 today because every
+    // table-contract bump so far also bumped the patch format. If they ever
+    // diverge, pin the number here explicitly instead of deriving it.
+    private val dbSchemaVersion = PatchDbSchema.CURRENT_VERSION
+    private val fixtureName = "/patch_table_columns_schema_$dbSchemaVersion.json"
+
+    @Test
+    fun `physical columns of every patch table match the committed expectation`() {
+        val fixture = javaClass.getResourceAsStream(fixtureName)
+            ?.readBytes()?.toString(Charsets.UTF_8)
+            ?: error("fixture $fixtureName missing from test resources")
+        val root = Json.parseToJsonElement(fixture).jsonObject
+        assertEquals(
+            dbSchemaVersion,
+            root.getValue("dbSchemaVersion").jsonPrimitive.content.toInt(),
+            "fixture $fixtureName must describe db_schema_version $dbSchemaVersion",
+        )
+        val expected = root.getValue("tables").jsonObject.mapValues { (_, v) ->
+            v.jsonArray.map { it.jsonPrimitive.content }
+        }
+
+        val actual = freshDatabaseColumns()
+
+        val hint = "bump db_schema_version or add a column migration"
+        val followUp = "If you bump db_schema_version, add a NEW " +
+            "patch_table_columns_schema_<N>.json for it (and keep $fixtureName frozen) rather " +
+            "than editing this one — the older fixture still describes DBs already released " +
+            "under the previous version."
+        assertEquals(
+            expected.keys.sorted(),
+            actual.keys.sorted(),
+            "the set of patch tables changed — $hint (fixture: $fixtureName). $followUp",
+        )
+        for (table in expected.keys.sorted()) {
+            assertEquals(
+                expected.getValue(table),
+                actual.getValue(table),
+                "physical columns of '$table' drifted from the committed schema " +
+                    "$dbSchemaVersion expectation — $hint. " +
+                    "A column added without a bump makes every older release " +
+                    "carry a different physical schema under the same signed version. " +
+                    followUp,
+            )
+        }
+    }
+
+    /** Column names (alphabetical, like LogicalContentHasher) per patch table. */
+    private fun freshDatabaseColumns(): Map<String, List<String>> {
+        val db = tmp.newFolder().toPath().resolve("fresh-seforim.db")
+        Files.deleteIfExists(db)
+        JdbcSqliteDriver("jdbc:sqlite:${db.toAbsolutePath()}").use { driver ->
+            SeforimDb.Schema.create(driver)
+        }
+        val out = LinkedHashMap<String, List<String>>()
+        DriverManager.getConnection("jdbc:sqlite:${db.toAbsolutePath()}").use { conn ->
+            for (table in PATCH_TABLES_IN_FK_ORDER) {
+                val cols = PatchDbSchema.readTableInfo(conn, "main", table.name).map { it.name }
+                if (cols.isEmpty()) error("patch table '${table.name}' is missing from a freshly created DB")
+                out[table.name] = cols.sorted()
+            }
+        }
+        return out
+    }
+}

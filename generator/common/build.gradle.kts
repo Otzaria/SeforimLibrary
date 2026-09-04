@@ -88,6 +88,32 @@ tasks.register<JavaExec>("producePatchAndVerify") {
     }
 
     jvmArgs = listOf("-Xmx$generatorHeap", "-XX:+UseG1GC")
+
+    // Exit-code contract with PatchPipelineCli:
+    //   0 → produced + verified.
+    //   3 → UnpatchableAnchor: this (prev, new) pair cannot be expressed as a
+    //       delta at all (missing PK column / column dropped without a
+    //       db_schema_version bump). The CLI wrote "<out>.unpatchable" with
+    //       the reason; the build SUCCEEDS so the release fan can skip just
+    //       this anchor by testing for that marker.
+    //   * → a real failure; rethrown so the build fails as before.
+    // Gradle itself always exits 1 on a failed build, so the marker file — not
+    // Gradle's own exit code — is what carries the typed outcome to the caller.
+    isIgnoreExitValue = true
+    val unpatchableMarker = file("$out.unpatchable")
+    val execOutcome = executionResult
+    doLast {
+        when (val rc = execOutcome.get().exitValue) {
+            0 -> Unit
+            3 -> logger.warn(
+                "producePatchAndVerify: anchor is NOT patchable (exit 3) — " +
+                    (unpatchableMarker.takeIf { it.isFile }?.readText()?.trim()
+                        ?: "see PatchPipelineCli output") +
+                    " — skipping this anchor; marker at $unpatchableMarker"
+            )
+            else -> throw GradleException("producePatchAndVerify failed with exit code $rc")
+        }
+    }
 }
 
 tasks.register<JavaExec>("compareLogicalContent") {

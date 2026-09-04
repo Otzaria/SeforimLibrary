@@ -21,8 +21,15 @@ import kotlin.system.exitProcess
  *       -PnewDb=build/seforim.db.runB   \
  *       -Pout=build/patch.db
  *
- * Exits with code 0 on success and prints the produced patch path, or
- * fails loud with a clear hash-mismatch message.
+ * Exit codes:
+ *   - `0` patch produced and verified.
+ *   - [UnpatchableAnchorException.EXIT_CODE] (3) the (prev, new) pair cannot
+ *     be expressed as a delta at all (missing PK column, or a column dropped
+ *     without a `db_schema_version` bump). A `<out>.unpatchable` marker file
+ *     carrying the reason is written next to the patch, the Gradle task lets
+ *     the build succeed, and the release workflow skips just that anchor.
+ *   - any other non-zero: a genuine failure (hash mismatch, IO, …) — the
+ *     Gradle task rethrows it and the release fails.
  */
 fun main(args: Array<String>) {
     Logger.setMinSeverity(Severity.Info)
@@ -47,15 +54,40 @@ fun main(args: Array<String>) {
     val toSchemaVersion = resolveSchemaVersion(newPath, "toSchemaVersion")
 
     logger.i { "Producing patch $prev → $new at $out (v$from → v$to, schema $fromSchemaVersion → $toSchemaVersion)" }
-    val output = PatchDbProducer(logger).produce(
-        prevDb = prevPath,
-        newDb = newPath,
-        outputPath = outPath,
-        fromVersion = from,
-        toVersion = to,
-        fromSchemaVersion = fromSchemaVersion,
-        toSchemaVersion = toSchemaVersion,
+    // Marker consumed by the Gradle task / release workflow — clear any
+    // leftover from an earlier anchor before this run can write its own.
+    val unpatchableMarker = outPath.resolveSibling(
+        "${outPath.fileName}${UnpatchableAnchorException.MARKER_SUFFIX}",
     )
+    runCatching { Files.deleteIfExists(unpatchableMarker) }
+    val output = try {
+        PatchDbProducer(logger).produce(
+            prevDb = prevPath,
+            newDb = newPath,
+            outputPath = outPath,
+            fromVersion = from,
+            toVersion = to,
+            fromSchemaVersion = fromSchemaVersion,
+            toSchemaVersion = toSchemaVersion,
+        )
+    } catch (unpatchable: UnpatchableAnchorException) {
+        // Not a build failure: this (prev → new) pair simply cannot be
+        // expressed as a delta. Record why, then exit with the reserved code
+        // so the caller can skip this anchor and keep the rest of the fan.
+        Files.createDirectories(unpatchableMarker.toAbsolutePath().parent)
+        Files.write(
+            unpatchableMarker,
+            "${unpatchable.message}\n".toByteArray(Charsets.UTF_8),
+        )
+        // The producer aborts with its half-built "<out>.tmp" still on disk.
+        runCatching { Files.deleteIfExists(outPath.resolveSibling("${outPath.fileName}.tmp")) }
+        logger.w {
+            "Anchor v$from → v$to is NOT patchable (${unpatchable.table}: " +
+                "${unpatchable.columns.joinToString(", ")}): ${unpatchable.message} — " +
+                "wrote $unpatchableMarker and exiting ${UnpatchableAnchorException.EXIT_CODE}"
+        }
+        exitProcess(UnpatchableAnchorException.EXIT_CODE)
+    }
     val totalUpserts = output.upsertCounts.values.sum()
     val totalDeletes = output.deleteCounts.values.sum()
     logger.i { "patch.db produced — upserts=$totalUpserts, deletes=$totalDeletes" }
