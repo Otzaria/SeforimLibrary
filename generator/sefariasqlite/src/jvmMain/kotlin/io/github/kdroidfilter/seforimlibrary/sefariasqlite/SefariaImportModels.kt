@@ -1,5 +1,7 @@
 package io.github.kdroidfilter.seforimlibrary.sefariasqlite
 
+import io.github.kdroidfilter.seforimlibrary.common.countVisibleChars
+import io.github.kdroidfilter.seforimlibrary.common.ids.IdAllocatorBindings
 import io.github.kdroidfilter.seforimlibrary.core.models.PubDate
 import kotlinx.serialization.Serializable
 
@@ -103,7 +105,102 @@ internal data class BookPayload(
     // Raw English `categories` from the index record. Only the whole-unit ref
     // sets need them (Sefaria's own gate is English-category based).
     val categoriesEn: List<String> = emptyList(),
-)
+) {
+    /**
+     * Text-only per-line derivations for this book: computed on the parallel
+     * parse worker by [precomputeLineData], read by the single-threaded insert
+     * loop. Deliberately *not* a constructor property — it is mutable state the
+     * loop releases per book, and it must stay out of the data class's identity
+     * (`equals`/`hashCode`/`copy`).
+     *
+     * `null` means "not precomputed": the state tests and the manual-links
+     * reader see, neither of which reaches the insert loop.
+     */
+    var precomputed: LinePrecompute? = null
+}
+
+/**
+ * The per-line values the serial insert loop used to derive inline, hoisted to
+ * the parse phase. The three arrays are indexed by lineIndex and sized to the
+ * book's line count.
+ *
+ * [release] drops them as soon as the book's rows have been queued. That matters:
+ * each 20-byte hash is handed to the IdAllocator, which retains it inside its
+ * `LineKey` for the rest of the build, so a second reference from the payload
+ * buys nothing and only inflates the insert loop's peak heap — and that peak is
+ * what sits closest to the generator's `-Xmx`.
+ */
+internal class LinePrecompute(
+    /// `refEntries.associateBy { it.lineIndex - 1 }` — lineIndex → RefEntry.
+    /// Kept past [release]: the inline-anchor pass holds it for the whole build.
+    val refsByLineIndex: Map<Int, RefEntry>,
+    /// `detectTeamimAndNekudot(lines)`, book-level.
+    val hasTeamim: Boolean,
+    val hasNekudot: Boolean,
+    lineKeyHashes: Array<ByteArray>,
+    lineCharCounts: IntArray,
+    lineIsHeading: BooleanArray,
+) {
+    /// Per line, `IdAllocatorBindings.lineNaturalKeyHash(content, heRef)`.
+    var lineKeyHashes: Array<ByteArray>? = lineKeyHashes
+        private set
+
+    /// Per line, `countVisibleChars(content)`.
+    var lineCharCounts: IntArray? = lineCharCounts
+        private set
+
+    /// Per line, whether the content carries an `<h1>`…`<h4>` tag.
+    var lineIsHeading: BooleanArray? = lineIsHeading
+        private set
+
+    /// Line count the arrays were built for. Survives [release] so the insert
+    /// loop can still assert it against `payload.lines.size`.
+    val lineCount: Int = lineKeyHashes.size
+
+    fun release() {
+        lineKeyHashes = null
+        lineCharCounts = null
+        lineIsHeading = null
+    }
+}
+
+/**
+ * Computes, on the parallel parse worker that already holds this book's text,
+ * every per-line value the serial insert loop used to derive inline: the natural
+ * key hash, the visible char count, the heading flag, the lineIndex → RefEntry
+ * lookup, and the book-level teamim/nekudot flags.
+ *
+ * This is pure code motion. Each value is produced by the exact same expression
+ * the loop used, over [BookPayload.lines] in ascending index order, so the loop
+ * keeps calling `nextLineOccurrence` / `allocator.lineId` with byte-identical
+ * arguments in an unchanged sequence — see the ordering invariant in
+ * [SefariaDirectImporter].
+ */
+internal fun BookPayload.precomputeLineData(): BookPayload {
+    val refsByLineIndex = refEntries.associateBy { it.lineIndex - 1 }
+    val count = lines.size
+    val hashes = arrayOfNulls<ByteArray>(count)
+    val charCounts = IntArray(count)
+    val isHeading = BooleanArray(count)
+    for (idx in 0 until count) {
+        val content = lines[idx]
+        hashes[idx] = IdAllocatorBindings.lineNaturalKeyHash(content, refsByLineIndex[idx]?.heRef)
+        charCounts[idx] = countVisibleChars(content)
+        isHeading[idx] = content.contains("<h1>") || content.contains("<h2>") ||
+            content.contains("<h3>") || content.contains("<h4>")
+    }
+    val (teamim, nekudot) = detectTeamimAndNekudot(lines)
+    @Suppress("UNCHECKED_CAST")
+    precomputed = LinePrecompute(
+        refsByLineIndex = refsByLineIndex,
+        hasTeamim = teamim,
+        hasNekudot = nekudot,
+        lineKeyHashes = hashes as Array<ByteArray>,
+        lineCharCounts = charCounts,
+        lineIsHeading = isHeading,
+    )
+    return this
+}
 
 internal data class VersionMeta(
     val title: String,

@@ -4,7 +4,6 @@ import co.touchlab.kermit.Logger
 import io.github.kdroidfilter.seforimlibrary.common.buildstate.BookKey
 import io.github.kdroidfilter.seforimlibrary.common.changes.SefariaSourceHashComputer
 import io.github.kdroidfilter.seforimlibrary.common.changes.TouchedBookDetector
-import io.github.kdroidfilter.seforimlibrary.common.countVisibleChars
 import io.github.kdroidfilter.seforimlibrary.common.ids.IdAllocator
 import io.github.kdroidfilter.seforimlibrary.common.ids.IdAllocatorBindings
 import io.github.kdroidfilter.seforimlibrary.common.ids.InMemoryIdAllocator
@@ -243,6 +242,20 @@ class SefariaDirectImporter(
         var processedBooks = 0
 
         for (payload in orderedBookPayloads) {
+            // The loop only allocates ids and inserts; every text-only derivation
+            // was done on the parse workers (BookPayload.precomputeLineData).
+            val precomputed = payload.precomputed
+                ?: error("Payload '${payload.heTitle}' reached the insert loop without precomputed line data")
+            check(precomputed.lineCount == payload.lines.size) {
+                "Payload '${payload.heTitle}' precompute size mismatch: " +
+                    "${precomputed.lineCount} entries for ${payload.lines.size} lines"
+            }
+            val lineKeyHashes = precomputed.lineKeyHashes
+                ?: error("Payload '${payload.heTitle}' precompute was already released")
+            val lineCharCounts = precomputed.lineCharCounts
+                ?: error("Payload '${payload.heTitle}' precompute was already released")
+            val lineIsHeading = precomputed.lineIsHeading
+                ?: error("Payload '${payload.heTitle}' precompute was already released")
             val catId = ensureCategoryPath(payload.categoriesHe)
             val bookId = allocator.bookId(sourceName, canonicalHeTitle(payload))
             val bookPath = buildBookPath(payload.categoriesHe, payload.heTitle)
@@ -258,8 +271,9 @@ class SefariaDirectImporter(
             val normalizedPath = normalizedBookPath(payload.categoriesHe, payload.heTitle)
             val isBaseBook = normalizedPath in baseBookKeys
 
-            // Detect teamim and nekudot in book lines
-            val (hasTeamim, hasNekudot) = detectTeamimAndNekudot(payload.lines)
+            // Teamim/nekudot were detected on the parse worker.
+            val hasTeamim = precomputed.hasTeamim
+            val hasNekudot = precomputed.hasNekudot
 
             // Pre-resolve author + pubDate IDs through the IdAllocator so they
             // stay stable across builds (without this, INSERT OR IGNORE INTO author
@@ -332,8 +346,8 @@ class SefariaDirectImporter(
                 allRefsWithPath += refsForBook
             }
 
-            // Create a mapping from lineIndex to RefEntry for quick lookup
-            val refsByLineIndex = payload.refEntries.associateBy { it.lineIndex - 1 }
+            // Mapping from lineIndex to RefEntry, built on the parse worker.
+            val refsByLineIndex = precomputed.refsByLineIndex
 
             anchorBookInputs += SefariaInlineAnchors.BookInput(
                 bookId = bookId,
@@ -353,14 +367,15 @@ class SefariaDirectImporter(
 
             payload.lines.forEachIndexed { idx, content ->
                 val refEntry = refsByLineIndex[idx]
-                // Prefer Sefaria's stable citation address (heRef) as natural key
+                // Prefers Sefaria's stable citation address (heRef) as natural key
                 // when available — survives Sefaria's verse-prefix renumbering
-                // (DELTA_UPDATE_PLAN.md §2.1). Fallback to content hash for
-                // headings / structural lines that have no heRef.
-                val contentHash = IdAllocatorBindings.lineNaturalKeyHash(content, refEntry?.heRef)
+                // (DELTA_UPDATE_PLAN.md §2.1). Falls back to a content hash for
+                // headings / structural lines that have no heRef. Computed on the
+                // parse worker; the array is handed to the allocator as-is.
+                val contentHash = lineKeyHashes[idx]
                 val occurrence = nextLineOccurrence(bookId, contentHash)
                 val lineId = allocator.lineId(bookId, contentHash, occurrence)
-                val lineCharCount = countVisibleChars(content)
+                val lineCharCount = lineCharCounts[idx]
                 lineBatch += Line(
                     id = lineId,
                     bookId = bookId,
@@ -371,9 +386,9 @@ class SefariaDirectImporter(
                 )
                 lineKeyToId[bookPath to idx] = lineId
                 lineIdToBookId[lineId] = bookId
-                // Track heading lines (contain <h1>, <h2>, etc. tags)
-                if (content.contains("<h1>") || content.contains("<h2>") ||
-                    content.contains("<h3>") || content.contains("<h4>")) {
+                // Track heading lines (contain <h1>, <h2>, etc. tags) — flagged
+                // on the parse worker.
+                if (lineIsHeading[idx]) {
                     headingLineIds.add(lineId)
                 }
 
@@ -383,6 +398,12 @@ class SefariaDirectImporter(
                     lineBatch.clear()
                 }
             }
+
+            // Every precomputed per-line array has been consumed. Drop them now:
+            // the allocator owns the hashes from here on, and the loop's peak
+            // heap — the build's high-water mark — lands at the END of this loop,
+            // so anything still referenced here costs us against -Xmx.
+            precomputed.release()
 
             // Insert TOC entries hierarchically and build line_toc mappings
             if (payload.headings.isNotEmpty()) {
@@ -680,10 +701,12 @@ internal fun buildNormalizedTitleToBookId(entries: List<BookTitleIndexEntry>): M
  * Detects whether any line in the list contains teamim (cantillation marks) or nekudot (vowel points).
  * Uses early exit optimization - stops scanning once both are found.
  *
+ * Runs on the parse worker via [precomputeLineData], not in the insert loop.
+ *
  * @param lines The list of line contents (HTML strings) to scan
  * @return A pair of (hasTeamim, hasNekudot) booleans
  */
-private fun detectTeamimAndNekudot(lines: List<String>): Pair<Boolean, Boolean> {
+internal fun detectTeamimAndNekudot(lines: List<String>): Pair<Boolean, Boolean> {
     var hasTeamim = false
     var hasNekudot = false
     for (line in lines) {

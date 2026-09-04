@@ -76,7 +76,10 @@ internal class SefariaBookPayloadReader(
         mergedFiles.map { textPath ->
             async(Dispatchers.IO) {
                 semaphore.withPermit {
-                    parseBookFile(textPath, schemaDir, schemaLookup)
+                    // Derive the text-only per-line values here, on the worker that
+                    // already holds the book's text, so the single-threaded insert
+                    // loop is left with nothing but id allocation and inserts.
+                    parseBookFile(textPath, schemaDir, schemaLookup)?.precomputeLineData()
                 }
             }
         }.awaitAll().filterNotNull()
