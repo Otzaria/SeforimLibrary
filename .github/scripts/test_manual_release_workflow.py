@@ -8,6 +8,10 @@ ZSTD_WORKERS_HELPER = Path(__file__).parent / "zstd_workers.sh"
 FAILURE_RECONCILER = (
     Path(__file__).parents[1] / "workflows" / "reconcile-linker-after-failure.yml"
 )
+RELEASE_DRAFT = Path(__file__).parent / "release_draft.sh"
+EARLY_UPLOAD = Path(__file__).parent / "upload_early_release_assets.sh"
+ANCHOR_PREFETCH = Path(__file__).parent / "prefetch_patch_anchors.sh"
+ANCHOR_DERIVATION = Path(__file__).parent / "patch_fan_anchors.sh"
 
 
 class ManualReleaseWorkflowContractTest(unittest.TestCase):
@@ -335,21 +339,222 @@ class ManualReleaseWorkflowContractTest(unittest.TestCase):
         )
 
     def test_publisher_reconciles_and_falls_back_only_to_preflighted_credentials(self):
+        # The create/reconcile/upload contract lives in ONE sourced script,
+        # because the early uploads (during the relink wait and the patch fan)
+        # drive the very same draft release; two copies could drift apart.
         publish = self.step("Create draft, verify every uploaded asset, then publish")
+        machinery = RELEASE_DRAFT.read_text(encoding="utf-8")
         self.assertIn("AUTOMATIC_TOKEN: ${{ secrets.GITHUB_TOKEN }}", publish)
         self.assertIn("CROSS_REPO_TOKEN: ${{ secrets.PIPELINE_TOKEN }}", publish)
+        self.assertIn(
+            "source .pipeline-control/.github/scripts/release_draft.sh", publish
+        )
         self.assertIn('use_token "$RELEASE_TOKEN_KIND"', publish)
-        self.assertIn('switch_token()', publish)
-        self.assertIn('export GH_TOKEN="$AUTOMATIC_TOKEN"', publish)
-        self.assertIn('export GH_TOKEN="$CROSS_REPO_TOKEN"', publish)
-        self.assertIn('exact-empty-draft', publish)
+        self.assertIn('switch_token()', machinery)
+        self.assertIn('export GH_TOKEN="${AUTOMATIC_TOKEN:-}"', machinery)
+        self.assertIn('export GH_TOKEN="${CROSS_REPO_TOKEN:-}"', machinery)
+        self.assertIn('exact-draft', machinery)
         self.assertIn('for asset_path in release-staging/*', publish)
+        self.assertNotIn('gh release upload "$RELEASE_TAG" "$asset_path" --clobber', machinery)
         self.assertNotIn('gh release upload "$RELEASE_TAG" "$asset_path" --clobber', publish)
-        self.assertIn('gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100"', publish)
-        self.assertIn("Draft releases are not", publish)
-        self.assertIn('RELEASE_ID="$(list_matching_releases', publish)
-        self.assertIn('repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID', publish)
-        self.assertNotIn('releases/tags/$RELEASE_TAG" > "$output"', publish)
+        self.assertIn("Never use --clobber.", machinery)
+        self.assertIn(
+            'gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100"', machinery
+        )
+        self.assertIn("Draft releases are not", machinery)
+        self.assertIn('RELEASE_ID="$(resolve_release_id)"', publish)
+        self.assertIn('repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID', machinery)
+        self.assertNotIn('releases/tags/$RELEASE_TAG" > "$output"', machinery)
+        # A draft is adopted only when its identity is exactly this build's and
+        # it carries nothing but the assets this build uploads early.
+        self.assertIn('EARLY_RELEASE_ASSETS="lines_snapshot.db.zst seforim.db.buildstate"', machinery)
+        self.assertIn("set(names) <= allowed", machinery)
+        self.assertIn("len(names)==len(set(names))", machinery)
+
+    def test_patch_fan_anchors_are_prefetched_while_the_db_is_generated(self):
+        # The fan paid 110-135 s per anchor to download a 1.3 GB seforim.db.zst
+        # with the CPU idle (run 33865604251). The tags are known before the DB
+        # build, which spends ~36 minutes without touching the network.
+        prefetch = self.step("Prefetch patch-fan anchor DBs (background)")
+        fan = self.step("Produce + verify patch fan")
+        cleanup = self.step(
+            "Clean run-scoped disk leftovers (workspace persists on self-hosted)"
+        )
+        script = ANCHOR_PREFETCH.read_text(encoding="utf-8")
+
+        self.assertLess(
+            self.workflow.index("      - name: Auto-discover prior releases\n"),
+            self.workflow.index(
+                "      - name: Prefetch patch-fan anchor DBs (background)\n"
+            ),
+        )
+        self.assertLess(
+            self.workflow.index(
+                "      - name: Prefetch patch-fan anchor DBs (background)\n"
+            ),
+            self.workflow.index("      - name: Generate Seforim Database\n"),
+        )
+        self.assertIn("if: steps.discover.outputs.has_prev == 'true'", prefetch)
+
+        # ONE derivation of offset -> tag, used by the prefetch and by the fan:
+        # a prefetch that resolved an offset differently would fetch the wrong DB.
+        derivation = (
+            'patch_fan_anchors.sh \\\n'
+            '            "$THIS_VER" prior-versions.tsv $PATCH_OFFSETS > "$ANCHORS"'
+        )
+        self.assertIn(derivation, prefetch)
+        self.assertIn(derivation, fan)
+        self.assertTrue(ANCHOR_DERIVATION.is_file())
+        self.assertNotIn("awk -F'\\t' -v v=\"$TARGET_VER\"", fan)
+        for status in ("ANCHOR", "BELOW-ONE", "NO-RELEASE"):
+            self.assertIn(status, ANCHOR_DERIVATION.read_text(encoding="utf-8"))
+            self.assertIn(status, fan)
+
+        # Onto the workspace disk, never onto the 16 GiB tmpfs build/.
+        self.assertIn('start "$ANCHORS" prefetch', prefetch)
+        self.assertNotIn("build/prefetch", self.workflow)
+
+        # Task C's verdict still gates the download: the prefetch runs the same
+        # check with the same arguments and never fetches a rejected anchor.
+        self.assertIn("patch_anchor_schema.py", script)
+        self.assertIn('--this-schema "$THIS_SCHEMA"', script)
+        self.assertIn('--anchor-version "$version"', script)
+        self.assertIn('--contract-tables "$CONTRACT_TABLES"', script)
+        self.assertIn(
+            "generator/common/src/jvmTest/resources/patch_tables_contract.json", script
+        )
+        self.assertLess(
+            script.index('[ "${verdict%% *}" = UNPATCHABLE ]'),
+            script.index("--pattern 'seforim.db.zst'"),
+        )
+        # Verified against the release asset's own published size and digest.
+        self.assertIn("size mismatch", script)
+        self.assertIn("digest mismatch", script)
+        self.assertIn('sha256:$(sha256sum "$file"', script)
+        self.assertNotIn("gh release view", script)
+
+        # The fan waits for THIS tag's marker, then falls back unchanged.
+        self.assertIn('while [ ! -f "$PREFETCH_DIR/$TAG/.done" ]', fan)
+        self.assertIn('"$PREFETCH_WAITED" -lt "$PREFETCH_WAIT_SECONDS"', fan)
+        self.assertIn(
+            'if [ "$PREFETCH_STATE" = ok ] && [ -s "$PREFETCH_DIR/$TAG/seforim.db.zst" ]; then',
+            fan,
+        )
+        self.assertIn('mv "$PREFETCH_DIR/$TAG/seforim.db.zst" prev-dbs/seforim.db.zst', fan)
+        self.assertIn("falling back to the serial download", fan)
+        self.assertIn("prefetch_patch_anchors.sh abort", fan)
+        self.assertLess(
+            fan.index("PREFETCH_STATE=absent"), fan.index("--pattern 'seforim.db.zst'")
+        )
+        # A prefetch timing line per anchor, like the fan's own.
+        self.assertIn("prefetch anchor v%s (%s) timings:", script)
+
+        # Nothing background outlives the job; prefetch/ goes with prev-dbs.
+        self.assertIn("prefetch_patch_anchors.sh abort prefetch", cleanup)
+        self.assertIn(
+            "rm -rf prev-dbs prev-meta patches release-staging prior-versions.tsv prefetch",
+            cleanup,
+        )
+        # A stale pid on this weeks-old runner must never be signalled blindly.
+        self.assertIn("ps -o args= -p \"$pid\"", script)
+
+    def test_final_assets_upload_while_the_job_waits_instead_of_at_publish(self):
+        relink = self.step("Run LinkerToOtzaria relink on this snapshot (and wait)")
+        fan = self.step("Produce + verify patch fan")
+        publish = self.step("Create draft, verify every uploaded asset, then publish")
+        uploader = EARLY_UPLOAD.read_text(encoding="utf-8")
+        machinery = RELEASE_DRAFT.read_text(encoding="utf-8")
+
+        # The draft is created before the relink wait, with the SHARED create.
+        start_snapshot = (
+            "upload_early_release_assets.sh \\\n"
+            "            start snapshot build/lines_snapshot.db.zst"
+        )
+        self.assertIn(start_snapshot, relink)
+        self.assertIn('source "$(dirname "$self")/release_draft.sh"', uploader)
+        self.assertIn("ensure_draft || return 1", uploader)
+        self.assertEqual(
+            machinery.count(
+                'gh release create "$RELEASE_TAG" --target "$SOURCE_COMMIT" '
+                '--title "$RELEASE_TAG" --draft'
+            ),
+            2,
+            "the draft create + retry pair may exist only in the shared script",
+        )
+        self.assertNotIn('gh release create "$RELEASE_TAG"', self.workflow)
+        # It starts before the polling wait and is reaped inside the same step,
+        # so no upload is ever in flight when the publish step runs.
+        self.assertLess(relink.index(start_snapshot), relink.index("completed:success) break"))
+        wait_snapshot = (
+            "upload_early_release_assets.sh \\\n            wait snapshot 3600"
+        )
+        self.assertIn(wait_snapshot, relink)
+        self.assertLess(relink.index("completed:success) break"), relink.index(wait_snapshot))
+
+        # seforim.db.buildstate is NOT final before the relink wait: Phase-2
+        # allocates this build's fresh stable link ids straight into it, so it
+        # rides the patch fan instead — after "Apply LINKER links (Phase-2)".
+        self.assertNotIn("build/seforim.db.buildstate", relink)
+        self.assertIn("DiskBackedLinkIdAllocator", machinery)
+        self.assertIn(
+            "upload_early_release_assets.sh \\\n"
+            "            start buildstate build/seforim.db.buildstate",
+            fan,
+        )
+        self.assertIn(
+            "upload_early_release_assets.sh \\\n            wait buildstate 3600", fan
+        )
+        self.assertLess(
+            self.workflow.index("      - name: Apply LINKER links (Phase-2)\n"),
+            self.workflow.index("      - name: Produce + verify patch fan\n"),
+        )
+
+        # A failed early upload is a lost optimisation, never a failed build.
+        self.assertIn("never a failed build", uploader)
+        self.assertIn("exit 0", uploader)
+
+        # The publish step still uploads the rest and re-verifies everything by
+        # name+size+digest against the staged bytes.
+        self.assertIn(
+            'for asset_path in release-staging/*; do upload_asset "$asset_path"; done',
+            publish,
+        )
+        self.assertIn("verify_remote", publish)
+        self.assertIn(
+            "remote release descriptors do not exactly match staged bytes", publish
+        )
+
+    def test_a_failed_build_deletes_the_draft_release_it_created(self):
+        delete = self.step("Delete this build's unpublished draft release on failure")
+        relink = self.step("Run LinkerToOtzaria relink on this snapshot (and wait)")
+        publish = self.step("Create draft, verify every uploaded asset, then publish")
+
+        self.assertIn("if: failure() || cancelled()", delete)
+        self.assertIn('[ "${DRAFT_RELEASE_CREATED:-}" = 1 ]', delete)
+        self.assertIn('echo "DRAFT_RELEASE_CREATED=1" >> "$GITHUB_ENV"', relink)
+        self.assertIn('echo "DRAFT_RELEASE_CREATED=1" >> "$GITHUB_ENV"', publish)
+        # Only ever a DRAFT of exactly this build's identity, and never the tag.
+        self.assertIn(".draft == true", delete)
+        self.assertIn(".target_commitish == $target", delete)
+        self.assertIn(
+            'gh api -X DELETE "repos/$GITHUB_REPOSITORY/releases/$release_id"', delete
+        )
+        self.assertNotIn("--cleanup-tag", self.workflow)
+        self.assertNotIn("gh release delete", self.workflow)
+        self.assertLess(
+            self.workflow.index(
+                "      - name: Create draft, verify every uploaded asset, then publish\n"
+            ),
+            self.workflow.index(
+                "      - name: Delete this build's unpublished draft release on failure\n"
+            ),
+        )
+        # The relink orphan cleanup is untouched and still always runs.
+        self.assertIn(
+            "      - name: Cancel any in-flight relink for this build "
+            "(no orphaned linker run)\n        if: always()\n",
+            self.workflow,
+        )
 
     def test_recovery_sets_both_cleanup_titles_and_cleanup_defaults_them(self):
         relink = self.step("Run LinkerToOtzaria relink on this snapshot (and wait)")

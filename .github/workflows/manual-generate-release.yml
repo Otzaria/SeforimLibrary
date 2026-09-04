@@ -730,6 +730,32 @@ jobs:
           # Buildstate goes where generateSeforimDb expects it.
           ls -lh build/seforim.db.buildstate
 
+      # ─── A1: overlap the patch fan's anchor downloads with the DB build ────
+      # The fan reconstitutes every anchor from that release's 1.3 GB
+      # seforim.db.zst; serially, inside the fan, that was 110-135 s per anchor
+      # with the CPU idle (run 33865604251). Every tag it will consider is
+      # already known here — prior-versions.tsv exists and the offsets are
+      # fixed — and "Generate Seforim Database" below spends ~36 minutes of CPU
+      # without touching the network. Fetch them in parallel across that window,
+      # onto the workspace disk (~880 GB free), never onto the 16 GiB tmpfs
+      # build/. The fan keeps its unchanged serial download as the fallback for
+      # every anchor this does not deliver verified.
+      - name: Prefetch patch-fan anchor DBs (background)
+        if: steps.discover.outputs.has_prev == 'true'
+        env:
+          THIS_VER: ${{ steps.discover.outputs.db_version }}
+        run: |
+          set -euo pipefail
+          ANCHORS="$RUNNER_TEMP/patch-fan-anchors.tsv"
+          # The SAME derivation the fan walks later — one script, so a prefetch
+          # can never resolve an offset to a different tag than the producer.
+          bash .pipeline-control/.github/scripts/patch_fan_anchors.sh \
+            "$THIS_VER" prior-versions.tsv $PATCH_OFFSETS > "$ANCHORS"
+          cat "$ANCHORS"
+          rm -rf prefetch
+          bash .pipeline-control/.github/scripts/prefetch_patch_anchors.sh \
+            start "$ANCHORS" prefetch
+
       # ─── Build seforim.db (full pipeline) ──────────────────────────────────
       # -PinMemoryDb=false: the Lucene index step otherwise copies the entire
       # ~7 GB seforim.db into a SQLite mode=memory database to speed up reads.
@@ -954,6 +980,14 @@ jobs:
           SEFARIA_TAG: ${{ inputs.sefaria_tag }}
           SEFARIA_METADATA_SHA: ${{ inputs.sefaria_release_metadata_sha256 }}
           RECOVERY_RUN_ID: ${{ inputs.relink_recovery_run_id }}
+          # For the A2 early upload below, which drives this build's own draft
+          # release with the same preflighted credentials as the publish step.
+          # GH_TOKEN above stays the cross-repo PAT for every `gh` call in this
+          # step; the uploader is a separate process and exports its own.
+          AUTOMATIC_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CROSS_REPO_TOKEN: ${{ secrets.PIPELINE_TOKEN }}
+          RELEASE_TAG: ${{ steps.release_meta.outputs.release_tag }}
+          SOURCE_COMMIT: ${{ inputs.source_commit }}
         run: |
           set -euo pipefail
           [ -n "$GH_TOKEN" ] || { echo "::error::PIPELINE_TOKEN secret is empty or missing on this repo — re-run: gh secret set PIPELINE_TOKEN -R Otzaria/SeforimLibrary"; exit 1; }
@@ -1124,6 +1158,21 @@ jobs:
                 -f snapshot_sha256="$SNAPSHOT_ZST_SHA256" \
                 -f sefaria_release_metadata_sha256="$SEFARIA_METADATA_SHA" ;;
           esac
+          # ─── A2: fill the idle uplink while the linker works ───────────────
+          # From here the job does nothing but poll for up to 20 min of run
+          # discovery plus the relink itself (1119 s on run 33865604251), and
+          # the ~2.1 MB/s uplink is idle throughout. lines_snapshot.db.zst is
+          # byte-final — nothing writes it after "Dump lines snapshot for the
+          # linker" — so create this build's draft release now and hand it those
+          # 830 MB, instead of paying for them serially in the publish step,
+          # which re-verifies them by name+size+digest exactly as before.
+          # seforim.db.buildstate deliberately does NOT ride along here: Phase-2
+          # still has to allocate this build's fresh stable link ids into it
+          # (DiskBackedLinkIdAllocator), so it is only final after "Apply LINKER
+          # links (Phase-2)" — the patch fan uploads it there.
+          echo "DRAFT_RELEASE_CREATED=1" >> "$GITHUB_ENV"
+          bash .pipeline-control/.github/scripts/upload_early_release_assets.sh \
+            start snapshot build/lines_snapshot.db.zst
           # Identify OUR run: EXACT title equality on the per-attempt request id, exactly
           # one match (two runs sharing a fresh id is a broken invariant — refuse to
           # guess), created at/after our dispatch, at the head we captured. Fully
@@ -1190,6 +1239,11 @@ jobs:
               *) queued_for=0; sleep 60 ;;
             esac
           done
+          # Reap the early upload before the heavy lease comes back and before
+          # any later step can race it on the same release. Normally it finished
+          # long ago; it can never fail this step.
+          bash .pipeline-control/.github/scripts/upload_early_release_assets.sh \
+            wait snapshot 3600
           # The exact child is terminal now. Reacquire before this job touches the DB
           # again; if another heavy phase won the race, fail rather than overlap.
           python3 .pipeline-control/.github/scripts/host_lease.py start \
@@ -1430,6 +1484,12 @@ jobs:
           # window on clients. Read by PatchPipelineCli (ZSTD_LEVEL); the full
           # DB's own `zstd -19` step below is unaffected.
           ZSTD_LEVEL: "19"
+          # For the A2 early upload of seforim.db.buildstate, which is final from
+          # Phase-2 on. Same preflighted credentials as the publish step.
+          AUTOMATIC_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CROSS_REPO_TOKEN: ${{ secrets.PIPELINE_TOKEN }}
+          RELEASE_TAG: ${{ steps.release_meta.outputs.release_tag }}
+          SOURCE_COMMIT: ${{ inputs.source_commit }}
         run: |
           set -euo pipefail
           # קורא db_schema_version מ-DB; טבלה/שורה חסרה → ERROR (release DB חייב מוטבע).
@@ -1447,17 +1507,34 @@ jobs:
           THIS_SCHEMA=$(read_schema build/seforim.db) || exit 1
           echo "THIS DB schema version = $THIS_SCHEMA"
           mkdir -p patches prev-dbs
-          for OFFSET in $PATCH_OFFSETS; do
-            TARGET_VER=$((THIS_VER - OFFSET))
-            if [ "$TARGET_VER" -lt 1 ]; then
-              echo "offset $OFFSET would target version $TARGET_VER (<1) — skip"
-              continue
-            fi
-            TAG=$(awk -F'\t' -v v="$TARGET_VER" '$1==v{print $2; exit}' prior-versions.tsv || true)
-            if [ -z "$TAG" ]; then
-              echo "No prior release at db_version=$TARGET_VER (offset $OFFSET) — skip"
-              continue
-            fi
+          # A2: seforim.db.buildstate is byte-final only now — Phase-2 allocated
+          # this build's fresh stable link ids straight into it. The fan spends
+          # ~30 minutes of pure CPU below, so hand its 990 MB to the ~2.1 MB/s
+          # uplink here instead of paying for it serially in the publish step.
+          bash .pipeline-control/.github/scripts/upload_early_release_assets.sh \
+            start buildstate build/seforim.db.buildstate
+          # A1: the anchors were fetched in parallel while the DB was generated.
+          PREFETCH_DIR=prefetch
+          PREFETCH_WAIT_SECONDS=900
+          ANCHORS="$RUNNER_TEMP/patch-fan-anchors.tsv"
+          # One derivation of offset → tag, shared with the prefetch step.
+          bash .pipeline-control/.github/scripts/patch_fan_anchors.sh \
+            "$THIS_VER" prior-versions.tsv $PATCH_OFFSETS > "$ANCHORS"
+          # Read the whole plan up front: the loop body runs Gradle, which must
+          # never be able to swallow the remaining rows from a redirected stdin.
+          mapfile -t ANCHOR_ROWS < "$ANCHORS"
+          for ROW in ${ANCHOR_ROWS[@]+"${ANCHOR_ROWS[@]}"}; do
+            IFS=$'\t' read -r STATUS OFFSET TARGET_VER TAG <<<"$ROW"
+            case "$STATUS" in
+              BELOW-ONE)
+                echo "offset $OFFSET would target version $TARGET_VER (<1) — skip"
+                continue
+                ;;
+              NO-RELEASE)
+                echo "No prior release at db_version=$TARGET_VER (offset $OFFSET) — skip"
+                continue
+                ;;
+            esac
             echo "=== Producing patch v${TARGET_VER} → v${THIS_VER} (offset $OFFSET, tag=$TAG) ==="
 
             # Reconstituting an anchor costs 110–135 s of download plus a
@@ -1497,10 +1574,38 @@ jobs:
 
             rm -rf prev-dbs
             mkdir -p prev-dbs
+            # A1: this anchor was very probably downloaded and verified (size,
+            # and digest when GitHub published one) while the DB was being
+            # generated. Wait for THIS tag's marker; anything short of a
+            # verified hit — no marker inside the budget, a failed or
+            # unpatchable verdict, a vanished file — falls straight back to the
+            # unchanged serial download below. A missing marker also aborts the
+            # prefetch, so it cannot keep competing for the downlink.
+            PREFETCH_STATE=absent
+            if [ -f "$PREFETCH_DIR/.started" ]; then
+              PREFETCH_WAITED=0
+              while [ ! -f "$PREFETCH_DIR/$TAG/.done" ] && [ "$PREFETCH_WAITED" -lt "$PREFETCH_WAIT_SECONDS" ]; do
+                sleep 5
+                PREFETCH_WAITED=$((PREFETCH_WAITED + 5))
+              done
+              if [ -f "$PREFETCH_DIR/$TAG/.done" ]; then
+                PREFETCH_STATE=$(head -n1 "$PREFETCH_DIR/$TAG/.done")
+                sed -n '2,$p' "$PREFETCH_DIR/$TAG/.done"
+              else
+                echo "::warning::anchor v${TARGET_VER} ($TAG): no prefetch marker after ${PREFETCH_WAITED}s — falling back to the serial download"
+                bash .pipeline-control/.github/scripts/prefetch_patch_anchors.sh abort "$PREFETCH_DIR" || true
+                PREFETCH_WAIT_SECONDS=0
+              fi
+            fi
             T_START=$(date +%s)
-            gh release download "$TAG" \
-              --pattern 'seforim.db.zst' \
-              --dir prev-dbs
+            if [ "$PREFETCH_STATE" = ok ] && [ -s "$PREFETCH_DIR/$TAG/seforim.db.zst" ]; then
+              mv "$PREFETCH_DIR/$TAG/seforim.db.zst" prev-dbs/seforim.db.zst
+              echo "anchor v${TARGET_VER} ($TAG): reused the prefetched DB"
+            else
+              gh release download "$TAG" \
+                --pattern 'seforim.db.zst' \
+                --dir prev-dbs
+            fi
             T_DOWNLOADED=$(date +%s)
             unzstd -c prev-dbs/seforim.db.zst > prev-dbs/seforim.db
             T_EXTRACTED=$(date +%s)
@@ -1567,6 +1672,13 @@ jobs:
                   "patches/verify-patch-v${TARGET_VER}-v${THIS_VER}.db"
             df -h /
           done
+          if [ -f "$PREFETCH_DIR/.log" ]; then
+            echo "=== anchor prefetch log ==="
+            cat "$PREFETCH_DIR/.log"
+          fi
+          # Never leave an upload in flight for the publish step to race.
+          bash .pipeline-control/.github/scripts/upload_early_release_assets.sh \
+            wait buildstate 3600
           echo "=== Final patch artefacts ==="
           ls -lh patches/ || true
           # Skipped anchors are warnings, but a release with prior versions and
@@ -1697,190 +1809,24 @@ jobs:
           SOURCE_COMMIT: ${{ inputs.source_commit }}
         run: |
           set -euo pipefail
-          use_token() {
-            case "$1" in
-              automatic)
-                [ "$RELEASE_AUTOMATIC_WRITABLE" = true ] || return 1
-                export GH_TOKEN="$AUTOMATIC_TOKEN"
-                ;;
-              cross-repo)
-                [ "$RELEASE_CROSS_REPO_WRITABLE" = true ] || return 1
-                export GH_TOKEN="$CROSS_REPO_TOKEN"
-                ;;
-              *) return 1 ;;
-            esac
-            CURRENT_TOKEN_KIND="$1"
-          }
-          switch_token() {
-            case "$CURRENT_TOKEN_KIND" in
-              automatic) use_token cross-repo ;;
-              cross-repo) use_token automatic ;;
-              *) return 1 ;;
-            esac
-          }
+          # One implementation of create/adopt/reconcile/upload, shared with the
+          # early upload that runs during the relink wait and the patch fan — so
+          # the draft this step adopts and the draft they created cannot drift.
+          # It still never uses --clobber, still adopts a release only when its
+          # identity is exactly this build's, and still fails closed otherwise.
+          source .pipeline-control/.github/scripts/release_draft.sh
           use_token "$RELEASE_TOKEN_KIND" || {
             echo "::error::release credential preflight result is missing or invalid"
             exit 1
           }
-
-          list_matching_releases() {
-            gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" | \
-              jq -s --arg tag "$RELEASE_TAG" '[add[] | select(.tag_name == $tag)]'
-          }
-
-          # Print absent, exact-empty-draft, or conflict. Draft releases are not
-          # returned by GitHub's /releases/tags/{tag} REST route, so reconciliation
-          # must use the fully paginated release collection. A response-lost create
-          # is adopted only when every immutable field and the empty asset set match
-          # this invocation; an unrelated release is never overwritten.
-          release_state() {
-            local output="$RUNNER_TEMP/release-state.json"
-            list_matching_releases > "$output" || return 1
-            python3 - "$output" "$RELEASE_TAG" "$SOURCE_COMMIT" <<'PY'
-          import json,sys
-          matches=json.load(open(sys.argv[1],encoding="utf-8"))
-          if not matches:
-              print("absent")
-              raise SystemExit(0)
-          if len(matches) != 1:
-              print("conflict")
-              raise SystemExit(0)
-          value=matches[0]
-          exact=(
-              value.get("tag_name")==sys.argv[2]
-              and value.get("name")==sys.argv[2]
-              and value.get("target_commitish")==sys.argv[3]
-              and value.get("draft") is True
-              and value.get("assets")==[]
-          )
-          print("exact-empty-draft" if exact else "conflict")
-          PY
-          }
-          ensure_draft() {
-            local state
-            state=$(release_state) || return 1
-            case "$state" in
-              exact-empty-draft)
-                echo "Adopting exact empty draft after a response-lost create."
-                return 0
-                ;;
-              conflict)
-                echo "::error::Release tag already exists with conflicting identity or assets."
-                return 1
-                ;;
-              absent) ;;
-              *) echo "::error::Unknown release state: $state"; return 1 ;;
-            esac
-            if gh release create "$RELEASE_TAG" --target "$SOURCE_COMMIT" --title "$RELEASE_TAG" --draft; then
-              return 0
-            fi
-            echo "::warning::Release create failed with $CURRENT_TOKEN_KIND; reconciling before retry."
-            state=$(release_state) || state=query-error
-            [ "$state" != conflict ] || return 1
-            if [ "$state" = exact-empty-draft ]; then return 0; fi
-            switch_token || {
-              echo "::error::No independently preflighted release credential remains."
-              return 1
-            }
-            state=$(release_state) || return 1
-            case "$state" in
-              exact-empty-draft) return 0 ;;
-              absent)
-                if gh release create "$RELEASE_TAG" --target "$SOURCE_COMMIT" --title "$RELEASE_TAG" --draft; then
-                  return 0
-                fi
-                state=$(release_state) || return 1
-                [ "$state" = exact-empty-draft ]
-                ;;
-              *) echo "::error::Release tag is conflicting after credential fallback."; return 1 ;;
-            esac
-          }
           ensure_draft
-          RELEASE_ID="$(list_matching_releases | jq -er \
-            --arg tag "$RELEASE_TAG" --arg target "$SOURCE_COMMIT" '
-              select(length == 1) | .[0] |
-              select(.tag_name == $tag and .name == $tag and .target_commitish == $target and
-                     .draft == true and (.assets | length) == 0) | .id |
-              select(type == "number" and . > 0)
-            ')" || { echo "::error::Could not resolve the exact empty draft release id"; exit 1; }
-
-          # Upload one asset at a time. If an upload response is lost, reconcile
-          # by exact name+size+digest and continue. Never use --clobber.
-          release_assets_json() {
-            gh api "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" --jq \
-              '{assets:[.assets[]|{name,size,digest}]}'
-          }
-          asset_state() {
-            local asset_path="$1" expected_size="$2" expected_digest="$3"
-            local output="$RUNNER_TEMP/release-assets-state.json"
-            release_assets_json > "$output" || return 1
-            python3 - "$output" "$asset_path" "$expected_size" "$expected_digest" <<'PY'
-          import json,sys
-          from pathlib import Path
-          assets=json.load(open(sys.argv[1],encoding="utf-8"))["assets"]
-          path=Path(sys.argv[2])
-          matches=[item for item in assets if item.get("name")==path.name]
-          if not matches:
-              print("absent")
-          elif len(matches)!=1:
-              print("conflict")
-          else:
-              item=matches[0]
-              if item.get("size")!=int(sys.argv[3]):
-                  print("conflict")
-              elif item.get("digest") in (None, ""):
-                  print("pending")
-              else:
-                  print("exact" if item.get("digest")=="sha256:"+sys.argv[4] else "conflict")
-          PY
-          }
-          upload_asset() {
-            local asset_path="$1" expected_size expected_digest state attempt
-            expected_size=$(stat --format='%s' "$asset_path")
-            expected_digest=$(sha256sum "$asset_path" | cut -d ' ' -f1)
-            state=$(asset_state "$asset_path" "$expected_size" "$expected_digest") || return 1
-            case "$state" in
-              exact) return 0 ;;
-              conflict) echo "::error::Conflicting remote asset: ${asset_path##*/}"; return 1 ;;
-              absent) ;;
-              pending)
-                for attempt in $(seq 1 12); do
-                  sleep 5
-                  state=$(asset_state "$asset_path" "$expected_size" "$expected_digest") || state=query-error
-                  case "$state" in
-                    exact) return 0 ;;
-                    conflict|absent) return 1 ;;
-                  esac
-                done
-                echo "::error::Digest metadata never settled for existing asset: ${asset_path##*/}"
-                return 1
-                ;;
-              *) echo "::error::Unknown asset state: $state"; return 1 ;;
-            esac
-            if gh release upload "$RELEASE_TAG" "$asset_path"; then return 0; fi
-            echo "::warning::Upload failed for ${asset_path##*/}; reconciling before retry."
-            for attempt in $(seq 1 12); do
-              state=$(asset_state "$asset_path" "$expected_size" "$expected_digest") || state=query-error
-              case "$state" in
-                exact) return 0 ;;
-                conflict) return 1 ;;
-              esac
-              sleep 5
-            done
-            if [ "$state" = pending ]; then
-              echo "::error::Refusing to duplicate an upload whose digest metadata is still pending: ${asset_path##*/}"
-              return 1
-            fi
-            switch_token || return 1
-            if gh release upload "$RELEASE_TAG" "$asset_path"; then return 0; fi
-            for attempt in $(seq 1 6); do
-              state=$(asset_state "$asset_path" "$expected_size" "$expected_digest") || state=query-error
-              [ "$state" != conflict ] || return 1
-              if [ "$state" = exact ]; then return 0; fi
-              sleep 2
-            done
-            return 1
-          }
+          # Reached only when a draft for this tag exists; record it so a later
+          # failure deletes it instead of leaving it behind.
+          echo "DRAFT_RELEASE_CREATED=1" >> "$GITHUB_ENV"
+          RELEASE_ID="$(resolve_release_id)" \
+            || { echo "::error::Could not resolve the exact draft release id"; exit 1; }
+          # Assets already uploaded early are re-verified here by name+size+digest
+          # like every other asset; upload_asset skips only an exact match.
           for asset_path in release-staging/*; do upload_asset "$asset_path"; done
           verify_remote() {
             release_assets_json > "$RUNNER_TEMP/release-assets.json"
@@ -2018,7 +1964,62 @@ jobs:
       # re-downloaded by the next run.
       - name: Clean run-scoped disk leftovers (workspace persists on self-hosted)
         if: always()
-        run: rm -rf prev-dbs prev-meta patches release-staging prior-versions.tsv
+        run: |
+          set -uo pipefail
+          # The anchor prefetch and the early release uploads deliberately
+          # outlive their own steps; nothing may outlive the job. Both aborts
+          # verify the recorded pid still belongs to that script before
+          # signalling, so a reused pid on this long-lived runner is safe.
+          bash .pipeline-control/.github/scripts/prefetch_patch_anchors.sh abort prefetch || true
+          for label in snapshot buildstate; do
+            bash .pipeline-control/.github/scripts/upload_early_release_assets.sh abort "$label" || true
+          done
+          rm -rf prev-dbs prev-meta patches release-staging prior-versions.tsv prefetch
+
+      # The draft release exists from the relink wait onward (A2), so a build
+      # that dies anywhere after that would otherwise leave an unpublished draft
+      # holding this build's tag and up to ~1.8 GB of assets. Delete it — only
+      # ever a DRAFT whose identity is exactly this attempt's, so a published
+      # release can never be touched — and never fail the job over it.
+      - name: Delete this build's unpublished draft release on failure
+        if: failure() || cancelled()
+        env:
+          AUTOMATIC_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CROSS_REPO_TOKEN: ${{ secrets.PIPELINE_TOKEN }}
+          RELEASE_TAG: ${{ steps.release_meta.outputs.release_tag }}
+          SOURCE_COMMIT: ${{ inputs.source_commit }}
+        run: |
+          set -uo pipefail
+          [ "${DRAFT_RELEASE_CREATED:-}" = 1 ] || {
+            echo "this attempt never created a draft release — nothing to delete."
+            exit 0
+          }
+          source .pipeline-control/.github/scripts/release_draft.sh
+          use_token "${RELEASE_TOKEN_KIND:-}" || {
+            echo "::warning::no preflighted release credential — leaving the draft for the operator"
+            exit 0
+          }
+          # Drafts are invisible to /releases/tags/{tag}, so resolve through the
+          # paginated collection. `.draft == true` is the whole safety property.
+          release_id=$(list_matching_releases | jq -er \
+            --arg tag "$RELEASE_TAG" --arg target "$SOURCE_COMMIT" '
+              select(length == 1) | .[0] |
+              select(.tag_name == $tag and .name == $tag and
+                     .target_commitish == $target and .draft == true) | .id |
+              select(type == "number" and . > 0)
+            ') || release_id=""
+          if [ -z "$release_id" ]; then
+            echo "no unpublished draft release for $RELEASE_TAG — nothing to delete."
+            exit 0
+          fi
+          if gh api -X DELETE "repos/$GITHUB_REPOSITORY/releases/$release_id"; then
+            echo "deleted the unpublished draft release $RELEASE_TAG ($release_id)."
+          elif switch_token && gh api -X DELETE "repos/$GITHUB_REPOSITORY/releases/$release_id"; then
+            echo "deleted the unpublished draft release $RELEASE_TAG ($release_id) after credential fallback."
+          else
+            echo "::warning::could not delete the draft release $RELEASE_TAG ($release_id); delete it manually."
+          fi
+          exit 0
 
       # If this build ends while the relink it dispatched is still pending/running — the
       # build hit its own timeout while waiting, failed in Phase-2, or was cancelled —
