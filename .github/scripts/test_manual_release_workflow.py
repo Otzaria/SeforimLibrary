@@ -16,6 +16,7 @@ ANCHOR_DERIVATION = Path(__file__).parent / "patch_fan_anchors.sh"
 GENERATOR_COMMON_BUILD = (
     Path(__file__).parents[2] / "generator" / "common" / "build.gradle.kts"
 )
+VALIDATOR = Path(__file__).parent / "validate_build_provenance.py"
 
 
 class ManualReleaseWorkflowContractTest(unittest.TestCase):
@@ -151,7 +152,7 @@ class ManualReleaseWorkflowContractTest(unittest.TestCase):
         self.assertGreaterEqual(self.workflow.count(f"PHASE2_IMPLEMENTATION_COMMIT: {expression}"), 3)
         self.assertIn('--arg phase2 "$PHASE2_IMPLEMENTATION_COMMIT"', lookup)
         self.assertIn(".phase2_implementation_commit==$phase2", lookup)
-        self.assertIn('"schema_version": 4', stage)
+        self.assertIn('"schema_version": 5', stage)
         self.assertIn(
             '"phase2_implementation_commit": os.environ["PHASE2_IMPLEMENTATION_COMMIT"]',
             stage,
@@ -526,8 +527,8 @@ class ManualReleaseWorkflowContractTest(unittest.TestCase):
 
     def test_publisher_reconciles_and_falls_back_only_to_preflighted_credentials(self):
         # The create/reconcile/upload contract lives in ONE sourced script,
-        # because the early uploads (during the relink wait and the patch fan)
-        # drive the very same draft release; two copies could drift apart.
+        # because the early upload (in the patch fan) drives the very same draft
+        # release; two copies could drift apart.
         publish = self.step("Create draft, verify every uploaded asset, then publish")
         machinery = RELEASE_DRAFT.read_text(encoding="utf-8")
         self.assertIn("AUTOMATIC_TOKEN: ${{ secrets.GITHUB_TOKEN }}", publish)
@@ -553,7 +554,7 @@ class ManualReleaseWorkflowContractTest(unittest.TestCase):
         self.assertNotIn('releases/tags/$RELEASE_TAG" > "$output"', machinery)
         # A draft is adopted only when its identity is exactly this build's and
         # it carries nothing but the assets this build uploads early.
-        self.assertIn('EARLY_RELEASE_ASSETS="lines_snapshot.db.zst seforim.db.buildstate"', machinery)
+        self.assertIn('EARLY_RELEASE_ASSETS="seforim.db.buildstate.zst"', machinery)
         self.assertIn("set(names) <= allowed", machinery)
         self.assertIn("len(names)==len(set(names))", machinery)
 
@@ -659,12 +660,13 @@ class ManualReleaseWorkflowContractTest(unittest.TestCase):
         uploader = EARLY_UPLOAD.read_text(encoding="utf-8")
         machinery = RELEASE_DRAFT.read_text(encoding="utf-8")
 
-        # The draft is created before the relink wait, with the SHARED create.
-        start_snapshot = (
-            "upload_early_release_assets.sh \\\n"
-            "            start snapshot build/lines_snapshot.db.zst"
+        # E2: the relink wait no longer uploads anything. lines_snapshot.db.zst
+        # is not published on the DB release at all, so the ONLY early upload
+        # left is the buildstate the patch fan starts — with the SHARED create.
+        self.assertNotIn("upload_early_release_assets.sh", relink)
+        self.assertNotIn(
+            'cp build/lines_snapshot.db.zst', self.step("Stage release assets")
         )
-        self.assertIn(start_snapshot, relink)
         self.assertIn('source "$(dirname "$self")/release_draft.sh"', uploader)
         self.assertIn("ensure_draft || return 1", uploader)
         self.assertEqual(
@@ -676,32 +678,41 @@ class ManualReleaseWorkflowContractTest(unittest.TestCase):
             "the draft create + retry pair may exist only in the shared script",
         )
         self.assertNotIn('gh release create "$RELEASE_TAG"', self.workflow)
-        # It starts before the polling wait and is reaped inside the same step,
-        # so no upload is ever in flight when the publish step runs.
-        self.assertLess(relink.index(start_snapshot), relink.index("completed:success) break"))
-        wait_snapshot = (
-            "upload_early_release_assets.sh \\\n            wait snapshot 3600"
-        )
-        self.assertIn(wait_snapshot, relink)
-        self.assertLess(relink.index("completed:success) break"), relink.index(wait_snapshot))
 
-        # seforim.db.buildstate is NOT final before the relink wait: Phase-2
-        # allocates this build's fresh stable link ids straight into it, so it
-        # rides the patch fan instead — after "Apply LINKER links (Phase-2)".
+        # The buildstate is NOT final before the relink wait: Phase-2 allocates
+        # this build's fresh stable link ids straight into it, so it is
+        # compressed and uploaded after "Apply LINKER links (Phase-2)". It
+        # starts at the top of the fan and is reaped inside the same step, so
+        # no upload is ever in flight when the publish step runs.
         self.assertNotIn("build/seforim.db.buildstate", relink)
         self.assertIn("DiskBackedLinkIdAllocator", machinery)
-        self.assertIn(
+        start_buildstate = (
             "upload_early_release_assets.sh \\\n"
-            "            start buildstate build/seforim.db.buildstate",
-            fan,
+            "            start buildstate build/seforim.db.buildstate.zst"
         )
-        self.assertIn(
-            "upload_early_release_assets.sh \\\n            wait buildstate 3600", fan
+        wait_buildstate = (
+            "upload_early_release_assets.sh \\\n            wait buildstate 3600"
         )
+        self.assertIn(start_buildstate, fan)
+        self.assertIn(wait_buildstate, fan)
+        self.assertLess(fan.index(start_buildstate), fan.index(wait_buildstate))
         self.assertLess(
             self.workflow.index("      - name: Apply LINKER links (Phase-2)\n"),
+            self.workflow.index("      - name: Compress buildstate for the release (zstd)\n"),
+        )
+        self.assertLess(
+            self.workflow.index("      - name: Compress buildstate for the release (zstd)\n"),
             self.workflow.index("      - name: Produce + verify patch fan\n"),
         )
+        # The abort sweep still covers every label the job can start.
+        cleanup = self.step(
+            "Clean run-scoped disk leftovers (workspace persists on self-hosted)"
+        )
+        self.assertIn(
+            "upload_early_release_assets.sh abort buildstate", cleanup
+        )
+        self.assertNotIn("abort snapshot", self.workflow)
+        self.assertNotIn("for label in snapshot buildstate", self.workflow)
 
         # A failed early upload is a lost optimisation, never a failed build.
         self.assertIn("never a failed build", uploader)
@@ -874,6 +885,7 @@ class ManualReleaseWorkflowContractTest(unittest.TestCase):
         source = ". .pipeline-control/.github/scripts/zstd_workers.sh"
         snapshot = self.step("Dump lines snapshot for the linker")
         compress = self.step("Compress Seforim Database (zstd)")
+        buildstate = self.step("Compress buildstate for the release (zstd)")
 
         # `-T0` resolves to PHYSICAL cores (8 of the runner's 16 vCPUs), so it
         # must not survive anywhere in the workflow.
@@ -902,6 +914,7 @@ class ManualReleaseWorkflowContractTest(unittest.TestCase):
         # checkout is pinned to source_commit and may predate the helper.
         self.assertIn(source, snapshot)
         self.assertIn(source, compress)
+        self.assertIn(source, buildstate)
 
         # Transient snapshot: level drops to 12 (bytes change once, and only
         # this build's own sha256 — recorded here — gates the consumer).
@@ -920,8 +933,87 @@ class ManualReleaseWorkflowContractTest(unittest.TestCase):
             compress,
         )
 
+        # E1 buildstate: -10 is the measured knee (1.97x in 8.0 s on a real
+        # 615.9 MB buildstate; -19 buys 6.4% for 3.5x the CPU). The worker count
+        # stays byte-neutral, so the asset is deterministic for a given input.
+        self.assertIn(
+            'zstd -T"$(zstd_workers)" -10 -f \\\n'
+            '            -o build/seforim.db.buildstate.zst build/seforim.db.buildstate',
+            buildstate,
+        )
+
         # The in-JVM patch compressor keeps its own level and is untouched.
         self.assertIn('ZSTD_LEVEL: "19"', self.workflow)
+
+    def test_buildstate_ships_compressed_end_to_end(self):
+        # E1: 990 MB of uncompressed SQLite went up every run and came back down
+        # every next run ("Seed allocator from offset-1 release", 128 s in run
+        # 33865604251). Publish it as .zst and expand it on the way in.
+        seed = self.step("Seed allocator from offset-1 release")
+        stage = self.step("Stage release assets")
+
+        self.assertIn("--pattern 'seforim.db.buildstate.zst' \\", seed)
+        self.assertIn('unzstd -f "$SEED_ZST" -o build/seforim.db.buildstate', seed)
+        # …and generateSeforimDb still finds the uncompressed file where it
+        # always was, never a half-written one from an earlier attempt.
+        self.assertIn("rm -f build/seforim.db.buildstate", seed)
+        self.assertIn("ls -lh build/seforim.db.buildstate", seed)
+
+        # Transitional fallback: the offset-1 release of the first run after this
+        # change (v26) still carries only the uncompressed asset. Documented as
+        # removable once v27 is published — the comment must say so, so the
+        # cleanup is not forgotten.
+        self.assertIn("--pattern 'seforim.db.buildstate' \\", seed)
+        self.assertIn("fallback branch once v27 is published", seed)
+        self.assertIn("pre-v27 uncompressed asset", seed)
+
+        # The release carries the compressed asset, and only that one.
+        self.assertIn('cp build/seforim.db.buildstate.zst "$STAGE/"', stage)
+        self.assertNotIn('cp build/seforim.db.buildstate "$STAGE/"', stage)
+        self.assertIn(
+            '"seforim.db.zst", "seforim.db.buildstate.zst"',
+            VALIDATOR.read_text(encoding="utf-8"),
+        )
+
+    def test_the_duplicate_lines_snapshot_is_not_published_on_the_db_release(self):
+        # E2: the identical bytes are already on the immutable content-addressed
+        # pre-release, so a second 830 MB - 1 GiB copy cost ~7 min of the
+        # ~2.1 MB/s uplink every week for nothing. The provenance names that
+        # pre-release instead, so every consumer can still resolve it.
+        stage = self.step("Stage release assets")
+        publish_snapshot = self.step("Publish immutable snapshot release for the relink run")
+        apply_links = self.step("Apply LINKER links (Phase-2)")
+        validator = VALIDATOR.read_text(encoding="utf-8")
+
+        # The staging step copies the buildstate and the DB, never the snapshot.
+        self.assertNotIn('cp build/lines_snapshot.db.zst', stage)
+        self.assertIn('"schema_version": 5,', stage)
+        self.assertIn('"snapshot_zst_sha256": snapshot_sha256,', stage)
+        self.assertIn(
+            '"snapshot_release_tag": "lines-snapshot-sha256-" + snapshot_sha256,', stage
+        )
+        self.assertIn('snapshot_sha256 = os.environ["SNAPSHOT_ZST_SHA256"]', stage)
+
+        # The tag it names is exactly the one the pre-release step publishes.
+        self.assertIn('tag="lines-snapshot-sha256-$SNAPSHOT_ZST_SHA256"', publish_snapshot)
+        # And the validator re-derives it, so a consumer may trust either field.
+        self.assertIn('V5_KEYS = V4_KEYS | {"snapshot_zst_sha256", "snapshot_release_tag"}', validator)
+        self.assertIn(
+            'value["snapshot_release_tag"] != "lines-snapshot-sha256-" + snapshot_sha256',
+            validator,
+        )
+        self.assertIn(
+            'forbidden = {"seforim.db.buildstate", "lines_snapshot.db.zst"}', validator
+        )
+
+        # The relink-recovery path already read the pre-release, never the DB
+        # release, and is untouched by the removal.
+        self.assertIn(
+            'gh release download \\\n'
+            '              "lines-snapshot-sha256-$EXPECTED_LINKER_SNAPSHOT_ZST_SHA256" \\\n'
+            '              -R "$GITHUB_REPOSITORY" -p lines_snapshot.db.zst \\',
+            apply_links,
+        )
 
     def test_release_publisher_rejects_asset_names_github_would_normalize(self):
         helper = HANDOFF_PUBLISHER.read_text(encoding="utf-8")

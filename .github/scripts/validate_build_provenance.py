@@ -32,6 +32,15 @@ V3_KEYS = V2_KEYS | {"phase2_implementation_commit"}
 # Older published provenances stay valid as v1/v2/v3 — they simply carry no such
 # evidence, and the patch fan then defers to the producer exactly as before.
 V4_KEYS = V3_KEYS | {"db_schema"}
+# v5 stops publishing lines_snapshot.db.zst on the DB release — the identical
+# bytes already live on the immutable content-addressed pre-release the build
+# published before its relink. The release therefore names that pre-release
+# instead: snapshot_zst_sha256 is the digest of this build's lines_snapshot.db.zst
+# and snapshot_release_tag is the release carrying it, so a consumer (the
+# LinkerToOtzaria manual relink) can resolve the snapshot and verify its bytes
+# fail-closed. Older published provenances stay valid as v1..v4 — they carry the
+# asset itself instead.
+V5_KEYS = V4_KEYS | {"snapshot_zst_sha256", "snapshot_release_tag"}
 IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,127}")
 
 
@@ -49,9 +58,9 @@ def load(path: Path) -> dict:
     if not isinstance(value, dict):
         raise ValueError("build provenance must be an object")
     version = value.get("schema_version")
-    if type(version) is not int or version not in (1, 2, 3, 4):
-        raise ValueError("schema_version must be integer 1, 2, 3 or 4")
-    expected_keys = {1: V1_KEYS, 2: V2_KEYS, 3: V3_KEYS, 4: V4_KEYS}[version]
+    if type(version) is not int or version not in (1, 2, 3, 4, 5):
+        raise ValueError("schema_version must be integer 1, 2, 3, 4 or 5")
+    expected_keys = {1: V1_KEYS, 2: V2_KEYS, 3: V3_KEYS, 4: V4_KEYS, 5: V5_KEYS}[version]
     if set(value) != expected_keys:
         raise ValueError("unknown build provenance key set")
     canonical = json.dumps(
@@ -128,6 +137,12 @@ def validate(value: dict) -> None:
                 raise ValueError(f"invalid column name in db_schema table {table!r}")
             if columns != sorted(columns) or len(columns) != len(set(columns)):
                 raise ValueError(f"db_schema table {table!r} columns must be unique and sorted")
+    if version >= 5:
+        snapshot_sha256 = value["snapshot_zst_sha256"]
+        if not isinstance(snapshot_sha256, str) or not SHA64.fullmatch(snapshot_sha256):
+            raise ValueError("invalid snapshot_zst_sha256")
+        if value["snapshot_release_tag"] != "lines-snapshot-sha256-" + snapshot_sha256:
+            raise ValueError("snapshot release tag does not match the snapshot digest")
     assets = value["assets"]
     if not isinstance(assets, list) or not assets:
         raise ValueError("assets must be a non-empty array")
@@ -145,9 +160,20 @@ def validate(value: dict) -> None:
         names.append(name)
     if names != sorted(names, key=lambda item: item.encode("utf-8")) or len(names) != len(set(names)):
         raise ValueError("asset names must be unique and bytewise sorted")
-    required = {"seforim.db.zst", "seforim.db.buildstate", "lines_snapshot.db.zst"}
+    # From v5 the buildstate ships compressed (~2x off a 990 MB SQLite file) and
+    # the duplicate lines snapshot is not published on the DB release at all —
+    # snapshot_release_tag names the immutable pre-release that carries it.
+    # v1..v4 keep the asset set they were published with.
+    if version >= 5:
+        required = {"seforim.db.zst", "seforim.db.buildstate.zst"}
+        forbidden = {"seforim.db.buildstate", "lines_snapshot.db.zst"}
+    else:
+        required = {"seforim.db.zst", "seforim.db.buildstate", "lines_snapshot.db.zst"}
+        forbidden = set()
     if not required.issubset(names):
         raise ValueError("required build assets are missing")
+    if forbidden & set(names):
+        raise ValueError("build assets superseded by this schema version are still published")
 
 
 def main() -> int:

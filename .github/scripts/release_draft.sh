@@ -4,12 +4,17 @@
 # Two steps drive the SAME draft of $RELEASE_TAG and must therefore share one
 # create/reconcile/upload contract:
 #
-#   * "Run LinkerToOtzaria relink on this snapshot (and wait)" creates the draft
-#     and pushes the assets that are already byte-final up the ~2.1 MB/s uplink
-#     while the job sits idle waiting for the linker, and
+#   * "Produce + verify patch fan" creates the draft and pushes the assets that
+#     are already byte-final up the ~2.1 MB/s uplink while the job spends ~30
+#     minutes of pure CPU producing patches, and
 #   * "Create draft, verify every uploaded asset, then publish" adopts that same
 #     draft, uploads whatever is still missing, re-verifies EVERY asset by
 #     name+size+digest against the staged bytes, and flips draft -> published.
+#
+# (Before E2 the relink wait also uploaded lines_snapshot.db.zst here. That asset
+# is no longer published on the DB release at all — the identical bytes live on
+# the content-addressed `lines-snapshot-sha256-<sha>` pre-release, which
+# build_provenance.json now names — so the fan is the only early uploader left.)
 #
 # Nothing here ever uses --clobber: an asset that already exists is verified by
 # name+size+digest and skipped, or the build fails. A create/upload whose
@@ -26,11 +31,11 @@
 # these is still unambiguously this build's own draft and is adopted; anything
 # else is a conflict and fails closed.
 #
-# seforim.db.buildstate is on the list but is NOT final before the relink wait:
-# Phase-2 allocates fresh stable link ids straight into it
+# seforim.db.buildstate.zst is NOT final before the relink wait: Phase-2
+# allocates fresh stable link ids straight into the buildstate
 # (DiskBackedLinkIdAllocator.open/commit on build/seforim.db.buildstate), so it
-# may only be uploaded after "Apply LINKER links (Phase-2)" has run.
-EARLY_RELEASE_ASSETS="lines_snapshot.db.zst seforim.db.buildstate"
+# may only be compressed and uploaded after "Apply LINKER links (Phase-2)".
+EARLY_RELEASE_ASSETS="seforim.db.buildstate.zst"
 
 use_token() {
   case "$1" in

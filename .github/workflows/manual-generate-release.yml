@@ -724,9 +724,29 @@ jobs:
           SEED_TAG="${{ steps.discover.outputs.seed_tag }}"
           echo "Seeding allocator from release '$SEED_TAG'"
           mkdir -p build prev-dbs
-          gh release download "$SEED_TAG" \
-            --pattern 'seforim.db.buildstate' \
-            --dir build
+          rm -f build/seforim.db.buildstate
+          # E1: the buildstate ships compressed from db_version 27 on. It is a
+          # 990 MB SQLite file that zstd -10 halves (measured 615.9 MB -> 312.2 MB,
+          # 1.97x, 8.0 s to produce, ~1 s to expand), so this step downloads
+          # ~500 MB instead of ~990 MB — run 33865604251 spent 128 s here.
+          #
+          # FALLBACK: the offset-1 release of the FIRST run after this change is
+          # v26, which still carries only the uncompressed asset. Delete the
+          # fallback branch once v27 is published (i.e. once no seed_tag this
+          # workflow can pick predates the compressed asset).
+          SEED_ZST="$RUNNER_TEMP/seed-buildstate-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.zst"
+          rm -f "$SEED_ZST"
+          if gh release download "$SEED_TAG" \
+               --pattern 'seforim.db.buildstate.zst' \
+               -O "$SEED_ZST"; then
+            unzstd -f "$SEED_ZST" -o build/seforim.db.buildstate
+            rm -f "$SEED_ZST"
+          else
+            echo "::warning::release $SEED_TAG carries no seforim.db.buildstate.zst — seeding from the pre-v27 uncompressed asset"
+            gh release download "$SEED_TAG" \
+              --pattern 'seforim.db.buildstate' \
+              --dir build
+          fi
           # Buildstate goes where generateSeforimDb expects it.
           ls -lh build/seforim.db.buildstate
 
@@ -1158,21 +1178,26 @@ jobs:
                 -f snapshot_sha256="$SNAPSHOT_ZST_SHA256" \
                 -f sefaria_release_metadata_sha256="$SEFARIA_METADATA_SHA" ;;
           esac
-          # ─── A2: fill the idle uplink while the linker works ───────────────
-          # From here the job does nothing but poll for up to 20 min of run
-          # discovery plus the relink itself (1119 s on run 33865604251), and
-          # the ~2.1 MB/s uplink is idle throughout. lines_snapshot.db.zst is
-          # byte-final — nothing writes it after "Dump lines snapshot for the
-          # linker" — so create this build's draft release now and hand it those
-          # 830 MB, instead of paying for them serially in the publish step,
-          # which re-verifies them by name+size+digest exactly as before.
-          # seforim.db.buildstate deliberately does NOT ride along here: Phase-2
-          # still has to allocate this build's fresh stable link ids into it
-          # (DiskBackedLinkIdAllocator), so it is only final after "Apply LINKER
-          # links (Phase-2)" — the patch fan uploads it there.
+          # ─── A2 / E2: nothing is uploaded early from HERE any more ─────────
+          # A2 used this idle window (20 min of discovery plus the relink itself,
+          # 1119 s on run 33865604251) to push lines_snapshot.db.zst to the draft
+          # release. E2 stopped publishing that asset on the DB release entirely
+          # — the identical bytes are already on the content-addressed
+          # `lines-snapshot-sha256-<sha>` pre-release this job published before
+          # the dispatch, and build_provenance.json now names that release — so
+          # there is nothing left here to upload. The next byte-final asset is
+          # seforim.db.buildstate.zst, and only after "Apply LINKER links
+          # (Phase-2)" has allocated this build's fresh stable link ids into the
+          # buildstate (DiskBackedLinkIdAllocator); the patch fan uploads it
+          # across its ~30 minutes of pure CPU.
+          #
+          # DRAFT_RELEASE_CREATED stays set here, unchanged: it has always been
+          # an optimistic "a draft for this tag may exist from this point on"
+          # marker (the early upload creates the draft in the background and may
+          # never get there), and the cleanup step resolves the draft by exact
+          # identity and simply reports "nothing to delete" when there is none.
+          # Keeping it set covers the draft the patch fan now creates.
           echo "DRAFT_RELEASE_CREATED=1" >> "$GITHUB_ENV"
-          bash .pipeline-control/.github/scripts/upload_early_release_assets.sh \
-            start snapshot build/lines_snapshot.db.zst
           # Identify OUR run: EXACT title equality on the per-attempt request id, exactly
           # one match (two runs sharing a fresh id is a broken invariant — refuse to
           # guess), created at/after our dispatch, at the head we captured. Fully
@@ -1239,11 +1264,10 @@ jobs:
               *) queued_for=0; sleep 60 ;;
             esac
           done
-          # Reap the early upload before the heavy lease comes back and before
-          # any later step can race it on the same release. Normally it finished
-          # long ago; it can never fail this step.
-          bash .pipeline-control/.github/scripts/upload_early_release_assets.sh \
-            wait snapshot 3600
+          # E2: there is no early upload to reap here any more — this step no
+          # longer starts one (see the A2/E2 note above). The 'buildstate' label
+          # the patch fan starts is reaped in that step, before the publish step
+          # can race it on the same release.
           # The exact child is terminal now. Reacquire before this job touches the DB
           # again; if another heavy phase won the race, fail rather than overlap.
           python3 .pipeline-control/.github/scripts/host_lease.py start \
@@ -1432,6 +1456,43 @@ jobs:
             -PlinkerStrict=true \
             --no-daemon --stacktrace
 
+      # ─── E1: ship the buildstate compressed ────────────────────────────────
+      # seforim.db.buildstate is a ~990 MB SQLite file that every run uploads and
+      # every NEXT run downloads ("Seed allocator from offset-1 release" — 128 s
+      # in run 33865604251). It compresses ~2x, so publishing it as
+      # seforim.db.buildstate.zst halves both.
+      #
+      # Level 10, measured on a real 615,899,136-byte buildstate (task2-runs/chg1)
+      # with zstd 1.5.5 on 16 vCPU:
+      #   L3  350,044,062  0.48 s   L9  313,173,328   5.32 s
+      #   L6  329,090,836  1.57 s   L10 312,210,830   7.99 s
+      #   L12 311,656,106 10.59 s   L15 311,053,197  12.62 s
+      #   L19 292,368,510 27.74 s
+      # L10 is the knee: L12/L15 buy ~0.2% for 30-60% more CPU, and L19's extra
+      # 6.4% (~32 MB on the real file) costs ~+32 s of CRITICAL path here to save
+      # ~15 s on an uplink that is idle anyway (the fan uploads this in the
+      # background across ~30 minutes of pure CPU).
+      #
+      # The worker count is byte-neutral, exactly as in the two other zstd steps:
+      # -T1/-T4/-T16/-T0 at -10 all produced
+      # e801ae3d6391653e3fb7f866a135d9d25f0303d6884db504e8863834b679cf69 on that
+      # file, so this asset stays byte-deterministic for a given buildstate.
+      #
+      # Runs here — after Phase-2 wrote this build's fresh stable link ids into
+      # the buildstate (DiskBackedLinkIdAllocator), so the bytes are final — and
+      # before the fan, whose first act is to hand the .zst to the idle uplink.
+      # The uncompressed file stays on disk. Nothing reads it after this step
+      # any more, so it could be freed; it is kept because it is the local
+      # artefact RELEASE.md and the publishRelease guard document, and ~500 MB
+      # more on the 16 GiB tmpfs (peak ~11 GiB) is well inside the budget.
+      - name: Compress buildstate for the release (zstd)
+        run: |
+          set -euo pipefail
+          . .pipeline-control/.github/scripts/zstd_workers.sh
+          zstd -T"$(zstd_workers)" -10 -f \
+            -o build/seforim.db.buildstate.zst build/seforim.db.buildstate
+          ls -lh build/seforim.db.buildstate build/seforim.db.buildstate.zst
+
       # ─── QA gate on the full DB (§10) ──────────────────────────────────────
       # Runs after LINKER inject so the DB is complete. --require-all makes any
       # skipped check a hard failure (e.g. a missing metrics report), so a
@@ -1545,7 +1606,7 @@ jobs:
           # ~30 minutes of pure CPU below, so hand its 990 MB to the ~2.1 MB/s
           # uplink here instead of paying for it serially in the publish step.
           bash .pipeline-control/.github/scripts/upload_early_release_assets.sh \
-            start buildstate build/seforim.db.buildstate
+            start buildstate build/seforim.db.buildstate.zst
           # A1: the anchors were fetched in parallel while the DB was generated.
           PREFETCH_DIR=prefetch
           PREFETCH_WAIT_SECONDS=900
@@ -1914,10 +1975,16 @@ jobs:
           # Full DB, compressed — canonical source of the DB.
           # Future releases reconstitute the prev DB from this.
           cp build/seforim.db.zst "$STAGE/"
-          cp build/seforim.db.buildstate "$STAGE/"
-          # Lines snapshot for the linker (lineage + manual/standalone relink runs;
-          # the serial cycle already handed it to relink through its content-addressed release).
-          cp build/lines_snapshot.db.zst "$STAGE/"
+          # E1: the IdAllocator seed for the NEXT build, compressed (~2x).
+          cp build/seforim.db.buildstate.zst "$STAGE/"
+          # E2: lines_snapshot.db.zst is deliberately NOT staged. The identical
+          # bytes are already published on the immutable, content-addressed
+          # pre-release `lines-snapshot-sha256-<sha>` — which the relink-recovery
+          # path in "Apply LINKER links (Phase-2)" already reads, and which
+          # snapshot_release_tag / snapshot_zst_sha256 below name for every other
+          # consumer (LinkerToOtzaria manual relink resolves it from there). A
+          # second 830 MB - 1 GiB copy on this release bought nothing and cost
+          # ~7 minutes of the ~2.1 MB/s uplink every week.
           # Patch fan (zero or more files; only present from release #2 on).
           if compgen -G "patches/patch-*.db.zst" > /dev/null; then
             cp patches/patch-*.db.zst "$STAGE/"
@@ -1953,8 +2020,19 @@ jobs:
           assets = []
           for path in sorted(stage.iterdir(), key=lambda p: p.name.encode()):
               assets.append({"name": path.name, "size": path.stat().st_size, "sha256": file_sha256(path)})
+          # E2: this release no longer carries lines_snapshot.db.zst, so the
+          # provenance names the immutable pre-release that does. The tag is
+          # derived from the digest exactly as the publishing step derives it, and
+          # the validator re-checks that derivation — a consumer can resolve the
+          # snapshot from here and verify the bytes it downloads, fail-closed.
+          # This is THIS build's own snapshot (build/lines_snapshot.db.zst), i.e.
+          # exactly the bytes the removed asset used to carry, including on the
+          # recovery path where the linked snapshot is an earlier attempt's.
+          snapshot_sha256 = os.environ["SNAPSHOT_ZST_SHA256"]
           value = {
-              "schema_version": 4,
+              "schema_version": 5,
+              "snapshot_zst_sha256": snapshot_sha256,
+              "snapshot_release_tag": "lines-snapshot-sha256-" + snapshot_sha256,
               "correlation_id": os.environ["CORRELATION_ID"],
               "source_commit": os.environ["SOURCE_COMMIT"],
               "sefaria_tag": os.environ["SEFARIA_TAG"],
@@ -2154,19 +2232,20 @@ jobs:
         if: always()
         run: |
           set -uo pipefail
-          # The anchor prefetch and the early release uploads deliberately
-          # outlive their own steps; nothing may outlive the job. Both aborts
-          # verify the recorded pid still belongs to that script before
-          # signalling, so a reused pid on this long-lived runner is safe.
+          # The anchor prefetch and the early release upload deliberately outlive
+          # their own steps; nothing may outlive the job. Both aborts verify the
+          # recorded pid still belongs to that script before signalling, so a
+          # reused pid on this long-lived runner is safe. ('snapshot' is gone
+          # with E2 — the DB release no longer carries lines_snapshot.db.zst, so
+          # 'buildstate' is the only early upload left.)
           bash .pipeline-control/.github/scripts/prefetch_patch_anchors.sh abort prefetch || true
-          for label in snapshot buildstate; do
-            bash .pipeline-control/.github/scripts/upload_early_release_assets.sh abort "$label" || true
-          done
+          bash .pipeline-control/.github/scripts/upload_early_release_assets.sh abort buildstate || true
           rm -rf prev-dbs prev-meta patches release-staging prior-versions.tsv prefetch
 
-      # The draft release exists from the relink wait onward (A2), so a build
-      # that dies anywhere after that would otherwise leave an unpublished draft
-      # holding this build's tag and up to ~1.8 GB of assets. Delete it — only
+      # The draft release can exist from the patch fan onward (A2/E2 — the fan's
+      # early buildstate upload creates it), so a build that dies anywhere after
+      # that would otherwise leave an unpublished draft holding this build's tag
+      # and ~500 MB of assets. Delete it — only
       # ever a DRAFT whose identity is exactly this attempt's, so a published
       # release can never be touched — and never fail the job over it.
       - name: Delete this build's unpublished draft release on failure

@@ -13,10 +13,31 @@ SPEC.loader.exec_module(contract)
 
 
 class BuildProvenanceContractTest(unittest.TestCase):
+    # The asset set every release up to and including v26 (provenance v1..v4)
+    # published: an uncompressed 990 MB buildstate plus a second copy of the
+    # lines snapshot that the content-addressed pre-release already carried.
+    LEGACY_ASSETS = [
+        {"name": "lines_snapshot.db.zst", "size": 1, "sha256": "8" * 64},
+        {"name": "seforim.db.buildstate", "size": 1, "sha256": "9" * 64},
+        {"name": "seforim.db.zst", "size": 1, "sha256": "a" * 64},
+    ]
+
+    def downgrade(self, version):
+        """A published document of an older schema version, assets and all."""
+        value = self.value()
+        value["schema_version"] = version
+        for key in contract.V5_KEYS - {1: contract.V1_KEYS, 2: contract.V2_KEYS,
+                                       3: contract.V3_KEYS, 4: contract.V4_KEYS}[version]:
+            del value[key]
+        value["assets"] = [dict(asset) for asset in self.LEGACY_ASSETS]
+        return value
+
     def value(self):
         sha = "a" * 64
         return {
-            "schema_version": 4,
+            "schema_version": 5,
+            "snapshot_zst_sha256": "b" * 64,
+            "snapshot_release_tag": "lines-snapshot-sha256-" + "b" * 64,
             "correlation_id": f"sefaria:1:2:export-v1:{sha}",
             "source_commit": "b" * 40,
             "sefaria_tag": "export-v1",
@@ -47,8 +68,7 @@ class BuildProvenanceContractTest(unittest.TestCase):
                 },
             },
             "assets": [
-                {"name": "lines_snapshot.db.zst", "size": 1, "sha256": "8" * 64},
-                {"name": "seforim.db.buildstate", "size": 1, "sha256": "9" * 64},
+                {"name": "seforim.db.buildstate.zst", "size": 1, "sha256": "9" * 64},
                 {"name": "seforim.db.zst", "size": 1, "sha256": "a" * 64},
             ],
         }
@@ -66,10 +86,7 @@ class BuildProvenanceContractTest(unittest.TestCase):
 
     def test_published_v1_contract_remains_readable_but_cannot_claim_v2_fields(self):
         with tempfile.TemporaryDirectory() as tmp:
-            value = self.value()
-            value["schema_version"] = 1
-            for key in contract.V4_KEYS - contract.V1_KEYS:
-                del value[key]
+            value = self.downgrade(1)
             contract.validate(contract.load(self.write(tmp, value)))
 
             value["fordb_archive_sha256"] = "e" * 64
@@ -83,7 +100,7 @@ class BuildProvenanceContractTest(unittest.TestCase):
 
     def test_duplicate_and_boolean_schema_are_rejected(self):
         with tempfile.TemporaryDirectory() as tmp:
-            raw = json.dumps(self.value(), sort_keys=True, separators=(",", ":"))[:-1] + ',"schema_version":4}\n'
+            raw = json.dumps(self.value(), sort_keys=True, separators=(",", ":"))[:-1] + ',"schema_version":5}\n'
             with self.assertRaises(ValueError):
                 contract.load(self.write(tmp, raw=raw.encode()))
             value = self.value()
@@ -93,11 +110,7 @@ class BuildProvenanceContractTest(unittest.TestCase):
 
     def test_published_v2_contract_remains_readable(self):
         with tempfile.TemporaryDirectory() as tmp:
-            value = self.value()
-            value["schema_version"] = 2
-            for key in contract.V4_KEYS - contract.V2_KEYS:
-                del value[key]
-            contract.validate(contract.load(self.write(tmp, value)))
+            contract.validate(contract.load(self.write(tmp, self.downgrade(2))))
 
     def test_phase2_commit_is_strict(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -111,16 +124,61 @@ class BuildProvenanceContractTest(unittest.TestCase):
         # still read (and its reuse claim still trusted) by this workflow, so
         # v3 must keep validating — it simply offers no anchor evidence.
         with tempfile.TemporaryDirectory() as tmp:
-            value = self.value()
-            value["schema_version"] = 3
-            for key in contract.V4_KEYS - contract.V3_KEYS:
-                del value[key]
+            value = self.downgrade(3)
             contract.validate(contract.load(self.write(tmp, value)))
 
             # …and a v3 document may not smuggle the v4 key in.
             value["db_schema"] = self.value()["db_schema"]
             with self.assertRaises(ValueError):
                 contract.load(self.write(tmp, value))
+
+    def test_published_v4_contract_remains_readable_with_its_own_asset_set(self):
+        # v26 and every earlier release published the uncompressed buildstate and
+        # a duplicate lines_snapshot.db.zst. Those documents must keep validating
+        # exactly as published — the patch fan still reads them off old releases.
+        with tempfile.TemporaryDirectory() as tmp:
+            value = self.downgrade(4)
+            contract.validate(contract.load(self.write(tmp, value)))
+
+            # …and a v4 document may not smuggle the v5 keys in.
+            value["snapshot_zst_sha256"] = "b" * 64
+            with self.assertRaises(ValueError):
+                contract.load(self.write(tmp, value))
+
+    def test_v5_names_the_snapshot_pre_release_instead_of_shipping_it(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            # The tag must be the digest's own content-addressed release: a
+            # consumer resolves the snapshot from here and verifies the bytes.
+            value = self.value()
+            value["snapshot_release_tag"] = "lines-snapshot-sha256-" + "c" * 64
+            with self.assertRaises(ValueError):
+                contract.validate(contract.load(self.write(tmp, value)))
+
+            for broken in ("", "not-a-sha", "B" * 64, "b" * 63):
+                value = self.value()
+                value["snapshot_zst_sha256"] = broken
+                value["snapshot_release_tag"] = "lines-snapshot-sha256-" + broken
+                with self.assertRaises(ValueError):
+                    contract.validate(contract.load(self.write(tmp, value)))
+
+            # v5 requires the compressed buildstate…
+            value = self.value()
+            value["assets"] = [
+                {"name": "seforim.db.buildstate", "size": 1, "sha256": "9" * 64},
+                {"name": "seforim.db.zst", "size": 1, "sha256": "a" * 64},
+            ]
+            with self.assertRaises(ValueError):
+                contract.validate(contract.load(self.write(tmp, value)))
+
+            # …and refuses to re-publish either superseded asset.
+            for superseded in ("seforim.db.buildstate", "lines_snapshot.db.zst"):
+                value = self.value()
+                value["assets"] = sorted(
+                    value["assets"] + [{"name": superseded, "size": 1, "sha256": "8" * 64}],
+                    key=lambda asset: asset["name"].encode("utf-8"),
+                )
+                with self.assertRaises(ValueError):
+                    contract.validate(contract.load(self.write(tmp, value)))
 
     def test_db_schema_block_is_strict(self):
         with tempfile.TemporaryDirectory() as tmp:
