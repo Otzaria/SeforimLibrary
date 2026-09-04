@@ -1380,6 +1380,21 @@ jobs:
             --metrics build/seforim.db.link-import-metrics.json \
             --require-all
 
+      # ─── Schema fingerprint of the DB this build publishes ─────────────────
+      # A few KB describing exactly the DB that ships as seforim.db.zst:
+      # db_schema_version plus the physical column set of every table. It is
+      # embedded in build_provenance.json below, so a FUTURE build can decide
+      # whether this release works as a patch-fan anchor WITHOUT downloading
+      # its 1.3 GB DB — and this build reads the same block out of older
+      # releases for its own pre-check. Must run while build/seforim.db still
+      # exists, i.e. before the fan and before the compress step.
+      - name: Fingerprint published DB schema
+        run: |
+          set -euo pipefail
+          python3 .pipeline-control/.github/scripts/patch_anchor_schema.py \
+            dump build/seforim.db > build/db_schema.json
+          echo "db_schema.json: $(wc -c < build/db_schema.json) bytes"
+
       # ─── Produce log-fan of patches: offsets {1, 2, 4, 8, 16} ──────────────
       # The prev DB is reconstituted from the release's compressed seforim.db.zst.
       # Each iteration downloads + decompresses, runs the producer, then
@@ -1423,6 +1438,42 @@ jobs:
               continue
             fi
             echo "=== Producing patch v${TARGET_VER} → v${THIS_VER} (offset $OFFSET, tag=$TAG) ==="
+
+            # Reconstituting an anchor costs 110–135 s of download plus a
+            # decompress; run 33865604251 paid ~140 s for the v10 anchor only
+            # to be told it was unpatchable. patch_anchor_schema.py answers the
+            # same question first, from the anchor's own build_provenance.json
+            # `db_schema` block (a few KB, exact from db_version 27 on — the
+            # published v26 provenance is schema_version 3 and carries none) or —
+            # for releases that predate that block — from a documented list of
+            # db_versions proven unpatchable by this repository's history.
+            # It is advisory in one direction only: PROCEED is NOT a
+            # patchability claim, the producer's exit-3 + "<out>.unpatchable"
+            # marker below stays the sole authority, and the pre-check itself
+            # can never fail the release (any surprise degrades to PROCEED).
+            # --contract-tables scopes the column comparison to the producer's
+            # own table list. It comes from the PAYLOAD checkout — the same
+            # commit whose PatchDbProducer runs below, not the control-plane
+            # checkout — because a comparison wider than that list would skip
+            # anchors the producer would still have patched.
+            rm -rf prev-meta
+            mkdir -p prev-meta
+            gh release download "$TAG" \
+              --pattern 'build_provenance.json' \
+              --dir prev-meta || true
+            PRECHECK=$(python3 .pipeline-control/.github/scripts/patch_anchor_schema.py check \
+              --this-schema build/db_schema.json \
+              --anchor-version "$TARGET_VER" \
+              --anchor-provenance prev-meta/build_provenance.json \
+              --contract-tables generator/common/src/jvmTest/resources/patch_tables_contract.json) \
+              || PRECHECK="PROCEED pre-check did not run — deferring to the producer"
+            rm -rf prev-meta
+            echo "pre-check: $PRECHECK"
+            if [ "${PRECHECK%% *}" = UNPATCHABLE ]; then
+              echo "::warning::anchor v${TARGET_VER} ($TAG): ${PRECHECK#* } — pre-download schema check declared the anchor unpatchable; skip anchor"
+              continue
+            fi
+
             rm -rf prev-dbs
             mkdir -p prev-dbs
             T_START=$(date +%s)
@@ -1556,10 +1607,14 @@ jobs:
           # Canonical, timestamp-free provenance. Asset hashes cover every
           # payload file; build_provenance.json itself is covered by the
           # release verification and pipeline result to avoid a hash cycle.
-          python3 - "$STAGE" "$MANUAL_LINKS_LINEAGE" <<'PY'
+          python3 - "$STAGE" "$MANUAL_LINKS_LINEAGE" build/db_schema.json <<'PY'
           import hashlib, json, os, pathlib, sys
           stage, lineage_path = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2])
           lineage = json.loads(lineage_path.read_text(encoding="utf-8"))
+          # Written by patch_anchor_schema.py dump — the same producer a later
+          # build's anchor pre-check compares against, so the published block
+          # and the compared block can never drift apart.
+          db_schema = json.loads(pathlib.Path(sys.argv[3]).read_text(encoding="utf-8"))
           def file_sha256(path):
               digest=hashlib.sha256()
               with path.open("rb") as source:
@@ -1569,7 +1624,7 @@ jobs:
           for path in sorted(stage.iterdir(), key=lambda p: p.name.encode()):
               assets.append({"name": path.name, "size": path.stat().st_size, "sha256": file_sha256(path)})
           value = {
-              "schema_version": 3,
+              "schema_version": 4,
               "correlation_id": os.environ["CORRELATION_ID"],
               "source_commit": os.environ["SOURCE_COMMIT"],
               "sefaria_tag": os.environ["SEFARIA_TAG"],
@@ -1592,6 +1647,7 @@ jobs:
               "config_sha256": lineage["config_sha256"],
               "source_links_tree_sha256": lineage["source_links_tree_sha256"],
               "packaged_links_tree_sha256": lineage["packaged_links_tree_sha256"],
+              "db_schema": db_schema,
               "assets": assets,
           }
           (stage / "build_provenance.json").write_text(
@@ -1932,7 +1988,7 @@ jobs:
       # re-downloaded by the next run.
       - name: Clean run-scoped disk leftovers (workspace persists on self-hosted)
         if: always()
-        run: rm -rf prev-dbs patches release-staging prior-versions.tsv
+        run: rm -rf prev-dbs prev-meta patches release-staging prior-versions.tsv
 
       # If this build ends while the relink it dispatched is still pending/running — the
       # build hit its own timeout while waiting, failed in Phase-2, or was cancelled —

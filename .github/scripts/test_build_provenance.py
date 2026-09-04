@@ -16,7 +16,7 @@ class BuildProvenanceContractTest(unittest.TestCase):
     def value(self):
         sha = "a" * 64
         return {
-            "schema_version": 3,
+            "schema_version": 4,
             "correlation_id": f"sefaria:1:2:export-v1:{sha}",
             "source_commit": "b" * 40,
             "sefaria_tag": "export-v1",
@@ -39,6 +39,13 @@ class BuildProvenanceContractTest(unittest.TestCase):
             "config_sha256": "5" * 64,
             "source_links_tree_sha256": "6" * 64,
             "packaged_links_tree_sha256": "7" * 64,
+            "db_schema": {
+                "db_schema_version": 4,
+                "tables": {
+                    "link": ["baseProvenance", "id", "sourceBookId"],
+                    "schema_meta": ["key", "value"],
+                },
+            },
             "assets": [
                 {"name": "lines_snapshot.db.zst", "size": 1, "sha256": "8" * 64},
                 {"name": "seforim.db.buildstate", "size": 1, "sha256": "9" * 64},
@@ -61,7 +68,7 @@ class BuildProvenanceContractTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             value = self.value()
             value["schema_version"] = 1
-            for key in contract.V3_KEYS - contract.V1_KEYS:
+            for key in contract.V4_KEYS - contract.V1_KEYS:
                 del value[key]
             contract.validate(contract.load(self.write(tmp, value)))
 
@@ -76,7 +83,7 @@ class BuildProvenanceContractTest(unittest.TestCase):
 
     def test_duplicate_and_boolean_schema_are_rejected(self):
         with tempfile.TemporaryDirectory() as tmp:
-            raw = json.dumps(self.value(), sort_keys=True, separators=(",", ":"))[:-1] + ',"schema_version":3}\n'
+            raw = json.dumps(self.value(), sort_keys=True, separators=(",", ":"))[:-1] + ',"schema_version":4}\n'
             with self.assertRaises(ValueError):
                 contract.load(self.write(tmp, raw=raw.encode()))
             value = self.value()
@@ -88,7 +95,7 @@ class BuildProvenanceContractTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             value = self.value()
             value["schema_version"] = 2
-            for key in contract.V3_KEYS - contract.V2_KEYS:
+            for key in contract.V4_KEYS - contract.V2_KEYS:
                 del value[key]
             contract.validate(contract.load(self.write(tmp, value)))
 
@@ -98,6 +105,43 @@ class BuildProvenanceContractTest(unittest.TestCase):
             value["phase2_implementation_commit"] = "not-a-commit"
             with self.assertRaises(ValueError):
                 contract.validate(contract.load(self.write(tmp, value)))
+
+    def test_published_v3_contract_remains_readable_without_db_schema(self):
+        # A prior release published before the patch-fan pre-check existed is
+        # still read (and its reuse claim still trusted) by this workflow, so
+        # v3 must keep validating — it simply offers no anchor evidence.
+        with tempfile.TemporaryDirectory() as tmp:
+            value = self.value()
+            value["schema_version"] = 3
+            for key in contract.V4_KEYS - contract.V3_KEYS:
+                del value[key]
+            contract.validate(contract.load(self.write(tmp, value)))
+
+            # …and a v3 document may not smuggle the v4 key in.
+            value["db_schema"] = self.value()["db_schema"]
+            with self.assertRaises(ValueError):
+                contract.load(self.write(tmp, value))
+
+    def test_db_schema_block_is_strict(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            for broken in (
+                {"db_schema_version": 4},
+                {"db_schema_version": 4, "tables": {}, "extra": 1},
+                {"db_schema_version": 0, "tables": {"link": ["id"]}},
+                {"db_schema_version": True, "tables": {"link": ["id"]}},
+                {"db_schema_version": 4, "tables": {}},
+                {"db_schema_version": 4, "tables": {"link": []}},
+                {"db_schema_version": 4, "tables": {"link": "id"}},
+                {"db_schema_version": 4, "tables": {"link": ["id", 1]}},
+                {"db_schema_version": 4, "tables": {"link": ["id", "id"]}},
+                # Unsorted columns would make the same DB hash two ways.
+                {"db_schema_version": 4, "tables": {"link": ["id", "baseProvenance"]}},
+                {"db_schema_version": 4, "tables": {"drop table": ["id"]}},
+            ):
+                value = self.value()
+                value["db_schema"] = broken
+                with self.assertRaises(ValueError):
+                    contract.validate(contract.load(self.write(tmp, value)))
 
     def test_attempt_and_asset_order_are_strict(self):
         with tempfile.TemporaryDirectory() as tmp:

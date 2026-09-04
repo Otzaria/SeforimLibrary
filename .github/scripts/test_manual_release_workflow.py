@@ -142,7 +142,7 @@ class ManualReleaseWorkflowContractTest(unittest.TestCase):
         self.assertGreaterEqual(self.workflow.count(f"PHASE2_IMPLEMENTATION_COMMIT: {expression}"), 3)
         self.assertIn('--arg phase2 "$PHASE2_IMPLEMENTATION_COMMIT"', lookup)
         self.assertIn(".phase2_implementation_commit==$phase2", lookup)
-        self.assertIn('"schema_version": 3', stage)
+        self.assertIn('"schema_version": 4', stage)
         self.assertIn(
             '"phase2_implementation_commit": os.environ["PHASE2_IMPLEMENTATION_COMMIT"]',
             stage,
@@ -185,6 +185,85 @@ class ManualReleaseWorkflowContractTest(unittest.TestCase):
         # Skips are warnings, but zero patches with prior releases must fail.
         self.assertIn("patch fan produced no patch although prior releases exist", patch_fan)
         self.assertLess(gradle_at, patch_fan.index("patch fan produced no patch although prior releases exist"))
+
+    def test_patch_fan_decides_unpatchable_anchors_before_downloading_them(self):
+        # An anchor the producer will reject costs 110–135 s of download plus a
+        # decompress before anyone learns that (run 33865604251, anchor v10).
+        # The cheap verdict must therefore come BEFORE `gh release download` of
+        # seforim.db.zst, and must never be able to fail the release.
+        fingerprint = self.step("Fingerprint published DB schema")
+        self.assertIn(
+            "patch_anchor_schema.py \\\n            dump build/seforim.db > build/db_schema.json",
+            fingerprint,
+        )
+        # It reads build/seforim.db, so it has to sit before the fan (which
+        # deletes nothing) and before the compress step that supersedes it.
+        self.assertLess(
+            self.workflow.index("      - name: Fingerprint published DB schema\n"),
+            self.workflow.index("      - name: Produce + verify patch fan\n"),
+        )
+        self.assertLess(
+            self.workflow.index("      - name: Fingerprint published DB schema\n"),
+            self.workflow.index("      - name: Compress Seforim Database (zstd)\n"),
+        )
+
+        patch_fan = self.step("Produce + verify patch fan")
+        precheck_at = patch_fan.index("patch_anchor_schema.py check")
+        db_download_at = patch_fan.index("--pattern 'seforim.db.zst'")
+        self.assertLess(precheck_at, db_download_at)
+        # Only the tiny provenance asset is fetched to decide.
+        self.assertLess(
+            patch_fan.index("--pattern 'build_provenance.json'"), db_download_at
+        )
+        self.assertIn("--anchor-version \"$TARGET_VER\"", patch_fan)
+        self.assertIn("--this-schema build/db_schema.json", patch_fan)
+        # The column comparison is scoped to the producer's own table list, and
+        # that list comes from the PAYLOAD checkout — the same commit whose
+        # PatchDbProducer runs — not from .pipeline-control. Comparing more
+        # tables than the producer does would skip anchors it would have patched.
+        contract = "generator/common/src/jvmTest/resources/patch_tables_contract.json"
+        self.assertIn(f"--contract-tables {contract}", patch_fan)
+        self.assertNotIn(f"--contract-tables .pipeline-control/{contract}", patch_fan)
+        self.assertTrue((Path(__file__).parents[2] / contract).is_file())
+        # Advisory-safe: a missing asset or a crashing pre-check degrades to
+        # PROCEED instead of aborting the job under `set -e`.
+        self.assertIn("--dir prev-meta || true", patch_fan)
+        self.assertIn(
+            '|| PRECHECK="PROCEED pre-check did not run', patch_fan
+        )
+        # A pre-check skip is announced with the same ::warning::anchor …
+        # skip anchor line shape as the producer's marker path, and leaves the
+        # loop exactly as that path does — nothing downloaded, nothing staged.
+        skip_at = patch_fan.index("pre-download schema check declared the anchor unpatchable; skip anchor")
+        self.assertIn(
+            '::warning::anchor v${TARGET_VER} ($TAG): ${PRECHECK#* } —', patch_fan
+        )
+        self.assertLess(precheck_at, skip_at)
+        self.assertLess(skip_at, db_download_at)
+        # The producer's own marker path is untouched and still authoritative.
+        self.assertLess(
+            db_download_at, patch_fan.index("producer declared the anchor unpatchable; skip anchor")
+        )
+        # prev-meta is run-scoped like prev-dbs.
+        self.assertIn(
+            "rm -rf prev-dbs prev-meta patches release-staging prior-versions.tsv",
+            self.workflow,
+        )
+
+    def test_provenance_publishes_the_schema_a_future_anchor_check_needs(self):
+        stage = self.step("Stage release assets")
+        self.assertIn(
+            'python3 - "$STAGE" "$MANUAL_LINKS_LINEAGE" build/db_schema.json', stage
+        )
+        self.assertIn(
+            'db_schema = json.loads(pathlib.Path(sys.argv[3]).read_text(encoding="utf-8"))',
+            stage,
+        )
+        self.assertIn('"db_schema": db_schema,', stage)
+        # Published and compared blocks share one producer, so they cannot drift.
+        self.assertEqual(
+            self.workflow.count("patch_anchor_schema.py \\\n            dump build/seforim.db"), 1
+        )
 
     def test_patch_fan_allows_only_the_supported_schema_transitions(self):
         patch_fan = self.step("Produce + verify patch fan")

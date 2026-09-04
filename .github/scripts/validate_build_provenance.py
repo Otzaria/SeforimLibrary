@@ -25,6 +25,14 @@ V2_KEYS = V1_KEYS | {
     "linker_relink_run_attempt", "linker_relink_request_id",
 }
 V3_KEYS = V2_KEYS | {"phase2_implementation_commit"}
+# v4 publishes the physical schema of the DB this release ships: db_schema_version
+# plus the sorted column list of every table. A later build reads it straight off
+# the release (a few KB) to decide whether this release can serve as a patch-fan
+# anchor, instead of downloading and extracting its 1.3 GB seforim.db.zst first.
+# Older published provenances stay valid as v1/v2/v3 — they simply carry no such
+# evidence, and the patch fan then defers to the producer exactly as before.
+V4_KEYS = V3_KEYS | {"db_schema"}
+IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,127}")
 
 
 def load(path: Path) -> dict:
@@ -41,9 +49,9 @@ def load(path: Path) -> dict:
     if not isinstance(value, dict):
         raise ValueError("build provenance must be an object")
     version = value.get("schema_version")
-    if type(version) is not int or version not in (1, 2, 3):
-        raise ValueError("schema_version must be integer 1, 2 or 3")
-    expected_keys = {1: V1_KEYS, 2: V2_KEYS, 3: V3_KEYS}[version]
+    if type(version) is not int or version not in (1, 2, 3, 4):
+        raise ValueError("schema_version must be integer 1, 2, 3 or 4")
+    expected_keys = {1: V1_KEYS, 2: V2_KEYS, 3: V3_KEYS, 4: V4_KEYS}[version]
     if set(value) != expected_keys:
         raise ValueError("unknown build provenance key set")
     canonical = json.dumps(
@@ -102,6 +110,24 @@ def validate(value: dict) -> None:
         phase2_commit = value["phase2_implementation_commit"]
         if not isinstance(phase2_commit, str) or not SHA40.fullmatch(phase2_commit):
             raise ValueError("invalid phase2_implementation_commit")
+    if version >= 4:
+        db_schema = value["db_schema"]
+        if not isinstance(db_schema, dict) or set(db_schema) != {"db_schema_version", "tables"}:
+            raise ValueError("db_schema must carry exactly db_schema_version and tables")
+        if type(db_schema["db_schema_version"]) is not int or db_schema["db_schema_version"] < 1:
+            raise ValueError("db_schema.db_schema_version must be a positive integer")
+        tables = db_schema["tables"]
+        if not isinstance(tables, dict) or not tables:
+            raise ValueError("db_schema.tables must be a non-empty object")
+        for table, columns in tables.items():
+            if not IDENTIFIER.fullmatch(table):
+                raise ValueError(f"invalid db_schema table name {table!r}")
+            if not isinstance(columns, list) or not columns:
+                raise ValueError(f"db_schema table {table!r} must list its columns")
+            if not all(isinstance(column, str) and IDENTIFIER.fullmatch(column) for column in columns):
+                raise ValueError(f"invalid column name in db_schema table {table!r}")
+            if columns != sorted(columns) or len(columns) != len(set(columns)):
+                raise ValueError(f"db_schema table {table!r} columns must be unique and sorted")
     assets = value["assets"]
     if not isinstance(assets, list) or not assets:
         raise ValueError("assets must be a non-empty array")
