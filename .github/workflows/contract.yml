@@ -18,10 +18,38 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # A coordinated contract change spans two repositories. On a PR, prefer
+      # a linked open companion PR by the same author; on push (or when none is
+      # linked) keep validating against the companion's default branch.
+      - name: Resolve linked updater PR
+        id: updater
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          repo=Otzaria/otzaria_library_updater
+          if [ "$GITHUB_EVENT_NAME" = pull_request ]; then
+            marker="$GITHUB_REPOSITORY#${{ github.event.pull_request.number }}"
+            author='${{ github.event.pull_request.user.login }}'
+            number=$(gh api -X GET search/issues \
+              -f q="repo:$repo is:pr is:open author:$author \"$marker\"" \
+              --jq '.items[0].number // empty')
+            if [ -n "$number" ]; then
+              companion_repo=$(gh api "repos/$repo/pulls/$number" --jq .head.repo.full_name)
+              companion_ref=$(gh api "repos/$repo/pulls/$number" --jq .head.ref)
+              echo "repository=$companion_repo" >> "$GITHUB_OUTPUT"
+              echo "ref=$companion_ref" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          fi
+          echo "repository=$repo" >> "$GITHUB_OUTPUT"
+          echo "ref=main" >> "$GITHUB_OUTPUT"
+
       - name: Checkout Otzaria/otzaria_library_updater (צד ה-Dart)
         uses: actions/checkout@v4
         with:
-          repository: Otzaria/otzaria_library_updater
+          repository: ${{ steps.updater.outputs.repository }}
+          ref: ${{ steps.updater.outputs.ref }}
           path: seforim-library-updater
 
       - name: Checkout Otzaria/SefariaExport visibility contract
