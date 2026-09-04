@@ -66,5 +66,8 @@ internal fun readManualLinksArguments(): ManualLinksArguments {
         changelogDir = changelog,
         seforimToolCommit = required("seforimToolCommit"),
         output = path("manualLinksOutput"),
+        anchorUnrelocatableCap = optional("anchorUnrelocatableCap")?.let { value ->
+            value.toIntOrNull()?.takeIf { it >= 0 } ?: error("anchorUnrelocatableCap must be a non-negative integer")
+        } ?: ManualLinksAnchor.DEFAULT_UNRELOCATABLE_CAP,
     )
 }

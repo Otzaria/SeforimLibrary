@@ -463,6 +463,7 @@ docs/קישורים-וכותרות.md  (פרק 9, רק לאחר שהמימוש �
 | `ref_1` | מקור Sefaria | `RefEntry.ref` של המקור |
 | `ref_2` | יעד Sefaria | `RefEntry.ref` של היעד |
 | `anchor_src_hash` | `start` על מקור Sefaria | hash מדויק של מחרוזת שורת ה־BookPayload |
+| `anchor_context` | `start` על מקור Sefaria | `{before, after}` — עד 32 תווים גולמיים מכל צד של `start`, לשחזור העוגן (§8.4) |
 
 ```json
 {
@@ -543,8 +544,9 @@ docs/קישורים-וכותרות.md  (פרק 9, רק לאחר שהמימוש �
 mode; input/output lineage; tool commit
 files scanned/changed/renamed
 records scanned/relevant/unchanged/shifted/enriched
+records anchors_relocated/anchors_context_filled + פירוט anchors_relocations/anchors_unrelocatable
 refs renamed/missing/duplicate
-anchors checked/drifted
+anchors checked/relocated/drifted/unrelocatable_cap
 packaging collisions
 כל failure עם file + record index + stable record hash
 זמן לכל phase
@@ -973,9 +975,85 @@ config דורש migration. tool commit חדש נבחר רק עבור Sefaria tar
 2. לפתור `(expectedBook, ref_X)` ל־RefEntry יחיד.
 3. לעדכן `line_index_X = RefEntry.lineIndex`.
 4. אינדקס זהה → אין שינוי קובץ.
-5. עם `anchor_src_hash`:
-   - hash זהה → `start` נשמר;
-   - hash שונה → `anchor_content_drift`, כשל; אין עדכון hash או offset.
+5. עם `anchor_src_hash` — ראו את מסלול העיגון שלהלן.
+
+#### מילוי `anchor_context`
+
+`anchor_src_hash` הוא hash של **כל** השורה הגולמית, ולכן הוא מגלה שינוי אבל אינו יודע
+לאן ה־offset זז. לכן כל רשומה עם `start` נושאת גם
+
+```json
+"anchor_context": {"before": "עד 32 תווים שמסתיימים ב־start", "after": "עד 32 תווים שמתחילים ב־start"}
+```
+
+טקסט גולמי בדיוק כפי ש־`retainedContent` מחזיר, בלי נרמול; קצר יותר כשהשורה קצרה, ולעולם
+אינו חוצה surrogate pair. הכלי כותב אותו בכל פעם שה־hash השמור **עדיין תואם** את השורה
+הנוכחית — כלומר הטקסט מוכח כבלתי־משתנה — וה־context חסר או שונה. זה קורה ב־refresh בדיוק
+כמו ב־bootstrap/migrate, כך שהמילוי אינו דורש migrate של אופרטור. השדה נכתב מיד אחרי
+`anchor_src_hash`, בשורה אחת, byte-preserving לכל שאר הקובץ, דרך אותו lossless patcher
+(כולל re-parse ואימות סמנטי קנוני של `render()`). ל־Generator אין בו שימוש: `buildLinkAnchor`
+קורא רק `start`, ו־decoder שלו הוא `ignoreUnknownKeys = true`.
+
+ה־refresh הראשון אחרי שהשינוי הזה נכנס ימלא `anchor_context` על כל ~17,980 הרשומות של
+`משנה ברורה_links.json` בבת אחת: ההרצה תתהפך מ־`no_op` ל־`ok`, ו־`sync-manual-links` יבצע
+commit חד־פעמי של כתיבה מחדש של הקובץ כולו ושל lineage חדש. זה צפוי ואינו סימן לתקלה.
+
+#### מפל השחזור כש־hash שונה
+
+השחזור הוא פונקציה טהורה של (רשומה ישנה, טקסט השורה החדש): בלי רשת, בלי export קודם.
+מחפשים כל offset `i` בשורה החדשה שבו `before` מסתיים ב־`i` ו־`after` מתחיל ב־`i`, לפי הסדר:
+
+| שלב | חלון | תנאי |
+|---|---|---|
+| `full` | `before` + `after` המלאים (עד 32) | התאמה יחידה |
+| `window12` | 12 תווים אחרונים של `before` + 12 ראשונים של `after` | התאמה יחידה |
+| `after12` | 12 ראשונים של `after` בלבד | יחידוּת בכל השורה **וגם** הצד השני אינו סותר |
+| `before12` | 12 אחרונים של `before` בלבד | יחידוּת בכל השורה **וגם** הצד השני אינו סותר |
+
+שני השלבים הראשונים דו־צדדיים: הם מוכיחים שהמילה המעוגנת עצמה שרדה. רק אם שניהם נכשלו רצים
+השלבים החד־צדדיים, ופגיעה חד־צדדית מתקבלת **רק** כשהצד השני אינו סותר אותה — כלומר ריק, לא
+יחיד, או מצביע על אותו offset. אם שני הצדדים יחידים וחלוקים זו `anchor_unrelocatable` עם
+`reason = context_sides_disagree`. הסיבה: עריכה שפגעה במילה המעוגנת עצמה יכולה להשאיר מופע
+יחיד אך לא־קשור של 12 תווים במקום אחר בשורה; מעבר אליו היה כותב hash טרי מעל offset שגוי
+ומסתיר את הסחיפה לתמיד. שחזור חד־צדדי נרשם כשורת `::warning::` כדי שאפשר יהיה לדגום אותו ידנית.
+
+אז מעדכנים `start = i`, `anchor_src_hash` חדש, `anchor_context` מרוענן, סופרים
+`anchors_relocated` ורושמים שורת log אחת לכל רשומה (file[index], ref, start ישן ← חדש) ואת
+שם השלב שפעל. כלל ה־surrogate לפני `start` נאכף גם על ה־offset החדש.
+
+רשומה שאין לה `anchor_context` ו־hash שלה שונה, או ששום שלב לא נתן פגיעה יחידה, היא
+`anchor_unrelocatable`: **אינה משתנה כלל**, ונאספת עם אותו פירוט אבחון שהיה ל־`anchorDrifts`
+(כולל dump מלא של השורה החדשה, פעם אחת לכל שורה).
+
+#### תוצאת ההרצה ו־cap
+
+רשומות unrelocatable אינן מפילות את ההרצה כברירת מחדל. יש cap קשיח
+(`ManualLinksAnchor.DEFAULT_UNRELOCATABLE_CAP = 50`, ניתן לעקיפה ב־`-PanchorUnrelocatableCap`):
+
+- מעל ה־cap → כשל `anchor_content_drift` בדיוק כמו קודם; שום דבר לא נכתב, עץ העבודה נשאר כשהיה.
+- עד ה־cap → ההרצה מצליחה, הרשומות נשארות ללא שינוי, לכל אחת נכתבת שורת `::warning::`,
+  והן מפורטות בדוח תחת `records.anchors_unrelocatable`.
+
+הנימוק: ה־Generator ממקם עוגן לפי `start` בלבד ואינו בודק את ה־hash בזמן build. `start` מיושן
+אחרי עריכה לא־קשורה של ספריא היה כבר המצב של **כל** build קודם — איש לא אימת אותו — ולכן
+השארת הרשומה כמות שהיא לעולם אינה גרועה מהמצב הקודם, בעוד שהשחזור מתקן את המקרה השכיח
+אוטומטית. חסימת release שלם בגלל חמישה עוגנים היא מחיר גבוה בהרבה מסיכון שכבר קיים.
+
+שדות דוח שנוספו: `records.anchors_relocated`, `records.anchors_context_filled`,
+`records.anchors_relocations` (עם `strategy`, `old_start`, `new_start`),
+`records.anchors_unrelocatable` (עם `reason`), המונים `..._omitted` לשני המערכים
+(תקרת פירוט 200), וכן `anchors.relocated`, `anchors.unrelocatable` ו־`anchors.unrelocatable_cap`.
+
+`anchors.drifted` **נשאר 0** ואינו סופר רשומות unrelocatable. הוא המשמעות ההיסטורית "סחיפה
+שעצרה את ההרצה", ו־`manual-links-corpus-qa.yml` בודק `.anchors.drifted == 0`; העברת המונה
+לשם הייתה הופכת את ה־cap ל־0 בפועל בשער הקורפוס ומייצרת כשל jq אטום במקום הודעה. סחיפה
+שהכלי ספג מדווחת ב־`anchors.unrelocatable`. מאותו טעם רשומה unrelocatable **כן** נספרת
+ב־`anchors.checked`: `ManualLinksCorpusMain` דורש `checked == expectedAnchors` (17,980),
+והמונה סופר עוגנים שנבדקו ולא עוגנים שהצליחו.
+
+התקרים של 2026-09-03 (`משנה ברורה` 585:4, מחיקת 3 תווים ב־offset 40, עוגנים ב־50/178/223/242/275)
+נפתר כך אוטומטית: העוגן הראשון דרך `after12` — חלונות ה־`before` שלו חוצים את המחיקה — וארבעת
+הנותרים דרך `full`, כולם ל־`start - 3`.
 
 ### 8.5 רשומות חדשות
 

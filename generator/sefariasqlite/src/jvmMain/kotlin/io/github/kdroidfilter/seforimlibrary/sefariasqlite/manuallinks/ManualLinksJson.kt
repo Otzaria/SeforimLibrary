@@ -89,17 +89,19 @@ internal object ManualLinksJson {
     fun rawSha256(path: Path): String = sha256(path.readBytes())
 }
 
-internal data class JsonScalarSpan(
+internal data class JsonValueSpan(
     val fieldStart: Int,
     val valueStart: Int,
     val valueEnd: Int,
+    /** `true` for object/array values, which never take part in the record's single-line/multi-line layout probe. */
+    val structured: Boolean = false,
 )
 
 /** Lossless editor for the flat array-of-objects manual-link format. */
 internal class ManualLinksDocument private constructor(
     val source: String,
     val records: ArrayNode,
-    private val spans: List<Map<String, JsonScalarSpan>>,
+    private val spans: List<Map<String, JsonValueSpan>>,
 ) {
     private val edits = LinkedHashMap<Int, LinkedHashMap<String, JsonNode>>()
 
@@ -113,12 +115,14 @@ internal class ManualLinksDocument private constructor(
 
     fun setInt(index: Int, field: String, value: Int) = set(index, field, ManualLinksJson.mapper.nodeFactory.numberNode(value))
 
+    fun setObject(index: Int, field: String, value: ObjectNode) = set(index, field, value)
+
     private fun set(index: Int, field: String, value: JsonNode) {
         val record = record(index)
         if (record.has(field) &&
             ManualLinksJson.canonicalString(record.get(field)) == ManualLinksJson.canonicalString(value)
         ) return
-        if (!record.has(field) && field !in setOf("ref_1", "ref_2", "anchor_src_hash")) {
+        if (!record.has(field) && field !in INSERTABLE_FIELDS) {
             error("Refusing to insert unsupported field '$field' at record $index")
         }
         record.set<JsonNode>(field, value)
@@ -137,30 +141,30 @@ internal class ManualLinksDocument private constructor(
             }
 
             val pending = LinkedHashMap(missing)
+            // Only scalars decide whether the record is written on one line: a structured
+            // value such as anchor_context may legitimately span lines of its own. A record
+            // with no scalar at all falls back to the anchor's own end.
+            val scalarEnd = recordSpans.values.filterNot { it.structured }.maxOfOrNull { it.valueEnd }
             fun insertAfter(anchor: String, names: List<String>) {
                 val values = names.mapNotNull { name -> pending.remove(name)?.let { name to it } }
                 if (values.isEmpty()) return
                 val anchorSpan = recordSpans[anchor]
                     ?: error("Cannot insert ${values.map { it.first }}: missing anchor $anchor")
-                val multiline = source.indexOf('\n', anchorSpan.fieldStart).let { it >= 0 && it < recordSpans.values.maxOf { s -> s.valueEnd } }
-                val indent = if (multiline) {
-                    val lineStart = source.lastIndexOf('\n', anchorSpan.fieldStart).let { if (it < 0) 0 else it + 1 }
-                    source.substring(lineStart, anchorSpan.fieldStart).takeWhile { it == ' ' || it == '\t' }
-                } else ""
-                val separator = if (multiline) "\n$indent" else " "
-                val insertion = values.joinToString(separator = ",$separator", prefix = ",$separator") { (name, value) ->
-                    "${ManualLinksJson.mapper.writeValueAsString(name)}: ${ManualLinksJson.mapper.writeValueAsString(value)}"
-                }
-                replacements += Replacement(anchorSpan.valueEnd, anchorSpan.valueEnd, insertion)
+                insertAfterAtSpan(anchorSpan, scalarEnd, values, replacements)
             }
-            if ("ref_1" in pending) insertAfter("line_index_1", listOf("ref_1", "anchor_src_hash"))
+            if ("ref_1" in pending) insertAfter("line_index_1", listOf("ref_1", "anchor_src_hash", "anchor_context"))
             if ("anchor_src_hash" in pending) {
                 val refSpan = recordSpans["ref_1"] ?: error("anchor_src_hash requires existing or inserted ref_1")
+                val names = listOfNotNull("anchor_src_hash", "anchor_context".takeIf { it in pending })
+                insertAfterAtSpan(refSpan, scalarEnd, names.map { it to pending.remove(it)!! }, replacements)
+            }
+            if ("anchor_context" in pending) {
+                val hashSpan = recordSpans["anchor_src_hash"]
+                    ?: error("anchor_context requires existing or inserted anchor_src_hash")
                 insertAfterAtSpan(
-                    refSpan,
-                    recordSpans.values.maxOf { it.valueEnd },
-                    pending.remove("anchor_src_hash")!!,
-                    "anchor_src_hash",
+                    hashSpan,
+                    scalarEnd,
+                    listOf("anchor_context" to pending.remove("anchor_context")!!),
                     replacements,
                 )
             }
@@ -185,26 +189,29 @@ internal class ManualLinksDocument private constructor(
     }
 
     private fun insertAfterAtSpan(
-        span: JsonScalarSpan,
-        recordScalarEnd: Int,
-        value: JsonNode,
-        name: String,
+        span: JsonValueSpan,
+        recordScalarEnd: Int?,
+        values: List<Pair<String, JsonNode>>,
         replacements: MutableList<Replacement>,
     ) {
+        if (values.isEmpty()) return
         val lineStart = source.lastIndexOf('\n', span.fieldStart).let { if (it < 0) 0 else it + 1 }
         val indent = source.substring(lineStart, span.fieldStart).takeWhile { it == ' ' || it == '\t' }
-        val multiline = source.indexOf('\n', span.fieldStart).let { it >= 0 && it < recordScalarEnd }
+        val scalarEnd = recordScalarEnd ?: span.valueEnd
+        val multiline = source.indexOf('\n', span.fieldStart).let { it >= 0 && it < scalarEnd }
         val separator = if (multiline) "\n$indent" else " "
-        replacements += Replacement(
-            span.valueEnd,
-            span.valueEnd,
-            ",$separator${ManualLinksJson.mapper.writeValueAsString(name)}: ${ManualLinksJson.mapper.writeValueAsString(value)}",
-        )
+        val insertion = values.joinToString(separator = ",$separator", prefix = ",$separator") { (name, value) ->
+            "${ManualLinksJson.mapper.writeValueAsString(name)}: ${ManualLinksJson.mapper.writeValueAsString(value)}"
+        }
+        replacements += Replacement(span.valueEnd, span.valueEnd, insertion)
     }
 
     private data class Replacement(val start: Int, val end: Int, val value: String)
 
     companion object {
+        /** The only fields this tool may add to a record that does not carry them yet. */
+        internal val INSERTABLE_FIELDS = setOf("ref_1", "ref_2", "anchor_src_hash", "anchor_context")
+
         fun read(path: Path): ManualLinksDocument {
             val bytes = Files.readAllBytes(path)
             require(bytes.size < 3 || !(bytes[0] == 0xef.toByte() && bytes[1] == 0xbb.toByte() && bytes[2] == 0xbf.toByte())) {
@@ -223,13 +230,13 @@ internal class ManualLinksDocument private constructor(
         fun parse(text: String, sourceName: String = "input"): ManualLinksDocument {
             val root = ManualLinksJson.mapper.readTree(text)
             require(root is ArrayNode) { "$sourceName must contain a JSON array" }
-            val recordSpans = ArrayList<Map<String, JsonScalarSpan>>()
+            val recordSpans = ArrayList<Map<String, JsonValueSpan>>()
             ManualLinksJson.factory.createParser(text).use { parser ->
                 require(parser.nextToken() == JsonToken.START_ARRAY) { "$sourceName must contain an array" }
                 var recordIndex = 0
                 while (parser.nextToken() != JsonToken.END_ARRAY) {
                     require(parser.currentToken == JsonToken.START_OBJECT) { "$sourceName[$recordIndex] must be an object" }
-                    val fields = LinkedHashMap<String, JsonScalarSpan>()
+                    val fields = LinkedHashMap<String, JsonValueSpan>()
                     while (parser.nextToken() != JsonToken.END_OBJECT) {
                         require(parser.currentToken == JsonToken.FIELD_NAME) { "Expected field in $sourceName[$recordIndex]" }
                         val name = parser.currentName
@@ -240,8 +247,11 @@ internal class ManualLinksDocument private constructor(
                             error("negative zero is forbidden in $sourceName[$recordIndex].$name")
                         }
                         parser.skipChildren()
-                        val valueEnd = if (token.isScalarValue) scalarValueEnd(text, valueStart) else -1
-                        if (token.isScalarValue) fields[name] = JsonScalarSpan(fieldStart, valueStart, valueEnd)
+                        fields[name] = if (token.isScalarValue) {
+                            JsonValueSpan(fieldStart, valueStart, scalarValueEnd(text, valueStart))
+                        } else {
+                            JsonValueSpan(fieldStart, valueStart, structuredValueEnd(text, valueStart), structured = true)
+                        }
                     }
                     recordSpans += fields
                     recordIndex++
@@ -262,6 +272,14 @@ internal class ManualLinksDocument private constructor(
             requireNonBlankText(record, "path_2", location)
             requirePositiveInt(record, "line_index_2", location)
             record.get("start")?.let { exactInt(it, "$location.start", allowZero = true) }
+            record.get("anchor_context")?.let { context ->
+                require(context.isObject && context.size() == 2) {
+                    "$location.anchor_context must be an object with exactly before and after"
+                }
+                listOf("before", "after").forEach { key ->
+                    require(context.get(key)?.isTextual == true) { "$location.anchor_context.$key must be text" }
+                }
+            }
         }
 
         internal fun exactInt(node: JsonNode, location: String, allowZero: Boolean = false): Int {
@@ -304,6 +322,40 @@ internal class ManualLinksDocument private constructor(
             while (index < source.length && source[index] !in charArrayOf(',', '}', ']', ' ', '\t', '\r', '\n')) index++
             require(index > start) { "Empty JSON scalar" }
             return index
+        }
+
+        /**
+         * End offset (exclusive) of the object/array value starting at [start]. Structured values are
+         * never rewritten wholesale except for `anchor_context`, but their spans must be known so an
+         * existing value is replaced in place instead of being inserted a second time.
+         */
+        private fun structuredValueEnd(source: String, start: Int): Int {
+            require(start in source.indices && (source[start] == '{' || source[start] == '[')) {
+                "Structured token does not start with a brace"
+            }
+            var depth = 0
+            var index = start
+            var inString = false
+            var escaped = false
+            while (index < source.length) {
+                val char = source[index]
+                if (inString) {
+                    when {
+                        escaped -> escaped = false
+                        char == '\\' -> escaped = true
+                        char == '"' -> inString = false
+                    }
+                } else when (char) {
+                    '"' -> inString = true
+                    '{', '[' -> depth++
+                    '}', ']' -> {
+                        depth--
+                        if (depth == 0) return index + 1
+                    }
+                }
+                index++
+            }
+            error("Unterminated JSON structure")
         }
     }
 }

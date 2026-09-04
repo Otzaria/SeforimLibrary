@@ -1,6 +1,7 @@
 package io.github.kdroidfilter.seforimlibrary.sefariasqlite.manuallinks
 
 import co.touchlab.kermit.Logger
+import com.fasterxml.jackson.databind.JsonNode
 import com.fasterxml.jackson.databind.node.ArrayNode
 import com.fasterxml.jackson.databind.node.ObjectNode
 import java.nio.file.Files
@@ -13,6 +14,126 @@ import kotlin.io.path.readText
 import kotlin.io.path.relativeTo
 
 internal enum class ManualLinksMode { BOOTSTRAP, REFRESH, MIGRATE }
+
+/**
+ * Word-level anchor self-healing.
+ *
+ * A record with `start` stores, besides the hash of the whole raw segment, a short window of the
+ * raw text on either side of the offset (`anchor_context`). When Sefaria edits the segment the hash
+ * no longer matches, but the surrounding words usually survive, so the new offset can be recovered
+ * as a pure function of (stored context, new segment) — no network, no previous export.
+ */
+internal object ManualLinksAnchor {
+    /** Stored window size on each side. Long enough to be unique inside one Sefaria segment. */
+    const val WINDOW = 32
+
+    /** Shortest still-discriminating window used by the fallback cascade. */
+    const val FALLBACK_WINDOW = 12
+
+    /** More unrelocatable records than this fails the run exactly as anchor drift did before. */
+    const val DEFAULT_UNRELOCATABLE_CAP = 50
+
+    const val FULL_STRATEGY = "full"
+    const val WINDOW_STRATEGY = "window$FALLBACK_WINDOW"
+    const val AFTER_ONLY_STRATEGY = "after$FALLBACK_WINDOW"
+    const val BEFORE_ONLY_STRATEGY = "before$FALLBACK_WINDOW"
+
+    /** One side of the anchor was edited away; the surviving side alone placed the offset. */
+    val ONE_SIDED_STRATEGIES = setOf(AFTER_ONLY_STRATEGY, BEFORE_ONLY_STRATEGY)
+
+    data class Context(val before: String, val after: String)
+
+    sealed interface Relocation {
+        /** [strategy] names the window pair that produced the single match. */
+        data class Relocated(val start: Int, val strategy: String) : Relocation
+
+        data class Failed(val reason: String) : Relocation
+    }
+
+    /** The context to store for [start] inside [content]; never splits a surrogate pair. */
+    fun contextAt(content: String, start: Int): Context = Context(
+        before = trimLeadingLowSurrogate(content.substring(maxOf(0, start - WINDOW), start)),
+        after = trimTrailingHighSurrogate(content.substring(start, minOf(content.length, start + WINDOW))),
+    )
+
+    fun contextNode(content: String, start: Int): ObjectNode {
+        val context = contextAt(content, start)
+        return ManualLinksJson.mapper.createObjectNode().apply {
+            put("before", context.before)
+            put("after", context.after)
+        }
+    }
+
+    fun contextOrNull(node: JsonNode?): Context? {
+        if (node == null || !node.isObject) return null
+        val before = node.get("before")?.takeIf { it.isTextual }?.textValue() ?: return null
+        val after = node.get("after")?.takeIf { it.isTextual }?.textValue() ?: return null
+        return Context(before, after)
+    }
+
+    /**
+     * Offsets are tried with the full stored windows first, then with the shortest still
+     * discriminating windows — both sides adjacent, so the anchored word itself is proven intact.
+     *
+     * Only if neither places the anchor do the one-sided windows run, and a one-sided hit is
+     * accepted **only** when the other side does not contradict it: an edit that landed on the
+     * anchored word can leave a unique but unrelated 12-character occurrence elsewhere in the
+     * segment, and relocating onto it would stamp a fresh hash over a silently wrong offset.
+     * Two unique sides that disagree are therefore `context_sides_disagree`, not a relocation.
+     */
+    fun relocate(content: String, context: Context): Relocation {
+        val short = Context(
+            before = trimLeadingLowSurrogate(context.before.takeLast(FALLBACK_WINDOW)),
+            after = trimTrailingHighSurrogate(context.after.take(FALLBACK_WINDOW)),
+        )
+        var ambiguous = false
+        listOf(FULL_STRATEGY to context, WINDOW_STRATEGY to short).forEach { (strategy, attempt) ->
+            if (attempt.before.isEmpty() && attempt.after.isEmpty()) return@forEach
+            val matches = matchOffsets(content, attempt)
+            when {
+                matches.size == 1 -> return Relocation.Relocated(matches.single(), strategy)
+                matches.size > 1 -> ambiguous = true
+            }
+        }
+        val afterHit = oneSidedHit(content, Context(before = "", after = short.after)) { ambiguous = true }
+        val beforeHit = oneSidedHit(content, Context(before = short.before, after = "")) { ambiguous = true }
+        return when {
+            afterHit != null && beforeHit != null && afterHit != beforeHit ->
+                Relocation.Failed("context_sides_disagree")
+            afterHit != null -> Relocation.Relocated(afterHit, AFTER_ONLY_STRATEGY)
+            beforeHit != null -> Relocation.Relocated(beforeHit, BEFORE_ONLY_STRATEGY)
+            ambiguous -> Relocation.Failed("ambiguous_context")
+            else -> Relocation.Failed("no_context_match")
+        }
+    }
+
+    private fun oneSidedHit(content: String, context: Context, onAmbiguous: () -> Unit): Int? {
+        if (context.before.isEmpty() && context.after.isEmpty()) return null
+        val matches = matchOffsets(content, context)
+        if (matches.size > 1) onAmbiguous()
+        return matches.singleOrNull()
+    }
+
+    /** At most two offsets: a second match already means "not unique". */
+    private fun matchOffsets(content: String, context: Context): List<Int> {
+        val found = ArrayList<Int>(2)
+        for (offset in 0..content.length) {
+            if (offset < context.before.length) continue
+            if (offset + context.after.length > content.length) break
+            if (!content.regionMatches(offset - context.before.length, context.before, 0, context.before.length)) continue
+            if (!content.regionMatches(offset, context.after, 0, context.after.length)) continue
+            found += offset
+            if (found.size == 2) return found
+        }
+        return found
+    }
+
+    private fun trimLeadingLowSurrogate(value: String): String =
+        if (value.isNotEmpty() && Character.isLowSurrogate(value[0])) value.substring(1) else value
+
+    private fun trimTrailingHighSurrogate(value: String): String =
+        if (value.isNotEmpty() && Character.isHighSurrogate(value[value.length - 1])) value.dropLast(1) else value
+}
 
 internal data class ManualLinksArguments(
     val mode: ManualLinksMode,
@@ -27,6 +148,8 @@ internal data class ManualLinksArguments(
     val changelogDir: Path?,
     val seforimToolCommit: String,
     val output: Path,
+    /** Above this many unrelocatable anchors the run fails as `anchor_content_drift` did before. */
+    val anchorUnrelocatableCap: Int = ManualLinksAnchor.DEFAULT_UNRELOCATABLE_CAP,
 )
 
 internal data class ManualLinksCounters(
@@ -43,6 +166,8 @@ internal data class ManualLinksCounters(
     var enriched: Int = 0,
     var refsRenamed: Int = 0,
     var anchorsChecked: Int = 0,
+    var anchorsRelocated: Int = 0,
+    var anchorsContextFilled: Int = 0,
 )
 
 internal data class ManualLinksResult(
@@ -65,14 +190,18 @@ internal class ManualLinksRefresh(
     private var currentFailureRecordIndex: Int? = null
     private var currentFailureRecordHash: String? = null
 
-    // Anchor drift is fatal, but failing on the FIRST record hides the size and shape
-    // of the problem: an upstream Sefaria content change can move one anchor or all of
-    // them, and the operator has to see which before deciding how to re-anchor.
-    private val anchorDrifts = mutableListOf<String>()
+    // Drifted anchors the context cascade could not place. They are left untouched — a stale
+    // `start` after an unrelated upstream edit was already the state of every previous build —
+    // but reporting the whole set at once still shows the operator the size and shape of the
+    // problem instead of failing on the first record.
+    private val anchorDrifts = mutableListOf<ObjectNode>()
 
     // One drifted segment usually carries several anchors: keep its full text once so
     // the operator can compute the new offsets instead of guessing from a window.
     private val anchorDriftLines = LinkedHashMap<String, String>()
+
+    // Successful re-anchorings, with the window pair that produced the unique match.
+    private val anchorRelocations = mutableListOf<ObjectNode>()
 
     fun run(): ManualLinksResult = try {
         runInternal()
@@ -119,21 +248,7 @@ internal class ManualLinksRefresh(
             proveTashmaVector()
         } else null
         processDocuments(initialBootstrap = inputLineage == null, mayBootstrap = mayBootstrap, tashmaProof = tashmaProof)
-        if (anchorDrifts.isNotEmpty()) {
-            // Nothing has been persisted yet, so the working tree stays exactly as it was.
-            logger.e { "anchor_content_drift: ${anchorDrifts.size} record(s) no longer match their stored source hash" }
-            anchorDrifts.take(200).forEach { logger.e { it } }
-            if (anchorDrifts.size > 200) {
-                logger.e { "... ${anchorDrifts.size - 200} further drifted record(s) not listed" }
-            }
-            anchorDriftLines.entries.take(20).forEach { (key, dump) ->
-                logger.e { "drifted_source_line $key $dump" }
-            }
-            if (anchorDriftLines.size > 20) {
-                logger.e { "... ${anchorDriftLines.size - 20} further drifted source line(s) not dumped" }
-            }
-            throw IllegalArgumentException("anchor_content_drift: ${anchorDrifts.size} record(s)")
-        }
+        reportUnrelocatableAnchors()
         persistChangedDocuments()
 
         val scan = ManualLinksTreeHash.scan(arguments.output, config)
@@ -593,32 +708,161 @@ internal class ManualLinksRefresh(
         }
         val start = ManualLinksDocument.exactInt(startNode, "start", allowZero = true)
         val content = book.retainedContent(entry.lineIndex) ?: error("Required anchor content was not retained")
-        require(start <= content.length) { "start exceeds raw source content" }
-        require(content.take(start).none { Character.isSurrogate(it) }) { "Surrogate pair occurs before start" }
         val expectedHash = "sha256:${ManualLinksJson.sha256(content.toByteArray(Charsets.UTF_8))}"
-        if (anchorNode == null) {
-            require(allowEnrich) { "pending_anchor_hash is forbidden in refresh" }
-            document.setString(recordIndex, "anchor_src_hash", expectedHash)
-        } else {
-            val stored = if (anchorNode.isTextual) anchorNode.textValue() else anchorNode.toString()
-            if (stored != expectedHash) {
-                val from = maxOf(0, start - 30)
-                val around = content.substring(from, minOf(content.length, start + 50))
-                    .replace('\n', ' ')
-                    .replace('\t', ' ')
-                anchorDrifts.add(
-                    "${currentFailureFile ?: "?"}[$recordIndex] ref_1=${entry.ref} " +
-                        "line_index=${entry.lineIndex} start=$start content_length=${content.length} " +
-                        "stored=$stored actual=$expectedHash around_start=\"$around\""
-                )
-                anchorDriftLines.putIfAbsent(
-                    "${currentFailureFile ?: "?"}#${entry.lineIndex}",
-                    "ref=${entry.ref} length=${content.length} text=<<<${content.replace('\n', ' ')}>>>",
-                )
-                return
+        val stored = anchorNode?.let { if (it.isTextual) it.textValue() else it.toString() }
+        var relocated = false
+        val anchoredStart = when {
+            anchorNode == null -> {
+                require(allowEnrich) { "pending_anchor_hash is forbidden in refresh" }
+                requireAnchorableStart(content, start)
+                document.setString(recordIndex, "anchor_src_hash", expectedHash)
+                start
+            }
+            stored == expectedHash -> {
+                requireAnchorableStart(content, start)
+                start
+            }
+            else -> {
+                val moved = relocateAnchor(document, recordIndex, entry, content, start, stored!!, expectedHash)
+                if (moved == null) {
+                    // An unrelocatable record was still inspected: the pinned corpus gate counts
+                    // anchors, not successes, so `checked` must not move when drift is tolerated.
+                    counters.anchorsChecked++
+                    return
+                }
+                relocated = true
+                moved
             }
         }
+        val contextWritten = writeAnchorContext(document, recordIndex, content, anchoredStart)
+        // A relocation always rewrites the context; only a fill on proven-unchanged text counts here.
+        if (contextWritten && !relocated) counters.anchorsContextFilled++
         counters.anchorsChecked++
+    }
+
+    /** The generator counts characters, so an anchor may not sit behind half of a surrogate pair. */
+    private fun requireAnchorableStart(content: String, start: Int) {
+        require(start <= content.length) { "start exceeds raw source content" }
+        require(content.take(start).none { Character.isSurrogate(it) }) { "Surrogate pair occurs before start" }
+    }
+
+    /**
+     * Re-anchors one drifted record from its stored `anchor_context`, or records it as
+     * unrelocatable and leaves it byte-identical. Returns the new offset when it moved.
+     */
+    private fun relocateAnchor(
+        document: ManualLinksDocument,
+        recordIndex: Int,
+        entry: io.github.kdroidfilter.seforimlibrary.sefariasqlite.RefEntry,
+        content: String,
+        start: Int,
+        stored: String,
+        expectedHash: String,
+    ): Int? {
+        val file = currentFailureFile ?: "?"
+        val context = ManualLinksAnchor.contextOrNull(document.record(recordIndex).get("anchor_context"))
+        val relocation = context?.let { ManualLinksAnchor.relocate(content, it) }
+            ?: ManualLinksAnchor.Relocation.Failed("missing_anchor_context")
+        if (relocation is ManualLinksAnchor.Relocation.Relocated &&
+            content.take(relocation.start).none { Character.isSurrogate(it) }
+        ) {
+            document.setInt(recordIndex, "start", relocation.start)
+            document.setString(recordIndex, "anchor_src_hash", expectedHash)
+            counters.anchorsRelocated++
+            anchorRelocations += ManualLinksJson.mapper.createObjectNode().apply {
+                put("file", file)
+                put("record_index", recordIndex)
+                put("ref_1", entry.ref)
+                put("line_index_1", entry.lineIndex)
+                put("old_start", start)
+                put("new_start", relocation.start)
+                put("strategy", relocation.strategy)
+            }
+            val line = "anchor_relocated $file[$recordIndex] ref_1=${entry.ref} line_index=${entry.lineIndex} " +
+                "start=$start -> ${relocation.start} via=${relocation.strategy}"
+            // One side of the context was edited away, so the offset rests on a single window:
+            // surface it for a spot-check instead of burying it in the info stream.
+            if (relocation.strategy in ManualLinksAnchor.ONE_SIDED_STRATEGIES) {
+                logger.w { "::warning::$line one_sided=true" }
+            } else {
+                logger.i { line }
+            }
+            return relocation.start
+        }
+        val reason = when {
+            relocation is ManualLinksAnchor.Relocation.Failed -> relocation.reason
+            else -> "surrogate_before_relocated_start"
+        }
+        val around = content
+            .substring(maxOf(0, minOf(start, content.length) - 30), minOf(content.length, start + 50))
+            .replace('\n', ' ')
+            .replace('\t', ' ')
+        anchorDrifts += ManualLinksJson.mapper.createObjectNode().apply {
+            put("file", file)
+            put("record_index", recordIndex)
+            put("ref_1", entry.ref)
+            put("line_index_1", entry.lineIndex)
+            put("start", start)
+            put("content_length", content.length)
+            put("stored_hash", stored)
+            put("actual_hash", expectedHash)
+            put("reason", reason)
+            put("around_start", around)
+        }
+        anchorDriftLines.putIfAbsent(
+            "$file#${entry.lineIndex}",
+            "ref=${entry.ref} length=${content.length} text=<<<${content.replace('\n', ' ')}>>>",
+        )
+        return null
+    }
+
+    /** Returns true when the record's stored context had to be written or refreshed. */
+    private fun writeAnchorContext(
+        document: ManualLinksDocument,
+        recordIndex: Int,
+        content: String,
+        start: Int,
+    ): Boolean {
+        val desired = ManualLinksAnchor.contextNode(content, start)
+        val existing = document.record(recordIndex).get("anchor_context")
+        if (existing != null &&
+            ManualLinksJson.canonicalString(existing) == ManualLinksJson.canonicalString(desired)
+        ) return false
+        document.setObject(recordIndex, "anchor_context", desired)
+        return true
+    }
+
+    private fun reportUnrelocatableAnchors() {
+        if (anchorDrifts.isEmpty()) return
+        anchorDrifts.take(REPORT_DETAIL_LIMIT).forEach { drift ->
+            logger.w {
+                "::warning::anchor_unrelocatable ${drift.get("file").textValue()}[${drift.get("record_index").intValue()}] " +
+                    "ref_1=${drift.get("ref_1").textValue()} line_index=${drift.get("line_index_1").intValue()} " +
+                    "start=${drift.get("start").intValue()} reason=${drift.get("reason").textValue()} " +
+                    "stored=${drift.get("stored_hash").textValue()} actual=${drift.get("actual_hash").textValue()} " +
+                    "around_start=\"${drift.get("around_start").textValue()}\""
+            }
+        }
+        if (anchorDrifts.size > REPORT_DETAIL_LIMIT) {
+            logger.w { "... ${anchorDrifts.size - REPORT_DETAIL_LIMIT} further unrelocatable record(s) not listed" }
+        }
+        anchorDriftLines.entries.take(20).forEach { (key, dump) ->
+            logger.w { "drifted_source_line $key $dump" }
+        }
+        if (anchorDriftLines.size > 20) {
+            logger.w { "... ${anchorDriftLines.size - 20} further drifted source line(s) not dumped" }
+        }
+        // Nothing has been persisted yet, so a run over the cap leaves the working tree untouched.
+        if (anchorDrifts.size > arguments.anchorUnrelocatableCap) {
+            logger.e {
+                "anchor_content_drift: ${anchorDrifts.size} record(s) could not be re-anchored " +
+                    "(cap ${arguments.anchorUnrelocatableCap})"
+            }
+            throw IllegalArgumentException(
+                "anchor_content_drift: ${anchorDrifts.size} unrelocatable record(s) exceed the cap of " +
+                    "${arguments.anchorUnrelocatableCap}",
+            )
+        }
     }
 
     private fun persistChangedDocuments() {
@@ -655,6 +899,12 @@ internal class ManualLinksRefresh(
                 put("unchanged", counters.unchanged)
                 put("shifted", counters.shifted)
                 put("enriched", counters.enriched)
+                put("anchors_relocated", counters.anchorsRelocated)
+                put("anchors_context_filled", counters.anchorsContextFilled)
+                set<ArrayNode>("anchors_relocations", detailArray(anchorRelocations))
+                put("anchors_relocations_omitted", omitted(anchorRelocations))
+                set<ArrayNode>("anchors_unrelocatable", detailArray(anchorDrifts))
+                put("anchors_unrelocatable_omitted", omitted(anchorDrifts))
             })
             set<ObjectNode>("refs", ManualLinksJson.mapper.createObjectNode().apply {
                 put("renamed", counters.refsRenamed)
@@ -663,7 +913,13 @@ internal class ManualLinksRefresh(
             })
             set<ObjectNode>("anchors", ManualLinksJson.mapper.createObjectNode().apply {
                 put("checked", counters.anchorsChecked)
+                put("relocated", counters.anchorsRelocated)
+                // `drifted` keeps its original meaning: anchor drift that stopped the run. A drift
+                // the tool absorbed is reported as `unrelocatable`, so the corpus-QA gate on
+                // `.anchors.drifted == 0` and the pinned `expectedAnchors` count stay meaningful.
                 put("drifted", 0)
+                put("unrelocatable", anchorDrifts.size)
+                put("unrelocatable_cap", arguments.anchorUnrelocatableCap)
             })
             put("packaging_collisions", 0)
             set<ObjectNode>("reader", ManualLinksJson.mapper.createObjectNode().apply {
@@ -681,6 +937,12 @@ internal class ManualLinksRefresh(
         writeCanonical(path, report)
         return path
     }
+
+    /** Reports stay small enough to read: a full corpus can relocate thousands of anchors. */
+    private fun detailArray(details: List<ObjectNode>): ArrayNode =
+        ManualLinksJson.mapper.createArrayNode().apply { details.take(REPORT_DETAIL_LIMIT).forEach { add(it) } }
+
+    private fun omitted(details: List<ObjectNode>): Int = maxOf(0, details.size - REPORT_DETAIL_LIMIT)
 
     private fun writeMarker(status: String, lineage: Path, report: Path): Path {
         val marker = ManualLinksJson.mapper.createObjectNode().apply {
@@ -770,6 +1032,7 @@ internal class ManualLinksRefresh(
     internal data class TashmaProof(val book: ManualBookIndex)
 
     companion object {
+        private const val REPORT_DETAIL_LIMIT = 200
         private const val TASHMA_SNAPSHOT_SHA = "0b67db43e6f2dedc2aa63fd670368b1ab23e9995d4c6458044e87b43d2c772e6"
         private val LEADING_MARKER = Regex("""^\s*[({][א-ת\"׳״]{1,5}[)}]\s""")
         private val TASHMA_EXCEPTIONS = mapOf(

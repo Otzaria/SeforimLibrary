@@ -36,6 +36,58 @@ class ManualLinksJsonTest {
     }
 
     @Test
+    fun anchorContextIsInsertedRightAfterTheHashAndReplacedInPlaceAfterwards() {
+        val input = """
+            [
+              {
+                "line_index_1": 1,
+                "ref_1": "Source 1",
+                "anchor_src_hash": "sha256:${"0".repeat(64)}",
+                "heRef_2": "יעד א",
+                "path_2": "יעד.txt",
+                "line_index_2": 9,
+                "start": 4,
+                "unknown": { "kept": true }
+              }
+            ]
+        """.trimIndent()
+        val document = ManualLinksDocument.parse(input)
+        document.setObject(0, "anchor_context", ManualLinksAnchor.contextNode("אבגד הוזח טי", 4))
+
+        val output = document.render()
+
+        assertEquals(
+            input.replace(
+                "\"anchor_src_hash\": \"sha256:${"0".repeat(64)}\",",
+                "\"anchor_src_hash\": \"sha256:${"0".repeat(64)}\",\n" +
+                    "    \"anchor_context\": {\"before\":\"אבגד\",\"after\":\" הוזח טי\"},",
+            ),
+            output,
+        )
+        assertEquals(
+            ManualLinksJson.canonicalString(document.records),
+            ManualLinksJson.canonicalString(ManualLinksDocument.parse(output).records),
+        )
+
+        // A second pass re-anchors the same record: the object is replaced in place, nothing is added.
+        val second = ManualLinksDocument.parse(output)
+        second.setInt(0, "start", 5)
+        second.setObject(0, "anchor_context", ManualLinksAnchor.contextNode("אבגד הוזח טי", 5))
+        val replaced = second.render()
+        assertEquals(1, Regex("anchor_context").findAll(replaced).count())
+        assertTrue(replaced.contains("\"anchor_context\": {\"before\":\"אבגד \",\"after\":\"הוזח טי\"}"))
+        assertTrue(replaced.contains("\"start\": 5"))
+        assertTrue(replaced.contains("\"unknown\": { \"kept\": true }"))
+    }
+
+    @Test
+    fun insertingAnUnsupportedFieldIsRefused() {
+        val input = """[{"line_index_1":1,"heRef_2":"x","path_2":"x.txt","line_index_2":1}]"""
+        val document = ManualLinksDocument.parse(input)
+        assertFailsWith<IllegalStateException> { document.setInt(0, "start", 3) }
+    }
+
+    @Test
     fun duplicateKeysAndInvalidNumbersFailStrictly() {
         val duplicate = """[{"line_index_1":1,"line_index_1":2,"heRef_2":"x","path_2":"x.txt","line_index_2":1}]"""
         assertFailsWith<Exception> { ManualLinksDocument.parse(duplicate) }
