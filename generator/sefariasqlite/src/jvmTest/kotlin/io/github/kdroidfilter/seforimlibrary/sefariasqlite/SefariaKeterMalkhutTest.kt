@@ -49,9 +49,9 @@ class SefariaKeterMalkhutTest {
             "stanza from chapter 1 should be present as a content line"
         )
 
-        // Chapter 1 stanza is referenced as 'כתר מלכות א'
-        val refA = payload.refEntries.firstOrNull { it.heRef == "כתר מלכות א" }
-        assertTrue(refA != null, "chapter 1 should have heRef 'כתר מלכות א'")
+        // Chapter 1 stanza is referenced as 'כתר מלכות, א'
+        val refA = payload.refEntries.firstOrNull { it.heRef == "כתר מלכות, א" }
+        assertTrue(refA != null, "chapter 1 should have heRef 'כתר מלכות, א'")
     }
 
     @Test

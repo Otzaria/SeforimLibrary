@@ -60,10 +60,11 @@ internal class SefariaCorpusIndex private constructor(
 
     fun resolveRef(book: ManualBookIndex, ref: String): RefEntry = exactlyOne(book.refsByRef[ref], "ref '$ref' in ${book.enTitle}")
 
-    fun resolveHeRef(book: ManualBookIndex, heRef: String): RefEntry = exactlyOne(book.refsByHeRef[heRef], "heRef '$heRef' in ${book.enTitle}")
+    fun resolveHeRef(book: ManualBookIndex, heRef: String): RefEntry =
+        exactlyOne(book.refsByHeRef[legacyHeRefKey(book.heTitle, heRef)], "heRef '$heRef' in ${book.enTitle}")
 
     fun resolveHeRefOrNullIfMissing(book: ManualBookIndex, heRef: String): RefEntry? {
-        val values = book.refsByHeRef[heRef].orEmpty()
+        val values = book.refsByHeRef[legacyHeRefKey(book.heTitle, heRef)].orEmpty()
         require(values.size <= 1) { "heRef '$heRef' in ${book.enTitle} is ambiguous; found ${values.size}" }
         return values.singleOrNull()
     }
@@ -159,11 +160,20 @@ internal fun BookPayload.toManualIndex(
         retainedLines = retained,
         proofLines = lines.takeIf { retainFullLines },
         refsByRef = refEntries.groupBy { it.ref },
-        refsByHeRef = refEntries.groupBy { it.heRef },
+        refsByHeRef = refEntries.groupBy { legacyHeRefKey(heTitle, it.heRef) },
         refsByLineIndex = refEntries.groupBy { it.lineIndex },
     )
 }
 
+/**
+ * Manual-links CSVs pin heRef_2 strings from before the reader put a comma after
+ * the book title ("רש"י על חולין ו., ה" vs "רש"י על חולין, ו., ה"). Index keys and
+ * lookups both pass through this, so either spelling resolves to the same entry.
+ */
+internal fun legacyHeRefKey(heTitle: String, heRef: String): String {
+    val separated = "$heTitle, "
+    return if (heRef.startsWith(separated)) "$heTitle ${heRef.removePrefix(separated)}" else heRef
+}
 internal fun sourceTitle(fileName: String): String {
     require(fileName.endsWith("_links.json")) { "Not a links file: $fileName" }
     return fileName.removeSuffix("_links.json").takeIf { it.isNotBlank() } ?: error("Empty source title")
