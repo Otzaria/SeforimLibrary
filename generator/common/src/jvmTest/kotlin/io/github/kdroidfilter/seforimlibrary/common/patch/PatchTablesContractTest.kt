@@ -7,7 +7,7 @@ import kotlin.test.assertEquals
  * Contract guard against the Dart `seforim_library_updater` package.
  *
  * Serializes [PATCH_TABLES_IN_FK_ORDER], [LogicalContentHasher.DEFAULT_TABLES]
- * and [PatchDbSchema.CURRENT_VERSION] to a canonical JSON form and compares it
+ * and [CURRENT_DB_SCHEMA_VERSION] to a canonical JSON form and compares it
  * to a committed fixture. The identical fixture lives in the updater repo
  * (`test/patch_tables_contract.json`), where its own test asserts the Dart
  * lists produce byte-identical output — so the two table specs cannot drift.
@@ -17,11 +17,21 @@ import kotlin.test.assertEquals
  */
 class PatchTablesContractTest {
 
+    private fun fixture(path: String): String = javaClass.getResourceAsStream(path)
+        ?.readBytes()?.toString(Charsets.UTF_8)?.replace("\r\n", "\n")
+        ?: error("fixture $path missing from test resources")
+
     @Test
     fun `frozen schema contracts derive from the current list by dropping additions`() {
         assertEquals(
-            PATCH_TABLES_IN_FK_ORDER.filterNot { it.name in setOf("line_ref", "line_dh") },
+            PATCH_TABLES_SCHEMA_4.filterNot { it.name in setOf("line_ref", "line_dh") },
             PATCH_TABLES_SCHEMA_3,
+        )
+        assertEquals(
+            PATCH_TABLES_IN_FK_ORDER.map { table ->
+                if (table.name == "line_dh") table.copy(updatable = false) else table
+            },
+            PATCH_TABLES_SCHEMA_4,
         )
         assertEquals(
             PATCH_TABLES_SCHEMA_3.filterNot { it.name == "link_suppressed_side" },
@@ -59,6 +69,7 @@ class PatchTablesContractTest {
             },
             LogicalContentHasher.TABLES_SCHEMA_4,
         )
+        assertEquals(LogicalContentHasher.TABLES_SCHEMA_4, LogicalContentHasher.TABLES_SCHEMA_5)
     }
 
     private fun canonicalContract(
@@ -92,22 +103,29 @@ class PatchTablesContractTest {
 
     @Test
     fun `canonical serialization matches committed fixture`() {
-        val expected = javaClass.getResourceAsStream("/patch_tables_contract.json")
-            ?.readBytes()?.toString(Charsets.UTF_8)
-            ?: error("fixture patch_tables_contract.json missing from test resources")
+        val expected = fixture("/patch_tables_contract.json")
         val actual = canonicalContract(
             PATCH_TABLES_IN_FK_ORDER,
             LogicalContentHasher.DEFAULT_TABLES,
-            PatchDbSchema.CURRENT_VERSION,
+            CURRENT_DB_SCHEMA_VERSION,
+        )
+        assertEquals(expected, actual)
+    }
+
+    @Test
+    fun `schema 4 canonical contract remains byte frozen`() {
+        val expected = fixture("/patch_tables_contract_schema_4.json")
+        val actual = canonicalContract(
+            PATCH_TABLES_SCHEMA_4,
+            LogicalContentHasher.TABLES_SCHEMA_4,
+            schemaVersion = 4,
         )
         assertEquals(expected, actual)
     }
 
     @Test
     fun `schema 3 canonical contract remains byte frozen`() {
-        val expected = javaClass.getResourceAsStream("/patch_tables_contract_schema_3.json")
-            ?.readBytes()?.toString(Charsets.UTF_8)
-            ?: error("fixture patch_tables_contract_schema_3.json missing from test resources")
+        val expected = fixture("/patch_tables_contract_schema_3.json")
         val actual = canonicalContract(
             PATCH_TABLES_SCHEMA_3,
             LogicalContentHasher.TABLES_SCHEMA_3,
@@ -118,9 +136,7 @@ class PatchTablesContractTest {
 
     @Test
     fun `schema 1 canonical contract remains byte frozen`() {
-        val expected = javaClass.getResourceAsStream("/patch_tables_contract_schema_1.json")
-            ?.readBytes()?.toString(Charsets.UTF_8)
-            ?: error("fixture patch_tables_contract_schema_1.json missing from test resources")
+        val expected = fixture("/patch_tables_contract_schema_1.json")
         val actual = canonicalContract(
             PATCH_TABLES_SCHEMA_1,
             LogicalContentHasher.TABLES_SCHEMA_1,

@@ -273,6 +273,10 @@ class ManualReleaseWorkflowContractTest(unittest.TestCase):
             '[ "$PREV_SCHEMA" = 2 ] && [ "$THIS_SCHEMA" = 3 ]',
             '[ "$PREV_SCHEMA" = 2 ] && [ "$THIS_SCHEMA" = 4 ]',
             '[ "$PREV_SCHEMA" = 3 ] && [ "$THIS_SCHEMA" = 4 ]',
+            '[ "$PREV_SCHEMA" = 1 ] && [ "$THIS_SCHEMA" = 5 ]',
+            '[ "$PREV_SCHEMA" = 2 ] && [ "$THIS_SCHEMA" = 5 ]',
+            '[ "$PREV_SCHEMA" = 3 ] && [ "$THIS_SCHEMA" = 5 ]',
+            '[ "$PREV_SCHEMA" = 4 ] && [ "$THIS_SCHEMA" = 5 ]',
         )
         for transition in supported:
             self.assertIn(transition, patch_fan)
