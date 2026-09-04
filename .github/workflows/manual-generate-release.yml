@@ -411,9 +411,10 @@ jobs:
       # Guards so a release build never falls and never endangers the other
       # repos' runners that share this host:
       #   • size=16G is a HARD cap — a runaway write fails THIS job cleanly with
-      #     ENOSPC instead of OOM-killing the host. Measured peak is ~11.4 GiB
-      #     (seforim.db ~7G + seforim.db.zst ~3.5G + buildstate ~0.9G coexist
-      #     during the compression step), so 16G leaves comfortable headroom.
+      #     ENOSPC instead of OOM-killing the host. Peak is ~11.8 GiB during the
+      #     DB compression step (seforim.db 7.15G + seforim.db.zst 1.3G +
+      #     buildstate 0.99G + buildstate.zst ~0.5G + lines_snapshot.db.zst
+      #     ~1.0G coexist), so 16G leaves ~4 GiB of headroom.
       #   • Preflight ABORTS before any work if another Runner.Worker is active
       #     or MemAvailable < 24 GiB — never share the box, never start tight. A
       #     clean abort + rerun beats a mid-build OOM, which is the real "fall".
@@ -1603,8 +1604,8 @@ jobs:
           mkdir -p patches prev-dbs
           # A2: seforim.db.buildstate is byte-final only now — Phase-2 allocated
           # this build's fresh stable link ids straight into it. The fan spends
-          # ~30 minutes of pure CPU below, so hand its 990 MB to the ~2.1 MB/s
-          # uplink here instead of paying for it serially in the publish step.
+          # ~30 minutes of pure CPU below, so hand the ~500 MB .zst of it to the
+          # ~2.1 MB/s uplink here instead of paying for it serially in publish.
           bash .pipeline-control/.github/scripts/upload_early_release_assets.sh \
             start buildstate build/seforim.db.buildstate.zst
           # A1: the anchors were fetched in parallel while the DB was generated.
