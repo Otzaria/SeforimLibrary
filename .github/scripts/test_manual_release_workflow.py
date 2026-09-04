@@ -4,6 +4,7 @@ from pathlib import Path
 WORKFLOW = Path(__file__).parents[1] / "workflows" / "manual-generate-release.yml"
 MANIFEST_WORKFLOW = Path(__file__).parents[1] / "workflows" / "update-release-manifest.yml"
 HANDOFF_PUBLISHER = Path(__file__).parent / "publish_release_handoff.sh"
+ZSTD_WORKERS_HELPER = Path(__file__).parent / "zstd_workers.sh"
 FAILURE_RECONCILER = (
     Path(__file__).parents[1] / "workflows" / "reconcile-linker-after-failure.yml"
 )
@@ -468,6 +469,60 @@ class ManualReleaseWorkflowContractTest(unittest.TestCase):
         self.assertIn(legacy_skip, lookup)
         self.assertLess(lookup.index(validation), lookup.index(requested_source_guard))
         self.assertLess(lookup.index(requested_source_guard), lookup.index(legacy_skip))
+
+    def test_zstd_steps_saturate_the_runner_without_changing_published_bytes(self):
+        helper = ZSTD_WORKERS_HELPER.read_text(encoding="utf-8")
+        source = ". .pipeline-control/.github/scripts/zstd_workers.sh"
+        snapshot = self.step("Dump lines snapshot for the linker")
+        compress = self.step("Compress Seforim Database (zstd)")
+
+        # `-T0` resolves to PHYSICAL cores (8 of the runner's 16 vCPUs), so it
+        # must not survive anywhere in the workflow.
+        self.assertNotIn("zstd -T0", self.workflow)
+        zstd_calls = [
+            line.strip()
+            for line in self.workflow.splitlines()
+            if "zstd " in line and not line.lstrip().startswith("#")
+        ]
+        self.assertTrue(zstd_calls, "the workflow must still compress with zstd")
+        for call in zstd_calls:
+            self.assertNotIn("-T0", call)
+            # Levels above 19 need --ultra; without it `-22` was silently
+            # clamped, so neither may appear in an actual invocation.
+            self.assertNotIn("--ultra", call)
+            self.assertNotIn("-22", call)
+
+        # The helper is the single worker-count policy, and it must degrade to
+        # zstd's own detection (0) rather than emitting an empty `-T`.
+        self.assertIn("zstd_workers() {", helper)
+        self.assertIn('n="$(nproc 2>/dev/null || echo 0)"', helper)
+        self.assertIn("''|*[!0-9]*) n=0 ;;", helper)
+        self.assertIn('if [ "$n" -gt 32 ]; then', helper)
+
+        # Both steps source it from the pipeline-control checkout: the payload
+        # checkout is pinned to source_commit and may predate the helper.
+        self.assertIn(source, snapshot)
+        self.assertIn(source, compress)
+
+        # Transient snapshot: level drops to 12 (bytes change once, and only
+        # this build's own sha256 — recorded here — gates the consumer).
+        self.assertIn(
+            'zstd -T"$(zstd_workers)" -12 -f -o build/lines_snapshot.db.zst "$RAW_SNAPSHOT"',
+            snapshot,
+        )
+        self.assertIn(
+            'SNAPSHOT_ZST_SHA256=$(sha256sum build/lines_snapshot.db.zst | cut -d\' \' -f1)',
+            snapshot,
+        )
+
+        # Published DB: explicit -19 is byte-identical to the clamped -22.
+        self.assertIn(
+            'zstd -T"$(zstd_workers)" -19 -f -o build/seforim.db.zst build/seforim.db',
+            compress,
+        )
+
+        # The in-JVM patch compressor keeps its own level and is untouched.
+        self.assertIn('ZSTD_LEVEL: "19"', self.workflow)
 
     def test_release_publisher_rejects_asset_names_github_would_normalize(self):
         helper = HANDOFF_PUBLISHER.read_text(encoding="utf-8")

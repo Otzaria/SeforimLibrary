@@ -763,6 +763,27 @@ jobs:
       - name: Dump lines snapshot for the linker
         run: |
           set -euo pipefail
+          # zstd policy, stated once for both compress steps in this job:
+          #   * WORKER COUNT is byte-neutral.  A zstd frame depends on the level,
+          #     the job size and the overlap size, not on how many workers chew
+          #     through the jobs, so any `-T<n>` with n>=1 emits identical bytes.
+          #     `-T0` is not "every CPU": it resolves to PHYSICAL cores, i.e. 8 of
+          #     this runner's 16 vCPUs, so half the box idled for 515 s.  Sourced
+          #     from the pipeline-control checkout because the payload checkout is
+          #     pinned to source_commit and may predate this helper.
+          #   * LEVEL does change bytes, and changes here exactly once: 19 -> 12
+          #     for this snapshot only.  That is safe because the snapshot is
+          #     transient — it is consumed exactly once by the relink, its tag is
+          #     content-addressed, and the consumer verifies the sha256 that THIS
+          #     step records below (relink.yml SNAPSHOT_SHA256).  The only
+          #     cross-run comparison is the relink-recovery path, which compares
+          #     a recovered run's snapshot digest with this build's and falls
+          #     back to a semantic compare on mismatch -- so recovering a
+          #     pre-change relink costs one slow (~10 min) verified fallback,
+          #     never a wrong result.  Measured on Hebrew text: L12 is ~20-25%
+          #     larger than L19 (830 MB -> ~1.0 GiB, uploaded twice at ~2 MB/s,
+          #     ~+190 s) but ~7x faster to produce (515 s -> ~75 s): net ~-250 s.
+          . .pipeline-control/.github/scripts/zstd_workers.sh
           # The raw snapshot is ~5.7 GB and exists only as zstd input.  Keeping
           # it beside the 7.5 GB DB on the 16 GB tmpfs leaves almost no room for
           # the compressed stream and forces needless swap pressure.  Write the
@@ -775,7 +796,7 @@ jobs:
             -PseforimDb=$PWD/build/seforim.db \
             -PlinesSnapshot="$RAW_SNAPSHOT" \
             --no-daemon --stacktrace
-          zstd -T0 -19 -f -o build/lines_snapshot.db.zst "$RAW_SNAPSHOT"
+          zstd -T"$(zstd_workers)" -12 -f -o build/lines_snapshot.db.zst "$RAW_SNAPSHOT"
           # Pin the snapshot handoff: the relink verifies the release asset it downloads
           # against this digest, so it can only link the exact snapshot we produced.
           echo "SNAPSHOT_ZST_SHA256=$(sha256sum build/lines_snapshot.db.zst | cut -d' ' -f1)" >> "$GITHUB_ENV"
@@ -1407,7 +1428,7 @@ jobs:
           # 5–7 minutes per anchor. L19 parallelises across all cores (seconds)
           # for a few percent larger .zst, and needs a smaller decompression
           # window on clients. Read by PatchPipelineCli (ZSTD_LEVEL); the full
-          # DB's own `zstd -T0 -22` step below is unaffected.
+          # DB's own `zstd -19` step below is unaffected.
           ZSTD_LEVEL: "19"
         run: |
           set -euo pipefail
@@ -1560,7 +1581,16 @@ jobs:
       # delta phase so build/seforim.db (the diff ground-truth) and the .zst
       # don't both sit on disk during the patch fan.
       - name: Compress Seforim Database (zstd)
-        run: zstd -T0 -22 -f -o build/seforim.db.zst build/seforim.db
+        run: |
+          set -euo pipefail
+          # `-22` was silently clamped to 19: levels above 19 require --ultra,
+          # which this step never passed, so `-19` is BYTE-IDENTICAL to every
+          # seforim.db.zst this pipeline has ever published — no level change
+          # here, and no published digest moves.  The worker count is likewise
+          # byte-neutral (see "Dump lines snapshot for the linker" above); it
+          # only stops `-T0` from parking on 8 of the runner's 16 vCPUs.
+          . .pipeline-control/.github/scripts/zstd_workers.sh
+          zstd -T"$(zstd_workers)" -19 -f -o build/seforim.db.zst build/seforim.db
 
       # ─── Stage release assets ──────────────────────────────────────────────
       - name: Stage release assets
