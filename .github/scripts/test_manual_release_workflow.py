@@ -148,6 +148,27 @@ class ManualReleaseWorkflowContractTest(unittest.TestCase):
             stage,
         )
 
+    def test_patch_fan_skips_anchors_whose_previous_db_lacks_columns(self):
+        # A column added without a db_schema_version bump (category.heShortDesc,
+        # 2026-07-16) made the v9 anchor unpatchable: the producer diffs every
+        # column of the new schema and no patch can ADD a column. Such anchors
+        # must be skipped with a warning, never fail the release.
+        patch_fan = self.step("Produce + verify patch fan")
+        gradle_at = patch_fan.index("gradle :generator-common:producePatchAndVerify")
+        check_at = patch_fan.index('MISSING_COLUMNS=$(python3 - "$PREV_DB" build/seforim.db')
+        self.assertLess(check_at, gradle_at)
+        self.assertIn('PRAGMA table_info("{t}")', patch_fan)
+        self.assertIn("patches cannot add columns; skip anchor", patch_fan)
+        skip_at = patch_fan.index("patches cannot add columns; skip anchor")
+        self.assertLess(check_at, skip_at)
+        self.assertLess(skip_at, gradle_at)
+        self.assertIn("rm -rf prev-dbs\n              continue", patch_fan[skip_at:gradle_at])
+        # Patch compression at L19 parallelises across cores; L22 ran single-core.
+        self.assertIn('ZSTD_LEVEL: "19"', patch_fan)
+        # Skips are warnings, but zero patches with prior releases must fail.
+        self.assertIn("patch fan produced no patch although prior releases exist", patch_fan)
+        self.assertLess(gradle_at, patch_fan.index("patch fan produced no patch although prior releases exist"))
+
     def test_patch_fan_allows_only_the_supported_schema_transitions(self):
         patch_fan = self.step("Produce + verify patch fan")
 
