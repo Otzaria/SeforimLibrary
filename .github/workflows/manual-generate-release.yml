@@ -1470,10 +1470,39 @@ jobs:
             dump build/seforim.db > build/db_schema.json
           echo "db_schema.json: $(wc -c < build/db_schema.json) bytes"
 
+      # ─── One Gradle run so the fan below needs none ────────────────────────
+      # The fan produces PATCH_FAN_PARALLELISM anchors at a time. Two concurrent
+      # Gradle builds in one project directory cannot do that: they contend on
+      # the project cache dir, on the configuration cache (this repo sets
+      # org.gradle.configuration-cache=true) and on jvmJar's own output file,
+      # which the other build's fork holds open while it reads it. So the fan
+      # invokes PatchPipelineCli directly with `java`, and this step publishes
+      # exactly what `gradle :generator-common:producePatchAndVerify` would have
+      # forked — same main class, same -Xmx/GC args, same runtime classpath,
+      # same toolchain version — read straight out of that task's definition.
+      # Opportunistic, like the anchor prefetch: a payload commit older than the
+      # patchPipelineLauncher task leaves no spec behind, and the fan falls back
+      # to the unchanged serial Gradle invocation, one anchor at a time.
+      - name: Materialise the patch-pipeline launcher
+        if: steps.discover.outputs.has_prev == 'true'
+        run: |
+          set -euo pipefail
+          LAUNCHER=generator/common/build/patch-pipeline-launcher.properties
+          rm -f "$LAUNCHER"
+          if gradle :generator-common:patchPipelineLauncher --no-daemon --stacktrace \
+             && [ -s "$LAUNCHER" ]; then
+            echo "launcher spec (classpath elided):"
+            grep -v '^classpath=' "$LAUNCHER"
+          else
+            echo "::warning::no :generator-common:patchPipelineLauncher in this payload commit — the patch fan falls back to one serial Gradle invocation per anchor"
+            rm -f "$LAUNCHER"
+          fi
+
       # ─── Produce log-fan of patches: offsets {1, 2, 4, 8, 16} ──────────────
       # The prev DB is reconstituted from the release's compressed seforim.db.zst.
-      # Each iteration downloads + decompresses, runs the producer, then
-      # frees everything so disk peak stays bounded.
+      # Each anchor downloads + decompresses, runs the producer, then frees
+      # everything so disk peak stays bounded; PATCH_FAN_PARALLELISM anchors
+      # are in flight at once.
       - name: Produce + verify patch fan
         if: steps.discover.outputs.has_prev == 'true'
         env:
@@ -1484,6 +1513,10 @@ jobs:
           # window on clients. Read by PatchPipelineCli (ZSTD_LEVEL); the full
           # DB's own `zstd -19` step below is unaffected.
           ZSTD_LEVEL: "19"
+          # Operator knob: repository variable PATCH_FAN_PARALLELISM (default 2).
+          # `|| '2'` matters: a bare `${{ vars.X }}` interpolates to '' when the
+          # variable is unset, which the guard below would treat as junk.
+          PATCH_FAN_PARALLELISM: ${{ vars.PATCH_FAN_PARALLELISM || '2' }}
           # For the A2 early upload of seforim.db.buildstate, which is final from
           # Phase-2 on. Same preflighted credentials as the publish step.
           AUTOMATIC_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -1516,25 +1549,83 @@ jobs:
           # A1: the anchors were fetched in parallel while the DB was generated.
           PREFETCH_DIR=prefetch
           PREFETCH_WAIT_SECONDS=900
+
+          # ── D: how many anchors are produced at once ────────────────────────
+          # Run 33865604251 paid 284–382 s per anchor for work that is
+          # single-threaded almost end to end (produce ~11–20 s, apply+verify
+          # ~150 s, hash ~47 s, zstd L19 of the patch 20–60 s) on a 16-vCPU box:
+          # four anchors were ~22 minutes of a mostly idle machine. Two at a
+          # time fit the budget:
+          #   RAM — 2 × (one -Xmx8g fork, whose real footprint is a small
+          #     SQLite page cache plus row buffers, well under the ceiling, and
+          #     ~1 GB of zstd L19 job buffers) on top of the ~9.5 GiB the tmpfs
+          #     build/ pins (seforim.db 7.15 GiB + buildstate + snapshot) and
+          #     the background buildstate upload, inside the ≥24 GiB this job
+          #     demanded before it mounted that tmpfs.
+          #   Disk — each concurrent anchor owns its extracted 7.15 GiB prev DB
+          #     plus the verify copy the CLI makes from it, so ~31 GiB for two
+          #     against ~880 GB free on the workspace disk.
+          # PATCH_FAN_PARALLELISM=1 restores the strictly serial fan.
+          FAN_PARALLELISM="${PATCH_FAN_PARALLELISM:-2}"
+          case "$FAN_PARALLELISM" in
+            ''|*[!0-9]*|0)
+              echo "::warning::PATCH_FAN_PARALLELISM='$FAN_PARALLELISM' is not a positive integer — producing anchors one at a time"
+              FAN_PARALLELISM=1
+              ;;
+          esac
+          # The direct-`java` launcher published by "Materialise the
+          # patch-pipeline launcher": main class, JVM args and runtime classpath
+          # read out of the producePatchAndVerify task itself. Without a usable
+          # one there is no way to run two producers at once (Gradle cannot be
+          # invoked twice concurrently in this project dir), so the fan degrades
+          # to exactly the serial Gradle loop it always ran.
+          LAUNCHER=generator/common/build/patch-pipeline-launcher.properties
+          PATCH_MAIN_CLASS=""
+          PATCH_JVM_ARGS=""
+          PATCH_CLASSPATH=""
+          if [ -s "$LAUNCHER" ]; then
+            PATCH_MAIN_CLASS=$(sed -n 's/^mainClass=//p' "$LAUNCHER")
+            PATCH_JVM_ARGS=$(sed -n 's/^jvmArgs=//p' "$LAUNCHER")
+            PATCH_CLASSPATH=$(sed -n 's/^classpath=//p' "$LAUNCHER")
+            LAUNCHER_JAVA=$(sed -n 's/^javaVersion=//p' "$LAUNCHER")
+            JAVA_MAJOR=$(java -XshowSettings:properties -version 2>&1 \
+              | awk -F'= ' '/^[[:space:]]*java.specification.version = / {print $2; exit}')
+            if [ -z "$PATCH_MAIN_CLASS" ] || [ -z "$PATCH_CLASSPATH" ] || [ "$JAVA_MAJOR" != "$LAUNCHER_JAVA" ]; then
+              echo "::warning::patch-pipeline launcher unusable (mainClass='$PATCH_MAIN_CLASS', toolchain '$LAUNCHER_JAVA' vs java '$JAVA_MAJOR') — falling back to Gradle"
+              PATCH_MAIN_CLASS=""
+            fi
+          fi
+          if [ -z "$PATCH_MAIN_CLASS" ]; then
+            echo "no usable patch-pipeline launcher — producing anchors serially through Gradle"
+            FAN_PARALLELISM=1
+          fi
+          echo "patch fan parallelism: $FAN_PARALLELISM"
+
           ANCHORS="$RUNNER_TEMP/patch-fan-anchors.tsv"
           # One derivation of offset → tag, shared with the prefetch step.
           bash .pipeline-control/.github/scripts/patch_fan_anchors.sh \
             "$THIS_VER" prior-versions.tsv $PATCH_OFFSETS > "$ANCHORS"
-          # Read the whole plan up front: the loop body runs Gradle, which must
-          # never be able to swallow the remaining rows from a redirected stdin.
+          # Read the whole plan up front: the loop body runs the producer, which
+          # must never be able to swallow the remaining rows from a redirected
+          # stdin.
           mapfile -t ANCHOR_ROWS < "$ANCHORS"
-          for ROW in ${ANCHOR_ROWS[@]+"${ANCHOR_ROWS[@]}"}; do
-            IFS=$'\t' read -r STATUS OFFSET TARGET_VER TAG <<<"$ROW"
-            case "$STATUS" in
-              BELOW-ONE)
-                echo "offset $OFFSET would target version $TARGET_VER (<1) — skip"
-                continue
-                ;;
-              NO-RELEASE)
-                echo "No prior release at db_version=$TARGET_VER (offset $OFFSET) — skip"
-                continue
-                ;;
-            esac
+
+          # One anchor, start to finish: pre-check, reconstitute, produce,
+          # verify, clean up. Every path it touches is scoped to its own offset
+          # so two of these can run side by side, it writes to its own log, and
+          # its exit status is the only channel back to the driver: 0 for a
+          # produced patch AND for every legitimate skip, non-zero only for a
+          # genuine failure — which fails the step exactly as `set -e` inside
+          # the serial loop always did.
+          produce_anchor() {  # <offset> <target-version> <tag>
+            local OFFSET="$1" TARGET_VER="$2" TAG="$3"
+            local ANCHOR_DIR="prev-dbs/anchor-$OFFSET"
+            local META_DIR="prev-meta/anchor-$OFFSET"
+            local PREV_DB="$ANCHOR_DIR/seforim.db"
+            local PATCH_OUT="$PWD/patches/patch-v${TARGET_VER}-v${THIS_VER}.db"
+            local PRECHECK WAIT_BUDGET PREFETCH_STATE PREFETCH_WAITED
+            local PREV_SCHEMA PRODUCE_RC REASON
+            local T_START T_DOWNLOADED T_EXTRACTED T_DONE
             echo "=== Producing patch v${TARGET_VER} → v${THIS_VER} (offset $OFFSET, tag=$TAG) ==="
 
             # Reconstituting an anchor costs 110–135 s of download plus a
@@ -1554,26 +1645,26 @@ jobs:
             # commit whose PatchDbProducer runs below, not the control-plane
             # checkout — because a comparison wider than that list would skip
             # anchors the producer would still have patched.
-            rm -rf prev-meta
-            mkdir -p prev-meta
+            rm -rf "$META_DIR"
+            mkdir -p "$META_DIR"
             gh release download "$TAG" \
               --pattern 'build_provenance.json' \
-              --dir prev-meta || true
+              --dir "$META_DIR" || true
             PRECHECK=$(python3 .pipeline-control/.github/scripts/patch_anchor_schema.py check \
               --this-schema build/db_schema.json \
               --anchor-version "$TARGET_VER" \
-              --anchor-provenance prev-meta/build_provenance.json \
+              --anchor-provenance "$META_DIR/build_provenance.json" \
               --contract-tables generator/common/src/jvmTest/resources/patch_tables_contract.json) \
               || PRECHECK="PROCEED pre-check did not run — deferring to the producer"
-            rm -rf prev-meta
+            rm -rf "$META_DIR"
             echo "pre-check: $PRECHECK"
             if [ "${PRECHECK%% *}" = UNPATCHABLE ]; then
               echo "::warning::anchor v${TARGET_VER} ($TAG): ${PRECHECK#* } — pre-download schema check declared the anchor unpatchable; skip anchor"
-              continue
+              return 0
             fi
 
-            rm -rf prev-dbs
-            mkdir -p prev-dbs
+            rm -rf "$ANCHOR_DIR"
+            mkdir -p "$ANCHOR_DIR"
             # A1: this anchor was very probably downloaded and verified (size,
             # and digest when GitHub published one) while the DB was being
             # generated. Wait for THIS tag's marker; anything short of a
@@ -1581,10 +1672,18 @@ jobs:
             # unpatchable verdict, a vanished file — falls straight back to the
             # unchanged serial download below. A missing marker also aborts the
             # prefetch, so it cannot keep competing for the downlink.
+            # The "stop waiting" verdict has to outlive this anchor: the ones
+            # still to come run in their own subshells, where a shell variable
+            # could not reach them, so it is recorded as a file next to the
+            # prefetch state.
+            WAIT_BUDGET="$PREFETCH_WAIT_SECONDS"
+            if [ -f "$PREFETCH_DIR/.abandoned" ]; then
+              WAIT_BUDGET=0
+            fi
             PREFETCH_STATE=absent
             if [ -f "$PREFETCH_DIR/.started" ]; then
               PREFETCH_WAITED=0
-              while [ ! -f "$PREFETCH_DIR/$TAG/.done" ] && [ "$PREFETCH_WAITED" -lt "$PREFETCH_WAIT_SECONDS" ]; do
+              while [ ! -f "$PREFETCH_DIR/$TAG/.done" ] && [ ! -f "$PREFETCH_DIR/.abandoned" ] && [ "$PREFETCH_WAITED" -lt "$WAIT_BUDGET" ]; do
                 sleep 5
                 PREFETCH_WAITED=$((PREFETCH_WAITED + 5))
               done
@@ -1594,29 +1693,28 @@ jobs:
               else
                 echo "::warning::anchor v${TARGET_VER} ($TAG): no prefetch marker after ${PREFETCH_WAITED}s — falling back to the serial download"
                 bash .pipeline-control/.github/scripts/prefetch_patch_anchors.sh abort "$PREFETCH_DIR" || true
-                PREFETCH_WAIT_SECONDS=0
+                : > "$PREFETCH_DIR/.abandoned"
               fi
             fi
             T_START=$(date +%s)
             if [ "$PREFETCH_STATE" = ok ] && [ -s "$PREFETCH_DIR/$TAG/seforim.db.zst" ]; then
-              mv "$PREFETCH_DIR/$TAG/seforim.db.zst" prev-dbs/seforim.db.zst
+              mv "$PREFETCH_DIR/$TAG/seforim.db.zst" "$ANCHOR_DIR/seforim.db.zst"
               echo "anchor v${TARGET_VER} ($TAG): reused the prefetched DB"
             else
               gh release download "$TAG" \
                 --pattern 'seforim.db.zst' \
-                --dir prev-dbs
+                --dir "$ANCHOR_DIR"
             fi
             T_DOWNLOADED=$(date +%s)
-            unzstd -c prev-dbs/seforim.db.zst > prev-dbs/seforim.db
+            unzstd -c "$ANCHOR_DIR/seforim.db.zst" > "$PREV_DB"
             T_EXTRACTED=$(date +%s)
-            PREV_DB=prev-dbs/seforim.db
-            test -s "$PREV_DB" || { echo "::error::seforim.db.zst not found in release $TAG"; exit 1; }
+            test -s "$PREV_DB" || { echo "::error::seforim.db.zst not found in release $TAG"; return 1; }
 
             # Explicitly supported schema transitions. The producer derives
             # contract promotions from both signed schema versions, rebuilds
             # newly tracked tables from a full snapshot, and verifies a real
             # apply. Unknown transitions remain fail-closed per anchor.
-            PREV_SCHEMA=$(read_schema "$PREV_DB") || exit 1
+            PREV_SCHEMA=$(read_schema "$PREV_DB") || return 1
             if [ "$PREV_SCHEMA" != "$THIS_SCHEMA" ]; then
               if { [ "$PREV_SCHEMA" = 2 ] && [ "$THIS_SCHEMA" = 3 ]; } || \
                  { [ "$PREV_SCHEMA" = 1 ] && [ "$THIS_SCHEMA" = 4 ]; } || \
@@ -1625,8 +1723,8 @@ jobs:
                 echo "schema $PREV_SCHEMA → $THIS_SCHEMA — producing the supported cross-schema delta"
               else
                 echo "schema $PREV_SCHEMA → $THIS_SCHEMA is unsupported — skip anchor"
-                rm -rf prev-dbs
-                continue
+                rm -rf "$ANCHOR_DIR"
+                return 0
               fi
             fi
 
@@ -1643,35 +1741,125 @@ jobs:
             # express the change (a PRIMARY KEY column missing from prev, or a
             # column dropped without a bump): PatchPipelineCli then exits 3
             # (UnpatchableAnchor) and drops "<out>.unpatchable" carrying the
-            # reason, and the Gradle task lets the build succeed for that one
-            # code. Every other non-zero exit still fails the release (set -e).
-            PATCH_OUT=$PWD/patches/patch-v${TARGET_VER}-v${THIS_VER}.db
+            # reason, and this anchor is skipped for that one code.
+            # Every other non-zero exit still fails the release.
             rm -f "$PATCH_OUT.unpatchable"
-            gradle :generator-common:producePatchAndVerify \
-              -PprevDb=$PWD/$PREV_DB \
-              -PnewDb=$PWD/build/seforim.db \
-              -Pout=$PATCH_OUT \
-              -PfromVersion=$TARGET_VER -PtoVersion=$THIS_VER \
-              --no-daemon --stacktrace
-            if [ -f "$PATCH_OUT.unpatchable" ]; then
-              echo "::warning::anchor v${TARGET_VER} ($TAG): $(cat "$PATCH_OUT.unpatchable") — producer declared the anchor unpatchable; skip anchor"
+            PRODUCE_RC=0
+            if [ -n "$PATCH_MAIN_CLASS" ]; then
+              # Exactly what `gradle :generator-common:producePatchAndVerify`
+              # forks: main class, -Xmx/GC flags and runtime classpath all come
+              # from that task's own definition (see patchPipelineLauncher in
+              # generator/common/build.gradle.kts), and its -P properties are
+              # the -D system properties the task sets on the fork. ZSTD_LEVEL
+              # reaches the CLI through the step env either way. Keeping Gradle
+              # out of the loop is what lets two of these run at once.
+              java $PATCH_JVM_ARGS -cp "$PATCH_CLASSPATH" \
+                -DprevDb=$PWD/$PREV_DB \
+                -DnewDb=$PWD/build/seforim.db \
+                -Dout=$PATCH_OUT \
+                -DfromVersion=$TARGET_VER -DtoVersion=$THIS_VER \
+                "$PATCH_MAIN_CLASS" || PRODUCE_RC=$?
+            else
+              gradle :generator-common:producePatchAndVerify \
+                -PprevDb=$PWD/$PREV_DB \
+                -PnewDb=$PWD/build/seforim.db \
+                -Pout=$PATCH_OUT \
+                -PfromVersion=$TARGET_VER -PtoVersion=$THIS_VER \
+                --no-daemon --stacktrace || PRODUCE_RC=$?
+            fi
+            # The Gradle task maps the CLI's exit 3 onto a warning and a
+            # successful build; run directly, that 3 arrives here. Both funnel
+            # into the one marker path below, and every OTHER non-zero exit
+            # fails this anchor — which fails the whole step, as before.
+            if [ "$PRODUCE_RC" -ne 0 ] && [ "$PRODUCE_RC" -ne 3 ]; then
+              echo "::error::anchor v${TARGET_VER} ($TAG): producePatchAndVerify failed with exit code $PRODUCE_RC"
+              rm -rf "$ANCHOR_DIR"
+              return "$PRODUCE_RC"
+            fi
+            if [ "$PRODUCE_RC" -eq 3 ] || [ -f "$PATCH_OUT.unpatchable" ]; then
+              REASON=$(cat "$PATCH_OUT.unpatchable" 2>/dev/null || true)
+              echo "::warning::anchor v${TARGET_VER} ($TAG): ${REASON:-see PatchPipelineCli output} — producer declared the anchor unpatchable; skip anchor"
               # Leave nothing behind: the marker plus the producer's half-built
               # .tmp (and any stale .db) must not clutter patches/, which the
               # release staging step globs.
               rm -f "$PATCH_OUT.unpatchable" "$PATCH_OUT" "$PATCH_OUT.tmp"
-              rm -rf prev-dbs
-              continue
+              rm -rf "$ANCHOR_DIR"
+              return 0
             fi
             T_DONE=$(date +%s)
             echo "anchor v${TARGET_VER} timings: download=$((T_DOWNLOADED - T_START))s extract=$((T_EXTRACTED - T_DOWNLOADED))s produce+verify+compress=$((T_DONE - T_EXTRACTED))s total=$((T_DONE - T_START))s"
 
-            # Free disk for the next iteration — only the .zst + manifest
+            # Free disk for the anchors still to come — only the .zst + manifest
             # need to ship; the .db was the verify ground-truth.
-            rm -rf prev-dbs
+            rm -rf "$ANCHOR_DIR"
             rm -f "patches/patch-v${TARGET_VER}-v${THIS_VER}.db" \
                   "patches/verify-patch-v${TARGET_VER}-v${THIS_VER}.db"
             df -h /
+          }
+
+          # Drive the anchors FAN_PARALLELISM at a time. Each batch's logs are
+          # printed in offset order once the whole batch is done, so the step's
+          # output stays readable and `anchor vNN timings:` keeps its shape and
+          # its own line. A failing anchor does not kill its sibling: the batch
+          # is drained, every log is printed, and only then does the step fail —
+          # the same failure the serial loop produced, at most one concurrent
+          # anchor's work later, and with no producer killed mid-write.
+          BATCH_PIDS=()
+          BATCH_LOGS=()
+          BATCH_NAMES=()
+          FAN_FAILURE=0
+          drain_batch() {
+            local i status rc=0
+            [ "${#BATCH_PIDS[@]}" -gt 0 ] || return 0
+            for i in "${!BATCH_PIDS[@]}"; do
+              status=0
+              wait "${BATCH_PIDS[$i]}" || status=$?
+              cat "${BATCH_LOGS[$i]}" || true
+              rm -f "${BATCH_LOGS[$i]}"
+              if [ "$status" -ne 0 ]; then
+                echo "::error::anchor ${BATCH_NAMES[$i]} failed with exit code $status"
+                rc="$status"
+              fi
+            done
+            BATCH_PIDS=()
+            BATCH_LOGS=()
+            BATCH_NAMES=()
+            return "$rc"
+          }
+
+          for ROW in ${ANCHOR_ROWS[@]+"${ANCHOR_ROWS[@]}"}; do
+            IFS=$'\t' read -r STATUS OFFSET TARGET_VER TAG <<<"$ROW"
+            case "$STATUS" in
+              BELOW-ONE)
+                echo "offset $OFFSET would target version $TARGET_VER (<1) — skip"
+                continue
+                ;;
+              NO-RELEASE)
+                echo "No prior release at db_version=$TARGET_VER (offset $OFFSET) — skip"
+                continue
+                ;;
+            esac
+            ANCHOR_LOG="$RUNNER_TEMP/patch-fan-anchor-$OFFSET.log"
+            echo "starting anchor v${TARGET_VER} (offset $OFFSET, tag=$TAG); its log follows when this batch of $FAN_PARALLELISM finishes"
+            # Concurrent forks are the one new pressure on this box's RAM;
+            # leave the evidence in the log for the next tuning pass.
+            awk '/MemAvailable/ {printf "MemAvailable: %.1f GiB\n", $2/1048576}' /proc/meminfo || true
+            produce_anchor "$OFFSET" "$TARGET_VER" "$TAG" > "$ANCHOR_LOG" 2>&1 < /dev/null &
+            BATCH_PIDS+=("$!")
+            BATCH_LOGS+=("$ANCHOR_LOG")
+            BATCH_NAMES+=("v${TARGET_VER} (offset $OFFSET)")
+            if [ "${#BATCH_PIDS[@]}" -ge "$FAN_PARALLELISM" ]; then
+              drain_batch || FAN_FAILURE=$?
+              [ "$FAN_FAILURE" -eq 0 ] || break
+            fi
           done
+          if [ "$FAN_FAILURE" -eq 0 ]; then
+            drain_batch || FAN_FAILURE=$?
+          fi
+          if [ "$FAN_FAILURE" -ne 0 ]; then
+            echo "::error::patch fan: an anchor failed (exit $FAN_FAILURE) — see its log above"
+            exit "$FAN_FAILURE"
+          fi
           if [ -f "$PREFETCH_DIR/.log" ]; then
             echo "=== anchor prefetch log ==="
             cat "$PREFETCH_DIR/.log"

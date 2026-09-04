@@ -40,13 +40,28 @@ kotlin {
     }
 }
 
+// ─── One definition of how the patch pipeline is launched ──────────────────
+// `producePatchAndVerify` below is the Gradle entry point. The release
+// workflow's patch fan runs the SAME CLI directly with `java`, because it
+// produces several anchors at once and two concurrent Gradle builds in one
+// project directory would contend on the project cache dir, the configuration
+// cache and jvmJar's own output file — which a running fork holds open.
+// Both paths read the three definitions below and `patchPipelineLauncher`
+// publishes them verbatim, so the direct invocation cannot drift from the task
+// it stands in for.
+val patchPipelineMainClass = "io.github.kdroidfilter.seforimlibrary.common.patch.PatchPipelineCliKt"
+val patchPipelineJvmArgs = listOf("-Xmx$generatorHeap", "-XX:+UseG1GC")
+// A function, not a val: like every other JavaExec here it must resolve inside
+// a task's configuration block, never at script-evaluation time.
+fun patchPipelineClasspath() = files(tasks.named("jvmJar")) + configurations.getByName("jvmRuntimeClasspath")
+
 tasks.register<JavaExec>("producePatchAndVerify") {
     group = "application"
     description = "Produce patch.db from (prevDb, newDb) and verify apply reproduces newDb's logical hash."
 
     dependsOn("jvmJar")
-    mainClass.set("io.github.kdroidfilter.seforimlibrary.common.patch.PatchPipelineCliKt")
-    classpath = files(tasks.named("jvmJar")) + configurations.getByName("jvmRuntimeClasspath")
+    mainClass.set(patchPipelineMainClass)
+    classpath = patchPipelineClasspath()
 
     // Skip cleanly when no previous release was supplied — this is the
     // first-release path, where there's no prior DB to diff against.
@@ -87,7 +102,7 @@ tasks.register<JavaExec>("producePatchAndVerify") {
         project.findProperty(key)?.let { systemProperty(key, it as String) }
     }
 
-    jvmArgs = listOf("-Xmx$generatorHeap", "-XX:+UseG1GC")
+    jvmArgs = patchPipelineJvmArgs
 
     // Exit-code contract with PatchPipelineCli:
     //   0 → produced + verified.
@@ -113,6 +128,39 @@ tasks.register<JavaExec>("producePatchAndVerify") {
             )
             else -> throw GradleException("producePatchAndVerify failed with exit code $rc")
         }
+    }
+}
+
+// Publishes exactly what `producePatchAndVerify` would fork, so a caller can
+// run the CLI itself: the release workflow's patch fan produces several
+// anchors concurrently, which Gradle cannot do inside one project directory.
+// Everything here comes from the same definitions the task above uses, so the
+// two can never disagree about main class, heap or classpath;
+// `javaVersion` lets the caller assert the `java` it is about to run is the
+// toolchain Gradle would have forked.
+tasks.register("patchPipelineLauncher") {
+    group = "application"
+    description = "Write build/patch-pipeline-launcher.properties — the main class, JVM args, toolchain version and runtime classpath producePatchAndVerify forks with."
+    dependsOn("jvmJar")
+    val launcherMainClass = patchPipelineMainClass
+    val launcherJvmArgs = patchPipelineJvmArgs
+    val launcherClasspath = patchPipelineClasspath()
+    val launcherJavaVersion = libs.versions.jvmToolchain.get()
+    val specFile = layout.buildDirectory.file("patch-pipeline-launcher.properties")
+    inputs.property("mainClass", launcherMainClass)
+    inputs.property("jvmArgs", launcherJvmArgs)
+    inputs.property("javaVersion", launcherJavaVersion)
+    inputs.files(launcherClasspath)
+    outputs.file(specFile)
+    doLast {
+        val target = specFile.get().asFile
+        target.parentFile.mkdirs()
+        target.writeText(
+            "mainClass=$launcherMainClass\n" +
+                "jvmArgs=${launcherJvmArgs.joinToString(" ")}\n" +
+                "javaVersion=$launcherJavaVersion\n" +
+                "classpath=${launcherClasspath.asPath}\n",
+        )
     }
 }
 

@@ -1,3 +1,4 @@
+import re
 import unittest
 from pathlib import Path
 
@@ -12,6 +13,9 @@ RELEASE_DRAFT = Path(__file__).parent / "release_draft.sh"
 EARLY_UPLOAD = Path(__file__).parent / "upload_early_release_assets.sh"
 ANCHOR_PREFETCH = Path(__file__).parent / "prefetch_patch_anchors.sh"
 ANCHOR_DERIVATION = Path(__file__).parent / "patch_fan_anchors.sh"
+GENERATOR_COMMON_BUILD = (
+    Path(__file__).parents[2] / "generator" / "common" / "build.gradle.kts"
+)
 
 
 class ManualReleaseWorkflowContractTest(unittest.TestCase):
@@ -173,14 +177,22 @@ class ManualReleaseWorkflowContractTest(unittest.TestCase):
         self.assertIn("-Pout=$PATCH_OUT", patch_fan)
         skip_at = patch_fan.index("producer declared the anchor unpatchable; skip anchor")
         self.assertLess(gradle_at, skip_at)
-        self.assertIn('if [ -f "$PATCH_OUT.unpatchable" ]; then', patch_fan)
+        # Run directly the CLI's exit 3 arrives in the shell; run through Gradle
+        # it is already turned into a warning + a zero exit. Both reach the one
+        # marker path.
+        self.assertIn(
+            'if [ "$PRODUCE_RC" -eq 3 ] || [ -f "$PATCH_OUT.unpatchable" ]; then',
+            patch_fan,
+        )
         # A skipped anchor must leave patches/ clean: the marker, the producer's
         # half-built .tmp and any stale .db all go.
         self.assertIn(
             'rm -f "$PATCH_OUT.unpatchable" "$PATCH_OUT" "$PATCH_OUT.tmp"',
             patch_fan[skip_at:],
         )
-        self.assertIn("rm -rf prev-dbs\n              continue", patch_fan[skip_at:])
+        self.assertIn(
+            'rm -rf "$ANCHOR_DIR"\n              return 0', patch_fan[skip_at:]
+        )
         # Exit 3 is the only tolerated failure mode; everything else still
         # aborts the job through set -e.
         self.assertIn("exits 3", patch_fan)
@@ -232,7 +244,7 @@ class ManualReleaseWorkflowContractTest(unittest.TestCase):
         self.assertTrue((Path(__file__).parents[2] / contract).is_file())
         # Advisory-safe: a missing asset or a crashing pre-check degrades to
         # PROCEED instead of aborting the job under `set -e`.
-        self.assertIn("--dir prev-meta || true", patch_fan)
+        self.assertIn('--dir "$META_DIR" || true', patch_fan)
         self.assertIn(
             '|| PRECHECK="PROCEED pre-check did not run', patch_fan
         )
@@ -290,6 +302,180 @@ class ManualReleaseWorkflowContractTest(unittest.TestCase):
         self.assertNotIn("cross-schema delta unsupported", patch_fan)
         self.assertNotIn('[ "$PREV_SCHEMA" = 1 ] && [ "$THIS_SCHEMA" = 2 ]', patch_fan)
         self.assertNotIn('[ "$PREV_SCHEMA" = 1 ] && [ "$THIS_SCHEMA" = 3 ]', patch_fan)
+
+    def test_patch_fan_produces_two_anchors_at_a_time(self):
+        # Run 33865604251 spent 2015 s in the fan, 284–382 s per anchor, on work
+        # that is single-threaded almost end to end. Anchors now run
+        # PATCH_FAN_PARALLELISM at a time (default 2).
+        patch_fan = self.step("Produce + verify patch fan")
+
+        self.assertIn('FAN_PARALLELISM="${PATCH_FAN_PARALLELISM:-2}"', patch_fan)
+        # A junk or zero value degrades to serial instead of running an
+        # unbounded (or empty) batch.
+        self.assertIn("''|*[!0-9]*|0)", patch_fan)
+        self.assertIn("FAN_PARALLELISM=1", patch_fan)
+
+        # Per-anchor isolation: every path the body touches carries the offset,
+        # so two bodies never share a prev DB, a provenance dir or a log.
+        self.assertIn('local ANCHOR_DIR="prev-dbs/anchor-$OFFSET"', patch_fan)
+        self.assertIn('local META_DIR="prev-meta/anchor-$OFFSET"', patch_fan)
+        self.assertIn('local PREV_DB="$ANCHOR_DIR/seforim.db"', patch_fan)
+        self.assertIn(
+            'ANCHOR_LOG="$RUNNER_TEMP/patch-fan-anchor-$OFFSET.log"', patch_fan
+        )
+        # The shared prev-dbs/ and prev-meta/ working dirs of the serial loop
+        # must be gone — one anchor wiping them would pull the DB out from
+        # under its sibling.
+        body = patch_fan.split("produce_anchor() {", 1)[1]
+        self.assertNotIn("rm -rf prev-dbs\n", body)
+        self.assertNotIn("rm -rf prev-meta\n", body)
+        # The "give up on the prefetch" verdict crosses subshells as a file,
+        # since a shell variable cannot.
+        self.assertIn(': > "$PREFETCH_DIR/.abandoned"', patch_fan)
+        self.assertIn('if [ -f "$PREFETCH_DIR/.abandoned" ]; then', patch_fan)
+
+        # Dispatch: background, own log, no shared stdin to swallow.
+        self.assertIn(
+            'produce_anchor "$OFFSET" "$TARGET_VER" "$TAG" > "$ANCHOR_LOG" 2>&1 '
+            "< /dev/null &",
+            patch_fan,
+        )
+        # Exit codes are collected per job — `wait <pid>` one at a time, never a
+        # bare `wait` that would throw the statuses away.
+        self.assertIn('wait "${BATCH_PIDS[$i]}" || status=$?', patch_fan)
+        self.assertNotIn("\n            wait\n", patch_fan)
+        # Logs are replayed in offset order once the batch drains, so
+        # `anchor vNN timings:` (which the pipeline tracker greps) keeps its
+        # exact shape on a line of its own.
+        self.assertIn('cat "${BATCH_LOGS[$i]}" || true', patch_fan)
+        self.assertIn(
+            'echo "anchor v${TARGET_VER} timings: download=$((T_DOWNLOADED - T_START))s '
+            "extract=$((T_EXTRACTED - T_DOWNLOADED))s "
+            "produce+verify+compress=$((T_DONE - T_EXTRACTED))s "
+            'total=$((T_DONE - T_START))s"',
+            patch_fan,
+        )
+        # A genuine failure still fails the step: the sibling is drained first
+        # (never killed mid-write), no further batch starts, and the step exits
+        # with the anchor's own code.
+        self.assertIn("drain_batch || FAN_FAILURE=$?", patch_fan)
+        self.assertIn('[ "$FAN_FAILURE" -eq 0 ] || break', patch_fan)
+        self.assertIn('exit "$FAN_FAILURE"', patch_fan)
+        self.assertLess(
+            patch_fan.index('exit "$FAN_FAILURE"'),
+            patch_fan.index("wait buildstate 3600"),
+        )
+        # Legitimate skips and produced patches alike come back as 0.
+        self.assertIn(
+            'echo "::error::anchor v${TARGET_VER} ($TAG): producePatchAndVerify '
+            'failed with exit code $PRODUCE_RC"',
+            patch_fan,
+        )
+        self.assertIn('return "$PRODUCE_RC"', patch_fan)
+
+        # A2 stays exactly where it was: started inside this step, waited for
+        # inside this step, on the success path only (as before).
+        self.assertIn(
+            "upload_early_release_assets.sh \\\n            start buildstate "
+            "build/seforim.db.buildstate",
+            patch_fan,
+        )
+        self.assertIn(
+            "upload_early_release_assets.sh \\\n            wait buildstate 3600",
+            patch_fan,
+        )
+        self.assertLess(
+            patch_fan.index("start buildstate"), patch_fan.index("produce_anchor() {")
+        )
+
+    def test_patch_fan_java_launcher_cannot_drift_from_the_gradle_task(self):
+        # Two concurrent anchors cannot both go through Gradle (one project
+        # cache dir, one configuration cache, one jvmJar output), so the fan
+        # runs PatchPipelineCli directly. What it runs is published by the
+        # producePatchAndVerify task itself — same vals, no second source of
+        # truth.
+        gradle = GENERATOR_COMMON_BUILD.read_text(encoding="utf-8")
+        main_class = (
+            "io.github.kdroidfilter.seforimlibrary.common.patch.PatchPipelineCliKt"
+        )
+
+        self.assertIn(f'val patchPipelineMainClass = "{main_class}"', gradle)
+        self.assertIn(
+            'val patchPipelineJvmArgs = listOf("-Xmx$generatorHeap", "-XX:+UseG1GC")',
+            gradle,
+        )
+        self.assertIn(
+            "fun patchPipelineClasspath() = files(tasks.named(\"jvmJar\")) + "
+            'configurations.getByName("jvmRuntimeClasspath")',
+            gradle,
+        )
+        # The fork's own definition reads those three and nothing else, so the
+        # literals exist exactly once in the file.
+        self.assertIn("mainClass.set(patchPipelineMainClass)", gradle)
+        self.assertIn("classpath = patchPipelineClasspath()", gradle)
+        self.assertIn("jvmArgs = patchPipelineJvmArgs", gradle)
+        self.assertEqual(gradle.count(f'"{main_class}"'), 1)
+        # producePatchAndVerify itself must not re-state the heap either — it
+        # reads the val, so the launcher cannot publish a different one.
+        produce_task = gradle.split('tasks.register<JavaExec>("producePatchAndVerify")', 1)[1]
+        produce_task = produce_task.split("\ntasks.register", 1)[0]
+        self.assertNotIn("-Xmx", produce_task)
+
+        # …and the launcher spec republishes exactly them, plus the toolchain
+        # the fork would have used.
+        self.assertIn('tasks.register("patchPipelineLauncher")', gradle)
+        for line in (
+            "val launcherMainClass = patchPipelineMainClass",
+            "val launcherJvmArgs = patchPipelineJvmArgs",
+            "val launcherClasspath = patchPipelineClasspath()",
+            "val launcherJavaVersion = libs.versions.jvmToolchain.get()",
+            '"mainClass=$launcherMainClass\\n"',
+            '"jvmArgs=${launcherJvmArgs.joinToString(" ")}\\n"',
+            '"javaVersion=$launcherJavaVersion\\n"',
+            '"classpath=${launcherClasspath.asPath}\\n"',
+        ):
+            self.assertIn(line, gradle)
+
+        launcher_step = self.step("Materialise the patch-pipeline launcher")
+        patch_fan = self.step("Produce + verify patch fan")
+        spec = "generator/common/build/patch-pipeline-launcher.properties"
+
+        self.assertIn("if: steps.discover.outputs.has_prev == 'true'", launcher_step)
+        self.assertIn(f"LAUNCHER={spec}", launcher_step)
+        self.assertIn(
+            "gradle :generator-common:patchPipelineLauncher --no-daemon", launcher_step
+        )
+        # Opportunistic: a payload commit without the task leaves no spec and
+        # the fan falls back to its unchanged serial Gradle loop.
+        self.assertIn("::warning::no :generator-common:patchPipelineLauncher", launcher_step)
+        self.assertLess(
+            self.workflow.index("      - name: Materialise the patch-pipeline launcher\n"),
+            self.workflow.index("      - name: Produce + verify patch fan\n"),
+        )
+
+        self.assertIn(f"LAUNCHER={spec}", patch_fan)
+        for key in ("mainClass", "jvmArgs", "classpath", "javaVersion"):
+            self.assertIn(f"sed -n 's/^{key}=//p' \"$LAUNCHER\"", patch_fan)
+        # The `java` about to be run must be the toolchain Gradle would fork.
+        self.assertIn("java.specification.version", patch_fan)
+        self.assertIn('[ "$JAVA_MAJOR" != "$LAUNCHER_JAVA" ]', patch_fan)
+        self.assertIn("falling back to Gradle", patch_fan)
+        # Same heap, same classpath, same main class, same inputs — the -P
+        # properties of the Gradle task become the -D system properties it sets
+        # on its fork.
+        self.assertIn(
+            'java $PATCH_JVM_ARGS -cp "$PATCH_CLASSPATH"', patch_fan
+        )
+        self.assertIn('"$PATCH_MAIN_CLASS" || PRODUCE_RC=$?', patch_fan)
+        java_args = re.findall(r"-D(\w+)=", patch_fan)
+        gradle_args = re.findall(r"-P(\w+)=", patch_fan)
+        self.assertEqual(java_args, gradle_args)
+        self.assertEqual(
+            java_args, ["prevDb", "newDb", "out", "fromVersion", "toVersion"]
+        )
+        # ZSTD_LEVEL keeps reaching the CLI as an env var on both paths, so the
+        # patch bytes do not depend on which one ran.
+        self.assertIn('ZSTD_LEVEL: "19"', patch_fan)
 
     def test_pinned_sefaria_archive_uses_its_explicit_root_contract(self):
         extract = self.step("Verify pinned lineage and extract exact inputs")
@@ -435,12 +621,20 @@ class ManualReleaseWorkflowContractTest(unittest.TestCase):
 
         # The fan waits for THIS tag's marker, then falls back unchanged.
         self.assertIn('while [ ! -f "$PREFETCH_DIR/$TAG/.done" ]', fan)
-        self.assertIn('"$PREFETCH_WAITED" -lt "$PREFETCH_WAIT_SECONDS"', fan)
+        # The budget starts at PREFETCH_WAIT_SECONDS and drops to 0 for every
+        # anchor after one has given up — a file, because the anchors run in
+        # their own subshells now.
+        self.assertIn('PREFETCH_WAIT_SECONDS=900', fan)
+        self.assertIn('WAIT_BUDGET="$PREFETCH_WAIT_SECONDS"', fan)
+        self.assertIn('"$PREFETCH_WAITED" -lt "$WAIT_BUDGET"', fan)
+        self.assertIn('if [ -f "$PREFETCH_DIR/.abandoned" ]; then\n              WAIT_BUDGET=0', fan)
         self.assertIn(
             'if [ "$PREFETCH_STATE" = ok ] && [ -s "$PREFETCH_DIR/$TAG/seforim.db.zst" ]; then',
             fan,
         )
-        self.assertIn('mv "$PREFETCH_DIR/$TAG/seforim.db.zst" prev-dbs/seforim.db.zst', fan)
+        self.assertIn(
+            'mv "$PREFETCH_DIR/$TAG/seforim.db.zst" "$ANCHOR_DIR/seforim.db.zst"', fan
+        )
         self.assertIn("falling back to the serial download", fan)
         self.assertIn("prefetch_patch_anchors.sh abort", fan)
         self.assertLess(
