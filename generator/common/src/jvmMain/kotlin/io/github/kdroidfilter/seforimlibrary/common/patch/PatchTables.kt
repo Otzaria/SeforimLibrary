@@ -18,6 +18,9 @@ internal data class PatchTable(
     val updatable: Boolean,
 )
 
+/** Current `seforim.db` schema produced by this revision. */
+internal const val CURRENT_DB_SCHEMA_VERSION: Int = 5
+
 /**
  * Canonical table order — parents (referenced) come before children
  * (referencing) for upserts. The applier runs upserts in this order and
@@ -62,8 +65,8 @@ internal val PATCH_TABLES_IN_FK_ORDER: List<PatchTable> = listOf(
     // Schema 4. Canonical line-reference index — pure key table (PK == all
     // columns), so there is nothing to update on conflict.
     PatchTable("line_ref",           listOf("bookId", "refKeyHash", "lineIndex"), updatable = false),
-    // Schema 4. Dibbur-hamatchil index — pure key table, same shape.
-    PatchTable("line_dh",            listOf("bookId", "dhText", "lineIndex"), updatable = false),
+    // Schema 5. Dibbur-hamatchil index — dhDisplay rides along the key.
+    PatchTable("line_dh",            listOf("bookId", "dhText", "lineIndex"), updatable = true),
 
     // Links.
     PatchTable("link",               listOf("id"),       updatable = true),
@@ -91,9 +94,15 @@ internal val PATCH_TABLES_IN_FK_ORDER: List<PatchTable> = listOf(
     PatchTable("schema_meta",        listOf("key"),      updatable = true),
 )
 
+/** Schema-4 contract shipped in v26, before line_dh gained dhDisplay. */
+internal val PATCH_TABLES_SCHEMA_4: List<PatchTable> =
+    PATCH_TABLES_IN_FK_ORDER.map { table ->
+        if (table.name == "line_dh") table.copy(updatable = false) else table
+    }
+
 /** Schema-3 contract retained for updater compatibility tests. */
 internal val PATCH_TABLES_SCHEMA_3: List<PatchTable> =
-    PATCH_TABLES_IN_FK_ORDER.filterNot { it.name in setOf("line_ref", "line_dh") }
+    PATCH_TABLES_SCHEMA_4.filterNot { it.name in setOf("line_ref", "line_dh") }
 
 /** Schema-2 contract retained for updater compatibility tests. */
 internal val PATCH_TABLES_SCHEMA_2: List<PatchTable> =
@@ -108,6 +117,7 @@ internal fun patchTablesForSchemaVersion(schemaVersion: Int): List<PatchTable> =
     1 -> PATCH_TABLES_SCHEMA_1
     2 -> PATCH_TABLES_SCHEMA_2
     3 -> PATCH_TABLES_SCHEMA_3
-    4 -> PATCH_TABLES_IN_FK_ORDER
+    4 -> PATCH_TABLES_SCHEMA_4
+    5 -> PATCH_TABLES_IN_FK_ORDER
     else -> error("Unsupported patch-table schema version $schemaVersion")
 }

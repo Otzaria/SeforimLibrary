@@ -126,14 +126,18 @@ class LogicalContentHasher(
             add(indexOf("line_ref") + 1, "line_dh")
         }
 
+        /** Schema 5 changes line_dh columns, not the set or order of tables. */
+        val TABLES_SCHEMA_5: List<String> = TABLES_SCHEMA_4
+
         /** Current-schema default for build-time diagnostics and current DB tests. */
-        val DEFAULT_TABLES: List<String> = TABLES_SCHEMA_4
+        val DEFAULT_TABLES: List<String> = TABLES_SCHEMA_5
 
         fun tablesForSchemaVersion(schemaVersion: Int): List<String> = when (schemaVersion) {
             1 -> TABLES_SCHEMA_1
             2 -> TABLES_SCHEMA_2
             3 -> TABLES_SCHEMA_3
             4 -> TABLES_SCHEMA_4
+            5 -> TABLES_SCHEMA_5
             else -> error("Unsupported logical-hash schema version $schemaVersion")
         }
 

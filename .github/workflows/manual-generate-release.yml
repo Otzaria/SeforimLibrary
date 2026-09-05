@@ -1781,7 +1781,11 @@ jobs:
               if { [ "$PREV_SCHEMA" = 2 ] && [ "$THIS_SCHEMA" = 3 ]; } || \
                  { [ "$PREV_SCHEMA" = 1 ] && [ "$THIS_SCHEMA" = 4 ]; } || \
                  { [ "$PREV_SCHEMA" = 2 ] && [ "$THIS_SCHEMA" = 4 ]; } || \
-                 { [ "$PREV_SCHEMA" = 3 ] && [ "$THIS_SCHEMA" = 4 ]; }; then
+                 { [ "$PREV_SCHEMA" = 3 ] && [ "$THIS_SCHEMA" = 4 ]; } || \
+                 { [ "$PREV_SCHEMA" = 1 ] && [ "$THIS_SCHEMA" = 5 ]; } || \
+                 { [ "$PREV_SCHEMA" = 2 ] && [ "$THIS_SCHEMA" = 5 ]; } || \
+                 { [ "$PREV_SCHEMA" = 3 ] && [ "$THIS_SCHEMA" = 5 ]; } || \
+                 { [ "$PREV_SCHEMA" = 4 ] && [ "$THIS_SCHEMA" = 5 ]; }; then
                 echo "schema $PREV_SCHEMA → $THIS_SCHEMA — producing the supported cross-schema delta"
               else
                 echo "schema $PREV_SCHEMA → $THIS_SCHEMA is unsupported — skip anchor"

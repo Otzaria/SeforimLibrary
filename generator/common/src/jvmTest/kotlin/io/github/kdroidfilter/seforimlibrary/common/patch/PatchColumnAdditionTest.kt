@@ -167,6 +167,58 @@ class PatchColumnAdditionTest {
     }
 
     @Test
+    fun `v26 to v27 adds dhDisplay and ships a full line_dh snapshot`() {
+        val prev = newDbPath("prev.db")
+        val next = newDbPath("next.db")
+        val patch = newDbPath("patch.db")
+
+        buildDb(prev) { st ->
+            st.executeUpdate(
+                "CREATE TABLE line_dh (bookId INTEGER NOT NULL, dhText TEXT NOT NULL, " +
+                    "lineIndex INTEGER NOT NULL, PRIMARY KEY (bookId, dhText, lineIndex)) WITHOUT ROWID",
+            )
+            st.executeUpdate("INSERT INTO line_dh VALUES (1, 'מאימתי קורין', 0), (1, 'משעה', 1)")
+        }
+        buildDb(next) { st ->
+            st.executeUpdate(
+                "CREATE TABLE line_dh (bookId INTEGER NOT NULL, dhText TEXT NOT NULL, " +
+                    "lineIndex INTEGER NOT NULL, dhDisplay TEXT NOT NULL, " +
+                    "PRIMARY KEY (bookId, dhText, lineIndex)) WITHOUT ROWID",
+            )
+            st.executeUpdate(
+                "INSERT INTO line_dh VALUES " +
+                    "(1, 'מאימתי קורין', 0, 'מאימתי קורין'), (1, 'משעה', 1, 'משעה שהכהנים')",
+            )
+        }
+
+        val produced = PatchDbProducer().produce(
+            prev,
+            next,
+            patch,
+            fromVersion = 26,
+            toVersion = 27,
+            fromSchemaVersion = 4,
+            toSchemaVersion = 5,
+        )
+
+        assertEquals(
+            listOf("""ALTER TABLE "line_dh" ADD COLUMN "dhDisplay" TEXT NOT NULL DEFAULT ''"""),
+            migrationsOf(patch),
+        )
+        assertEquals(2, produced.upsertCounts.getValue("line_dh"))
+        assertAppliesTo(prev, next, patch) { conn ->
+            conn.createStatement().use { st ->
+                st.executeQuery("SELECT dhDisplay FROM line_dh ORDER BY lineIndex").use { rs ->
+                    assertTrue(rs.next())
+                    assertEquals("מאימתי קורין", rs.getString(1))
+                    assertTrue(rs.next())
+                    assertEquals("משעה שהכהנים", rs.getString(1))
+                }
+            }
+        }
+    }
+
+    @Test
     fun `a CURRENT_TIMESTAMP default is not constant so it is synthesised away`() {
         val prev = newDbPath("prev.db")
         val next = newDbPath("next.db")

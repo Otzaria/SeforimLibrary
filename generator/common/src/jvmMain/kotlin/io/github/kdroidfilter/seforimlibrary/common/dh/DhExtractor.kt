@@ -24,6 +24,14 @@ object DhExtractor {
 
     enum class Format { BOLD, DASH }
 
+    /**
+     * One extracted dibbur: [key] is the [DhKey] form the index is searched
+     * by; [display] is the dibbur as printed — points and quote marks kept,
+     * whitespace collapsed, edge punctuation trimmed — for showing it as a
+     * sub-heading.
+     */
+    data class Dh(val key: String, val display: String)
+
     /** Longest raw dibbur accepted, in characters (real ones median ~11). */
     private const val MAX_DH_LENGTH = 100
 
@@ -66,9 +74,13 @@ object DhExtractor {
     )
 
     private val POINTS = Regex("[֑-ׇ]")
+    private val WHITESPACE = Regex("""\s+""")
 
-    /** Extracts and normalises the dibbur of [line] in [format], or `null`. */
-    fun extract(line: String, format: Format): String? = when (format) {
+    /** Same edge trim as DhKey, so key and display agree on where the dibbur ends. */
+    private const val EDGE_PUNCTUATION = ".,:;?!()[]"
+
+    /** Extracts the dibbur of [line] in [format], or `null`. */
+    fun extract(line: String, format: Format): Dh? = when (format) {
         Format.BOLD -> extractBold(line)
         Format.DASH -> extractDash(line)
     }
@@ -76,7 +88,7 @@ object DhExtractor {
     /** `true` when [line] is a `<h1>`–`<h6>` heading (never carries a dibbur). */
     fun isHeadingLine(line: String): Boolean = HEADING_LINE.containsMatchIn(line)
 
-    private fun extractBold(line: String): String? {
+    private fun extractBold(line: String): Dh? {
         if (isHeadingLine(line)) return null
         val m = BOLD_PREFIX.find(line) ?: return null
         val rest = TAG.replace(m.groupValues[2], "").trim()
@@ -84,7 +96,7 @@ object DhExtractor {
         return accept(m.groupValues[1])
     }
 
-    private fun extractDash(line: String): String? {
+    private fun extractDash(line: String): Dh? {
         if (isHeadingLine(line)) return null
         val m = SPACED_DASH.find(line) ?: return null
         var dh = line.substring(0, m.range.first)
@@ -99,7 +111,7 @@ object DhExtractor {
         return accept(dh)
     }
 
-    private fun accept(rawDh: String): String? {
+    private fun accept(rawDh: String): Dh? {
         // Match DhKey's edge trimming while deliberately preserving quote
         // marks: תוד"ה is a locator, while תודה is a genuine Hebrew word.
         val marker = POINTS.replace(rawDh, "")
@@ -111,8 +123,10 @@ object DhExtractor {
             .replace('‘', '\'')
             .replace("''", "\"")
             .trim()
-            .trim { it in ".,:;?!()[]" || it == ' ' }
+            .trim { it in EDGE_PUNCTUATION || it == ' ' }
         if (marker in STOP_MARKERS) return null
-        return DhKey.normalize(rawDh)
+        val key = DhKey.normalize(rawDh) ?: return null
+        val display = WHITESPACE.replace(rawDh, " ").trim { it in EDGE_PUNCTUATION || it == ' ' }
+        return Dh(key, display)
     }
 }

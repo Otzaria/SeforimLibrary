@@ -18,7 +18,7 @@ import java.sql.DriverManager
  *   - `dbVersion`      integer release version (matches release_meta.json
  *                      `latestVersion` and `deltas[].toVersion`)
  *   - `dbSchemaVersion` integer SQLDelight schema version (optional, defaults
- *                      to [PatchDbSchema.CURRENT_VERSION]); matches the
+ *                      to [CURRENT_DB_SCHEMA_VERSION]); matches the
  *                      manifest's `toSchemaVersion`
  *
  * Idempotent: re-running with the same values is a no-op
@@ -32,7 +32,7 @@ fun main() {
     val dbVersion = System.getProperty("dbVersion")?.toIntOrNull()
         ?: error("-PdbVersion= missing or not an integer")
     val dbSchemaVersion = System.getProperty("dbSchemaVersion")?.toIntOrNull()
-        ?: PatchDbSchema.CURRENT_VERSION
+        ?: CURRENT_DB_SCHEMA_VERSION
 
     val path = Paths.get(dbPath)
     require(Files.isRegularFile(path)) { "Database file not found: $dbPath" }
@@ -48,13 +48,13 @@ fun main() {
 /** Writes release/schema metadata only after the DB satisfies that schema's table contract. */
 internal fun stampSchemaVersion(conn: Connection, dbVersion: Int, dbSchemaVersion: Int) {
     require(dbVersion >= 1) { "dbVersion=$dbVersion must be positive" }
-    require(dbSchemaVersion in 1..PatchDbSchema.CURRENT_VERSION) {
-        "dbSchemaVersion=$dbSchemaVersion is outside the supported range 1..${PatchDbSchema.CURRENT_VERSION}"
+    require(dbSchemaVersion in 1..CURRENT_DB_SCHEMA_VERSION) {
+        "dbSchemaVersion=$dbSchemaVersion is outside the supported range 1..$CURRENT_DB_SCHEMA_VERSION"
     }
     check(conn.autoCommit) { "stampSchemaVersion requires an unowned JDBC connection" }
 
     val requiredTables = when (dbSchemaVersion) {
-        4 -> setOf("line_ref", "line_dh")
+        4, 5 -> setOf("line_ref", "line_dh")
         else -> emptySet()
     }
     val existingTables = if (requiredTables.isEmpty()) {
@@ -72,6 +72,19 @@ internal fun stampSchemaVersion(conn: Connection, dbVersion: Int, dbSchemaVersio
     require(missingTables.isEmpty()) {
         "Cannot stamp DB as schema $dbSchemaVersion; missing required tables: " +
             missingTables.sorted().joinToString()
+    }
+
+    if (dbSchemaVersion >= 5) {
+        val dhDisplay = PatchDbSchema.readTableInfo(conn, "main", "line_dh")
+            .find { it.name == "dhDisplay" }
+        require(
+            dhDisplay != null &&
+                dhDisplay.type.equals("TEXT", ignoreCase = true) &&
+                dhDisplay.notNull,
+        ) {
+            "Cannot stamp DB as schema $dbSchemaVersion; " +
+                "line_dh.dhDisplay must exist as TEXT NOT NULL"
+        }
     }
 
     conn.autoCommit = false

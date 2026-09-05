@@ -7,6 +7,7 @@ import java.sql.SQLException
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
+import kotlin.test.assertTrue
 
 class BuildLineDhIndexCliTest {
 
@@ -24,7 +25,8 @@ class BuildLineDhIndexCliTest {
                 st.execute("CREATE TABLE line (bookId INTEGER NOT NULL, lineIndex INTEGER NOT NULL, content TEXT NOT NULL)")
                 st.execute(
                     "CREATE TABLE line_dh (bookId INTEGER NOT NULL, dhText TEXT NOT NULL, " +
-                        "lineIndex INTEGER NOT NULL, PRIMARY KEY (bookId, dhText, lineIndex)) WITHOUT ROWID",
+                        "lineIndex INTEGER NOT NULL, dhDisplay TEXT NOT NULL, " +
+                        "PRIMARY KEY (bookId, dhText, lineIndex)) WITHOUT ROWID",
                 )
             }
             block(conn)
@@ -76,15 +78,22 @@ class BuildLineDhIndexCliTest {
     }
 
     @Test
-    fun `a bold-dominant book is indexed in bold format`() {
+    fun `a bold-dominant book is indexed in bold format, display alongside the key`() {
         withDb { conn ->
             conn.createStatement().use { it.execute("INSERT INTO book (id, title) VALUES (2, 'רש\"י על בראשית')") }
-            insertLines(conn, 2, List(10) { "<b>דיבור $it.</b> פירוש כלשהו" })
+            insertLines(conn, 2, List(10) { "<b>דִּבּוּר $it.</b> פירוש כלשהו" })
 
             val report = indexAllBooks(conn, Logger.withTag("test"))
 
             assertEquals(1, report.boldBooks)
             assertEquals(10, report.indexed)
+            conn.createStatement().use { st ->
+                st.executeQuery("SELECT dhText, dhDisplay FROM line_dh WHERE lineIndex = 3").use { rs ->
+                    assertTrue(rs.next())
+                    assertEquals("דבור 3", rs.getString(1))
+                    assertEquals("דִּבּוּר 3", rs.getString(2))
+                }
+            }
         }
     }
 
@@ -155,7 +164,7 @@ class BuildLineDhIndexCliTest {
         withDb { conn ->
             conn.createStatement().use { it.execute("INSERT INTO book (id, title) VALUES (5, 'ספר')") }
             insertLines(conn, 5, List(10) { "דיבור $it – פירוש" })
-            conn.createStatement().use { it.execute("INSERT INTO line_dh VALUES (99, 'ישן', 99)") }
+            conn.createStatement().use { it.execute("INSERT INTO line_dh VALUES (99, 'ישן', 99, 'ישן')") }
 
             rebuildLineDhIndex(conn, Logger.withTag("test"))
 
@@ -172,7 +181,7 @@ class BuildLineDhIndexCliTest {
             conn.createStatement().use { st ->
                 st.execute("INSERT INTO book (id, title) VALUES (6, 'ספר')")
                 st.execute("INSERT INTO line VALUES (6, 0, '<b>דיבור.</b> פירוש')")
-                st.execute("INSERT INTO line_dh VALUES (99, 'ישן', 99)")
+                st.execute("INSERT INTO line_dh VALUES (99, 'ישן', 99, 'ישן')")
                 st.execute(
                     "CREATE TRIGGER reject_line_dh BEFORE INSERT ON line_dh " +
                         "BEGIN SELECT RAISE(ABORT, 'forced failure'); END",

@@ -58,8 +58,8 @@ class PatchDbProducer(
         fromVersion: Int,
         toVersion: Int,
         migrations: List<Pair<Int, String>> = emptyList(),
-        fromSchemaVersion: Int = PatchDbSchema.CURRENT_VERSION,
-        toSchemaVersion: Int = PatchDbSchema.CURRENT_VERSION,
+        fromSchemaVersion: Int = CURRENT_DB_SCHEMA_VERSION,
+        toSchemaVersion: Int = CURRENT_DB_SCHEMA_VERSION,
     ): Output {
         require(fromSchemaVersion <= toSchemaVersion) {
             "Schema downgrade $fromSchemaVersion -> $toSchemaVersion is not supported"

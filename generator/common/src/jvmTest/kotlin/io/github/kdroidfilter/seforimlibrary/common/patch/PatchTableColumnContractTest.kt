@@ -30,13 +30,10 @@ class PatchTableColumnContractTest {
     @JvmField @Rule
     val tmp = TemporaryFolder()
 
-    // The fixture is keyed by the DB's `schema_meta.db_schema_version`. There is
-    // no compile-time constant for it: StampSchemaVersionCli defaults it to
-    // PatchDbSchema.CURRENT_VERSION (the *patch format* version, documented as
-    // independent), and the two happen to coincide at 4 today because every
-    // table-contract bump so far also bumped the patch format. If they ever
-    // diverge, pin the number here explicitly instead of deriving it.
-    private val dbSchemaVersion = PatchDbSchema.CURRENT_VERSION
+    // The DB schema and patch-artifact format are independent version axes.
+    // v26 froze DB schema 4; dhDisplay therefore starts a new schema 5 fixture
+    // while PatchDbSchema.CURRENT_VERSION remains the patch format version.
+    private val dbSchemaVersion = CURRENT_DB_SCHEMA_VERSION
     private val fixtureName = "/patch_table_columns_schema_$dbSchemaVersion.json"
 
     @Test

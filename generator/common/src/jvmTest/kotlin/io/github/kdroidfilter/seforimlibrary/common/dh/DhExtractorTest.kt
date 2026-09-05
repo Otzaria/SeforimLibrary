@@ -8,13 +8,15 @@ import kotlin.test.assertNull
 /** Shapes below are verbatim from a real seforim.db unless noted. */
 class DhExtractorTest {
 
+    private fun key(line: String, format: Format): String? = DhExtractor.extract(line, format)?.key
+
     // ── DASH format (Sefaria Talmud commentaries) ──────────────────────────
 
     @Test
     fun `dash-separated dibbur is extracted and normalised`() {
         assertEquals(
             "עד סוף האשמורה הראשונה",
-            DhExtractor.extract(
+            key(
                 "עד סוף האשמורה הראשונה – שליש הלילה כדמפרש בגמרא",
                 Format.DASH,
             ),
@@ -25,7 +27,7 @@ class DhExtractorTest {
     fun `plain hyphen works as separator too`() {
         assertEquals(
             "אי הכי סיפא דקתני שחרית ברישא",
-            DhExtractor.extract(
+            key(
                 "אי הכי סיפא דקתני שחרית ברישא - אי אמרת בשלמא דסמיך אקרא",
                 Format.DASH,
             ),
@@ -38,7 +40,7 @@ class DhExtractorTest {
         // the naive dash cut would swallow the whole quoted mishnah.
         assertEquals(
             "מאימתי קורין את שמע בערבין",
-            DhExtractor.extract(
+            key(
                 "מאימתי קורין את שמע בערבין. משעה שהכהנים נכנסים לאכול בתרומתן – כהנים שנטמאו וטבלו",
                 Format.DASH,
             ),
@@ -47,23 +49,23 @@ class DhExtractorTest {
 
     @Test
     fun `maqaf does not separate a dibbur`() {
-        assertNull(DhExtractor.extract("בית־השלחין שדה שצריך להשקותה", Format.DASH))
+        assertNull(key("בית־השלחין שדה שצריך להשקותה", Format.DASH))
     }
 
     @Test
     fun `a line without a spaced dash yields nothing`() {
-        assertNull(DhExtractor.extract("שורה רגילה בלי מפריד כלל", Format.DASH))
+        assertNull(key("שורה רגילה בלי מפריד כלל", Format.DASH))
     }
 
     @Test
     fun `a dash with nothing after it yields nothing`() {
-        assertNull(DhExtractor.extract("עד סוף האשמורה - ", Format.DASH))
+        assertNull(key("עד סוף האשמורה - ", Format.DASH))
     }
 
     @Test
     fun `an implausibly long dash prefix without a sentence break yields nothing`() {
         val prefix = "מילים ".repeat(30).trim()
-        assertNull(DhExtractor.extract("$prefix - פירוש", Format.DASH))
+        assertNull(key("$prefix - פירוש", Format.DASH))
     }
 
     // ── BOLD format (Rashi on Tanakh, Mishnah commentaries) ────────────────
@@ -72,7 +74,7 @@ class DhExtractorTest {
     fun `bold dibbur is extracted, nikud stripped`() {
         assertEquals(
             "בראשית",
-            DhExtractor.extract(
+            key(
                 "<b>בְּרֵאשִׁית.</b> אָמַר רַבִּי יִצְחָק לֹא הָיָה צָרִיךְ",
                 Format.BOLD,
             ),
@@ -81,22 +83,22 @@ class DhExtractorTest {
 
     @Test
     fun `whole-line bold is a decorated heading, not a dibbur`() {
-        assertNull(DhExtractor.extract("<b>הדרן עלך מאימתי</b>", Format.BOLD))
+        assertNull(key("<b>הדרן עלך מאימתי</b>", Format.BOLD))
     }
 
     @Test
     fun `structural markers are not dibburim`() {
-        assertNull(DhExtractor.extract("<b>מתני'</b> ביצה שנולדה ביום טוב", Format.BOLD))
-        assertNull(DhExtractor.extract("<b>גמרא</b> במאי אוקימתא", Format.BOLD))
-        assertNull(DhExtractor.extract("<b>(גמרא)</b> במאי אוקימתא", Format.BOLD))
-        assertNull(DhExtractor.extract("<b>גמרא!</b> במאי אוקימתא", Format.BOLD))
-        assertNull(DhExtractor.extract("<b>שם</b> ד\"ה הורו, עד עפ\"י ב\"ד", Format.BOLD))
-        assertNull(DhExtractor.extract("<b>תוד\"ה</b> חייב, בהקפת הראש", Format.BOLD))
-        assertNull(DhExtractor.extract("<b>ד״ה</b> הורו, עד עפ״י ב״ד", Format.BOLD))
-        assertNull(DhExtractor.extract("<b>בד״ה</b> הורו, עד עפ״י ב״ד", Format.BOLD))
-        assertNull(DhExtractor.extract("<b>תוד״ה</b> חייב, בהקפת הראש", Format.BOLD))
-        assertNull(DhExtractor.extract("<b>בד''ה</b> אתנו ב''ד", Format.BOLD))
-        assertNull(DhExtractor.extract("<b>רשי'</b> פירש כאן", Format.BOLD))
+        assertNull(key("<b>מתני'</b> ביצה שנולדה ביום טוב", Format.BOLD))
+        assertNull(key("<b>גמרא</b> במאי אוקימתא", Format.BOLD))
+        assertNull(key("<b>(גמרא)</b> במאי אוקימתא", Format.BOLD))
+        assertNull(key("<b>גמרא!</b> במאי אוקימתא", Format.BOLD))
+        assertNull(key("<b>שם</b> ד\"ה הורו, עד עפ\"י ב\"ד", Format.BOLD))
+        assertNull(key("<b>תוד\"ה</b> חייב, בהקפת הראש", Format.BOLD))
+        assertNull(key("<b>ד״ה</b> הורו, עד עפ״י ב״ד", Format.BOLD))
+        assertNull(key("<b>בד״ה</b> הורו, עד עפ״י ב״ד", Format.BOLD))
+        assertNull(key("<b>תוד״ה</b> חייב, בהקפת הראש", Format.BOLD))
+        assertNull(key("<b>בד''ה</b> אתנו ב''ד", Format.BOLD))
+        assertNull(key("<b>רשי'</b> פירש כאן", Format.BOLD))
     }
 
     @Test
@@ -104,7 +106,7 @@ class DhExtractorTest {
         // תוד"ה is a locator; תודה is a real dibbur (the korban).
         assertEquals(
             "תודה",
-            DhExtractor.extract("<b>תודה.</b> הבא תודה על חטאתו", Format.BOLD),
+            key("<b>תודה.</b> הבא תודה על חטאתו", Format.BOLD),
         )
     }
 
@@ -113,7 +115,7 @@ class DhExtractorTest {
         // גליון הש"ס: the bold locator IS the searchable dibbur.
         assertEquals(
             "תוס דה חייב וכו בהקפת הראש חייב אף במספרים",
-            DhExtractor.extract(
+            key(
                 "<b>תוס' ד\"ה חייב וכו' בהקפת הראש חייב אף במספרים.</b> לפ\"ז נראה דגם במלקט חייב",
                 Format.BOLD,
             ),
@@ -122,16 +124,41 @@ class DhExtractorTest {
 
     @Test
     fun `bold mid-line is not a dibbur`() {
-        assertNull(DhExtractor.extract("עיין רע\"ב דאזיל בשטת הר\"ש. <b>וקשיא</b> לי ביה", Format.BOLD))
+        assertNull(key("עיין רע\"ב דאזיל בשטת הר\"ש. <b>וקשיא</b> לי ביה", Format.BOLD))
     }
 
     // ── shared guards ───────────────────────────────────────────────────────
 
     @Test
     fun `heading lines never carry a dibbur`() {
-        assertNull(DhExtractor.extract("<h2>דף ב.</h2>", Format.DASH))
-        assertNull(DhExtractor.extract("<h2>דף ב.</h2>", Format.BOLD))
+        assertNull(key("<h2>דף ב.</h2>", Format.DASH))
+        assertNull(key("<h2>דף ב.</h2>", Format.BOLD))
         // BOM-prefixed heading, as emitted by some source files.
-        assertNull(DhExtractor.extract("﻿<h1>רש\"י על ברכות</h1>", Format.BOLD))
+        assertNull(key("﻿<h1>רש\"י על ברכות</h1>", Format.BOLD))
+    }
+
+    // ── display form ───────────────────────────────────────────────────────
+
+    @Test
+    fun `display keeps points and quote marks, drops the closing period`() {
+        assertEquals(
+            DhExtractor.Dh(key = "בראשית", display = "בְּרֵאשִׁית"),
+            DhExtractor.extract(
+                "<b>בְּרֵאשִׁית.</b> אָמַר רַבִּי יִצְחָק לֹא הָיָה צָרִיךְ",
+                Format.BOLD,
+            ),
+        )
+        assertEquals(
+            DhExtractor.Dh(key = "אר וכו", display = "א\"ר וכו'"),
+            DhExtractor.extract("א\"ר וכו' – פירוש הדברים", Format.DASH),
+        )
+    }
+
+    @Test
+    fun `display collapses inner whitespace like the key does`() {
+        assertEquals(
+            "עד סוף האשמורה",
+            DhExtractor.extract("עד  סוף\tהאשמורה – שליש הלילה", Format.DASH)?.display,
+        )
     }
 }

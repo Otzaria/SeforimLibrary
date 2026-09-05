@@ -75,6 +75,51 @@ class PatchMultiSchemaPromotionTest {
         }
     }
 
+    @Test
+    fun `schema 1 through 3 clients can jump directly to schema 5`() {
+        for (fromSchema in 1..3) {
+            val prev = path("prev-v$fromSchema-to-v5.db")
+            val next = path("next-v$fromSchema-to-v5.db")
+            val patch = path("v$fromSchema-v5-patch.db")
+            val target = path("target-v$fromSchema-to-v5.db")
+
+            buildDb(prev, schemaVersion = fromSchema, stalePromotedTables = true)
+            buildDb(next, schemaVersion = 5, stalePromotedTables = false)
+
+            val produced = PatchDbProducer().produce(
+                prev,
+                next,
+                patch,
+                fromVersion = 20 + fromSchema,
+                toVersion = 27,
+                fromSchemaVersion = fromSchema,
+                toSchemaVersion = 5,
+            )
+
+            val promoted = when (fromSchema) {
+                1 -> listOf("book_base_text", "line_ref", "line_dh", "link_suppressed_side")
+                2 -> listOf("line_ref", "line_dh", "link_suppressed_side")
+                else -> listOf("line_ref", "line_dh")
+            }
+            for (table in promoted) {
+                assertEquals(1, produced.upsertCounts.getValue(table), "full snapshot for $table")
+                assertEquals(0, produced.deleteCounts.getValue(table), "no stale deletes for $table")
+            }
+
+            Files.copy(prev, target)
+            val expectedHash = hash(next, 5)
+            DriverManager.getConnection("jdbc:sqlite:${target.toAbsolutePath()}").use { conn ->
+                PatchApplier().apply(
+                    conn,
+                    patch,
+                    expectedToContentHash = expectedHash,
+                    expectedToSchemaVersion = 5,
+                )
+            }
+            assertEquals(expectedHash, hash(target, 5))
+        }
+    }
+
     private fun path(name: String): Path = tmp.root.toPath().resolve(name)
 
     private fun buildDb(path: Path, schemaVersion: Int, stalePromotedTables: Boolean) {
@@ -100,13 +145,15 @@ class PatchMultiSchemaPromotionTest {
                 )
                 val refKey = if (stalePromotedTables) 700 else 800
                 st.execute("INSERT INTO line_ref VALUES (1, $refKey, 0)")
+                val dhDisplayColumn = if (schemaVersion >= 5) ", dhDisplay TEXT NOT NULL" else ""
                 st.execute(
                     "CREATE TABLE line_dh (" +
-                        "bookId INTEGER NOT NULL, dhText TEXT NOT NULL, lineIndex INTEGER NOT NULL, " +
-                        "PRIMARY KEY(bookId, dhText, lineIndex)) WITHOUT ROWID",
+                        "bookId INTEGER NOT NULL, dhText TEXT NOT NULL, lineIndex INTEGER NOT NULL" +
+                        "$dhDisplayColumn, PRIMARY KEY(bookId, dhText, lineIndex)) WITHOUT ROWID",
                 )
                 val dh = if (stalePromotedTables) "ישן" else "חדש"
-                st.execute("INSERT INTO line_dh VALUES (1, '$dh', 0)")
+                val dhValues = if (schemaVersion >= 5) "1, '$dh', 0, '$dh מודפס'" else "1, '$dh', 0"
+                st.execute("INSERT INTO line_dh VALUES ($dhValues)")
 
                 st.execute("CREATE TABLE link (id INTEGER PRIMARY KEY NOT NULL, label TEXT NOT NULL)")
                 st.execute("INSERT INTO link VALUES (100, 'link')")
