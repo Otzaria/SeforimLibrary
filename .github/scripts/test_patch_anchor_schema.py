@@ -188,14 +188,26 @@ class PatchAnchorSchemaTest(unittest.TestCase):
         # promoted-table set derivable for the oldest anchors still in the fan.
         current = RESOURCES / "patch_tables_contract.json"
         tables, version = anchor._contract(current)
-        self.assertEqual(4, version)
+        # Not pinned to a number: every db_schema_version bump (4 -> 5 for
+        # line_dh.dhDisplay, PR #24) adds a patch_table_columns_schema_<N>.json
+        # and freezes the previous contract as a sibling; the check must keep
+        # reading whichever pair the repo currently carries.
+        self.assertGreaterEqual(version, 4)
         columns = json.loads(
-            (RESOURCES / "patch_table_columns_schema_4.json").read_text(encoding="utf-8")
+            (RESOURCES / f"patch_table_columns_schema_{version}.json").read_text(encoding="utf-8")
         )
+        self.assertEqual(version, int(columns["dbSchemaVersion"]))
         self.assertEqual(set(columns["tables"]), set(tables))
-        for older in (1, 3):
+        siblings = sorted(
+            int(p.stem.rsplit("_", 1)[1])
+            for p in RESOURCES.glob("patch_tables_contract_schema_*.json")
+        )
+        # The oldest anchors still in the fan need schema 1 and 3; the schema
+        # just superseded must be frozen too, or promotion is underivable.
+        self.assertTrue({1, 3, version - 1} <= set(siblings), siblings)
+        for older in siblings:
+            self.assertLess(older, version)
             sibling = current.with_name(f"patch_tables_contract_schema_{older}.json")
-            self.assertTrue(sibling.is_file(), sibling)
             older_tables, older_version = anchor._contract(sibling)
             self.assertEqual(older, older_version)
             # Frozen contracts only ever gain tables, so promotion is a
