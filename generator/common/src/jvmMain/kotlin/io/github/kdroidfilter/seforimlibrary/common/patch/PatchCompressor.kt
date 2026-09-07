@@ -63,7 +63,6 @@ object PatchCompressor {
 
         ZstdCompressCtx().use { ctx ->
             ctx.setLevel(level)
-            ctx.setChecksum(true)
             // Enable multithreaded compression when workers > 1.
             if (workers > 1) ctx.setWorkers(workers)
             // Written into the frame header -> the client can size its buffer exactly.
@@ -86,6 +85,9 @@ object PatchCompressor {
                         val n = input.read(inBuf)
                         if (n <= 0) break
                         remaining -= n
+                        check(remaining >= 0L) {
+                            "patch.db grew while compressing: expected $uncompressedSize bytes"
+                        }
                         inBuf.flip()
                         inBuf.duplicate().get(hashView, 0, n)
                         uncompressedSha.update(hashView, 0, n)
@@ -94,6 +96,10 @@ object PatchCompressor {
                         // so the pledged size is honoured exactly.
                         val directive = if (remaining == 0L) EndDirective.END else EndDirective.CONTINUE
                         drain(ctx, inBuf, outBuf, output, directive)
+                    }
+                    check(remaining == 0L) {
+                        "patch.db changed while compressing: expected $uncompressedSize bytes, " +
+                            "read ${uncompressedSize - remaining}"
                     }
                     if (uncompressedSize == 0L) {
                         // Empty patch: still emit a well-formed frame with size 0.
