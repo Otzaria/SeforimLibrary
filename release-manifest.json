@@ -1,88 +1,406 @@
 {
-  "generatedAt": "2026-06-26T09:40:21Z",
+  "generatedAt": "2026-09-07T12:14:46Z",
   "latest": {
     "assets": [
       {
-        "apiUrl": "https://api.github.com/repos/kdroidFilter/SeforimLibrary/releases/assets/435221738",
-        "contentType": "application/octet-stream",
-        "createdAt": "2026-06-01T11:50:23Z",
-        "digest": "sha256:679ac0ab32ddfbcadd9aaa668f45ae63441dceb6cfe850ad3e02fc591e392948",
-        "downloadCount": 9,
-        "id": "RA_kwDOPFZ3eM4Z8PTq",
+        "apiUrl": "https://api.github.com/repos/Otzaria/SeforimLibrary/releases/assets/547093653",
+        "contentType": "application/json",
+        "createdAt": "2026-09-06T11:10:22Z",
+        "digest": "sha256:fe857afb05c479d69037c122788956d1e4836bf50f05600061eaf6a7e87f306d",
+        "downloadCount": 3,
+        "id": "RA_kwDOQ6kTXM4gm_yV",
         "label": "",
-        "name": "catalog.pb",
-        "size": 669539,
+        "name": "build_provenance.json",
+        "size": 5779,
         "state": "uploaded",
-        "updatedAt": "2026-06-01T11:50:24Z",
-        "url": "https://github.com/kdroidFilter/SeforimLibrary/releases/download/v1-20260601094341/catalog.pb"
+        "updatedAt": "2026-09-06T11:10:22Z",
+        "url": "https://github.com/Otzaria/SeforimLibrary/releases/download/v27-20260906092829/build_provenance.json"
       },
       {
-        "apiUrl": "https://api.github.com/repos/kdroidFilter/SeforimLibrary/releases/assets/435221737",
-        "contentType": "application/octet-stream",
-        "createdAt": "2026-06-01T11:50:23Z",
-        "digest": "sha256:6fdd05b6a5c8cbb675184bf488f6c4de0a21b985d9ede7f13b0677e667fdf1c1",
-        "downloadCount": 12,
-        "id": "RA_kwDOPFZ3eM4Z8PTp",
+        "apiUrl": "https://api.github.com/repos/Otzaria/SeforimLibrary/releases/assets/547093711",
+        "contentType": "application/zstd",
+        "createdAt": "2026-09-06T11:10:25Z",
+        "digest": "sha256:77e7fa2fe69ef3186729e7359feac4c112631b45cd014974df313ecade24554d",
+        "downloadCount": 92,
+        "id": "RA_kwDOQ6kTXM4gm_zP",
         "label": "",
-        "name": "seforim.db.buildstate",
-        "size": 933068800,
+        "name": "patch-v19-v27.db.zst",
+        "size": 598519600,
         "state": "uploaded",
-        "updatedAt": "2026-06-01T11:51:00Z",
-        "url": "https://github.com/kdroidFilter/SeforimLibrary/releases/download/v1-20260601094341/seforim.db.buildstate"
+        "updatedAt": "2026-09-06T11:14:50Z",
+        "url": "https://github.com/Otzaria/SeforimLibrary/releases/download/v27-20260906092829/patch-v19-v27.db.zst"
       },
       {
-        "apiUrl": "https://api.github.com/repos/kdroidFilter/SeforimLibrary/releases/assets/435221740",
-        "contentType": "application/octet-stream",
-        "createdAt": "2026-06-01T11:50:23Z",
-        "digest": "sha256:cfa4b07ca92dc46436b68f60963b2c75700bdb472d2030fd94d82bceb9abce57",
-        "downloadCount": 1181,
-        "id": "RA_kwDOPFZ3eM4Z8PTs",
+        "apiUrl": "https://api.github.com/repos/Otzaria/SeforimLibrary/releases/assets/547097950",
+        "contentType": "application/json",
+        "createdAt": "2026-09-06T11:14:54Z",
+        "digest": "sha256:a344d39e3e1d763a76c05984627b4cbb2a22b40c5954d9bfb61badf6d1bdbd6f",
+        "downloadCount": 976,
+        "id": "RA_kwDOQ6kTXM4gnA1e",
         "label": "",
-        "name": "seforim_bundle.tar.zst.part01",
-        "size": 2040109465,
+        "name": "patch-v19-v27.db.zst.manifest.json",
+        "size": 640,
         "state": "uploaded",
-        "updatedAt": "2026-06-01T11:51:41Z",
-        "url": "https://github.com/kdroidFilter/SeforimLibrary/releases/download/v1-20260601094341/seforim_bundle.tar.zst.part01"
+        "updatedAt": "2026-09-06T11:14:54Z",
+        "url": "https://github.com/Otzaria/SeforimLibrary/releases/download/v27-20260906092829/patch-v19-v27.db.zst.manifest.json"
       },
       {
-        "apiUrl": "https://api.github.com/repos/kdroidFilter/SeforimLibrary/releases/assets/435221742",
-        "contentType": "application/octet-stream",
-        "createdAt": "2026-06-01T11:50:24Z",
-        "digest": "sha256:56f5d9cba85d3d4558976e98f41ae149678318927af746e59d43e53ab9857291",
-        "downloadCount": 741,
-        "id": "RA_kwDOPFZ3eM4Z8PTu",
+        "apiUrl": "https://api.github.com/repos/Otzaria/SeforimLibrary/releases/assets/547098024",
+        "contentType": "application/zstd",
+        "createdAt": "2026-09-06T11:14:58Z",
+        "digest": "sha256:4386aaed1758f9296677bc50980675108513e7112d31eb9e2ce87fbb5d6d618a",
+        "downloadCount": 533,
+        "id": "RA_kwDOQ6kTXM4gnA2o",
         "label": "",
-        "name": "seforim_bundle.tar.zst.part02",
-        "size": 1691337533,
+        "name": "patch-v23-v27.db.zst",
+        "size": 584711742,
         "state": "uploaded",
-        "updatedAt": "2026-06-01T11:51:28Z",
-        "url": "https://github.com/kdroidFilter/SeforimLibrary/releases/download/v1-20260601094341/seforim_bundle.tar.zst.part02"
+        "updatedAt": "2026-09-06T11:19:15Z",
+        "url": "https://github.com/Otzaria/SeforimLibrary/releases/download/v27-20260906092829/patch-v23-v27.db.zst"
+      },
+      {
+        "apiUrl": "https://api.github.com/repos/Otzaria/SeforimLibrary/releases/assets/547101809",
+        "contentType": "application/json",
+        "createdAt": "2026-09-06T11:19:19Z",
+        "digest": "sha256:c9ed73a0bcb6a66bf9139ee0ddd4261f22bdbc3509fff61b0f9b79cdac4cdf8d",
+        "downloadCount": 973,
+        "id": "RA_kwDOQ6kTXM4gnBxx",
+        "label": "",
+        "name": "patch-v23-v27.db.zst.manifest.json",
+        "size": 640,
+        "state": "uploaded",
+        "updatedAt": "2026-09-06T11:19:19Z",
+        "url": "https://github.com/Otzaria/SeforimLibrary/releases/download/v27-20260906092829/patch-v23-v27.db.zst.manifest.json"
+      },
+      {
+        "apiUrl": "https://api.github.com/repos/Otzaria/SeforimLibrary/releases/assets/547101838",
+        "contentType": "application/zstd",
+        "createdAt": "2026-09-06T11:19:23Z",
+        "digest": "sha256:a19f3463063cc7f43b57d685750845d28c682b97ca1fcf83dbd65e09e818e1e6",
+        "downloadCount": 17,
+        "id": "RA_kwDOQ6kTXM4gnByO",
+        "label": "",
+        "name": "patch-v25-v27.db.zst",
+        "size": 495175415,
+        "state": "uploaded",
+        "updatedAt": "2026-09-06T11:23:03Z",
+        "url": "https://github.com/Otzaria/SeforimLibrary/releases/download/v27-20260906092829/patch-v25-v27.db.zst"
+      },
+      {
+        "apiUrl": "https://api.github.com/repos/Otzaria/SeforimLibrary/releases/assets/547105202",
+        "contentType": "application/json",
+        "createdAt": "2026-09-06T11:23:06Z",
+        "digest": "sha256:19f3f84f4d359d665e50709a362123d03ff7bd75b813b523993f3ffed659db17",
+        "downloadCount": 970,
+        "id": "RA_kwDOQ6kTXM4gnCmy",
+        "label": "",
+        "name": "patch-v25-v27.db.zst.manifest.json",
+        "size": 640,
+        "state": "uploaded",
+        "updatedAt": "2026-09-06T11:23:06Z",
+        "url": "https://github.com/Otzaria/SeforimLibrary/releases/download/v27-20260906092829/patch-v25-v27.db.zst.manifest.json"
+      },
+      {
+        "apiUrl": "https://api.github.com/repos/Otzaria/SeforimLibrary/releases/assets/547105299",
+        "contentType": "application/zstd",
+        "createdAt": "2026-09-06T11:23:10Z",
+        "digest": "sha256:214f82d00420e282e4105c22765383a741fdd411b93501dba83d72c57d4ab28a",
+        "downloadCount": 65,
+        "id": "RA_kwDOQ6kTXM4gnCoT",
+        "label": "",
+        "name": "patch-v26-v27.db.zst",
+        "size": 475533836,
+        "state": "uploaded",
+        "updatedAt": "2026-09-06T11:26:39Z",
+        "url": "https://github.com/Otzaria/SeforimLibrary/releases/download/v27-20260906092829/patch-v26-v27.db.zst"
+      },
+      {
+        "apiUrl": "https://api.github.com/repos/Otzaria/SeforimLibrary/releases/assets/547108270",
+        "contentType": "application/json",
+        "createdAt": "2026-09-06T11:26:44Z",
+        "digest": "sha256:9b4c16e3555aaaca948187812aad5999d51ed62541a1792ce8fb3895f0c39f1f",
+        "downloadCount": 966,
+        "id": "RA_kwDOQ6kTXM4gnDWu",
+        "label": "",
+        "name": "patch-v26-v27.db.zst.manifest.json",
+        "size": 640,
+        "state": "uploaded",
+        "updatedAt": "2026-09-06T11:26:44Z",
+        "url": "https://github.com/Otzaria/SeforimLibrary/releases/download/v27-20260906092829/patch-v26-v27.db.zst.manifest.json"
+      },
+      {
+        "apiUrl": "https://api.github.com/repos/Otzaria/SeforimLibrary/releases/assets/547049656",
+        "contentType": "application/zstd",
+        "createdAt": "2026-09-06T10:21:50Z",
+        "digest": "sha256:067cfb448f46148a581fae670e0450569a6c125f9cf78601717b2fabbd4e5a01",
+        "downloadCount": 0,
+        "id": "RA_kwDOQ6kTXM4gm1C4",
+        "label": "",
+        "name": "seforim.db.buildstate.zst",
+        "size": 764566530,
+        "state": "uploaded",
+        "updatedAt": "2026-09-06T10:27:25Z",
+        "url": "https://github.com/Otzaria/SeforimLibrary/releases/download/v27-20260906092829/seforim.db.buildstate.zst"
+      },
+      {
+        "apiUrl": "https://api.github.com/repos/Otzaria/SeforimLibrary/releases/assets/547108387",
+        "contentType": "application/zstd",
+        "createdAt": "2026-09-06T11:26:51Z",
+        "digest": "sha256:812ddea5d0b8ee84aeacda9c514c6caed51af01af8838ef9fa6d858f2a97286d",
+        "downloadCount": 239,
+        "id": "RA_kwDOQ6kTXM4gnDYj",
+        "label": "",
+        "name": "seforim.db.zst",
+        "size": 1410034443,
+        "state": "uploaded",
+        "updatedAt": "2026-09-06T11:37:15Z",
+        "url": "https://github.com/Otzaria/SeforimLibrary/releases/download/v27-20260906092829/seforim.db.zst"
       }
     ],
-    "name": "v1-20260601094341",
-    "publishedAt": "2026-06-01T11:50:22Z",
-    "tagName": "v1-20260601094341"
+    "name": "v27-20260906092829",
+    "publishedAt": "2026-09-06T11:37:22Z",
+    "tagName": "v27-20260906092829"
   },
   "releases": [
     {
-      "name": "v5 — DB + index dense (modèle v5b) [DRAFT]",
-      "publishedAt": "0001-01-01T00:00:00Z",
-      "tagName": "v5-20260625"
+      "name": "Immutable Seforim pipeline result 34024655297:1",
+      "publishedAt": "2026-09-06T11:37:27Z",
+      "tagName": "pipeline-result-run-34024655297-1"
     },
     {
-      "name": "v1-20260601094341",
-      "publishedAt": "2026-06-01T11:50:22Z",
-      "tagName": "v1-20260601094341"
+      "name": "v27-20260906092829",
+      "publishedAt": "2026-09-06T11:37:22Z",
+      "tagName": "v27-20260906092829"
     },
     {
-      "name": "20260114122617",
-      "publishedAt": "2026-01-15T05:41:46Z",
-      "tagName": "20260114122617"
+      "name": "Immutable Linker snapshot 2486e499f93fde0324496e53dcbbe4ff8a05b3dfd5026943fda7f566e8a8a722",
+      "publishedAt": "2026-09-06T10:05:31Z",
+      "tagName": "lines-snapshot-sha256-2486e499f93fde0324496e53dcbbe4ff8a05b3dfd5026943fda7f566e8a8a722"
     },
     {
-      "name": "20251116085948",
-      "publishedAt": "2025-11-16T09:34:24Z",
-      "tagName": "20251116085948"
+      "name": "Immutable Linker snapshot 1efceedf3f1bf43bd7e5bcbb366c2dbb17a1bfce9d441beadd0e62a22f199cd9",
+      "publishedAt": "2026-09-06T09:09:03Z",
+      "tagName": "lines-snapshot-sha256-1efceedf3f1bf43bd7e5bcbb366c2dbb17a1bfce9d441beadd0e62a22f199cd9"
+    },
+    {
+      "name": "Immutable Linker snapshot 304c0bba07c1356c2410449cab0cc2bc4e13b3d956169b273c06455fa3cf5997",
+      "publishedAt": "2026-09-05T21:39:03Z",
+      "tagName": "lines-snapshot-sha256-304c0bba07c1356c2410449cab0cc2bc4e13b3d956169b273c06455fa3cf5997"
+    },
+    {
+      "name": "Immutable Seforim pipeline result 33865604251:1",
+      "publishedAt": "2026-09-04T13:34:52Z",
+      "tagName": "pipeline-result-run-33865604251-1"
+    },
+    {
+      "name": "v26-20260904110044",
+      "publishedAt": "2026-09-04T13:34:45Z",
+      "tagName": "v26-20260904110044"
+    },
+    {
+      "name": "Immutable Linker snapshot af5094445ad52fa439191d347e2f36b1ce830d79233c5b781756dca29bf60123",
+      "publishedAt": "2026-09-04T11:48:28Z",
+      "tagName": "lines-snapshot-sha256-af5094445ad52fa439191d347e2f36b1ce830d79233c5b781756dca29bf60123"
+    },
+    {
+      "name": "Immutable Seforim pipeline result 33825096860:1",
+      "publishedAt": "2026-09-04T03:18:23Z",
+      "tagName": "pipeline-result-run-33825096860-1"
+    },
+    {
+      "name": "v25-20260904011803",
+      "publishedAt": "2026-09-04T03:18:16Z",
+      "tagName": "v25-20260904011803"
+    },
+    {
+      "name": "Immutable Linker snapshot fae4d160c5b1725b9602a5ba05395303e21dcc7aab3634742d4caf4c14e0fb19",
+      "publishedAt": "2026-09-03T23:45:54Z",
+      "tagName": "lines-snapshot-sha256-fae4d160c5b1725b9602a5ba05395303e21dcc7aab3634742d4caf4c14e0fb19"
+    },
+    {
+      "name": "Immutable Linker snapshot 5bf2424b821f4221c5e9e14834cf86070b1b939cbb8a89773d6aaa680c86a36f",
+      "publishedAt": "2026-09-01T20:55:34Z",
+      "tagName": "lines-snapshot-sha256-5bf2424b821f4221c5e9e14834cf86070b1b939cbb8a89773d6aaa680c86a36f"
+    },
+    {
+      "name": "Immutable Seforim pipeline result 33389998063:1",
+      "publishedAt": "2026-08-31T13:52:08Z",
+      "tagName": "pipeline-result-run-33389998063-1"
+    },
+    {
+      "name": "Schema 3 delta v23 → v24",
+      "publishedAt": "2026-08-31T15:48:18Z",
+      "tagName": "patch-v23-v24-sha256-ad1f7ddeafab1b99adebf9ec8b5d27019d75c673b8ea41a0ead88387a1b3e34d"
+    },
+    {
+      "name": "v24-20260831120814",
+      "publishedAt": "2026-08-31T13:52:01Z",
+      "tagName": "v24-20260831120814"
+    },
+    {
+      "name": "Immutable Linker snapshot 551c718123356bc3acb4bb9222fc5c92ee4fca4d9e86dd0aba63afd33f440777",
+      "publishedAt": "2026-08-30T10:34:36Z",
+      "tagName": "lines-snapshot-sha256-551c718123356bc3acb4bb9222fc5c92ee4fca4d9e86dd0aba63afd33f440777"
+    },
+    {
+      "name": "Immutable Linker snapshot b53d614c73ff7e113902153782330fbcc53ae6da5bb722dd66f63d7d4897e25e",
+      "publishedAt": "2026-08-30T02:22:30Z",
+      "tagName": "lines-snapshot-sha256-b53d614c73ff7e113902153782330fbcc53ae6da5bb722dd66f63d7d4897e25e"
+    },
+    {
+      "name": "Immutable Linker snapshot 022b561d036ec9c61cdd863b8d2268cf550641db6271cfbe5322a14b912c01a5",
+      "publishedAt": "2026-08-30T00:51:18Z",
+      "tagName": "lines-snapshot-sha256-022b561d036ec9c61cdd863b8d2268cf550641db6271cfbe5322a14b912c01a5"
+    },
+    {
+      "name": "Immutable Seforim pipeline result 33231270038:1",
+      "publishedAt": "2026-08-29T05:38:14Z",
+      "tagName": "pipeline-result-run-33231270038-1"
+    },
+    {
+      "name": "v23-20260829032606",
+      "publishedAt": "2026-08-29T05:38:06Z",
+      "tagName": "v23-20260829032606"
+    },
+    {
+      "name": "Immutable Linker snapshot c024583b362190fc3105b1d17740e7de8c4647aaf0a73c5f3e5bd439e8597036",
+      "publishedAt": "2026-08-28T16:24:34Z",
+      "tagName": "lines-snapshot-sha256-c024583b362190fc3105b1d17740e7de8c4647aaf0a73c5f3e5bd439e8597036"
+    },
+    {
+      "name": "Immutable Linker snapshot 159557c67e06da501e1cead4b02dca64ac902f8864a2a2635a8439964c7fa688",
+      "publishedAt": "2026-08-27T09:35:01Z",
+      "tagName": "lines-snapshot-sha256-159557c67e06da501e1cead4b02dca64ac902f8864a2a2635a8439964c7fa688"
+    },
+    {
+      "name": "Immutable Seforim pipeline result 32497557926:1",
+      "publishedAt": "2026-08-21T18:11:49Z",
+      "tagName": "pipeline-result-run-32497557926-1"
+    },
+    {
+      "name": "v22-20260821152805",
+      "publishedAt": "2026-08-21T18:11:44Z",
+      "tagName": "v22-20260821152805"
+    },
+    {
+      "name": "Immutable Linker snapshot a66060767647af1cbc8fe4c36aa7338d786d4f150fc5dd5e5d82f6bc17ddd1e9",
+      "publishedAt": "2026-08-20T18:27:40Z",
+      "tagName": "lines-snapshot-sha256-a66060767647af1cbc8fe4c36aa7338d786d4f150fc5dd5e5d82f6bc17ddd1e9"
+    },
+    {
+      "name": "Immutable Seforim pipeline result 31775022164:1",
+      "publishedAt": "2026-08-14T08:57:23Z",
+      "tagName": "pipeline-result-run-31775022164-1"
+    },
+    {
+      "name": "v21-20260814060554",
+      "publishedAt": "2026-08-14T08:57:19Z",
+      "tagName": "v21-20260814060554"
+    },
+    {
+      "name": "Immutable Linker snapshot d6ce652fd3be4b3daa057c526f25e5559f6f23550a3ddb23224db1c1920ddbc9",
+      "publishedAt": "2026-08-14T02:49:51Z",
+      "tagName": "lines-snapshot-sha256-d6ce652fd3be4b3daa057c526f25e5559f6f23550a3ddb23224db1c1920ddbc9"
+    },
+    {
+      "name": "v20-20260807110905",
+      "publishedAt": "2026-08-07T15:19:20Z",
+      "tagName": "v20-20260807110905"
+    },
+    {
+      "name": "v19-20260731105446",
+      "publishedAt": "2026-07-31T13:50:40Z",
+      "tagName": "v19-20260731105446"
+    },
+    {
+      "name": "v18-20260728123527",
+      "publishedAt": "2026-07-28T17:33:45Z",
+      "tagName": "v18-20260728123527"
+    },
+    {
+      "name": "v17-20260725215227",
+      "publishedAt": "2026-07-26T00:13:00Z",
+      "tagName": "v17-20260725215227"
+    },
+    {
+      "name": "v16-20260723080937",
+      "publishedAt": "2026-07-23T10:28:45Z",
+      "tagName": "v16-20260723080937"
+    },
+    {
+      "name": "v15-20260722011300",
+      "publishedAt": "2026-07-22T03:19:50Z",
+      "tagName": "v15-20260722011300"
+    },
+    {
+      "name": "v14-20260719174439",
+      "publishedAt": "2026-07-19T20:49:44Z",
+      "tagName": "v14-20260719174439"
+    },
+    {
+      "name": "v13-20260709181538",
+      "publishedAt": "2026-07-09T20:15:00Z",
+      "tagName": "v13-20260709181538"
+    },
+    {
+      "name": "v12-20260708181148",
+      "publishedAt": "2026-07-08T20:13:28Z",
+      "tagName": "v12-20260708181148"
+    },
+    {
+      "name": "v11-20260707205718",
+      "publishedAt": "2026-07-07T23:21:18Z",
+      "tagName": "v11-20260707205718"
+    },
+    {
+      "name": "v10-20260707103605",
+      "publishedAt": "2026-07-07T12:49:41Z",
+      "tagName": "v10-20260707103605"
+    },
+    {
+      "name": "v9-20260706195857",
+      "publishedAt": "2026-07-06T22:19:59Z",
+      "tagName": "v9-20260706195857"
+    },
+    {
+      "name": "v8-20260706103738",
+      "publishedAt": "2026-07-06T12:51:17Z",
+      "tagName": "v8-20260706103738"
+    },
+    {
+      "name": "v7-20260703094250",
+      "publishedAt": "2026-07-03T11:22:47Z",
+      "tagName": "v7-20260703094250"
+    },
+    {
+      "name": "v6-20260702173941",
+      "publishedAt": "2026-07-02T19:11:41Z",
+      "tagName": "v6-20260702173941"
+    },
+    {
+      "name": "v5-20260701110442",
+      "publishedAt": "2026-07-01T12:41:32Z",
+      "tagName": "v5-20260701110442"
+    },
+    {
+      "name": "v4-20260630045331",
+      "publishedAt": "2026-06-30T06:16:59Z",
+      "tagName": "v4-20260630045331"
+    },
+    {
+      "name": "v3-20260626155508",
+      "publishedAt": "2026-06-26T17:10:27Z",
+      "tagName": "v3-20260626155508"
+    },
+    {
+      "name": "v2-20260626072852",
+      "publishedAt": "2026-06-26T08:35:44Z",
+      "tagName": "v2-20260626072852"
+    },
+    {
+      "name": "v1-20260625232529",
+      "publishedAt": "2026-06-26T00:25:13Z",
+      "tagName": "v1-20260625232529"
     }
   ]
 }
