@@ -113,13 +113,34 @@ The allocator's natural keys are :
 | `tocText`   | display text                                    | |
 | `connection_type` | `name`                                    | "commentary", "targum" |
 | `book`      | `(sourceName, canonicalHeTitle)`                | survives renames via book_aliases |
-| `line`      | `(bookId, "REF:"+heRef)` for Sefaria, `(bookId, contentHash, occurrenceIdx)` for Otzaria | heRef is THE killer feature — survives Sefaria's prefix renumbering |
+| `line`      | `(bookId, sha1("CT:"+rawSegment), occurrenceIdx)`   | content only — see the note below |
 | `tocEntry`  | `(bookId, ancestorPath@lineIndex)`              | path is a `/`-joined sequence of tocText ids |
 | `link`      | `(srcLineId, tgtLineId, connectionTypeId)`      | |
 
 > If two builds share the same `build_state.db` seed and the corpus
 > contents are unchanged, all ids match. If a row's content changes,
 > only that row gets a new id; everything around it stays put.
+
+> **`line` key, post-#1211.** Both Sefaria and Otzaria lines are keyed on
+> content alone. Up to db v27 a Sefaria line with an `heRef` was keyed
+> `"REF:"+heRef` instead; one reformatting pass that rewrote every heRef
+> renumbered the whole corpus and produced a 3 GB delta, so the ref — an
+> ordinary updatable column — is out of the key.
+>
+> `rawSegment` is the Sefaria segment **before** the generated prefixes the
+> importer injects (`(א) `, daf labels). Hashing the rendered line would
+> reintroduce the same failure at chapter scale: inserting one verse
+> reprefixes every verse after it. `BookPayload.cleanShiftByLineIndex`
+> records the injected prefix length, and the key strips it.
+>
+> Lines that repeat verbatim inside one book are separated by
+> `occurrenceIdx`, a per-`(bookId, contentHash)` counter in document order.
+>
+> `LegacyLineKey` is the one-build migration shim: on a miss the allocator
+> retries the pre-#1211 key (`"REF:"+heRef`, else `"CT:"+renderedContent`)
+> for **every** line and re-files the id under the new key, so the snapshot
+> it writes is fully migrated. Delete it once no build_state in circulation
+> predates the change.
 
 ### 1.2 The full producer pipeline
 

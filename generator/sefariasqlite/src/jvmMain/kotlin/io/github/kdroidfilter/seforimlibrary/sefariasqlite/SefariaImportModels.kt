@@ -2,6 +2,7 @@ package io.github.kdroidfilter.seforimlibrary.sefariasqlite
 
 import io.github.kdroidfilter.seforimlibrary.common.countVisibleChars
 import io.github.kdroidfilter.seforimlibrary.common.ids.IdAllocatorBindings
+import io.github.kdroidfilter.seforimlibrary.common.ids.LegacyLineKey
 import io.github.kdroidfilter.seforimlibrary.core.models.PubDate
 import kotlinx.serialization.Serializable
 
@@ -143,11 +144,16 @@ internal class LinePrecompute(
     val hasTeamim: Boolean,
     val hasNekudot: Boolean,
     lineKeyHashes: Array<ByteArray>,
+    legacyLineKeyHashes: Array<ByteArray>,
     lineCharCounts: IntArray,
     lineIsHeading: BooleanArray,
 ) {
-    /// Per line, `IdAllocatorBindings.lineNaturalKeyHash(content, heRef)`.
+    /// Per line, the natural-key hash of the raw segment (generated prefixes stripped).
     var lineKeyHashes: Array<ByteArray>? = lineKeyHashes
+        private set
+
+    /// Per line, `LegacyLineKey.hash(content, heRef)` — transition shim only.
+    var legacyLineKeyHashes: Array<ByteArray>? = legacyLineKeyHashes
         private set
 
     /// Per line, `countVisibleChars(content)`.
@@ -164,6 +170,7 @@ internal class LinePrecompute(
 
     fun release() {
         lineKeyHashes = null
+        legacyLineKeyHashes = null
         lineCharCounts = null
         lineIsHeading = null
     }
@@ -185,11 +192,13 @@ internal fun BookPayload.precomputeLineData(): BookPayload {
     val refsByLineIndex = refEntries.associateBy { it.lineIndex - 1 }
     val count = lines.size
     val hashes = arrayOfNulls<ByteArray>(count)
+    val legacyHashes = arrayOfNulls<ByteArray>(count)
     val charCounts = IntArray(count)
     val isHeading = BooleanArray(count)
     for (idx in 0 until count) {
         val content = lines[idx]
-        hashes[idx] = IdAllocatorBindings.lineNaturalKeyHash(content, refsByLineIndex[idx]?.heRef)
+        hashes[idx] = IdAllocatorBindings.lineNaturalKeyHash(rawSegmentForKey(idx, content))
+        legacyHashes[idx] = LegacyLineKey.hash(content, refsByLineIndex[idx]?.heRef)
         charCounts[idx] = countVisibleChars(content)
         isHeading[idx] = content.contains("<h1>") || content.contains("<h2>") ||
             content.contains("<h3>") || content.contains("<h4>")
@@ -201,10 +210,23 @@ internal fun BookPayload.precomputeLineData(): BookPayload {
         hasTeamim = teamim,
         hasNekudot = nekudot,
         lineKeyHashes = hashes as Array<ByteArray>,
+        legacyLineKeyHashes = legacyHashes as Array<ByteArray>,
         lineCharCounts = charCounts,
         lineIsHeading = isHeading,
     )
     return this
+}
+
+/**
+ * The line's text with the generated prefix (`(א) `, daf labels…) stripped off.
+ * Inserting one verse reprefixes every later line of the chapter, and hashing
+ * the prefixed text would renumber all of their ids (issue #1211).
+ */
+private fun BookPayload.rawSegmentForKey(lineIndex: Int, content: String): String {
+    // CLEAN_MODIFIED (or an out-of-range shift) means the raw segment cannot be
+    // recovered from the stored text; the prefixed content is the best key left.
+    val shift = cleanShiftByLineIndex[lineIndex] ?: return content
+    return if (shift in 1..content.length) content.substring(shift) else content
 }
 
 internal data class VersionMeta(

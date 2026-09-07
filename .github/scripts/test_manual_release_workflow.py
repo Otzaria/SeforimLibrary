@@ -48,6 +48,11 @@ PATCH_PIPELINE_CLI = (
     / "io" / "github" / "kdroidfilter" / "seforimlibrary" / "common" / "patch"
     / "PatchPipelineCli.kt"
 )
+PATCH_SIZE_GUARD = (
+    Path(__file__).parents[2]
+    / "generator/common/src/jvmMain/kotlin/io/github/kdroidfilter/seforimlibrary"
+    / "common/patch/PatchSizeGuard.kt"
+)
 
 
 class ManualReleaseWorkflowContractTest(unittest.TestCase):
@@ -276,6 +281,50 @@ class ManualReleaseWorkflowContractTest(unittest.TestCase):
         self.assertLess(
             patch_fan.index("for ROW in "),
             patch_fan.index("patch fan produced no patch although prior releases exist"),
+        )
+
+    def test_a_corpus_wide_size_guard_skip_still_publishes_a_full_only_release(self):
+        # A build that churns every line legitimately loses every anchor to the
+        # delta size guard (Otzaria issue #1211). That is a degraded release —
+        # seforim.db.zst + buildstate, no patches — not a broken patch contract.
+        patch_fan = self.step("Produce + verify patch fan")
+        # produce_anchor lives in patch_fan_lib.sh, sourced into the step's shell.
+        fan_lib = self.fan_lib
+
+        # The kind of every skip outlives its subshell as a file, because the
+        # anchors run in background subshells that cannot share a variable.
+        self.assertIn('SKIP_DIR="$RUNNER_TEMP/patch-fan-skips"', fan_lib)
+        self.assertIn("record_skip() {", fan_lib)
+        # Every skip path records, so "no patch and no recorded skip" stays an error.
+        self.assertEqual(fan_lib.count("record_skip "), 3)
+        self.assertIn('record_skip structural "$TARGET_VER" "${PRECHECK#* }"', fan_lib)
+        self.assertIn('record_skip "$SKIP_KIND" "$TARGET_VER"', fan_lib)
+
+        # The oversized/structural split is driven by the token PatchSizeGuard
+        # puts at the head of its marker — the two must not drift apart.
+        token = re.search(
+            r'MARKER_REASON_TOKEN: String = "([^"]+)"',
+            PATCH_SIZE_GUARD.read_text(encoding="utf-8"),
+        )
+        self.assertIsNotNone(token, "PatchSizeGuard must expose MARKER_REASON_TOKEN")
+        self.assertIn(
+            f'case "$REASON" in {token.group(1)}:*) SKIP_KIND=oversized ;; esac',
+            fan_lib,
+        )
+
+        # No patch + at least one size-guard skip: warn and carry on.
+        warn_at = patch_fan.index("::warning::patch fan produced no patch:")
+        err_at = patch_fan.index("patch fan produced no patch although prior releases exist")
+        self.assertLess(warn_at, err_at)
+        self.assertIn('if [ "$OVERSIZED_SKIPS" -gt 0 ]; then', patch_fan)
+        self.assertNotIn("exit 1", patch_fan[warn_at:err_at])
+        # No patch and no size-guard skip is still a hard failure.
+        self.assertIn("exit 1", patch_fan[err_at:])
+
+        # Staging a release with zero patches is already guarded.
+        self.assertIn(
+            'if compgen -G "patches/patch-*.db.zst" > /dev/null; then',
+            self.step("Stage release assets"),
         )
 
     def test_patch_fan_decides_unpatchable_anchors_before_downloading_them(self):

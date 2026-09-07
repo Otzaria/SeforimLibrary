@@ -2061,12 +2061,21 @@ jobs:
             wait buildstate 3600
           echo "=== Final patch artefacts ==="
           ls -lh patches/ || true
-          # Skipped anchors are warnings, but a release with prior versions and
-          # NO delta at all means every anchor was skipped — that is a broken
-          # patch contract, not a degraded one, and must fail loudly.
+          # Skipped anchors are warnings. No delta AT ALL is only acceptable
+          # when the size guard is what removed them: a corpus-wide churn build
+          # legitimately ships full-only (seforim.db.zst + buildstate). Every
+          # anchor skipped for any other reason is still a broken patch
+          # contract and must fail loudly. SKIP_DIR is patch_fan_lib.sh's.
           if ! compgen -G "patches/patch-*.db.zst" > /dev/null; then
-            echo "::error::patch fan produced no patch although prior releases exist (every anchor skipped)"
-            exit 1
+            OVERSIZED_SKIPS=$(find "$SKIP_DIR" -type f -name '*.oversized' | wc -l)
+            STRUCTURAL_SKIPS=$(find "$SKIP_DIR" -type f -name '*.structural' | wc -l)
+            if [ "$OVERSIZED_SKIPS" -gt 0 ]; then
+              echo "::warning::patch fan produced no patch: $OVERSIZED_SKIPS anchor(s) dropped by the delta size guard, $STRUCTURAL_SKIPS structurally unpatchable — publishing a full-only release (seforim.db.zst + buildstate)"
+              cat "$SKIP_DIR"/*.oversized
+            else
+              echo "::error::patch fan produced no patch although prior releases exist (every anchor skipped; $STRUCTURAL_SKIPS structurally unpatchable, none dropped by the size guard)"
+              exit 1
+            fi
           fi
 
       # Compress the full DB into a single .zst for the release. Done after the

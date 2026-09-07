@@ -110,11 +110,14 @@ jobs:
           # catalog.pb is no longer produced; drop any stale copy so it can't
           # be auto-embedded into the patch via the default -PcatalogPb path.
           rm -f build/catalog.pb
+          # These runs test the delta MECHANICS on toy DBs, where a patch is
+          # legitimately huge relative to the DB — the size guard must not fire.
           ./gradlew :generator-common:producePatchAndVerify \
             -PprevDb=$PWD/build/seforim.db.v1 \
             -PnewDb=$PWD/build/seforim.db \
             -Pout=$PWD/build/patch-v1-v2.db \
             -PfromVersion=1 -PtoVersion=2 \
+            -PmaxDeltaUncompressedRatio=1000 \
             --no-daemon --stacktrace
 
       # ─── PATCH SIZE + MANIFEST SUMMARY ──────────────────────────────────────

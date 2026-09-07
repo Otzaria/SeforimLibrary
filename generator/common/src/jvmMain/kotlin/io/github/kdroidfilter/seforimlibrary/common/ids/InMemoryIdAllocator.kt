@@ -25,8 +25,6 @@ import java.util.concurrent.atomic.AtomicLong
  * - Fresh allocations come from a per-table [AtomicLong] counter.
  * - Counters start at `max(previous next_id, previous max(id) + 1, 1)` so we
  *   never collide with reused ids even if the previous snapshot was incomplete.
- *
- * See DELTA_UPDATE_PLAN.md §3.5.
  */
 class InMemoryIdAllocator private constructor(
     previous: BuildStateSnapshot,
@@ -97,6 +95,22 @@ class InMemoryIdAllocator private constructor(
 
     private val previousMeta: Map<String, String> = previous.meta
 
+    /** Line keys the seed build_state carried in — 0 means there was nothing to migrate. */
+    private val seedLineCount: Int = previous.lines.size
+
+    // Transition shim counters (see LegacyLineKey); reported by snapshotTo.
+    private val legacyLineKeysMigrated = AtomicLong(0)
+    private val legacyLineKeyLookups = AtomicLong(0)
+
+    /** How many line ids were carried over from a pre-#1211 build_state. */
+    fun legacyLineKeysMigrated(): Long = legacyLineKeysMigrated.get()
+
+    /** Lines whose legacy key differed from the new one, so the shim was consulted. */
+    fun legacyLineKeyLookups(): Long = legacyLineKeyLookups.get()
+
+    /** Lines the shim was consulted for and could not resolve — they got a fresh id. */
+    fun legacyLineKeysMissed(): Long = legacyLineKeyLookups.get() - legacyLineKeysMigrated.get()
+
     // ─── Lookup-table accessors ────────────────────────────────────────────────
 
     private fun allocateLookup(table: IdTable, key: String): Long {
@@ -150,10 +164,22 @@ class InMemoryIdAllocator private constructor(
         }
     }
 
-    override fun lineId(bookId: Long, contentHash: ByteArray, occurrenceIdx: Int): Long {
+    override fun lineId(bookId: Long, contentHash: ByteArray, occurrenceIdx: Int): Long =
+        lineId(bookId, contentHash, occurrenceIdx, legacy = null)
+
+    override fun lineId(
+        bookId: Long,
+        contentHash: ByteArray,
+        occurrenceIdx: Int,
+        legacy: LegacyLineKey?,
+    ): Long {
         require(contentHash.size == 20) { "contentHash must be 20-byte sha1, got ${contentHash.size}" }
         val key = LineKey(bookId, contentHash, occurrenceIdx)
         lines[key]?.let {
+            reusedCount.getValue(IdTable.LINE).incrementAndGet()
+            return it
+        }
+        migrateLegacyLineKey(bookId, key, legacy)?.let {
             reusedCount.getValue(IdTable.LINE).incrementAndGet()
             return it
         }
@@ -161,6 +187,23 @@ class InMemoryIdAllocator private constructor(
             freshCount.getValue(IdTable.LINE).incrementAndGet()
             counters.getValue(IdTable.LINE).getAndIncrement()
         }
+    }
+
+    /**
+     * Transition shim (see [LegacyLineKey]): moves the id a pre-#1211 build
+     * filed under the heRef-based key over to [newKey]. Tried for every line,
+     * not only ref-bearing ones — a generated prefix moved into the old key too.
+     */
+    private fun migrateLegacyLineKey(bookId: Long, newKey: LineKey, legacy: LegacyLineKey?): Long? {
+        if (legacy == null) return null
+        val legacyKey = LineKey(bookId, legacy.contentHash, legacy.occurrenceIdx)
+        if (legacyKey == newKey) return null
+        legacyLineKeyLookups.incrementAndGet()
+        val id = lines.remove(legacyKey) ?: return null
+        legacyLineKeysMigrated.incrementAndGet()
+        // remove + putIfAbsent, never a bare put: it is what stops one id from
+        // ending up filed under both keys in the written snapshot.
+        return lines.putIfAbsent(newKey, id) ?: id
     }
 
     override fun tocEntryId(bookId: Long, ancestorPath: String): Long {
@@ -286,6 +329,7 @@ class InMemoryIdAllocator private constructor(
             bookAliases = bookAliases.values.toList(),
             sourceHashes = mergedSourceHashes,
         )
+        logLegacyLineKeyTransition()
         BuildStateWriter(logger).write(snapshot, target)
         val stats = stats()
         logger.i {
@@ -293,6 +337,28 @@ class InMemoryIdAllocator private constructor(
                 .filterValues { it.total > 0 }
                 .entries
                 .joinToString { (t, s) -> "${t.tableName}(reused=${s.reused}, fresh=${s.freshlyAllocated})" }
+        }
+    }
+
+    /**
+     * Build-summary line for the #1211 key change: a transition build that did
+     * NOT carry its ids over is the failure mode worth seeing, so it warns.
+     */
+    private fun logLegacyLineKeyTransition() {
+        val lookups = legacyLineKeyLookups.get()
+        if (seedLineCount == 0 || lookups == 0L) return
+        val migrated = legacyLineKeysMigrated.get()
+        val missed = lookups - migrated
+        logger.i {
+            "Legacy line-key transition: seed held $seedLineCount line keys; " +
+                "$lookups lines re-keyed, $migrated migrated, $missed given fresh ids"
+        }
+        if (missed > lookups * LEGACY_MISS_WARN_FRACTION) {
+            logger.w {
+                "Legacy line-key transition looks unclean: $missed of $lookups re-keyed lines " +
+                    "(${"%.1f".format(missed * 100.0 / lookups)}%) got a fresh id instead of the seed's — " +
+                    "expect a large delta for this release"
+            }
         }
     }
 
@@ -315,6 +381,9 @@ class InMemoryIdAllocator private constructor(
     }
 
     companion object {
+        /** Above this share of re-keyed lines missing from the seed, the transition warns. */
+        private const val LEGACY_MISS_WARN_FRACTION = 0.01
+
         /** Loads a previous build_state from [path] (empty if missing) and returns an allocator. */
         fun load(path: Path?, logger: Logger = Logger.withTag("IdAllocator")): InMemoryIdAllocator {
             val previous = if (path == null) {
