@@ -31,7 +31,9 @@ import kotlin.system.exitProcess
  * `base_text_titles`) is a שולחן ערוך book; the SA gate is deliberate — on
  * other bases (e.g. Rashi on Torah) a per-verse marker would be noise, not
  * structure. A book that already has a Seifim structure is skipped, so the
- * task is idempotent.
+ * task is idempotent; so is a book whose main TOC already carries se'if
+ * headings under its simanim (Shach) — a synthesized copy would only
+ * duplicate them.
  *
  * All writes run on one JDBC connection in a single transaction with batched
  * statements — the line_alt_toc map alone is hundreds of thousands of rows,
@@ -380,6 +382,12 @@ internal fun readSeifimCandidateSnapshots(conn: Connection): List<SeifimBookSnap
                 current = current.parentId?.let(headingById::get)
             }
         }
+        // A book whose main TOC already breaks simanim into se'ifim (Shach,
+        // Taz on Yoreh De'ah) needs no synthesized copy: the reader would show
+        // "סעיף ג" twice, once per structure, pointing at adjacent lines.
+        val simanIds = headingRows.filter { isSimanHeading(it.heading.text) }.map { it.id }.toHashSet()
+        if (headingRows.any { it.parentId in simanIds && isSeifHeading(it.heading.text) }) continue
+
         // Keep only siman headings and their structural ancestors. Lower-level
         // headings such as "סעיף קטן א" are content inside the new se'if
         // group, not containers above it.
@@ -416,6 +424,15 @@ private fun isSimanHeading(text: String): Boolean {
     return trimmed.startsWith("סימן") &&
         trimmed.length > "סימן".length &&
         trimmed["סימן".length].isWhitespace()
+}
+
+/** "סעיף ג" — a se'if heading; "סעיף קטן א" is a se'if-katan and stays content. */
+private fun isSeifHeading(text: String): Boolean {
+    val trimmed = text.trimStart()
+    return trimmed.startsWith("סעיף") &&
+        trimmed.length > "סעיף".length &&
+        trimmed["סעיף".length].isWhitespace() &&
+        !trimmed.removePrefix("סעיף").trimStart().startsWith("קטן")
 }
 
 private fun queryMaxId(conn: Connection, table: String): Long =

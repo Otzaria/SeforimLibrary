@@ -238,6 +238,37 @@ class SynthesizeSeifimAltTocIntegrationTest {
     }
 
     @Test
+    fun `a main TOC that already has seif headings under the siman is not re-synthesized`() = runBlocking {
+        // ש"ך על יו"ד: סימן ← סעיף ← תוכן. עלה "סעיף" מסונתז היה מכפיל את
+        // הכותרת הקיימת (otzaria#1249).
+        val (_, mbId) = seedMiniDb()
+        val simanEntryId = DriverManager.getConnection("jdbc:sqlite:$dbFile").use { conn ->
+            conn.prepareStatement(
+                "SELECT e.id FROM tocEntry e JOIN tocText t ON t.id = e.textId WHERE e.bookId = ? AND t.text = 'סימן א'",
+            ).use { st ->
+                st.setLong(1, mbId)
+                st.executeQuery().use { rs -> assertTrue(rs.next()); rs.getLong(1) }
+            }
+        }
+        repo.insertTocEntry(
+            TocEntry(bookId = mbId, parentId = simanEntryId, text = "סעיף א", level = 3, lineId = repo.getLineByIndex(mbId, 4)!!.id),
+        )
+
+        DriverManager.getConnection("jdbc:sqlite:$dbFile").use { conn ->
+            assertTrue(readSeifimCandidateSnapshots(conn).isEmpty(), "existing se'if headings must exclude the book")
+        }
+    }
+
+    @Test
+    fun `se'if-katan headings under the siman do not exclude the book`() = runBlocking {
+        // seedMiniDb כבר מכיל "סעיף קטן א" מתחת לסימן — הספר חייב להישאר מועמד.
+        seedMiniDb()
+        DriverManager.getConnection("jdbc:sqlite:$dbFile").use { conn ->
+            assertEquals(1, readSeifimCandidateSnapshots(conn).size)
+        }
+    }
+
+    @Test
     fun `incidental SA links do not qualify a commentary on another declared base`() = runBlocking {
         val (_, mbId) = seedMiniDb()
         val sourceId = repo.insertSource("Other")
