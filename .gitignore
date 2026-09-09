@@ -21,3 +21,4 @@ repomix-output.xml
 *.db.bak
 *.db-shm
 *.db-wal
+__pycache__/

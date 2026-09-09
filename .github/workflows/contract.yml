@@ -4,7 +4,17 @@
 name: contract
 
 on:
+  # בלי סינון-ענפים, ה-refs שהצינור עצמו יוצר (תגי-רליס, ה-releases של
+  # lines-snapshot-sha256-…, ענפי-saga) הריצו את ה-job הזה שוב על עץ שכבר
+  # נבדק: ריצות 34026451036 (ענף lines-snapshot-sha256-2486e499…) ו-34030778729
+  # (ענף v27-20260906092829) היו שתיהן push על אותו SHA 2aadf7a7 — ~78
+  # שניות-runner ו-141KB לוג כפולים. `ci.yml` כבר מסנן כך, ולא בכותרת הזו ולא
+  # בתיעוד יש ריצת-contract מכוונת מתג.
   push:
+    branches:
+      - otzaria
+  # pull_request נשאר בלי סינון בכוונה: PR נפתח בידי אדם, ובועות ה-branch stack
+  # (BRANCH-STACK.md) מכוונות גם לבסיסים שאינם otzaria.
   pull_request:
 
 jobs:
@@ -18,7 +28,7 @@ jobs:
       KOTLIN_VISIBILITY_FIXTURE: generator/sefariasqlite/src/jvmTest/resources/link_visibility_contract_v1.json
       SEFARIA_VISIBILITY_FIXTURE: sefaria-export/link_visibility_contract_v1.json
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       # A coordinated contract change spans two repositories. On a PR, prefer
       # a linked open companion PR by the same author; on push (or when none is
@@ -48,14 +58,14 @@ jobs:
           echo "ref=main" >> "$GITHUB_OUTPUT"
 
       - name: Checkout Otzaria/otzaria_library_updater (צד ה-Dart)
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           repository: ${{ steps.updater.outputs.repository }}
           ref: ${{ steps.updater.outputs.ref }}
           path: seforim-library-updater
 
       - name: Checkout Otzaria/SefariaExport visibility contract
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           repository: Otzaria/SefariaExport
           path: sefaria-export
@@ -69,6 +79,7 @@ jobs:
           test -f "$DART_HASH_FIXTURE"
           test -f "$KOTLIN_VISIBILITY_FIXTURE"
           test -f "$SEFARIA_VISIBILITY_FIXTURE"
+          echo "fixtures: 6 present"
 
       # השוואת בתים ישירה בין שני ה-fixtures — הבדיקה המקבילה בצד ה-Dart רצה ב-CI של ה-updater
       - name: cmp fixtures (byte-identical)
@@ -76,22 +87,54 @@ jobs:
           cmp "$KOTLIN_FIXTURE" "$DART_FIXTURE"
           cmp "$KOTLIN_HASH_FIXTURE" "$DART_HASH_FIXTURE"
           cmp "$KOTLIN_VISIBILITY_FIXTURE" "$SEFARIA_VISIBILITY_FIXTURE"
+          echo "fixtures: 3 pairs byte-identical"
 
       # cmp לבדו תופס רק סטייה בין שני ה-fixtures. שינוי ברשימת הטבלאות בצד Kotlin
       # שכן מתעדכן ב-fixture ה-Kotlini היה עובר בשקט — לכן מריצים גם את בדיקת החוזה
-      # הקוטלינית עצמה (מאמתת את הרשימה מול הקוד), כדי שתיכשל ב-push. JDK 25 כמו ci.yml;
-      # setup-gradle מספק caching (כמו gradle-build-action ב-ci.yml).
+      # הקוטלינית עצמה (מאמתת את הרשימה מול הקוד), כדי שתיכשל ב-push. JDK 25 כמו
+      # ci.yml, וגם setup-gradle זהה לו מאז ש-ci.yml נגמל מ-gradle-build-action.
       - name: Set up JDK 25
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: "25"
 
       - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@v4
+        uses: gradle/actions/setup-gradle@v5
 
       - name: Grant execute permission for gradlew
         run: chmod +x gradlew
 
+      # הצעד היה מסתיים ב-check ירוק בלי ולו מספר-טסטים אחד בכל הלוג (ריצה
+      # 34024566706). Gradle כותב JUnit XML גם כשה-task הוא FROM-CACHE, ולכן
+      # השורה האחרונה מדווחת מה בדיוק אומת — גם כשלא הורץ מחדש.
       - name: Run Kotlin patch-tables contract test
-        run: ./gradlew :generator-common:jvmTest --tests '*PatchTablesContractTest*' --tests '*LogicalHashContractTest*' --no-daemon
+        run: |
+          set -uo pipefail
+          rc=0
+          ./gradlew :generator-common:jvmTest --tests '*PatchTablesContractTest*' --tests '*LogicalHashContractTest*' --no-daemon || rc=$?
+          python3 - <<'PY' || rc=1
+          import glob
+          import xml.etree.ElementTree as ET
+
+          reports = sorted(glob.glob("generator/common/build/test-results/jvmTest/*.xml"))
+          classes = tests = failures = errors = skipped = 0
+          for report in reports:
+              root = ET.parse(report).getroot()
+              if root.tag != "testsuite":
+                  continue
+              classes += 1
+              tests += int(root.get("tests", 0))
+              failures += int(root.get("failures", 0))
+              errors += int(root.get("errors", 0))
+              skipped += int(root.get("skipped", 0))
+          print(
+              f"tests: PatchTablesContractTest+LogicalHashContractTest {tests - failures - errors - skipped} passed, "
+              f"{failures + errors} failed, {skipped} skipped "
+              f"({classes} test classes)"
+          )
+          if classes == 0:
+              print("::error::the contract test wrote no test-result XML — nothing ran")
+              raise SystemExit(1)
+          PY
+          exit "$rc"
