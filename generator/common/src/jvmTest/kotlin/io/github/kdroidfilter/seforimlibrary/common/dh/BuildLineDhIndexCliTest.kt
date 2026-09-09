@@ -7,6 +7,7 @@ import java.sql.SQLException
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
+import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 class BuildLineDhIndexCliTest {
@@ -156,6 +157,133 @@ class BuildLineDhIndexCliTest {
 
             assertEquals(1, report.boldBooks)
             assertEquals(10, report.indexed)
+        }
+    }
+
+    @Test
+    fun `a book whose bold words are paragraph openers is dropped as noise`() {
+        withDb { conn ->
+            conn.createStatement().use { it.execute("INSERT INTO book (id, title) VALUES (10, 'שו\"ת')") }
+            // Full coverage and fully distinct keys, but every mark is an opener
+            // (two of them with Hebrew gershayim, which must fold to ASCII).
+            val openers = listOf(
+                "והנה", "ועוד", "אמנם", "ובזה", "אך", "אבל", "אלא", "ונראה",
+                "הנה", "ומה", "ולפ״ז", "ולענ״ד",
+            )
+            insertLines(conn, 10, openers.map { "<b>$it</b> דברי המשיב בעניין השאלה" })
+
+            val report = indexAllBooks(conn, Logger.withTag("test"))
+
+            assertEquals(1, report.noisyBooks)
+            assertEquals(0, report.skippedBooks)
+            assertEquals(0, report.boldBooks + report.dashBooks)
+            assertEquals(emptyList(), dhRows(conn))
+        }
+    }
+
+    @Test
+    fun `a book that bolds the same word in most paragraphs is dropped for low diversity`() {
+        withDb { conn ->
+            conn.createStatement().use { it.execute("INSERT INTO book (id, title) VALUES (11, 'רלב\"ג על התורה')") }
+            // 18 of 20 hits share one key that is not in OPENERS, so only the
+            // distinct-ratio rule can reject this book.
+            insertLines(
+                conn, 11,
+                List(18) { "<b>ופירש</b> הכתוב עניין מספר $it" } +
+                    listOf("<b>ויאמר אלהים</b> פירוש", "<b>ויהי ערב</b> פירוש"),
+            )
+
+            val report = indexAllBooks(conn, Logger.withTag("test"))
+
+            assertEquals(1, report.noisyBooks)
+            assertEquals(0, report.boldBooks + report.dashBooks)
+            assertEquals(emptyList(), dhRows(conn))
+        }
+    }
+
+    @Test
+    fun `a genuine one-word commentary with distinct non-opener words is kept`() {
+        withDb { conn ->
+            conn.createStatement().use { it.execute("INSERT INTO book (id, title) VALUES (12, 'מצודת ציון')") }
+            val words = listOf("בקר", "ערב", "תהום", "רקיע", "דשא", "מאור", "שרץ", "כנף", "בהמה", "רמש", "צלם", "שבת")
+            insertLines(conn, 12, words.map { "<b>$it.</b> ביאור המילה" })
+
+            val report = indexAllBooks(conn, Logger.withTag("test"))
+
+            assertEquals(0, report.noisyBooks)
+            assertEquals(1, report.boldBooks)
+            assertEquals(12, report.indexed)
+            assertEquals(words, dhRows(conn).map { it.second })
+        }
+    }
+
+    @Test
+    fun `a regular commentary with multi-word dibburim passes the noise gate`() {
+        withDb { conn ->
+            conn.createStatement().use { it.execute("INSERT INTO book (id, title) VALUES (13, 'רש\"י על שמות')") }
+            insertLines(conn, 13, List(12) { "<b>ואלה שמות בני $it</b> פירוש הפסוק" })
+
+            val report = indexAllBooks(conn, Logger.withTag("test"))
+
+            assertEquals(0, report.noisyBooks)
+            assertEquals(1, report.boldBooks)
+            assertEquals(12, report.indexed)
+        }
+    }
+
+    @Test
+    fun `noise ratios are computed over the winning hits`() {
+        val hits = listOf(
+            DhExtractor.Dh("והנה", "והנה"),
+            DhExtractor.Dh("והנה", "וְהִנֵּה"),
+            DhExtractor.Dh("ולפז", "ולפ״ז"),
+            DhExtractor.Dh("בראשית ברא", "בראשית ברא"),
+        )
+
+        val ratios = NoiseRatios.of(hits)
+
+        assertEquals(0.75, ratios.distinctRatio)
+        assertEquals(0.75, ratios.oneWordRatio)
+        assertEquals(0.75, ratios.openerRatio)
+        assertTrue(ratios.isNoisy)
+        assertEquals(0.5, NoiseRatios.of(hits, linesWithBold = 8).boldStartRatio)
+        assertFalse(NoiseRatios(distinctRatio = 1.0, oneWordRatio = 1.0, openerRatio = 0.05).isNoisy)
+        assertTrue(NoiseRatios(distinctRatio = 1.0, oneWordRatio = 0.95, openerRatio = 0.10).isNoisy)
+        assertFalse(NoiseRatios(distinctRatio = 1.0, oneWordRatio = 0.5, openerRatio = 0.20).isNoisy)
+        // Low diversity alone is not noise when the dibburim are phrases, not single words.
+        assertFalse(NoiseRatios(distinctRatio = 0.3, oneWordRatio = 0.0, openerRatio = 0.0).isNoisy)
+        assertTrue(NoiseRatios(distinctRatio = 0.3, oneWordRatio = 0.9, openerRatio = 0.0).isNoisy)
+        assertTrue(NoiseRatios(distinctRatio = 1.0, oneWordRatio = 0.0, openerRatio = 0.0, boldStartRatio = 0.6).isNoisy)
+    }
+
+    @Test
+    fun `a commentary that repeats the same verse phrase for several notes is kept`() {
+        withDb { conn ->
+            conn.createStatement().use { it.execute("INSERT INTO book (id, title) VALUES (14, 'תורה תמימה')") }
+            val phrases = listOf("אדם שעמלו בחכמה וגו'", "יפה בעתו", "אם קהה הברזל וגו'", "טוב מלא כף וגו'")
+            insertLines(conn, 14, List(12) { "<b>${phrases[it % phrases.size]}.</b> ביאור $it" })
+
+            val report = indexAllBooks(conn, Logger.withTag("test"))
+
+            assertEquals(0, report.noisyBooks)
+            assertEquals(1, report.boldBooks)
+            assertEquals(12, report.indexed)
+        }
+    }
+
+    @Test
+    fun `interleaved bold quotation inside a running explanation is not a dibbur format`() {
+        withDb { conn ->
+            conn.createStatement().use { it.execute("INSERT INTO book (id, title) VALUES (15, 'חברותא')") }
+            val opening = List(10) { "<b>אבות מאי ניהו $it</b> מה הן האבות? הלוא הן <b>יציאות</b> הוצאות." }
+            val midLine = List(10) { "אך מקשה הגמרא $it: והרי <b>יציאות תרי</b> שתיים בלבד <b>הויין</b> אחת." }
+            insertLines(conn, 15, opening + midLine)
+
+            val report = indexAllBooks(conn, Logger.withTag("test"))
+
+            assertEquals(1, report.noisyBooks)
+            assertEquals(0, report.boldBooks)
+            assertEquals(emptyList(), dhRows(conn))
         }
     }
 
