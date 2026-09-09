@@ -449,6 +449,7 @@ class SefariaDirectImporter(
         }
 
         logger.i { "Inserted all books and lines" }
+        SefariaDashlessDibburim.logSummary(logger)
 
         // Build the title→bookId index in two global phases (all primaries, then
         // all aliases) so a primary title always beats any alias regardless of

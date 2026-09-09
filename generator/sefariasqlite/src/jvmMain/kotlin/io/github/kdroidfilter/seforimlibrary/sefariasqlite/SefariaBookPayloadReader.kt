@@ -668,7 +668,7 @@ internal class SefariaBookPayloadReader(
         if (depth == 0 || (leafPrimitive != null && leafPrimitive.isString)) {
             val content = leafPrimitive?.takeIf { it.isString }?.content
             if (!content.isNullOrEmpty()) {
-                val cleaned = cleanSefariaLine(content)
+                val cleaned = SefariaDashlessDibburim.separate(bookHeTitle, cleanSefariaLine(content))
                 if (cleaned.isNotEmpty()) {
                     output += linePrefix + cleaned
                     if (cleanShifts != null) {
