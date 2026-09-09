@@ -207,10 +207,10 @@ class ManualGenerateReleaseWorkflowContractTest {
         assertTrue(workflow.contains("host_lease.py release"))
         assertFalse(workflow.contains("running under its lease"))
         assertTrue(
-            workflow.contains("timeout-minutes: 1440"),
+            workflow.contains("timeout-minutes: 2880"),
             "self-hosted parent must outlast DB generation and the complete split relink chain",
         )
-        assertTrue(workflow.contains("--ttl 90000"), "cross-step lease must cover the 24h job")
+        assertTrue(workflow.contains("--ttl 176400"), "cross-step lease must cover the 48h job")
     }
 
     @Test
@@ -271,7 +271,7 @@ class ManualGenerateReleaseWorkflowContractTest {
         assertTrue(workflow.contains(".refs.duplicate == 0"))
         assertTrue(workflow.contains(".anchors.drifted == 0"))
         assertTrue(workflow.contains(".packaging_collisions == 0"))
-        assertTrue(workflow.contains("actions/upload-artifact@v4"))
+        assertTrue(workflow.contains("actions/upload-artifact@v6"))
         assertTrue(workflow.contains("include-hidden-files: true"), "completion marker is a dotfile")
         assertTrue(workflow.contains("DISK_AVAILABLE_KIB < 12582912"), "corpus gate requires 12 GiB free disk")
         assertTrue(workflow.contains("MEM_AVAILABLE_KIB < 6291456"), "corpus gate requires 6 GiB available memory")

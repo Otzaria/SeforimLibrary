@@ -7,7 +7,7 @@ import re
 import sys
 
 
-def validate(path: pathlib.Path, expected_tag: str, expected_archive_sha256: str) -> None:
+def validate(path: pathlib.Path, expected_tag: str, expected_archive_sha256: str) -> dict:
     metadata = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(metadata, dict):
         raise ValueError("release metadata must be a JSON object")
@@ -46,12 +46,22 @@ def validate(path: pathlib.Path, expected_tag: str, expected_archive_sha256: str
         raise ValueError("metadata archive parts must have unique UTF-8-sorted names")
     if total != archive_size:
         raise ValueError("metadata archive part sizes do not sum to archive.size")
+    return metadata
 
 
 if __name__ == "__main__":
     if len(sys.argv) != 4:
         raise SystemExit("usage: validate-sefaria-release-metadata.py PATH TAG ARCHIVE_SHA256")
     try:
-        validate(pathlib.Path(sys.argv[1]), sys.argv[2], sys.argv[3])
+        checked = validate(pathlib.Path(sys.argv[1]), sys.argv[2], sys.argv[3])
     except (OSError, ValueError, json.JSONDecodeError) as error:
         raise SystemExit(str(error)) from error
+    # Positive evidence, one line: this validator is the only thing standing
+    # between a pinned digest and a silently different Sefaria archive, so a
+    # pass has to say so out loud.
+    print(
+        f"ok: sefaria_release_metadata tag={checked['tag']}, "
+        f"archive {checked['archive']['size']} bytes in "
+        f"{len(checked['archive']['parts'])} parts, "
+        f"sha256={checked['archive']['sha256'][:12]}"
+    )

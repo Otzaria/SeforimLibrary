@@ -35,10 +35,13 @@ V4_KEYS = V3_KEYS | {"db_schema"}
 # v5 stops publishing lines_snapshot.db.zst on the DB release — the identical
 # bytes already live on the immutable content-addressed pre-release the build
 # published before its relink. The release therefore names that pre-release
-# instead: snapshot_zst_sha256 is the digest of this build's lines_snapshot.db.zst
-# and snapshot_release_tag is the release carrying it, so a consumer (the
-# LinkerToOtzaria manual relink) can resolve the snapshot and verify its bytes
-# fail-closed. Older published provenances stay valid as v1..v4 — they carry the
+# instead: snapshot_zst_sha256 is the digest of the snapshot THIS RELEASE'S LINK
+# SET was produced from — this build's own lines_snapshot.db.zst on every normal
+# path, and on the recovery path the earlier attempt's snapshot, which the
+# rebuild is proven line-equivalent to and which is the only one still
+# resolvable — and snapshot_release_tag is the release carrying it, so a consumer
+# (the LinkerToOtzaria manual relink) can resolve the snapshot and verify its
+# bytes fail-closed. Older published provenances stay valid as v1..v4 — they carry the
 # asset itself instead.
 V5_KEYS = V4_KEYS | {"snapshot_zst_sha256", "snapshot_release_tag"}
 IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,127}")
@@ -179,13 +182,30 @@ def validate(value: dict) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("path")
+    # The reconcile reuse scan runs this validator once per candidate release
+    # (~27 of them), where one positive line each is noise, not evidence: that
+    # loop reports its own summary. The real validation call sites — the staged
+    # document this build publishes — keep the line.
+    parser.add_argument("--quiet", action="store_true",
+                        help="suppress the positive line; failures still report")
     args = parser.parse_args()
     try:
-        validate(load(Path(args.path)))
-        return 0
+        value = load(Path(args.path))
+        validate(value)
     except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
         print(f"build provenance contract error: {exc}", file=__import__("sys").stderr)
         return 2
+    # Positive evidence, one line. Without it a green step proved nothing: a
+    # silently stubbed validator and ~190 lines of contract checking looked
+    # exactly alike in the log. Says which document was checked, at which schema
+    # version, and how many of the two countable things it covers.
+    if not args.quiet:
+        print(
+            f"ok: build_provenance v{value['schema_version']}, {len(value)} fields, "
+            f"{len(value['assets'])} assets, "
+            f"source_commit={value['source_commit'][:12]} ({args.path})"
+        )
+    return 0
 
 
 if __name__ == "__main__":

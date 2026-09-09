@@ -1,6 +1,8 @@
 import importlib.util
 import json
 from pathlib import Path
+import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -200,6 +202,37 @@ class BuildProvenanceContractTest(unittest.TestCase):
                 value["db_schema"] = broken
                 with self.assertRaises(ValueError):
                     contract.validate(contract.load(self.write(tmp, value)))
+
+    def test_cli_prints_one_positive_line_and_keeps_its_failure_contract(self):
+        # A pipeline whose whole premise is provenance logged ZERO evidence that
+        # ~190 lines of validation had run: a silently stubbed validator and a
+        # working one were the same green step (audit of run 34024655297). The
+        # pass now says what it checked; the failure contract is unchanged —
+        # stderr, exit 2, nothing on stdout.
+        with tempfile.TemporaryDirectory() as tmp:
+            good = self.write(tmp, self.value())
+            done = subprocess.run(
+                [sys.executable, str(SCRIPT), str(good)], capture_output=True, text=True
+            )
+            self.assertEqual(done.returncode, 0, done.stderr)
+            lines = [line for line in done.stdout.splitlines() if line.strip()]
+            self.assertEqual(len(lines), 1, lines)
+            self.assertRegex(
+                lines[0],
+                r"^ok: build_provenance v5, \d+ fields, 2 assets, "
+                r"source_commit=[0-9a-f]{12} \(.*build_provenance\.json\)$",
+            )
+
+            broken = self.value()
+            broken["assets"][0]["size"] = 0
+            done = subprocess.run(
+                [sys.executable, str(SCRIPT), str(self.write(tmp, broken))],
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(done.returncode, 2)
+            self.assertEqual(done.stdout, "")
+            self.assertIn("build provenance contract error:", done.stderr)
 
     def test_attempt_and_asset_order_are_strict(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -130,14 +130,62 @@ jobs:
       packaged_links_tree_sha256: ${{ steps.lookup.outputs.packaged_links_tree_sha256 }}
       assets_json: ${{ steps.lookup.outputs.assets_json }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           # Reconciliation is control-plane work.  It must use the validator
           # shipped with this workflow run, not the older payload commit.
           ref: ${{ github.sha }}
           persist-credentials: false
+      # unittest writes its "Ran N tests" / "OK" summary to stderr and the step
+      # then reports a bare green check: run 34024655297 carries no test count
+      # anywhere in 28,118 lines. Each suite now ends in one explicit line, and
+      # a suite that collects nothing (a rename, a lost import, an empty file)
+      # fails the step instead of passing in silence. The first five keep their
+      # order and the fail-closed behaviour of the `&&` chain this replaces.
+      #
+      # The last three ran nowhere until now: test_ci_workflows (the hosted
+      # ci/contract invariants), test_patch_anchor_schema (the fan's cheap
+      # UNPATCHABLE/PROCEED pre-check) and test_prefetch_patch_anchors (the
+      # prefetch script's cold fetch, digest-verified cache, eviction and abort
+      # paths). The patch fan's own anchor machinery therefore shipped ungated.
+      # All three are hermetic on ubuntu-latest — the sandbox prepends stub
+      # `gh`/`java`/`sqlite3` binaries to PATH and an unexpected invocation
+      # exits 90 instead of reaching the network, no credentials and no
+      # `setsid` are needed, and the anchors are 200 KB of filler instead of
+      # 1.3 GB — and they run here, in the first and cheapest job, so a
+      # regression stops the pipeline before it books the self-hosted runner.
+      # test_prefetch_patch_anchors is last because it is the slow one (~1 min).
       - name: Validate local orchestration boundary contracts
-        run: python3 .github/scripts/test_build_provenance.py && python3 .github/scripts/test_otzaria_provenance.py && python3 .github/scripts/test_host_safety.py && python3 .github/scripts/test_manual_release_workflow.py && python3 .github/scripts/test_verify_relink_recovery_snapshot.py
+        run: |
+          set -euo pipefail
+          total=0
+          for suite in \
+            test_build_provenance \
+            test_otzaria_provenance \
+            test_host_safety \
+            test_manual_release_workflow \
+            test_verify_relink_recovery_snapshot \
+            test_ci_workflows \
+            test_patch_anchor_schema \
+            test_prefetch_patch_anchors; do
+            log="$RUNNER_TEMP/$suite.log"
+            if ! python3 ".github/scripts/$suite.py" > "$log" 2>&1; then
+              cat "$log"
+              echo "::error::$suite failed — see its output above"
+              exit 1
+            fi
+            ran=$(sed -n 's/^Ran \([0-9][0-9]*\) test.*/\1/p' "$log" | tail -n1)
+            skipped=$(sed -n 's/^OK (skipped=\([0-9][0-9]*\)).*/\1/p' "$log" | tail -n1)
+            if [ -z "$ran" ] || [ "$ran" -eq 0 ]; then
+              cat "$log"
+              echo "::error::$suite reported no tests — it collected nothing"
+              exit 1
+            fi
+            passed=$((ran - ${skipped:-0}))
+            echo "tests: $suite $passed passed${skipped:+ ($skipped skipped)}"
+            total=$((total + passed))
+          done
+          echo "tests: local orchestration boundary contracts $total passed"
       - name: Validate the complete immutable dispatch contract
         env:
           SOURCE_COMMIT: ${{ inputs.source_commit }}
@@ -195,6 +243,7 @@ jobs:
           mkdir -p "$RUNNER_TEMP/provenance-scan"
           gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" | jq -s 'add' > "$RUNNER_TEMP/releases.json"
           MATCHES=0
+          SCANNED_PROVENANCE=0
           MATCH_TAG=""
           MATCH_SHA=""
           MATCH_CONFIG_SHA=""
@@ -215,7 +264,7 @@ jobs:
             # pinned inputs, so ignore them; a malformed provenance for this
             # exact source commit remains a hard failure rather than risking a
             # duplicate or partial release.
-            if ! python3 .github/scripts/validate_build_provenance.py "$file"; then
+            if ! python3 .github/scripts/validate_build_provenance.py --quiet "$file"; then
               if [ "$target" = "$SOURCE_COMMIT" ]; then
                 echo "::error::Release $tag targets this source commit but has invalid build provenance; recover or remove it explicitly."
                 exit 1
@@ -223,6 +272,7 @@ jobs:
               echo "::warning::Skipping legacy release $tag with invalid build provenance"
               continue
             fi
+            SCANNED_PROVENANCE=$((SCANNED_PROVENANCE+1))
             if jq -e \
               --arg source "$SOURCE_COMMIT" \
               --arg st "$SEFARIA_TAG" --arg sm "$SEFARIA_METADATA_SHA" --arg sa "$SEFARIA_ARCHIVE_SHA" \
@@ -271,6 +321,10 @@ jobs:
                 '.assets + [{name:$name,size:$size,sha256:$sha}] | sort_by(.name)' "$file")
             fi
           done < <(jq -r '.[] | [.id,.tag_name,.draft,.target_commitish,([.assets[]|select(.name=="build_provenance.json")|.id][0]//"NONE")] | @tsv' "$RUNNER_TEMP/releases.json")
+          # One line for the whole reuse scan instead of one per release: the
+          # validator is run --quiet here precisely because ~27 identical ok:
+          # lines would bury the two verdicts that matter (this count and reuse=).
+          echo "ok: build_provenance checked on $SCANNED_PROVENANCE releases"
           test "$MATCHES" -le 1 || { echo "::error::Multiple complete releases have identical input provenance"; exit 1; }
           if [ "$MATCHES" -eq 1 ]; then
             echo "reuse=true" >> "$GITHUB_OUTPUT"
@@ -285,16 +339,151 @@ jobs:
             echo "reuse=false" >> "$GITHUB_OUTPUT"
           fi
 
+      # Fail fast on the recovery inputs, before a runner is even leased.
+      # Build 34021998271 burned 48 minutes — 35 min of DB generation, a
+      # snapshot dump and a 987 MiB upload — and then died in "Apply LINKER
+      # links (Phase-2)" on the Linker's meta.json schema. Every byte that
+      # check needs already existed at second 0: relink_recovery_run_id is a
+      # dispatch input and the recovery relink had finished 37 s earlier.
+      #
+      # So resolve the same payload Phase-2 will consume and run the SAME
+      # verifier code on its meta.json (--preflight); the accepted schema set
+      # lives in one constant that both paths read, so the cheap gate cannot
+      # drift from the expensive one. Everything here is input-only — nothing
+      # depends on the rebuilt DB.
+      #
+      # Additive by construction: the authoritative "exact terminal recovery
+      # attempt" guard in "Run LinkerToOtzaria relink on this snapshot (and
+      # wait)" and every Phase-2 check are unchanged and still run against the
+      # real payload. This step only refuses earlier, and only for inputs those
+      # checks would refuse anyway. Skipped when the reconciler already found a
+      # complete release for these pinned inputs: that build never runs, so its
+      # recovery inputs decide nothing.
+      - name: Preflight the recovery relink inputs
+        if: inputs.relink_recovery_run_id != '' && steps.lookup.outputs.reuse != 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.PIPELINE_TOKEN }}
+          RECOVERY_RUN_ID: ${{ inputs.relink_recovery_run_id }}
+          CORRELATION_ID: ${{ inputs.correlation_id }}
+        run: |
+          set -euo pipefail
+          [ -n "$GH_TOKEN" ] || { echo "::error::recovery preflight: PIPELINE_TOKEN is empty or missing — cannot read Otzaria/LinkerToOtzaria"; exit 1; }
+          WORK="$RUNNER_TEMP/recovery-preflight"
+          rm -rf "$WORK"
+          mkdir -p "$WORK"
+          gh api "repos/Otzaria/LinkerToOtzaria/actions/runs/$RECOVERY_RUN_ID" > "$WORK/run.json" || {
+            echo "::error::recovery preflight: relink_recovery_run_id $RECOVERY_RUN_ID is not a readable Otzaria/LinkerToOtzaria run"; exit 1; }
+          # map(. // "none"): bash treats tab as IFS *whitespace*, so consecutive
+          # tabs collapse and an empty column (a still-running run has
+          # conclusion=null) would shift every later field left and misreport the
+          # value seen. The || arm keeps a jq failure from exiting bare.
+          IFS=$'\t' read -r RUN_STATUS RUN_CONCLUSION RUN_ATTEMPT RUN_HEAD RUN_TITLE < <(jq -er \
+            '[.status, .conclusion, (.run_attempt|tostring), .head_sha, .display_title]
+             | map(. // "none") | @tsv' "$WORK/run.json") || {
+            echo "::error::recovery preflight: run $RECOVERY_RUN_ID API response is not a run object with status, conclusion, run_attempt, head_sha and display_title"; exit 1; }
+          [ "$RUN_STATUS" = completed ] && [ "$RUN_CONCLUSION" = success ] || {
+            echo "::error::recovery preflight: run $RECOVERY_RUN_ID is $RUN_STATUS:$RUN_CONCLUSION, expected completed:success"; exit 1; }
+          if [[ "$RUN_TITLE" =~ ^relink-recovery\ request=([0-9a-f]{64})\ parent=([1-9][0-9]*):([1-9][0-9]*)$ ]]; then
+            REQUEST_ID="${BASH_REMATCH[1]}"
+            PARENT_RUN_ID="${BASH_REMATCH[2]}"
+            PARENT_RUN_ATTEMPT="${BASH_REMATCH[3]}"
+          else
+            echo "::error::recovery preflight: run $RECOVERY_RUN_ID display_title is '$RUN_TITLE', expected 'relink-recovery request=<64 hex> parent=<run>:<attempt>'"; exit 1
+          fi
+          # Correlation binding only. The terminal-state, event, path and attempt
+          # assertions on the parent stay in the build job's guard.
+          PARENT_TITLE="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$PARENT_RUN_ID/attempts/$PARENT_RUN_ATTEMPT" --jq .display_title)" || {
+            echo "::error::recovery preflight: run $RECOVERY_RUN_ID names parent $PARENT_RUN_ID:$PARENT_RUN_ATTEMPT, which is not a readable run of this repository"; exit 1; }
+          [ "$PARENT_TITLE" = "manual-generate-release correlation=$CORRELATION_ID" ] || {
+            echo "::error::recovery preflight: parent $PARENT_RUN_ID:$PARENT_RUN_ATTEMPT display_title is '$PARENT_TITLE', expected 'manual-generate-release correlation=$CORRELATION_ID'"; exit 1; }
+          gh release download "linker-output-$REQUEST_ID-$RUN_ATTEMPT" -R Otzaria/LinkerToOtzaria \
+            -p linker_release_pointer.json -p relink_manifest.json -D "$WORK" || {
+            echo "::error::recovery preflight: release linker-output-$REQUEST_ID-$RUN_ATTEMPT of Otzaria/LinkerToOtzaria has no readable linker_release_pointer.json + relink_manifest.json"; exit 1; }
+          WORK="$WORK" RECOVERY_RUN_ID="$RECOVERY_RUN_ID" RUN_ATTEMPT="$RUN_ATTEMPT" RUN_HEAD="$RUN_HEAD" \
+          REQUEST_ID="$REQUEST_ID" PARENT_RUN_ID="$PARENT_RUN_ID" PARENT_RUN_ATTEMPT="$PARENT_RUN_ATTEMPT" \
+          python3 - <<'PY'
+          import json, os, re
+          from pathlib import Path
+          work = Path(os.environ["WORK"])
+          def fail(message):
+              print(f"::error::recovery preflight: {message}", flush=True)
+              raise SystemExit(1)
+          def load(name):
+              try:
+                  return json.loads((work / name).read_text(encoding="utf-8"))
+              except ValueError as error:
+                  fail(f"{name} is not valid JSON ({error})")
+          manifest, pointer = load("relink_manifest.json"), load("linker_release_pointer.json")
+          def check(name, document, field, expected):
+              if document.get(field) != expected:
+                  fail(f"{name} field {field} is {document.get(field)!r}, expected {expected!r}")
+          def hex64(name, document, field):
+              value = document.get(field)
+              if not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{64}", value):
+                  fail(f"{name} field {field} is {value!r}, expected a 64-character lowercase sha256")
+              return value
+          run, attempt = int(os.environ["RECOVERY_RUN_ID"]), int(os.environ["RUN_ATTEMPT"])
+          request, head = os.environ["REQUEST_ID"], os.environ["RUN_HEAD"]
+          for field, expected in (("schema_version", 2), ("relink_request_id", request),
+                                  ("relink_run_id", run), ("relink_run_attempt", attempt),
+                                  ("parent_run_id", int(os.environ["PARENT_RUN_ID"])),
+                                  ("parent_run_attempt", int(os.environ["PARENT_RUN_ATTEMPT"])),
+                                  ("linker_commit", head)):
+              check("relink_manifest.json", manifest, field, expected)
+          for field, expected in (("schema_version", 1), ("relink_request_id", request),
+                                  ("relink_run_id", run), ("relink_run_attempt", attempt),
+                                  ("payload_sha256", hex64("relink_manifest.json", manifest, "payload_sha256"))):
+              check("linker_release_pointer.json", pointer, field, expected)
+          tag = pointer.get("release_tag")
+          if not isinstance(tag, str) or not re.fullmatch(r"linker-release-sha256-[0-9a-f]{64}", tag):
+              fail(f"linker_release_pointer.json field release_tag is {tag!r}, expected linker-release-sha256-<64 hex>")
+          (work / "release_tag").write_text(tag, encoding="utf-8")
+          (work / "snapshot_zst_sha256").write_text(
+              hex64("relink_manifest.json", manifest, "snapshot_zst_sha256"), encoding="utf-8")
+          PY
+          LINKER_RELEASE_TAG="$(cat "$WORK/release_tag")"
+          SNAPSHOT_ZST_SHA256="$(cat "$WORK/snapshot_zst_sha256")"
+          gh release download "$LINKER_RELEASE_TAG" -R Otzaria/LinkerToOtzaria -p meta.json -D "$WORK" || {
+            echo "::error::recovery preflight: release $LINKER_RELEASE_TAG of Otzaria/LinkerToOtzaria has no readable meta.json"; exit 1; }
+          # The Phase-2 check, on the real published file, at second 0.
+          META_OK="$(python3 .github/scripts/verify_relink_recovery_snapshot.py --preflight --payload-meta "$WORK/meta.json")" || {
+            echo "::error::recovery preflight: $LINKER_RELEASE_TAG meta.json is not consumable by verify_relink_recovery_snapshot.py (see the message above) — a recovery build would fail after the DB is rebuilt"; exit 1; }
+          META_SCHEMA="${META_OK#*schema=}"
+          META_SCHEMA="${META_SCHEMA%% *}"
+          # The original snapshot the recovery relink ran against must still be
+          # resolvable, byte-exact: Phase-2 downloads it to compare the rebuild.
+          gh api "repos/$GITHUB_REPOSITORY/releases/tags/lines-snapshot-sha256-$SNAPSHOT_ZST_SHA256" > "$WORK/snapshot-release.json" || {
+            echo "::error::recovery preflight: relink_manifest.json field snapshot_zst_sha256 is $SNAPSHOT_ZST_SHA256 but release lines-snapshot-sha256-$SNAPSHOT_ZST_SHA256 does not exist in $GITHUB_REPOSITORY"; exit 1; }
+          jq -e --arg digest "sha256:$SNAPSHOT_ZST_SHA256" '
+            .draft == false and
+            ([.assets[] | select(.name == "lines_snapshot.db.zst" and .digest == $digest and .size > 0)] | length) == 1
+          ' "$WORK/snapshot-release.json" > /dev/null || {
+            echo "::error::recovery preflight: release lines-snapshot-sha256-$SNAPSHOT_ZST_SHA256 carries no published lines_snapshot.db.zst asset with digest sha256:$SNAPSHOT_ZST_SHA256"; exit 1; }
+          echo "recovery preflight: meta.json of run $RECOVERY_RUN_ID ok (schema $META_SCHEMA, snapshot ${SNAPSHOT_ZST_SHA256:0:8}…, linker ${RUN_HEAD:0:7})"
+
   build-and-release:
     name: Build seforim.db + bundle + delta fan, publish release
     needs: reconcile
     if: needs.reconcile.outputs.reuse != 'true'
     runs-on: ${{ inputs.runner_selection == 'local' && fromJSON('["otzaria-db"]') || (inputs.runner_selection == 'server-2' && fromJSON('["self-hosted", "Linux", "X64", "server-2"]') || fromJSON('["self-hosted", "Linux", "ARM64"]')) }}
-    # Self-hosted jobs have a five-day execution ceiling.  The split child may legally
-    # consume 90m GPU NER + 480m CPU resolution (including lease wait) + 30m publish,
-    # after this parent has already spent hours generating the DB.  Keep a full 24h
-    # parent ceiling so it cannot die while its exact child is still within contract.
-    timeout-minutes: 1440
+    # Self-hosted jobs have a five-day (7200-minute) execution ceiling.  What this
+    # parent waits on is the whole child CHAIN in relink.yml, not one job: the default
+    # target=local is ONE relink job with a 1440-minute ceiling plus a 30m publish;
+    # the split fallbacks may legally consume 90m GPU NER + 480m CPU resolution
+    # (including lease wait) + 30m publish.
+    # At a 1440 parent ceiling a legal child could not be waited out:
+    # this job spends ~55 minutes generating the DB and publishing the snapshot
+    # BEFORE it dispatches, so a target=local child that ran to its own ceiling
+    # always outlived the parent and was killed mid-flight by the `always()` cancel
+    # step below — destroying a run that was still within contract.  2880 (48h) is
+    # 40% of GitHub's cap and budgets 2880 − 1530 (largest wait cap) − ~55 (pre-dispatch)
+    # ≈ 1295 minutes for Phase-2, the patch fan and the ~5.1 GiB of uploads, which
+    # measure ~130-160 minutes together.  The wait itself is capped explicitly
+    # (RELINK_WAIT_CAP_MIN below), so the parent ceiling is a backstop, not the timer.
+    # The two host leases below live 176400 s = 2940 min, an hour past this ceiling,
+    # so no lease can expire under a job that is still running.
+    timeout-minutes: 2880
     env:
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -302,6 +491,13 @@ jobs:
       # Older clients chain through the anchors; the full bundle is the
       # ultimate fallback.
       PATCH_OFFSETS: "1 2 4 8 16"
+      # How many Sefaria images may fail to embed before the build is refused.
+      # Each failure ships as a live textimages.sefaria.org <img src>, i.e. a
+      # broken image for every offline client. ~420 images per build, of which
+      # 10-11 are stubborn in a typical cycle (timeouts, one filter-blocked
+      # URL), so 20 lets a weekly through while a broken CDN — or a filter that
+      # started answering 418 for everything — fails loudly.
+      IMAGE_EMBED_MAX_FAILURES: "20"
       PHASE2_IMPLEMENTATION_COMMIT: ${{ inputs.relink_recovery_run_id != '' && github.sha || inputs.source_commit }}
 
     steps:
@@ -436,7 +632,7 @@ jobs:
           }
           echo "HOST_LEASE_STATE=$RUNNER_TEMP/host-lease.json" >> "$GITHUB_ENV"
           python3 .pipeline-control/.github/scripts/host_lease.py start --lock "$LEASE" \
-            --state "$RUNNER_TEMP/host-lease.json" --ttl 90000
+            --state "$RUNNER_TEMP/host-lease.json" --ttl 176400
           python3 .pipeline-control/.github/scripts/reap_linker_ner.py
 
           # Exclusivity: this host runs three self-hosted runners (SeforimLibrary,
@@ -467,13 +663,36 @@ jobs:
 
       - name: Bridle daemon heaps + generator forks for the 16 GB runner
         run: |
+          set -euo pipefail
+          # ~/.gradle is the RUNNER's home and survives every run, so the old
+          # `cat >>` appended these four lines again every week: the file grew
+          # without bound and the effective value became "whichever duplicate
+          # Gradle happened to read last". Same property values, written as ONE
+          # marked block: drop any previous block plus any bare duplicate of a
+          # managed line left by earlier runs, then append exactly one copy.
+          # `grep -Fxq 'linkerHeap=12g'` in "Overlay pinned recovery Phase-2
+          # implementation" still matches — emitted verbatim, one per line.
           mkdir -p ~/.gradle
-          cat >> ~/.gradle/gradle.properties <<EOF
+          PROPS="$HOME/.gradle/gradle.properties"
+          MANAGED="$RUNNER_TEMP/gradle-heaps-managed.properties"
+          BEGIN='# >>> manual-generate-release managed heaps >>>'
+          END='# <<< manual-generate-release managed heaps <<<'
+          touch "$PROPS"
+          cat > "$MANAGED" <<EOF
           org.gradle.jvmargs=-Xmx3g
           kotlin.compiler.execution.strategy=in-process
           generatorHeap=8g
           linkerHeap=12g
           EOF
+          awk -v b="$BEGIN" -v e="$END" '
+            NR == FNR { managed[$0] = 1; next }
+            $0 == b { skip = 1; next }
+            skip { if ($0 == e) skip = 0; next }
+            !($0 in managed)
+          ' "$MANAGED" "$PROPS" > "$PROPS.next"
+          { printf '%s\n' "$BEGIN"; cat "$MANAGED"; printf '%s\n' "$END"; } >> "$PROPS.next"
+          mv "$PROPS.next" "$PROPS"
+          echo "gradle.properties: $(wc -l < "$PROPS") lines, exactly one managed block"
 
       - name: Verify durable Java 25 toolchain
         shell: bash
@@ -736,14 +955,19 @@ jobs:
           # fallback branch once v27 is published (i.e. once no seed_tag this
           # workflow can pick predates the compressed asset).
           SEED_ZST="$RUNNER_TEMP/seed-buildstate-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.zst"
-          rm -f "$SEED_ZST"
+          SEED_ERR="$RUNNER_TEMP/seed-buildstate-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.err"
+          rm -f "$SEED_ZST" "$SEED_ERR"
+          # gh prints a bare "no assets match the file pattern" on stderr and
+          # never says WHICH asset it looked for (run 34024655297). Capture it
+          # and fold it into the warning below, which does name the asset.
           if gh release download "$SEED_TAG" \
                --pattern 'seforim.db.buildstate.zst' \
-               -O "$SEED_ZST"; then
+               -O "$SEED_ZST" 2>"$SEED_ERR"; then
             unzstd -f "$SEED_ZST" -o build/seforim.db.buildstate
-            rm -f "$SEED_ZST"
+            rm -f "$SEED_ZST" "$SEED_ERR"
           else
-            echo "::warning::release $SEED_TAG carries no seforim.db.buildstate.zst — seeding from the pre-v27 uncompressed asset"
+            echo "::warning::release $SEED_TAG carries no seforim.db.buildstate.zst ($(tr -d '\r' < "$SEED_ERR" | head -n1)) — seeding from the pre-v27 uncompressed asset"
+            rm -f "$SEED_ERR"
             gh release download "$SEED_TAG" \
               --pattern 'seforim.db.buildstate' \
               --dir build
@@ -772,7 +996,23 @@ jobs:
           # can never resolve an offset to a different tag than the producer.
           bash .pipeline-control/.github/scripts/patch_fan_anchors.sh \
             "$THIS_VER" prior-versions.tsv $PATCH_OFFSETS > "$ANCHORS"
-          cat "$ANCHORS"
+          # The plan, in words. `cat "$ANCHORS"` printed the raw TSV, which the
+          # log renders as five bare lines reading `ANCHOR` with no tag, offset
+          # or target version anywhere (run 34021998271). Same `anchor <tag>
+          # (offset N):` prefix the prefetch script uses, so the plan line and
+          # the `seforim.db.zst <size>` line it prints after querying the
+          # release pair up by eye.
+          awk -F'\t' -v this="$THIS_VER" '
+            $1 == "ANCHOR"     { printf "anchor %s (offset %s): will patch v%s -> v%s\n", $4, $2, $3, this; next }
+            $1 == "BELOW-ONE"  { printf "offset %s targets v%s (<1) - no anchor\n", $2, $3; next }
+            $1 == "NO-RELEASE" { printf "offset %s targets v%s - no release carries that db_version\n", $2, $3; next }
+                               { print }
+          ' "$ANCHORS"
+          # Warm or cold, stated before any download starts. The cache is
+          # durable, digest-verified and bounded (see the script's header); it
+          # is what stops a failed attempt from paying for the same 6.5 GB of
+          # immutable release assets twice.
+          bash .pipeline-control/.github/scripts/prefetch_patch_anchors.sh cache-report
           rm -rf prefetch
           bash .pipeline-control/.github/scripts/prefetch_patch_anchors.sh \
             start "$ANCHORS" prefetch
@@ -788,6 +1028,13 @@ jobs:
         run: |
           # -PlinkerSidecar makes the Sefaria import dump the RefEntry→lineId sidecar
           # this build's LINKER Phase-2 needs (see next step).
+          # -PimageCacheDir keeps the embedded textimages.sefaria.org images in a
+          # durable per-runner cache: the build dir is tmpfs, so without it every
+          # build re-downloads ~420 images and a transient timeout (10 of them in
+          # 34021998271) leaves a remote URL where the previous build inlined the
+          # image — a line change the relink recovery comparison must reject.
+          IMAGE_CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/seforimlibrary/textimages"
+          mkdir -p "$IMAGE_CACHE_DIR"
           gradle generateSeforimDb \
             -PexportDir="$SEFARIA_EXTRACT_ROOT" \
             -PsourceDir="$OTZARIA_EXTRACT_ROOT" \
@@ -797,7 +1044,26 @@ jobs:
             -PlinkerSidecar=$PWD/build/linker_sidecar.tsv \
             -PforDbArchive="$FORDB_ARCHIVE" \
             -PforDbSha256="$FORDB_ARCHIVE_SHA" \
+            -PimageCacheDir="$IMAGE_CACHE_DIR" \
+            -PimageEmbedReport=$PWD/build/image-embed-report.json \
             --no-daemon --stacktrace
+          # Every image the embedder could not inline stays in the line as a
+          # live https://textimages.sefaria.org/... <img src>, which renders as a
+          # broken placeholder for an offline client. The count used to be an
+          # INFO log line nothing read, so v27 shipped 10 of them unnoticed;
+          # surface each one and refuse the build past IMAGE_EMBED_MAX_FAILURES.
+          IMAGE_REPORT=build/image-embed-report.json
+          if [ ! -f "$IMAGE_REPORT" ]; then
+            echo "::error::$IMAGE_REPORT missing — the Sefaria image embedder did not run"
+            exit 1
+          fi
+          jq -r '"Image embedder: attempted=\(.attempted) cached=\(.cached) downloaded=\(.downloaded) fromDiskCache=\(.fromDiskCache) failed=\(.failed)"' "$IMAGE_REPORT"
+          jq -r '.failures[] | "::warning::image not embedded (\(.reason)): \(.url)"' "$IMAGE_REPORT"
+          IMAGE_FAILED=$(jq -r '.failed' "$IMAGE_REPORT")
+          if [ "$IMAGE_FAILED" -gt "$IMAGE_EMBED_MAX_FAILURES" ]; then
+            echo "::error::$IMAGE_FAILED Sefaria images could not be embedded (limit $IMAGE_EMBED_MAX_FAILURES) — they would ship as live network URLs"
+            exit 1
+          fi
           # catalog.pb is no longer produced; drop any stale copy so a dirty
           # self-hosted workspace can't smuggle it into the bundle or a patch.
           rm -f build/catalog.pb
@@ -853,7 +1119,16 @@ jobs:
       # fails closed; the Linker never resolves a moving "Latest" pointer.  This early
       # pre-release exists before the final DB release and remains available for an
       # exactly correlated recovery after a parent failure.
+      #
+      # SKIPPED in recovery mode: that path never dispatches a relink, so nothing
+      # will ever download these bytes — it re-reads the ORIGINAL attempt's
+      # snapshot release instead (see "Run LinkerToOtzaria relink…"). Runs
+      # 34021998271 and 34024655297 each spent 464 s uploading a 987 MiB
+      # pre-release that was orphaned the moment the next step chose the reuse
+      # branch. The dump above still runs: the semantic compare in "Apply LINKER
+      # links (Phase-2)" needs build/lines_snapshot.db.zst and its digest.
       - name: Publish immutable snapshot release for the relink run
+        if: inputs.relink_recovery_run_id == ''
         env:
           AUTOMATIC_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           CROSS_REPO_TOKEN: ${{ secrets.PIPELINE_TOKEN }}
@@ -862,6 +1137,11 @@ jobs:
           set -euo pipefail
           snapshot=build/lines_snapshot.db.zst
           tag="lines-snapshot-sha256-$SNAPSHOT_ZST_SHA256"
+          # Ownership, for the failure hook below: 1 only when THIS attempt's own
+          # `gh release create` succeeded. The tag is content-addressed, so a
+          # later attempt that rebuilds byte-identical bytes resolves to an
+          # existing release and must never claim (or delete) it.
+          created_here=0
           expected_size=$(stat --format='%s' "$snapshot")
           [ "$expected_size" -le 2147483647 ] || {
             echo "::error::snapshot exceeds GitHub's 2 GiB release-asset limit"
@@ -931,6 +1211,7 @@ jobs:
                 --title "Immutable Linker snapshot $SNAPSHOT_ZST_SHA256" \
                 --notes "Content-addressed lines snapshot for exact weekly Linker handoff." \
                 --prerelease; then
+              created_here=1
               return 0
             fi
             state=$(release_state) || state=query-error
@@ -941,13 +1222,15 @@ jobs:
               exact|empty|pending) return 0 ;;
               conflict) return 1 ;;
               absent)
-                gh release create "$tag" --target "$SOURCE_COMMIT" \
+                if gh release create "$tag" --target "$SOURCE_COMMIT" \
                   --title "Immutable Linker snapshot $SNAPSHOT_ZST_SHA256" \
                   --notes "Content-addressed lines snapshot for exact weekly Linker handoff." \
-                  --prerelease || {
-                    state=$(release_state) || return 1
-                    case "$state" in exact|empty|pending) return 0 ;; *) return 1 ;; esac
-                  }
+                  --prerelease; then
+                  created_here=1
+                else
+                  state=$(release_state) || return 1
+                  case "$state" in exact|empty|pending) return 0 ;; *) return 1 ;; esac
+                fi
                 ;;
               *) echo "::error::unknown snapshot release state after credential fallback: $state"; return 1 ;;
             esac
@@ -983,7 +1266,8 @@ jobs:
             exit 1
           }
           echo "SNAPSHOT_RELEASE_TAG=$tag" >> "$GITHUB_ENV"
-          echo "Published immutable snapshot release $tag"
+          echo "SNAPSHOT_RELEASE_CREATED_HERE=$created_here" >> "$GITHUB_ENV"
+          echo "Published immutable snapshot release $tag (created_here=$created_here)"
 
       # Trigger the incremental relink on LinkerToOtzaria against THIS snapshot and wait.
       # Serial by design: the DB release depends on the relink succeeding — a linker
@@ -1001,6 +1285,18 @@ jobs:
           SEFARIA_TAG: ${{ inputs.sefaria_tag }}
           SEFARIA_METADATA_SHA: ${{ inputs.sefaria_release_metadata_sha256 }}
           RECOVERY_RUN_ID: ${{ inputs.relink_recovery_run_id }}
+          # Overall cap on the relink wait, in minutes: what the target=local child
+          # CHAIN may legally cost (relink 1440 + publish 30) plus an hour of grace.
+          # Past it the child is out of contract and GitHub still has not reported it
+          # terminal, so wait_for_relink_run.sh fails with the recovery recipe and a
+          # named cause, instead of going quiet until this job's 2880-minute ceiling
+          # kills it mid-wait.  That script takes the TIGHTER of this and its own
+          # per-PATH derivation, so the kaggle (90 + 480 + 30) and server (480 + 30)
+          # fallbacks are not held to the local budget — they cap at 660 and 570.
+          # 1500 was the same bug one order of magnitude smaller: it left a legal
+          # 1470-minute local child only 30 minutes of margin, while the script's
+          # own single-job derivation cancelled a healthy kaggle child at 150.
+          RELINK_WAIT_CAP_MIN: "1530"
           # For the A2 early upload below, which drives this build's own draft
           # release with the same preflighted credentials as the publish step.
           # GH_TOKEN above stays the cross-repo PAT for every `gh` call in this
@@ -1155,6 +1451,7 @@ jobs:
           python3 .pipeline-control/.github/scripts/host_lease.py release --state "$HOST_LEASE_STATE"
           case "$SERIAL_LINKER_TARGET" in
             local)
+              DISPATCHED_WORKFLOW=relink.yml
               gh workflow run relink.yml -R Otzaria/LinkerToOtzaria \
                 -f library_run_id="$GITHUB_RUN_ID" -f target=local \
                 -f relink_request_id="$RELINK_REQUEST_ID" \
@@ -1163,6 +1460,7 @@ jobs:
                 -f snapshot_sha256="$SNAPSHOT_ZST_SHA256" \
                 -f sefaria_release_metadata_sha256="$SEFARIA_METADATA_SHA" ;;
             kaggle)
+              DISPATCHED_WORKFLOW=kaggle-relink.yml
               gh workflow run kaggle-relink.yml -R Otzaria/LinkerToOtzaria \
                 -f library_run_id="$GITHUB_RUN_ID" \
                 -f relink_request_id="$RELINK_REQUEST_ID" \
@@ -1171,6 +1469,7 @@ jobs:
                 -f snapshot_sha256="$SNAPSHOT_ZST_SHA256" \
                 -f sefaria_release_metadata_sha256="$SEFARIA_METADATA_SHA" ;;
             server)
+              DISPATCHED_WORKFLOW=relink.yml
               gh workflow run relink.yml -R Otzaria/LinkerToOtzaria \
                 -f library_run_id="$GITHUB_RUN_ID" -f target=server \
                 -f relink_request_id="$RELINK_REQUEST_ID" \
@@ -1179,6 +1478,12 @@ jobs:
                 -f snapshot_sha256="$SNAPSHOT_ZST_SHA256" \
                 -f sefaria_release_metadata_sha256="$SEFARIA_METADATA_SHA" ;;
           esac
+          # One line at the dispatch boundary: what was asked of whom, with the
+          # exact non-secret inputs and the correlation identity discovery below
+          # matches on. `gh workflow run` returns no run id, so the run URL is
+          # printed once by the wait loop below the moment discovery resolves it
+          # — deliberately NOT duplicated here.
+          echo "dispatched $DISPATCHED_WORKFLOW to Otzaria/LinkerToOtzaria: target=$SERIAL_LINKER_TARGET library_run_id=$GITHUB_RUN_ID parent_run_attempt=$GITHUB_RUN_ATTEMPT relink_request_id=$RELINK_REQUEST_ID sefaria_tag=$SEFARIA_TAG snapshot_sha256=$SNAPSHOT_ZST_SHA256"
           # ─── A2 / E2: nothing is uploaded early from HERE any more ─────────
           # A2 used this idle window (20 min of discovery plus the relink itself,
           # 1119 s on run 33865604251) to push lines_snapshot.db.zst to the draft
@@ -1236,35 +1541,25 @@ jobs:
           done
           [ -n "$RUN" ] || { echo "::error::relink run ($RELINK_TITLE) never appeared"; exit 1; }
           echo "relink run: $RUN"
+          RUN_URL="https://github.com/Otzaria/LinkerToOtzaria/actions/runs/$RUN"
           {
             echo "run_id=$RUN"
             echo "request_id=$RELINK_REQUEST_ID"
             echo "parent_run_id=$GITHUB_RUN_ID"
             echo "parent_run_attempt=$GITHUB_RUN_ATTEMPT"
           } >> "$GITHUB_OUTPUT"
-          # Low-frequency resilient wait: `gh run watch` polls every 3s, which can
-          # exhaust the shared 5k/hr API quota on an hours-long relink; transient
-          # API errors must not kill an otherwise-healthy build. A run stuck in
-          # `queued` past 30 min means the Kaggle session never booted (quota,
-          # dataset, image drift) — fail loudly instead of burning the job timeout.
-          queued_for=0
-          while :; do
-            state="$(gh api "repos/Otzaria/LinkerToOtzaria/actions/runs/$RUN" --jq '.status + ":" + (.conclusion // "")' 2>"$RUNNER_TEMP/wait-err.txt" || { grep -q "HTTP 401" "$RUNNER_TEMP/wait-err.txt" && echo fatal-auth || echo transient; })"
-            case "$state" in
-              completed:success) break ;;
-              completed:*) echo "::error::relink run $RUN concluded ${state#completed:}"; exit 1 ;;
-              fatal-auth) echo "::error::token rejected (HTTP 401) while waiting — dead credentials cannot heal"; exit 1 ;;
-              queued:*|pending:*|requested:*|waiting:*)
-                # Every pre-start state counts toward the 30-min cap — a run blocked in
-                # `pending` on a busy concurrency group is just as stuck as one `queued`.
-                queued_for=$((queued_for + 60))
-                if [ "$queued_for" -ge 1800 ]; then
-                  echo "::error::relink run $RUN still ${state%%:*} after 30 min — never started (Kaggle session or concurrency slot)"; exit 1
-                fi
-                sleep 60 ;;
-              *) queued_for=0; sleep 60 ;;
-            esac
-          done
+          # The wait loop, its 10-minute heartbeat and its terminal-state reporting are
+          # one cohesive block and live in a script, so this body stays well under the
+          # 21,000-character ceiling GitHub Actions puts on a single `run:` template —
+          # the sibling patch-fan step crossed it and the whole workflow stopped loading
+          # (run 34195296928). The script sets the same `set -euo pipefail`, prints the
+          # same lines, and a non-zero exit fails this step exactly as its inline
+          # `exit 1`s did. Nothing below reads a variable it sets, so a child process is
+          # enough. RUN, RUN_URL and RELINK_REQUEST_ID are shell locals here, so they are
+          # handed over explicitly; everything else it reads is already step env.
+          RELINK_RUN_ID="$RUN" RELINK_RUN_URL="$RUN_URL" \
+            RELINK_REQUEST_ID="$RELINK_REQUEST_ID" \
+            bash .pipeline-control/.github/scripts/wait_for_relink_run.sh
           # E2: there is no early upload to reap here any more — this step no
           # longer starts one (see the A2/E2 note above). The 'buildstate' label
           # the patch fan starts is reaped in that step, before the publish step
@@ -1273,7 +1568,7 @@ jobs:
           # again; if another heavy phase won the race, fail rather than overlap.
           python3 .pipeline-control/.github/scripts/host_lease.py start \
             --lock /run/lock/otzaria/host-heavy.lock \
-            --state "$HOST_LEASE_STATE" --ttl 90000
+            --state "$HOST_LEASE_STATE" --ttl 176400
           fi
           : "${EXPECTED_LINKER_SNAPSHOT_ZST_SHA256:=$SNAPSHOT_ZST_SHA256}"
           echo "EXPECTED_LINKER_SNAPSHOT_ZST_SHA256=$EXPECTED_LINKER_SNAPSHOT_ZST_SHA256" >> "$GITHUB_ENV"
@@ -1508,6 +1803,29 @@ jobs:
       # python3 (stdlib only) is the runtime; verify it like the deps script does
       # for sqlite3, then fail the job on any nonzero exit.
       - name: QA — run §10 checks on the full DB (required)
+        env:
+          # Reference-snapshot drift gate for the §10 checks (scripts/qa/common.py,
+          # gate_snapshot_drift). Every check carrying a hard-coded baseline used
+          # to PRINT the drift next to the observed value and PASS regardless, so
+          # a slow bleed was visible only to a human reading the log. Now a shrink
+          # larger than this percentage of the baseline is an ::error:: that fails
+          # the build; anything smaller — and any growth — is a ::warning:: naming
+          # the numbers.
+          #
+          # 2% is set against the widest drift the last good cycle (run
+          # 34024655297) actually showed: baseProvenance=1 12970 vs 13056 =
+          # −0.659%, dependenceType 4940 vs 4941 = −0.020%, book_base_text 5425 vs
+          # 5426 = −0.018%. That is a 3x margin over the largest observed value,
+          # so a normal weekly cannot trip it, while the −86-link bleed is at
+          # least a warning now and a real collapse fails closed. Raising it is an
+          # operator decision; refreshing a baseline is a deliberate edit to the
+          # check, and --expect-snapshot still enforces the exact numbers.
+          QA_DRIFT_MAX_SHRINK_PCT: "2"
+          # A shrink is an error only when it also exceeds this absolute floor:
+          # at 2% alone a -1 on guides=2 / midrash=5 / inferred pairs=20 /
+          # targum=45 would fail the weekly release over one book that left
+          # the export. 10 keeps that a warning; a real collapse still fails.
+          QA_DRIFT_MIN_SHRINK_ABS: "10"
         run: |
           set -euo pipefail
           command -v python3
@@ -1587,17 +1905,15 @@ jobs:
           SOURCE_COMMIT: ${{ inputs.source_commit }}
         run: |
           set -euo pipefail
-          # קורא db_schema_version מ-DB; טבלה/שורה חסרה → ERROR (release DB חייב מוטבע).
-          # sqlite3 זמין ברנרים ה-self-hosted (בשימוש גם בוורקפלואי delta-real-diff-*).
-          read_schema() {
-            local db="$1" v
-            if ! v=$(sqlite3 "$db" "SELECT value FROM schema_meta WHERE key='db_schema_version'" 2>/dev/null); then
-              echo "::error::schema_meta missing/unreadable in $db (release DB must be stamped)" >&2
-              return 1
-            fi
-            [ -n "$v" ] || { echo "::error::db_schema_version row missing in $db (release DB must be stamped)" >&2; return 1; }
-            printf '%s' "$v"
-          }
+          # read_schema, produce_anchor, the heartbeat machinery and drain_batch are
+          # sourced from one library so this body stays well under the 21,000-character
+          # ceiling GitHub Actions puts on a single `run:` template — at 22,592 it
+          # refused to load the whole workflow (run 34195296928). Sourced, not run: the
+          # functions keep this shell, these `set` options and these globals, and
+          # `produce_anchor` still forks from HERE when the driver backgrounds it.
+          # From the pipeline-control checkout like every other helper in this job — the
+          # payload checkout is a different commit.
+          . .pipeline-control/.github/scripts/patch_fan_lib.sh
           THIS_VER=${{ steps.discover.outputs.db_version }}
           THIS_SCHEMA=$(read_schema build/seforim.db) || exit 1
           echo "THIS DB schema version = $THIS_SCHEMA"
@@ -1671,197 +1987,10 @@ jobs:
           # must never be able to swallow the remaining rows from a redirected
           # stdin.
           mapfile -t ANCHOR_ROWS < "$ANCHORS"
-
-          # One anchor, start to finish: pre-check, reconstitute, produce,
-          # verify, clean up. Every path it touches is scoped to its own offset
-          # so two of these can run side by side, it writes to its own log, and
-          # its exit status is the only channel back to the driver: 0 for a
-          # produced patch AND for every legitimate skip, non-zero only for a
-          # genuine failure — which fails the step exactly as `set -e` inside
-          # the serial loop always did.
-          produce_anchor() {  # <offset> <target-version> <tag>
-            local OFFSET="$1" TARGET_VER="$2" TAG="$3"
-            local ANCHOR_DIR="prev-dbs/anchor-$OFFSET"
-            local META_DIR="prev-meta/anchor-$OFFSET"
-            local PREV_DB="$ANCHOR_DIR/seforim.db"
-            local PATCH_OUT="$PWD/patches/patch-v${TARGET_VER}-v${THIS_VER}.db"
-            local PRECHECK WAIT_BUDGET PREFETCH_STATE PREFETCH_WAITED
-            local PREV_SCHEMA PRODUCE_RC REASON
-            local T_START T_DOWNLOADED T_EXTRACTED T_DONE
-            echo "=== Producing patch v${TARGET_VER} → v${THIS_VER} (offset $OFFSET, tag=$TAG) ==="
-
-            # Reconstituting an anchor costs 110–135 s of download plus a
-            # decompress; run 33865604251 paid ~140 s for the v10 anchor only
-            # to be told it was unpatchable. patch_anchor_schema.py answers the
-            # same question first, from the anchor's own build_provenance.json
-            # `db_schema` block (a few KB, exact from db_version 27 on — the
-            # published v26 provenance is schema_version 3 and carries none) or —
-            # for releases that predate that block — from a documented list of
-            # db_versions proven unpatchable by this repository's history.
-            # It is advisory in one direction only: PROCEED is NOT a
-            # patchability claim, the producer's exit-3 + "<out>.unpatchable"
-            # marker below stays the sole authority, and the pre-check itself
-            # can never fail the release (any surprise degrades to PROCEED).
-            # --contract-tables scopes the column comparison to the producer's
-            # own table list. It comes from the PAYLOAD checkout — the same
-            # commit whose PatchDbProducer runs below, not the control-plane
-            # checkout — because a comparison wider than that list would skip
-            # anchors the producer would still have patched.
-            rm -rf "$META_DIR"
-            mkdir -p "$META_DIR"
-            gh release download "$TAG" \
-              --pattern 'build_provenance.json' \
-              --dir "$META_DIR" || true
-            PRECHECK=$(python3 .pipeline-control/.github/scripts/patch_anchor_schema.py check \
-              --this-schema build/db_schema.json \
-              --anchor-version "$TARGET_VER" \
-              --anchor-provenance "$META_DIR/build_provenance.json" \
-              --contract-tables generator/common/src/jvmTest/resources/patch_tables_contract.json) \
-              || PRECHECK="PROCEED pre-check did not run — deferring to the producer"
-            rm -rf "$META_DIR"
-            echo "pre-check: $PRECHECK"
-            if [ "${PRECHECK%% *}" = UNPATCHABLE ]; then
-              echo "::warning::anchor v${TARGET_VER} ($TAG): ${PRECHECK#* } — pre-download schema check declared the anchor unpatchable; skip anchor"
-              return 0
-            fi
-
-            rm -rf "$ANCHOR_DIR"
-            mkdir -p "$ANCHOR_DIR"
-            # A1: this anchor was very probably downloaded and verified (size,
-            # and digest when GitHub published one) while the DB was being
-            # generated. Wait for THIS tag's marker; anything short of a
-            # verified hit — no marker inside the budget, a failed or
-            # unpatchable verdict, a vanished file — falls straight back to the
-            # unchanged serial download below. A missing marker also aborts the
-            # prefetch, so it cannot keep competing for the downlink.
-            # The "stop waiting" verdict has to outlive this anchor: the ones
-            # still to come run in their own subshells, where a shell variable
-            # could not reach them, so it is recorded as a file next to the
-            # prefetch state.
-            WAIT_BUDGET="$PREFETCH_WAIT_SECONDS"
-            if [ -f "$PREFETCH_DIR/.abandoned" ]; then
-              WAIT_BUDGET=0
-            fi
-            PREFETCH_STATE=absent
-            if [ -f "$PREFETCH_DIR/.started" ]; then
-              PREFETCH_WAITED=0
-              while [ ! -f "$PREFETCH_DIR/$TAG/.done" ] && [ ! -f "$PREFETCH_DIR/.abandoned" ] && [ "$PREFETCH_WAITED" -lt "$WAIT_BUDGET" ]; do
-                sleep 5
-                PREFETCH_WAITED=$((PREFETCH_WAITED + 5))
-              done
-              if [ -f "$PREFETCH_DIR/$TAG/.done" ]; then
-                PREFETCH_STATE=$(head -n1 "$PREFETCH_DIR/$TAG/.done")
-                sed -n '2,$p' "$PREFETCH_DIR/$TAG/.done"
-              else
-                echo "::warning::anchor v${TARGET_VER} ($TAG): no prefetch marker after ${PREFETCH_WAITED}s — falling back to the serial download"
-                bash .pipeline-control/.github/scripts/prefetch_patch_anchors.sh abort "$PREFETCH_DIR" || true
-                : > "$PREFETCH_DIR/.abandoned"
-              fi
-            fi
-            T_START=$(date +%s)
-            if [ "$PREFETCH_STATE" = ok ] && [ -s "$PREFETCH_DIR/$TAG/seforim.db.zst" ]; then
-              mv "$PREFETCH_DIR/$TAG/seforim.db.zst" "$ANCHOR_DIR/seforim.db.zst"
-              echo "anchor v${TARGET_VER} ($TAG): reused the prefetched DB"
-            else
-              gh release download "$TAG" \
-                --pattern 'seforim.db.zst' \
-                --dir "$ANCHOR_DIR"
-            fi
-            T_DOWNLOADED=$(date +%s)
-            unzstd -c "$ANCHOR_DIR/seforim.db.zst" > "$PREV_DB"
-            T_EXTRACTED=$(date +%s)
-            test -s "$PREV_DB" || { echo "::error::seforim.db.zst not found in release $TAG"; return 1; }
-
-            # Explicitly supported schema transitions. The producer derives
-            # contract promotions from both signed schema versions, rebuilds
-            # newly tracked tables from a full snapshot, and verifies a real
-            # apply. Unknown transitions remain fail-closed per anchor.
-            PREV_SCHEMA=$(read_schema "$PREV_DB") || return 1
-            if [ "$PREV_SCHEMA" != "$THIS_SCHEMA" ]; then
-              if { [ "$PREV_SCHEMA" = 2 ] && [ "$THIS_SCHEMA" = 3 ]; } || \
-                 { [ "$PREV_SCHEMA" = 1 ] && [ "$THIS_SCHEMA" = 4 ]; } || \
-                 { [ "$PREV_SCHEMA" = 2 ] && [ "$THIS_SCHEMA" = 4 ]; } || \
-                 { [ "$PREV_SCHEMA" = 3 ] && [ "$THIS_SCHEMA" = 4 ]; } || \
-                 { [ "$PREV_SCHEMA" = 1 ] && [ "$THIS_SCHEMA" = 5 ]; } || \
-                 { [ "$PREV_SCHEMA" = 2 ] && [ "$THIS_SCHEMA" = 5 ]; } || \
-                 { [ "$PREV_SCHEMA" = 3 ] && [ "$THIS_SCHEMA" = 5 ]; } || \
-                 { [ "$PREV_SCHEMA" = 4 ] && [ "$THIS_SCHEMA" = 5 ]; }; then
-                echo "schema $PREV_SCHEMA → $THIS_SCHEMA — producing the supported cross-schema delta"
-              else
-                echo "schema $PREV_SCHEMA → $THIS_SCHEMA is unsupported — skip anchor"
-                rm -rf "$ANCHOR_DIR"
-                return 0
-              fi
-            fi
-
-            # A column added without a db_schema_version bump (e.g.
-            # category.heShortDesc, 2026-07-16, still schema 1) no longer costs
-            # us the anchor: PatchDbProducer emits an
-            # `ALTER TABLE … ADD COLUMN` migration — plain SQL that every
-            # released PatchApplier already runs before the upserts — and ships
-            # every row whose new value is non-NULL. The shell pre-check that
-            # compared PRAGMA table_info is therefore gone; the producer itself
-            # is now the single authority on what is patchable.
-            #
-            # It declares an anchor unpatchable only when no patch could ever
-            # express the change (a PRIMARY KEY column missing from prev, or a
-            # column dropped without a bump): PatchPipelineCli then exits 3
-            # (UnpatchableAnchor) and drops "<out>.unpatchable" carrying the
-            # reason, and this anchor is skipped for that one code.
-            # Every other non-zero exit still fails the release.
-            rm -f "$PATCH_OUT.unpatchable"
-            PRODUCE_RC=0
-            if [ -n "$PATCH_MAIN_CLASS" ]; then
-              # Exactly what `gradle :generator-common:producePatchAndVerify`
-              # forks: main class, -Xmx/GC flags and runtime classpath all come
-              # from that task's own definition (see patchPipelineLauncher in
-              # generator/common/build.gradle.kts), and its -P properties are
-              # the -D system properties the task sets on the fork. ZSTD_LEVEL
-              # reaches the CLI through the step env either way. Keeping Gradle
-              # out of the loop is what lets two of these run at once.
-              java $PATCH_JVM_ARGS -cp "$PATCH_CLASSPATH" \
-                -DprevDb=$PWD/$PREV_DB \
-                -DnewDb=$PWD/build/seforim.db \
-                -Dout=$PATCH_OUT \
-                -DfromVersion=$TARGET_VER -DtoVersion=$THIS_VER \
-                "$PATCH_MAIN_CLASS" || PRODUCE_RC=$?
-            else
-              gradle :generator-common:producePatchAndVerify \
-                -PprevDb=$PWD/$PREV_DB \
-                -PnewDb=$PWD/build/seforim.db \
-                -Pout=$PATCH_OUT \
-                -PfromVersion=$TARGET_VER -PtoVersion=$THIS_VER \
-                --no-daemon --stacktrace || PRODUCE_RC=$?
-            fi
-            # The Gradle task maps the CLI's exit 3 onto a warning and a
-            # successful build; run directly, that 3 arrives here. Both funnel
-            # into the one marker path below, and every OTHER non-zero exit
-            # fails this anchor — which fails the whole step, as before.
-            if [ "$PRODUCE_RC" -ne 0 ] && [ "$PRODUCE_RC" -ne 3 ]; then
-              echo "::error::anchor v${TARGET_VER} ($TAG): producePatchAndVerify failed with exit code $PRODUCE_RC"
-              rm -rf "$ANCHOR_DIR"
-              return "$PRODUCE_RC"
-            fi
-            if [ "$PRODUCE_RC" -eq 3 ] || [ -f "$PATCH_OUT.unpatchable" ]; then
-              REASON=$(cat "$PATCH_OUT.unpatchable" 2>/dev/null || true)
-              echo "::warning::anchor v${TARGET_VER} ($TAG): ${REASON:-see PatchPipelineCli output} — producer declared the anchor unpatchable; skip anchor"
-              # Leave nothing behind: the marker plus the producer's half-built
-              # .tmp (and any stale .db) must not clutter patches/, which the
-              # release staging step globs.
-              rm -f "$PATCH_OUT.unpatchable" "$PATCH_OUT" "$PATCH_OUT.tmp"
-              rm -rf "$ANCHOR_DIR"
-              return 0
-            fi
-            T_DONE=$(date +%s)
-            echo "anchor v${TARGET_VER} timings: download=$((T_DOWNLOADED - T_START))s extract=$((T_EXTRACTED - T_DOWNLOADED))s produce+verify+compress=$((T_DONE - T_EXTRACTED))s total=$((T_DONE - T_START))s"
-
-            # Free disk for the anchors still to come — only the .zst + manifest
-            # need to ship; the .db was the verify ground-truth.
-            rm -rf "$ANCHOR_DIR"
-            rm -f "patches/patch-v${TARGET_VER}-v${THIS_VER}.db" \
-                  "patches/verify-patch-v${TARGET_VER}-v${THIS_VER}.db"
-            df -h /
-          }
+          # Numbered progress: "anchor 3/4 …" tells an operator how much of the
+          # fan is left without counting `starting anchor` lines by hand.
+          ANCHOR_TOTAL=$(awk -F'\t' '$1 == "ANCHOR"' "$ANCHORS" | wc -l | tr -d ' ')
+          ANCHOR_INDEX=0
 
           # Drive the anchors FAN_PARALLELISM at a time. Each batch's logs are
           # printed in offset order once the whole batch is done, so the step's
@@ -1873,25 +2002,9 @@ jobs:
           BATCH_PIDS=()
           BATCH_LOGS=()
           BATCH_NAMES=()
+          BATCH_TARGETS=()
+          BATCH_STARTS=()
           FAN_FAILURE=0
-          drain_batch() {
-            local i status rc=0
-            [ "${#BATCH_PIDS[@]}" -gt 0 ] || return 0
-            for i in "${!BATCH_PIDS[@]}"; do
-              status=0
-              wait "${BATCH_PIDS[$i]}" || status=$?
-              cat "${BATCH_LOGS[$i]}" || true
-              rm -f "${BATCH_LOGS[$i]}"
-              if [ "$status" -ne 0 ]; then
-                echo "::error::anchor ${BATCH_NAMES[$i]} failed with exit code $status"
-                rc="$status"
-              fi
-            done
-            BATCH_PIDS=()
-            BATCH_LOGS=()
-            BATCH_NAMES=()
-            return "$rc"
-          }
 
           for ROW in ${ANCHOR_ROWS[@]+"${ANCHOR_ROWS[@]}"}; do
             IFS=$'\t' read -r STATUS OFFSET TARGET_VER TAG <<<"$ROW"
@@ -1906,14 +2019,18 @@ jobs:
                 ;;
             esac
             ANCHOR_LOG="$RUNNER_TEMP/patch-fan-anchor-$OFFSET.log"
-            echo "starting anchor v${TARGET_VER} (offset $OFFSET, tag=$TAG); its log follows when this batch of $FAN_PARALLELISM finishes"
+            ANCHOR_INDEX=$((ANCHOR_INDEX + 1))
+            ANCHOR_LABEL="anchor $ANCHOR_INDEX/$ANCHOR_TOTAL $TAG (offset $OFFSET, v${TARGET_VER} → v${THIS_VER})"
+            echo "$ANCHOR_LABEL: starting; its log follows when this batch of $FAN_PARALLELISM finishes"
             # Concurrent forks are the one new pressure on this box's RAM;
             # leave the evidence in the log for the next tuning pass.
             awk '/MemAvailable/ {printf "MemAvailable: %.1f GiB\n", $2/1048576}' /proc/meminfo || true
             produce_anchor "$OFFSET" "$TARGET_VER" "$TAG" > "$ANCHOR_LOG" 2>&1 < /dev/null &
             BATCH_PIDS+=("$!")
             BATCH_LOGS+=("$ANCHOR_LOG")
-            BATCH_NAMES+=("v${TARGET_VER} (offset $OFFSET)")
+            BATCH_NAMES+=("$ANCHOR_LABEL")
+            BATCH_TARGETS+=("$TARGET_VER")
+            BATCH_STARTS+=("$(date +%s)")
             if [ "${#BATCH_PIDS[@]}" -ge "$FAN_PARALLELISM" ]; then
               drain_batch || FAN_FAILURE=$?
               [ "$FAN_FAILURE" -eq 0 ] || break
@@ -2030,10 +2147,15 @@ jobs:
           # derived from the digest exactly as the publishing step derives it, and
           # the validator re-checks that derivation — a consumer can resolve the
           # snapshot from here and verify the bytes it downloads, fail-closed.
-          # This is THIS build's own snapshot (build/lines_snapshot.db.zst), i.e.
-          # exactly the bytes the removed asset used to carry, including on the
-          # recovery path where the linked snapshot is an earlier attempt's.
-          snapshot_sha256 = os.environ["SNAPSHOT_ZST_SHA256"]
+          # This is the snapshot the LINK SET on this release was produced from,
+          # i.e. EXPECTED_LINKER_SNAPSHOT_ZST_SHA256, which the relink step
+          # defaults to this build's own SNAPSHOT_ZST_SHA256 on every normal
+          # path.  They diverge only in recovery mode, where this build's rebuild
+          # is deliberately NOT published (nothing would ever read it) and the
+          # earlier attempt's release still carries resolvable bytes — proven
+          # line-for-line equivalent by the semantic compare in Phase-2.  Naming
+          # the unpublished rebuild here would hand every consumer a 404.
+          snapshot_sha256 = os.environ["EXPECTED_LINKER_SNAPSHOT_ZST_SHA256"]
           value = {
               "schema_version": 5,
               "snapshot_zst_sha256": snapshot_sha256,
@@ -2098,7 +2220,12 @@ jobs:
             || { echo "::error::Could not resolve the exact draft release id"; exit 1; }
           # Assets already uploaded early are re-verified here by name+size+digest
           # like every other asset; upload_asset skips only an exact match.
+          # upload_asset prints one summary line per asset (uploaded/reused,
+          # size, digest prefix, elapsed, MB/s) and release_upload_summary closes
+          # the ~27-minute step with the totals, so a stall, a retry and a fast
+          # upload are no longer the same silence.
           for asset_path in release-staging/*; do upload_asset "$asset_path"; done
+          release_upload_summary
           verify_remote() {
             release_assets_json > "$RUNNER_TEMP/release-assets.json"
             python3 - "$RUNNER_TEMP/release-assets.json" release-staging <<'PY'
@@ -2243,9 +2370,68 @@ jobs:
           # reused pid on this long-lived runner is safe. ('snapshot' is gone
           # with E2 — the DB release no longer carries lines_snapshot.db.zst, so
           # 'buildstate' is the only early upload left.)
-          bash .pipeline-control/.github/scripts/prefetch_patch_anchors.sh abort prefetch || true
-          bash .pipeline-control/.github/scripts/upload_early_release_assets.sh abort buildstate || true
+          # `|| true` used to swallow the abort's own failure too, so a
+          # helper that never ran read exactly like a clean abort. Keep the job
+          # green — this step is `if: always()` — but say which abort failed,
+          # with what status, on top of the helper's own "what I aborted" line.
+          abort_background() {  # <what> <command>...
+            local what="$1" rc=0
+            shift
+            "$@" || rc=$?
+            [ "$rc" -eq 0 ] || echo "::warning::$what: the abort helper itself exited $rc — the background job may still be running; nothing in this job waits for it"
+          }
+          abort_background "patch-fan anchor prefetch" \
+            bash .pipeline-control/.github/scripts/prefetch_patch_anchors.sh abort prefetch
+          abort_background "early release-asset upload 'buildstate'" \
+            bash .pipeline-control/.github/scripts/upload_early_release_assets.sh abort buildstate
           rm -rf prev-dbs prev-meta patches release-staging prior-versions.tsv prefetch
+          # prefetch/ is run-scoped and goes with the rest. The DURABLE anchor
+          # cache it fed is NOT under the workspace, is bounded by the script
+          # itself, and is deliberately kept: deleting it is what made run
+          # 34024655297 re-download the 4 anchors run 34021998271 had already
+          # fetched (~16 min). This step must never remove it — only report it.
+          # Guarded like every other external call in this step: the default
+          # shell is `bash -e`, so on a job that died before the pipeline-control
+          # checkout an unguarded `bash <missing>` would exit 127 and turn this
+          # `if: always()` cleanup red on top of the real failure.
+          bash .pipeline-control/.github/scripts/prefetch_patch_anchors.sh cache-report || echo "patch-fan anchor cache: not reported (the prefetch helper is not in this workspace)"
+          # $RUNNER_TEMP is NOT run-scoped on this self-hosted runner either, and
+          # the two biggest temp trees are removed only by traps inside their own
+          # steps — a job that dies elsewhere (or is cancelled) leaks them: the
+          # raw lines snapshot is 5.8 GB and the manual-links input tree holds the
+          # extracted Sefaria + Otzaria archives. Run 33991433362 left both.
+          # Ours first, unconditionally, with sizes so the log shows the reclaim.
+          for leftover in \
+            "$RUNNER_TEMP/lines-snapshot-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.db" \
+            "$RUNNER_TEMP/manual-links-inputs-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"; do
+            [ -e "$leftover" ] || continue
+            echo "removing $(du -sh "$leftover" 2>/dev/null | cut -f1) $leftover"
+            rm -rf "$leftover" || true
+          done
+          # Then a bounded sweep of the SAME two patterns from earlier runs. Heavy
+          # phases are serialized by the host lease so nothing concurrent can own
+          # these, but stay conservative anyway: depth 1, these two name shapes
+          # only, and untouched for more than two days. This job's own
+          # timeout-minutes is 2880, so no LIVE attempt of this workflow can own
+          # a temp entry older than 48 h, while `-mtime +2` matches only entries at
+          # least 72 h old (find truncates the age to whole days) — the window still
+          # cannot race a live attempt, not even a directory whose mtime went stale
+          # while its files were in use.
+          # This step runs `if: always()`, and the default shell is `bash -e`, so
+          # every reclaim is best-effort: one EACCES entry under $RUNNER_TEMP
+          # must not turn a published, green build red.
+          # The durable anchor cache is out of this sweep's reach twice over: it
+          # lives under ${XDG_CACHE_HOME:-$HOME/.cache}/seforimlibrary, not under
+          # $RUNNER_TEMP, and neither name shape below could match it. Keep both
+          # true — a cache an unlucky +2 day gap could delete is not a cache, and
+          # the ~16 min of re-download is exactly what it exists to prevent.
+          find "$RUNNER_TEMP" -maxdepth 1 -mtime +2 \
+            \( \( -type f -name 'lines-snapshot-*-*.db' \) -o \
+               \( -type d -name 'manual-links-inputs-*-*' \) \) -print0 \
+            | while IFS= read -r -d '' stale; do
+                echo "removing stale $(du -sh "$stale" 2>/dev/null | cut -f1) $stale"
+                rm -rf "$stale" || true
+              done || true
 
       # The draft release can exist from the patch fan onward (A2/E2 — the fan's
       # early buildstate upload creates it), so a build that dies anywhere after
@@ -2293,10 +2479,76 @@ jobs:
           fi
           exit 0
 
+      # The content-addressed `lines-snapshot-sha256-<sha>` pre-release is published
+      # BEFORE the relink is dispatched, so an attempt that dies (or is cancelled) in
+      # that window leaves a ~1 GiB pre-release nothing will ever download, and the
+      # failure hooks above only ever looked at drafts. Delete it — but only when BOTH
+      # hold: this attempt CREATED that release itself (the tag is content-addressed
+      # and shared, so an attempt that merely rebuilt identical bytes must not claim
+      # another's), and this attempt never reached the dispatch boundary (a relink in
+      # flight, or a later recovery of it, resolves the snapshot of the attempt that
+      # dispatched it — those must survive). Best-effort: never fails the job.
+      - name: Delete this attempt's unconsumed snapshot pre-release on failure
+        if: failure() || cancelled()
+        env:
+          AUTOMATIC_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CROSS_REPO_TOKEN: ${{ secrets.PIPELINE_TOKEN }}
+          RELINK_STEP_OUTCOME: ${{ steps.relink.outcome }}
+        run: |
+          set -uo pipefail
+          TAG="${SNAPSHOT_RELEASE_TAG:-}"
+          if [ "${SNAPSHOT_RELEASE_CREATED_HERE:-}" != 1 ] || [ -z "$TAG" ]; then
+            echo "this attempt published no snapshot pre-release of its own — nothing to delete."
+            exit 0
+          fi
+          if [ "${RELINK_DISPATCH_STARTED:-}" = 1 ]; then
+            echo "$TAG was handed to the relink this attempt dispatched — keeping it for that run and any recovery of it."
+            exit 0
+          fi
+          # RELINK_DISPATCH_STARTED reaches this step through GITHUB_ENV, which the
+          # runner applies after the writing step COMPLETES. A relink step killed
+          # mid-flight is the one case where "marker unset" is not proof that
+          # `gh workflow run` never ran, and deleting a snapshot a live child is
+          # about to download is unrecoverable. Leak instead.
+          if [ "${RELINK_STEP_OUTCOME:-}" = cancelled ]; then
+            echo "the relink step was cancelled, so an already-dispatched child cannot be ruled out — keeping $TAG."
+            exit 0
+          fi
+          if ! [[ "$TAG" =~ ^lines-snapshot-sha256-[0-9a-f]{64}$ ]]; then
+            echo "::warning::refusing to delete unexpected snapshot tag '$TAG'"
+            exit 0
+          fi
+          source .pipeline-control/.github/scripts/release_draft.sh
+          use_token "${RELEASE_TOKEN_KIND:-}" || {
+            echo "::warning::no preflighted release credential — leaving $TAG for the operator"
+            exit 0
+          }
+          delete_snapshot() {  # 0 = gone (deleted or already absent), 1 = try the other credential
+            local err="$RUNNER_TEMP/snapshot-release-delete.err"
+            if gh release delete "$TAG" -R "$GITHUB_REPOSITORY" --cleanup-tag --yes 2> "$err"; then
+              echo "deleted the unconsumed snapshot pre-release $TAG."
+              return 0
+            fi
+            if grep -qi 'HTTP 404\|release not found' "$err"; then
+              echo "$TAG is already gone — nothing to delete."
+              return 0
+            fi
+            cat "$err" >&2
+            return 1
+          }
+          if ! delete_snapshot; then
+            if switch_token && delete_snapshot; then
+              echo "(that deletion needed the fallback release credential)"
+            else
+              echo "::warning::could not delete the unconsumed snapshot pre-release $TAG; delete it manually."
+            fi
+          fi
+          exit 0
+
       # If this build ends while the relink it dispatched is still pending/running — the
       # build hit its own timeout while waiting, failed in Phase-2, or was cancelled —
       # cancel OUR child so it can't outlive us as an orphan holding the linker
-      # host/session (its own ceiling is 8h). Identity is the per-attempt request id
+      # host/session (its own ceiling is 24h). Identity is the per-attempt request id
       # stamped into both run-names: matching is FULL-title equality, so this attempt's
       # cleanup can never touch another attempt's (or any other) runs. Order: cancel the
       # kaggle-relink DISPATCHER first and wait (bounded) until it is terminal — its own
@@ -2309,14 +2561,22 @@ jobs:
         if: always()
         env:
           GH_TOKEN: ${{ secrets.PIPELINE_TOKEN }}
+          RECOVERY_RUN_ID: ${{ inputs.relink_recovery_run_id }}
         run: |
           set -uo pipefail
           # The identity vars exist only if the dispatch step ran (GITHUB_ENV) — before
-          # that point there is nothing to clean.
-          [ "${RELINK_DISPATCH_STARTED:-}" = 1 ] || {
-            echo "this attempt never reached the relink dispatch boundary — nothing to clean."
+          # that point there is nothing to clean. Two very different runs land here,
+          # and the old single sentence claimed the wrong one for the recovery path:
+          # a recovery reuses a relink that is already terminal, so it deliberately
+          # dispatches nothing — it did not "fail to reach" the boundary.
+          if [ "${RELINK_DISPATCH_STARTED:-}" != 1 ]; then
+            if [ -n "${RECOVERY_RUN_ID:-}" ]; then
+              echo "recovery mode (relink_recovery_run_id=$RECOVERY_RUN_ID): this attempt dispatches no relink of its own — no child of ours can be in flight."
+            else
+              echo "this attempt ended before the relink dispatch boundary (RELINK_DISPATCH_STARTED is unset) — no child was ever dispatched, so there is nothing to cancel."
+            fi
             exit 0
-          }
+          fi
           [ -n "${RELINK_REQUEST_ID:-}" ] || { echo "dispatch boundary lacked a request id — nothing to clean."; exit 0; }
           : "${RELINK_TITLE:=}"
           : "${KAGGLE_TITLE:=}"
@@ -2349,6 +2609,9 @@ jobs:
             done
             echo "::warning::run $1 is still not terminal after 90s"
           }
+          # Every run this step actually cancelled, so the closing line can report
+          # what it cleaned instead of only that it ran.
+          CANCELLED=""
           cancel_live() {  # $1 workflow, $2 exact title
             local ids rid
             if ! ids=$(list_live "$1" "$2"); then
@@ -2359,6 +2622,7 @@ jobs:
               echo "Cancelling in-flight $1 run $rid ($2)"
               gh run cancel "$rid" -R Otzaria/LinkerToOtzaria || true
               wait_terminal "$rid"
+              CANCELLED+="$1:$rid "
             done
           }
           scan_all() {
@@ -2385,7 +2649,7 @@ jobs:
           elif [ "$QUERY_OK" -ne 1 ]; then
             echo "::warning::ORPHAN_INTENT relink_request_id=$RELINK_REQUEST_ID query_ok=0 — one or more scans failed; a live run may be invisible. The failure-event reconciler reaps by this request id."
           else
-            echo "relink orphan-cleanup done for request=$RELINK_REQUEST_ID."
+            echo "relink orphan-cleanup done for request=$RELINK_REQUEST_ID: cancelled ${CANCELLED:-nothing (no child was still live)}."
           fi
 
       - name: Release cross-repo host lease after child cleanup
@@ -2406,7 +2670,7 @@ jobs:
     timeout-minutes: 30
     steps:
       - name: Checkout pipeline handoff publisher
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           ref: ${{ github.sha }}
           sparse-checkout: |
@@ -2495,7 +2759,17 @@ jobs:
             --argjson saga_run_id "$SAGA_RUN_ID" --argjson child_run_id "$GITHUB_RUN_ID" \
             --argjson saga_run_attempt "$SAGA_RUN_ATTEMPT" --argjson child_run_attempt "$GITHUB_RUN_ATTEMPT" \
             '{event_type:"seforim-published",client_payload:{correlation_id:$correlation_id,saga_run_id:$saga_run_id,saga_run_attempt:$saga_run_attempt,child_run_id:$child_run_id,child_run_attempt:$child_run_attempt}}')"
+          # This is the event that wakes the downstream repo, and a repository
+          # dispatch answers 204 with an empty body — so without these two lines a
+          # swallowed dispatch and a good one leave the identical (empty) trace.
+          # Everything printed is already public run metadata: no secret, and the
+          # payload carries none.
+          echo "dispatch: repos/Otzaria/otzaria-library event_type=seforim-published correlation_id=$CORRELATION_ID saga=$SAGA_RUN_ID:$SAGA_RUN_ATTEMPT child=$GITHUB_RUN_ID:$GITHUB_RUN_ATTEMPT"
           gh api repos/Otzaria/otzaria-library/dispatches --method POST --input - <<<"$payload"
+          # The dispatch carries no run id back; the downstream run appears in
+          # https://github.com/Otzaria/otzaria-library/actions filtered by this
+          # correlation_id. Acceptance is what this line records.
+          echo "dispatch accepted by repos/Otzaria/otzaria-library (204, empty body)"
 
   refresh-release-manifest:
     name: Refresh release-manifest.json after publish or verified reuse
@@ -2512,7 +2786,7 @@ jobs:
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           ref: otzaria
           fetch-depth: 0
@@ -2520,10 +2794,24 @@ jobs:
       - name: Regenerate and push the release manifest
         run: |
           set -euo pipefail
-          if LATEST_JSON=$(gh release view --json tagName,name,publishedAt,assets 2>/dev/null | jq -cS 'del(.assets[].downloadCount)'); then
+          # `gh release view` with no tag asks for the LATEST release. A repo that
+          # has never published one legitimately has no latest, and `latest: null`
+          # is the correct manifest; an auth failure, a rate limit, a network drop
+          # or a broken jq is NOT, and `2>/dev/null` collapsed all of them into
+          # that same silent null while this step still reported success — i.e. it
+          # published a manifest telling every client there is no release at all.
+          # Keep stderr and separate "no release yet" from "the query failed".
+          LATEST_ERR="$RUNNER_TEMP/gh-release-view.err"
+          if LATEST_RAW=$(gh release view --json tagName,name,publishedAt,assets 2>"$LATEST_ERR"); then
+            LATEST_JSON=$(jq -cS 'del(.assets[].downloadCount)' <<<"$LATEST_RAW")
             LATEST_ARG=(--argjson latest "$LATEST_JSON")
-          else
+            echo "manifest: latest release $(jq -r .tagName <<<"$LATEST_JSON") published $(jq -r .publishedAt <<<"$LATEST_JSON")"
+          elif grep -qEi 'release not found|404: not found \(https://api\.github\.com/repos/[^)]*/releases' "$LATEST_ERR"; then
+            echo "manifest: no release published yet (gh reported 404) — writing latest: null"
             LATEST_ARG=(--argjson latest null)
+          else
+            echo "::error::gh release view failed for $GITHUB_REPOSITORY, refusing to publish a manifest that claims there is no release: $(tr '\n' ' ' < "$LATEST_ERR")"
+            exit 1
           fi
           ALL_RELEASES=$(gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
             --jq '.[] | select((.draft|not) and (.prerelease|not)) | {tagName:.tag_name,name:.name,publishedAt:.published_at} | @json' \
@@ -2538,6 +2826,7 @@ jobs:
             --argjson releases "$ALL_RELEASES" \
             '{generatedAt: $generatedAt, latest: $latest, releases: $releases}' \
             > release-manifest.json
+          echo "manifest: $(jq '.releases | length' release-manifest.json) published releases, generatedAt=$GENERATED_AT, $(wc -c < release-manifest.json) bytes"
           git config user.name 'github-actions[bot]'
           git config user.email 'github-actions[bot]@users.noreply.github.com'
           git add release-manifest.json
@@ -2546,4 +2835,7 @@ jobs:
             git pull --rebase origin otzaria
             gh auth setup-git
             git push origin HEAD:otzaria
+            echo "manifest: committed $(git rev-parse --short HEAD) and pushed to otzaria"
+          else
+            echo "manifest: unchanged at $(git rev-parse --short HEAD) — nothing to commit"
           fi

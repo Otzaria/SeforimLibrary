@@ -1,6 +1,8 @@
 import importlib.util
 import json
 from pathlib import Path
+import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -57,6 +59,39 @@ class OtzariaProvenanceTest(unittest.TestCase):
                 value[field] = replacement
                 with self.assertRaises(ValueError):
                     validator.validate(value, self.target, self.tag, self.asset_sha)
+
+    def test_cli_prints_one_positive_line_and_keeps_its_failure_contract(self):
+        # Same reason as validate_build_provenance.py: the weekly build carried
+        # no evidence that this validator had run at all.
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "otzaria_release_provenance.json"
+            canonical = json.dumps(
+                self.value(), ensure_ascii=False, sort_keys=True, separators=(",", ":")
+            ) + "\n"
+            # write_bytes, not write_text: the contract is one trailing LF, and
+            # a Windows host would translate it to CRLF.
+            path.write_bytes(canonical.encode("utf-8"))
+            argv = [
+                sys.executable, str(SCRIPT), str(path),
+                "--expected-target", self.target,
+                "--expected-tag", self.tag,
+                "--expected-asset-sha256", self.asset_sha,
+            ]
+            done = subprocess.run(argv, capture_output=True, text=True)
+            self.assertEqual(done.returncode, 0, done.stderr)
+            lines = [line for line in done.stdout.splitlines() if line.strip()]
+            self.assertEqual(len(lines), 1, lines)
+            self.assertEqual(
+                lines[0],
+                "ok: otzaria_provenance v1, 12 fields, asset otzaria_latest.zip "
+                f"+ 2 auxiliary, tag={self.tag} target={self.target[:12]}",
+            )
+
+            argv[argv.index("--expected-tag") + 1] = "library-links-other"
+            done = subprocess.run(argv, capture_output=True, text=True)
+            self.assertEqual(done.returncode, 2)
+            self.assertEqual(done.stdout, "")
+            self.assertIn("Otzaria provenance contract error:", done.stderr)
 
     def test_duplicate_and_noncanonical_json_fail(self):
         with tempfile.TemporaryDirectory() as directory:

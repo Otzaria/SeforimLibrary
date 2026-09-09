@@ -179,15 +179,52 @@ else:
 PY
 }
 
+# One summary line per asset, and one closing line per step.
+#
+# The publish step spends 20-27 minutes of a 2h11m job pushing ~3.4 GiB up a
+# ~2.2 MB/s uplink and, before this, said nothing at all between "Adopting this
+# build's existing draft release." and the final release URL: a stalled upload,
+# a retried one and a fast one were indistinguishable, and the dedupe that skips
+# an early-uploaded asset left no trace that it had run. These lines are pure
+# reporting — no upload decision, no retry budget and no failure path changes.
+#
+# `uploaded` = this call sent the bytes. `reused` = the asset was already on the
+# draft with a matching name+size+digest (the early upload or a lost-response
+# reconcile put it there) and this call verified it instead of re-sending.
+RELEASE_UPLOAD_ASSETS=0
+RELEASE_UPLOAD_BYTES=0
+RELEASE_UPLOAD_SECONDS=0
+
+_release_upload_note() {
+  local verb="$1" name="$2" size="$3" digest="$4" started="$5" elapsed rate
+  elapsed=$(( SECONDS - started ))
+  # Guard the rate against a sub-second asset: report it over 1s rather than
+  # dividing by zero. Reporting only — nothing reads this number back.
+  rate=$(awk -v bytes="$size" -v secs="$elapsed" \
+    'BEGIN { if (secs < 1) secs = 1; printf "%.2f", bytes / 1048576 / secs }')
+  RELEASE_UPLOAD_ASSETS=$(( RELEASE_UPLOAD_ASSETS + 1 ))
+  RELEASE_UPLOAD_BYTES=$(( RELEASE_UPLOAD_BYTES + size ))
+  RELEASE_UPLOAD_SECONDS=$(( RELEASE_UPLOAD_SECONDS + elapsed ))
+  echo "$verb $name $size sha256=${digest:0:12} in ${elapsed}s (${rate} MB/s)"
+}
+
+# Closing line for a step that uploaded assets. Counts every asset upload_asset
+# handled in THIS shell, uploaded or reused, so the total is the step's whole
+# release payload rather than only what happened to be missing.
+release_upload_summary() {
+  echo "release ${RELEASE_TAG}: ${RELEASE_UPLOAD_ASSETS} assets, ${RELEASE_UPLOAD_BYTES} bytes, ${RELEASE_UPLOAD_SECONDS}s"
+}
+
 # Upload one asset. If an upload response is lost, reconcile by exact
 # name+size+digest and continue. Never use --clobber.
 upload_asset() {
   local asset_path="$1" expected_size expected_digest state attempt
+  local name="${asset_path##*/}" started="$SECONDS"
   expected_size=$(stat --format='%s' "$asset_path")
   expected_digest=$(sha256sum "$asset_path" | cut -d ' ' -f1)
   state=$(asset_state "$asset_path" "$expected_size" "$expected_digest") || return 1
   case "$state" in
-    exact) return 0 ;;
+    exact) _release_upload_note reused "$name" "$expected_size" "$expected_digest" "$started"; return 0 ;;
     conflict) echo "::error::Conflicting remote asset: ${asset_path##*/}"; return 1 ;;
     absent) ;;
     pending)
@@ -195,7 +232,7 @@ upload_asset() {
         sleep 5
         state=$(asset_state "$asset_path" "$expected_size" "$expected_digest") || state=query-error
         case "$state" in
-          exact) return 0 ;;
+          exact) _release_upload_note reused "$name" "$expected_size" "$expected_digest" "$started"; return 0 ;;
           conflict|absent) return 1 ;;
         esac
       done
@@ -204,12 +241,15 @@ upload_asset() {
       ;;
     *) echo "::error::Unknown asset state: $state"; return 1 ;;
   esac
-  if gh release upload "$RELEASE_TAG" "$asset_path"; then return 0; fi
+  if gh release upload "$RELEASE_TAG" "$asset_path"; then
+    _release_upload_note uploaded "$name" "$expected_size" "$expected_digest" "$started"
+    return 0
+  fi
   echo "::warning::Upload failed for ${asset_path##*/}; reconciling before retry."
   for attempt in $(seq 1 12); do
     state=$(asset_state "$asset_path" "$expected_size" "$expected_digest") || state=query-error
     case "$state" in
-      exact) return 0 ;;
+      exact) _release_upload_note uploaded "$name" "$expected_size" "$expected_digest" "$started"; return 0 ;;
       conflict) return 1 ;;
     esac
     sleep 5
@@ -219,11 +259,17 @@ upload_asset() {
     return 1
   fi
   switch_token || return 1
-  if gh release upload "$RELEASE_TAG" "$asset_path"; then return 0; fi
+  if gh release upload "$RELEASE_TAG" "$asset_path"; then
+    _release_upload_note uploaded "$name" "$expected_size" "$expected_digest" "$started"
+    return 0
+  fi
   for attempt in $(seq 1 6); do
     state=$(asset_state "$asset_path" "$expected_size" "$expected_digest") || state=query-error
     [ "$state" != conflict ] || return 1
-    if [ "$state" = exact ]; then return 0; fi
+    if [ "$state" = exact ]; then
+      _release_upload_note uploaded "$name" "$expected_size" "$expected_digest" "$started"
+      return 0
+    fi
     sleep 2
   done
   return 1

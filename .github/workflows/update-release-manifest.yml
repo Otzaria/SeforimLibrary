@@ -25,7 +25,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           ref: otzaria
 
@@ -36,14 +36,25 @@ jobs:
           echo "Fetching all releases..."
 
           # `gh release view` (no args) → the "Latest" release. With no releases
-          # (or only pre-releases) the call fails; leave `latest` null.
+          # (or only pre-releases) the call 404s and `latest` is legitimately
+          # null. Any OTHER failure — auth, rate limit, network, a broken jq — is
+          # not, and `2>/dev/null` used to write the same silent null for it and
+          # still report success, publishing a manifest that tells every client
+          # there is no release. Keep stderr and tell the two cases apart.
           # Download counters change merely because a client (or the reuse
           # verifier) reads an asset.  They are monitoring data, not release
           # identity, so keep them out of the committed immutable manifest.
-          if LATEST_JSON=$(gh release view --json tagName,name,publishedAt,assets 2>/dev/null | jq -cS 'del(.assets[].downloadCount)'); then
+          LATEST_ERR="$RUNNER_TEMP/gh-release-view.err"
+          if LATEST_RAW=$(gh release view --json tagName,name,publishedAt,assets 2>"$LATEST_ERR"); then
+            LATEST_JSON=$(jq -cS 'del(.assets[].downloadCount)' <<<"$LATEST_RAW")
             LATEST_ARG=(--argjson latest "$LATEST_JSON")
-          else
+            echo "manifest: latest release $(jq -r .tagName <<<"$LATEST_JSON")"
+          elif grep -qEi 'release not found|404: not found \(https://api\.github\.com/repos/[^)]*/releases' "$LATEST_ERR"; then
+            echo "manifest: no release published yet (gh reported 404) — writing latest: null"
             LATEST_ARG=(--argjson latest null)
+          else
+            echo "::error::gh release view failed for $GITHUB_REPOSITORY, refusing to publish a manifest that claims there is no release: $(tr '\n' ' ' < "$LATEST_ERR")"
+            exit 1
           fi
 
           # Every final published DB release for history ([] when none exist),
