@@ -216,10 +216,23 @@ def _file_title(path):
     return base.replace("_", " ")
 
 
+# קובצי schema שהייצוא המקובע של ספריא שולח בכוונה כך שאינם נטענים לספר, עם הסיבה.
+# Sheet.json הוא ה-pseudo-index של "דפי מקורות" (Sheets) — לא ספר: הייצוא כותב
+# אותו כקובץ באורך 0, ולכן אין לו schema, אין לו heTitle ואין לו שורה ב-book.
+# היבואן עצמו מפיל אותו באותה הדרך בדיוק (SefariaBookPayloadReader.buildSchemaLookup,
+# runCatching פר-קובץ), ולכן דילוג עליו כאן אינו מקטין כיסוי — הוא משחזר את התנהגות
+# היבואן. כל קובץ אחר שאינו נטען לספר הוא נזק בארכיון מקובע ומאומת-digest, ונכשל בקול.
+KNOWN_UNREADABLE_SCHEMAS = {
+    "Sheet.json": "ה-pseudo-index של דפי-מקורות בספריא, נשלח כקובץ באורך 0; "
+                  "היבואן מפיל אותו זהה, ואין לו ספר ב-DB",
+}
+
+
 def load_schema_books(schemas_dir):
     # שכפול קריאת SefariaBookPayloadReader.kt: כותרות מ-schema המקונן, dependence/base מ-top עם fallback.
     books = []
-    skipped = 0
+    known_skipped = []
+    unreadable = []
     for fn in sorted(os.listdir(schemas_dir)):
         if not fn.endswith(".json"):
             continue
@@ -229,14 +242,26 @@ def load_schema_books(schemas_dir):
                 top = json.load(fh)
         except (ValueError, OSError) as e:
             # שכפול דטרמיניסטי של runCatching פר-קובץ ב-SefariaBookPayloadReader.kt:33-49
-            # (buildSchemaLookup בולע קובץ לא-פריס בשקט; למשל Sheet.json ריק בייצוא האמיתי).
-            print(f"אזהרה: schema לא-קריא, מדולג: {fn} ({e})", file=sys.stderr)
-            skipped += 1
+            # (buildSchemaLookup בולע קובץ לא-פריס בשקט).
+            if fn in KNOWN_UNREADABLE_SCHEMAS:
+                known_skipped.append(fn)
+                continue
+            unreadable.append((fn, str(e)))
             continue
+        # JSON תקין אך לא-שמיש הוא בדיוק אותו נזק כמו JSON לא-פריס: היבואן מפיל גם
+        # אותו (בלי אובייקט schema מקונן אין payload), הספר נעדר גם מהצפי וגם מה-DB,
+        # וכל בדיקות ההשוואה עוברות על קבוצה שהצטמצמה בשקט מתחת לשער הסחיפה. לכן
+        # אותה הנהלת-חשבונות בדיוק: החרגה מנומקת ב-KNOWN_UNREADABLE_SCHEMAS, או כשל.
         if not isinstance(top, dict):
-            continue
-        schema = top.get("schema")
-        if not isinstance(schema, dict):
+            unusable = f"top-level JSON is {type(top).__name__}, not an object"
+        else:
+            schema = top.get("schema")
+            unusable = None if isinstance(schema, dict) else "no object-valued 'schema' key"
+        if unusable is not None:
+            if fn in KNOWN_UNREADABLE_SCHEMAS:
+                known_skipped.append(fn)
+                continue
+            unreadable.append((fn, unusable))
             continue
         en = _str_or_none(schema.get("title")) or _file_title(path)
         he = _str_or_none(schema.get("heTitle")) or en
@@ -264,8 +289,19 @@ def load_schema_books(schemas_dir):
         if b.collective_en == "":
             b.collective_en = None
         books.append(b)
-    if skipped:
-        print(f"skipped {skipped} unreadable schema files", file=sys.stderr)
+    # דילוג ידוע = שורת INFO אחת שמסבירה למה, במקום אזהרה + שורת-ספירה שאיש אינו פועל לפיהן.
+    if known_skipped:
+        print("INFO: schemas ידועים שאינם ספרים, מדולגים: " + "; ".join(
+            f"{fn} ({KNOWN_UNREADABLE_SCHEMAS[fn]})" for fn in known_skipped))
+    # כל schema אחר שאינו נטען לספר בארכיון ספריא המקובע (שה-digest שלו אומת) הוא
+    # נזק אמיתי — לא-פריס, או פריס אך בלי אובייקט schema: דילוג שקט עליו היה מצמצם
+    # את כיסוי הבדיקה ועדיין מדווח PASS. כשל רועש.
+    if unreadable:
+        for fn, msg in unreadable[:10]:
+            print(f"  schema לא-שמיש: {fn} ({msg})", file=sys.stderr)
+        die(f"{len(unreadable)} קובצי schema לא-שמישים בארכיון ספריא המקובע "
+            f"(מעבר ל-{sorted(KNOWN_UNREADABLE_SCHEMAS)} הידועים) — "
+            "כיסוי הבדיקה היה מצטמצם בשקט")
     return books
 
 
@@ -305,3 +341,82 @@ def die(msg):
 def ok(msg):
     print(f"PASS: {msg}")
     sys.exit(0)
+
+
+# ─── שער סחיפה מול ה-reference snapshot ────────────────────────────────────
+# עד כאן כל בדיקה שנושאת baseline קשיח רק הדפיסה אותו לצד הערך הנמדד ועברה בכל
+# מקרה. הרצה 34024655297 פרסמה DB עם dependenceType 4940 מול snapshot 4941,
+# book_base_text 5425 מול 5426 ו-baseProvenance=1 12970 מול 13056 (‎−0.659%) —
+# שלושתן PASS. סחיפה איטית הייתה נראית רק לאדם שקורא את הלוג.
+#
+# השער חד-צדדי ונדיב בכוונה:
+#   * התכווצות גדולה מ-QA_DRIFT_MAX_SHRINK_PCT מה-snapshot → ‎::error:: ויציאה 1
+#   * כל הפרש אחר (התכווצות קטנה יותר, או גדילה) → ‎::warning:: עם המספרים,
+#     כי הקורפוס אכן זז בין ייצוא לייצוא וזה לא יהפוך לאזעקת-שווא שבועית.
+# הסף מגיע מהסביבה: QA_DRIFT_MAX_SHRINK_PCT, וברירת המחדל שלו נקבעת ב-workflow
+# השבועי (צעד ה-QA). כשהמשתנה אינו מוגדר השער כבוי — ה-baselines משמעותיים רק מול
+# הקורפוס המקובע האמיתי, לא מול פיקסטורה סינתטית או DB חלקי בהרצת אד-הוק. כדי
+# שהשער לא ייעלם בשקט מהרצת release, run_all.py ‎--require-all נכשל כשהוא אינו
+# מוגדר. אין בכך רענון snapshot: ‎--expect-snapshot ממשיך לאכוף את המספרים המדויקים.
+DRIFT_ENV = "QA_DRIFT_MAX_SHRINK_PCT"
+# רצפה מוחלטת: התכווצות היא ‎::error:: רק כשהיא חוצה גם את האחוז וגם את המספר
+# הזה. בלעדיה, על מדד קטן (guides=2, midrash=5, זוגות מוסקים=20, targum=45)
+# ירידה של 1 = 2%..50% והייתה מפילה בנייה שבועית על ספר יחיד שנעלם מהייצוא.
+# ברירת המחדל 10 חלה גם כשהמשתנה אינו מוגדר; ה-workflow קובע אותו במפורש.
+DRIFT_ABS_ENV = "QA_DRIFT_MIN_SHRINK_ABS"
+DRIFT_ABS_DEFAULT = 10
+
+
+def drift_max_shrink_pct():
+    """הסף באחוזים, או None כשהשער כבוי (המשתנה אינו מוגדר/ריק)."""
+    raw = os.environ.get(DRIFT_ENV, "").strip()
+    if raw == "":
+        return None
+    try:
+        value = float(raw)
+    except ValueError:
+        die(f"{DRIFT_ENV} אינו מספר: {raw!r}")
+    if value < 0:
+        die(f"{DRIFT_ENV} חייב להיות ≥ 0: {raw!r}")
+    return value
+
+
+def drift_min_shrink_abs():
+    """הרצפה המוחלטת (מספר שלם ≥ 0); ברירת מחדל DRIFT_ABS_DEFAULT כשלא מוגדר."""
+    raw = os.environ.get(DRIFT_ABS_ENV, "").strip()
+    if raw == "":
+        return DRIFT_ABS_DEFAULT
+    try:
+        value = int(raw)
+    except ValueError:
+        die(f"{DRIFT_ABS_ENV} אינו מספר שלם: {raw!r}")
+    if value < 0:
+        die(f"{DRIFT_ABS_ENV} חייב להיות ≥ 0: {raw!r}")
+    return value
+
+
+def gate_snapshot_drift(label, observed, snapshot):
+    """משווה מדד סָפוּר אחד ל-reference snapshot שלו ומחיל את השער.
+
+    יוצא 1 (עם ‎::error::) כשההתכווצות עוברת את הסף; אחרת מדפיס שורה אחת בלבד.
+    כשהשער כבוי אינו מדפיס דבר — הערך וה-snapshot כבר הודפסו על ידי הבדיקה עצמה.
+    """
+    limit = drift_max_shrink_pct()
+    if limit is None:
+        return
+    delta = observed - snapshot
+    if delta == 0:
+        print(f"drift {label}: 0 (snapshot {snapshot})")
+        return
+    pct = (abs(delta) * 100.0 / snapshot) if snapshot else float("inf")
+    detail = f"{label}: DB={observed} snapshot={snapshot} delta={delta:+d} ({pct:.3f}%)"
+    if delta < 0 and pct > limit:
+        floor = drift_min_shrink_abs()
+        if abs(delta) >= floor:
+            print(f"::error::drift {detail} — התכווצות מעבר ל-{DRIFT_ENV}={limit}% "
+                  f"וגם ל-{DRIFT_ABS_ENV}={floor}", file=sys.stderr)
+            sys.exit(1)
+        print(f"::warning::drift {detail} (מעבר ל-{DRIFT_ENV}={limit}%, אך מתחת "
+              f"לרצפה המוחלטת {DRIFT_ABS_ENV}={floor})")
+        return
+    print(f"::warning::drift {detail} (בתוך {DRIFT_ENV}={limit}%)")

@@ -4,6 +4,8 @@
 ברירת מחדל: בדיקה שאין לה את הארגומנט הנדרש (למשל --metrics) מדולגת (SKIP) —
 נוח להרצות אד-הוק. בהרצת release יש להעביר --require-all: אז כל דילוג הוא כשל
 (יציאה שונה מ-0), כדי שבנייה ששכחה --metrics לא "תעבור" בשקט ותפספס בדיקה 10.5.
+‏--require-all גם דורש QA_DRIFT_MAX_SHRINK_PCT בסביבה, אחרת שער הסחיפה מול ה-
+reference snapshot (common.gate_snapshot_drift) היה כבוי בהרצת release — בשקט.
 """
 import argparse
 import os
@@ -11,6 +13,8 @@ import subprocess
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, HERE)
+from common import DRIFT_ENV  # noqa: E402
 
 # (script, needs_sefaria_dir, accepts_expect_snapshot, needs_metrics)
 SCRIPTS = [("check3_elucidation.py", False, False, False),
@@ -35,9 +39,19 @@ def main():
                          "מחמיר את הצלבת ה-DB בבדיקה 5 מ-≥ ל-==")
     ap.add_argument("--expect-snapshot", action="store_true")
     ap.add_argument("--require-all", action="store_true",
-                    help="הרצת release: כל דילוג הוא כשל (יציאה!=0). ברירת המחדל "
+                    help="הרצת release: כל דילוג הוא כשל (יציאה!=0), ו-"
+                         "QA_DRIFT_MAX_SHRINK_PCT חייב להיות מוגדר. ברירת המחדל "
                          "מתירה דילוגים להרצות אד-הוק.")
     args = ap.parse_args()
+
+    # ‏--require-all הוא מצב release. שער הסחיפה מול ה-reference snapshot
+    # (common.gate_snapshot_drift) מופעל רק כשהסף מוגדר בסביבה, ולכן הרצת release
+    # שאיבדה את המשתנה הייתה מריצה את הבדיקות בלי שער — בדיוק המצב שהשער בא לתקן,
+    # ובשקט. נכשל מיד, עם השם המדויק של מה שחסר.
+    if args.require_all and os.environ.get(DRIFT_ENV, "").strip() == "":
+        print(f"::error::--require-all (הרצת release) ללא {DRIFT_ENV} — שער הסחיפה "
+              "מול ה-reference snapshot היה כבוי", file=sys.stderr)
+        sys.exit(1)
 
     results = []
     for name, needs_sefaria, accepts_snapshot, needs_metrics in SCRIPTS:

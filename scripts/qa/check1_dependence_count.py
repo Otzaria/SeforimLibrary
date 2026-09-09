@@ -6,7 +6,8 @@ import os
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from common import (load_schema_books, normalize_title_key, open_db,
-                    require_columns, resolve_schemas_dir, sefaria_source_id, die)
+                    require_columns, resolve_schemas_dir, sefaria_source_id, die,
+                    gate_snapshot_drift)
 
 SNAPSHOT_TOTAL = 4941
 SNAPSHOT_BREAKDOWN = {"commentary": 4889, "targum": 45, "midrash": 5, "guides": 2}
@@ -60,6 +61,12 @@ def main():
         diff = {k: (db_breakdown.get(k, 0), exp_breakdown.get(k, 0))
                 for k in sorted(keys) if db_breakdown.get(k, 0) != exp_breakdown.get(k, 0)}
         die(f"DB לא תואם ל-schemas (סוג: DB,expected): {diff}")
+
+    # שער הסחיפה: הסך וכל סוג בנפרד, כדי שהחלפה מקזזת (סוג יורד, אחר עולה) לא
+    # תעבור מתחת לסך יציב.
+    gate_snapshot_drift("dependenceType total", db_total, SNAPSHOT_TOTAL)
+    for kind, expected in sorted(SNAPSHOT_BREAKDOWN.items()):
+        gate_snapshot_drift(f"dependenceType {kind}", db_breakdown.get(kind, 0), expected)
 
     if args.expect_snapshot:
         if db_total != SNAPSHOT_TOTAL:

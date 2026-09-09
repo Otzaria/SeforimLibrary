@@ -4,6 +4,8 @@
 הרצה: python3 scripts/qa/tests/test_qa_synthetic.py  (יציאה 0 = הכול עבר).
 כל בדיקה בונה schemas/DB מינימליים ומריצה את הסקריפט האמיתי כתת-תהליך.
 """
+import contextlib
+import io
 import json
 import os
 import sqlite3
@@ -26,9 +28,17 @@ def _check(name, cond, detail=""):
         _FAILURES.append(name)
 
 
-def _run(script, *args):
+def _run(script, *args, env_extra=None):
+    # הפיקסטורות כאן הן DB-ים בני ארבע שורות, לא הקורפוס המקובע — ולכן שער הסחיפה
+    # מול ה-reference snapshot (common.gate_snapshot_drift) חייב להיות כבוי בהן.
+    # הוא כבוי כברירת מחדל בדיוק לשם כך: QA_DRIFT_MAX_SHRINK_PCT אינו מוגדר, וה-
+    # workflow השבועי הוא זה שקובע אותו. מנקים אותו מהסביבה כדי שהרצה מקומית
+    # שהגדירה אותו לא תשנה את התוצאה.
+    env = dict(os.environ)
+    env.pop("QA_DRIFT_MAX_SHRINK_PCT", None)
+    env.update(env_extra or {})
     p = subprocess.run([sys.executable, os.path.join(_QA, script), *args],
-                       capture_output=True, text=True)
+                       capture_output=True, text=True, env=env)
     return p.returncode, p.stdout + p.stderr
 
 
@@ -397,17 +407,213 @@ def test_run_all_require_all():
         _check("run_all ברירת מחדל: דילוג מותר (יציאה 0)", rc == 0, out.strip().splitlines()[-3:])
         _check("run_all ברירת מחדל: מנסח 'דולגו' ולא 'כל הבדיקות עברו'",
                "דולגו" in out and "כל הבדיקות עברו" not in out, out.strip().splitlines()[-3:])
-        rc, out = _run("run_all.py", "--db", db, "--require-all")
+        # הרצת release אמיתית מגדירה את הסף; כאן 100% כדי שהשער עצמו לא יפיל
+        # פיקסטורה בת ארבע שורות — הנבדק הוא התנהגות הדילוגים.
+        rc, out = _run("run_all.py", "--db", db, "--require-all",
+                       env_extra={"QA_DRIFT_MAX_SHRINK_PCT": "100"})
         _check("run_all --require-all: דילוג → כשל (יציאה!=0)", rc != 0,
                out.strip().splitlines()[-3:])
         _check("run_all --require-all: מפרט את הארגומנט המפעיל (--metrics)",
                "--metrics" in out, out.strip().splitlines()[-4:])
+        # ‏--require-all ללא הסף = הרצת release בלי שער סחיפה. חייב להיכשל מיד,
+        # ולנקוב בשם המשתנה החסר.
+        rc, out = _run("run_all.py", "--db", db, "--require-all")
+        _check("run_all --require-all ללא QA_DRIFT_MAX_SHRINK_PCT → כשל", rc != 0,
+               out.strip().splitlines()[-2:])
+        _check("run_all: הכשל נוקב בשם QA_DRIFT_MAX_SHRINK_PCT",
+               "QA_DRIFT_MAX_SHRINK_PCT" in out, out.strip().splitlines()[-2:])
+
+
+# --- שער הסחיפה מול ה-reference snapshot -----------------------------------------
+def test_snapshot_drift_gate():
+    print("gate_snapshot_drift: כבוי כברירת מחדל, ‎::warning:: בתוך הסף, ‎::error:: מעבר לו")
+    with tempfile.TemporaryDirectory() as tmp:
+        schemas = os.path.join(tmp, "schemas")
+        os.makedirs(schemas)
+        _write_schema(schemas, "dep.json", "Commentary A", "פירוש א", base_he="בסיס")
+        _write_schema(schemas, "base.json", "Base", "בסיס")
+        db = os.path.join(tmp, "ok.db")
+        _make_db(db,
+                 books=[(10, "פירוש א", None, None, None, 0, 999, SRC_SEFARIA),
+                        (20, "בסיס", None, None, None, 1, 1, SRC_SEFARIA)],
+                 bbt=[(10, 20)])
+        # הפיקסטורה נושאת שורה אחת מול baseline של 5,426 — התכווצות של ~99.98%.
+        rc, out = _run("check2_book_base_text.py", "--db", db, "--sefaria-dir", schemas)
+        _check("שער כבוי (המשתנה אינו מוגדר): עובר ואינו מדפיס drift",
+               rc == 0 and "drift " not in out, out.strip().splitlines()[-2:])
+        rc, out = _run("check2_book_base_text.py", "--db", db, "--sefaria-dir", schemas,
+                       env_extra={"QA_DRIFT_MAX_SHRINK_PCT": "100"})
+        _check("סף רחב: עובר עם ‎::warning:: הנוקב במספרים",
+               rc == 0 and "::warning::drift" in out and "snapshot=5426" in out,
+               out.strip().splitlines()[-3:])
+        rc, out = _run("check2_book_base_text.py", "--db", db, "--sefaria-dir", schemas,
+                       env_extra={"QA_DRIFT_MAX_SHRINK_PCT": "2"})
+        _check("סף 2% (ברירת המחדל של ה-workflow): ‎::error:: ויציאה!=0",
+               rc != 0 and "::error::drift" in out, out.strip().splitlines()[-2:])
+        rc, out = _run("check2_book_base_text.py", "--db", db, "--sefaria-dir", schemas,
+                       env_extra={"QA_DRIFT_MAX_SHRINK_PCT": "לא-מספר"})
+        _check("סף לא-מספרי: כשל, לא שער כבוי בשקט", rc != 0,
+               out.strip().splitlines()[-2:])
+    # ארבעת המקרים של השער עצמו, בתהליך, בלי לבנות DB לכל אחד.
+    def _gate(observed, snapshot, limit, floor=None):
+        previous = os.environ.get("QA_DRIFT_MAX_SHRINK_PCT")
+        previous_floor = os.environ.get("QA_DRIFT_MIN_SHRINK_ABS")
+        if limit is None:
+            os.environ.pop("QA_DRIFT_MAX_SHRINK_PCT", None)
+        else:
+            os.environ["QA_DRIFT_MAX_SHRINK_PCT"] = limit
+        if floor is None:
+            os.environ.pop("QA_DRIFT_MIN_SHRINK_ABS", None)
+        else:
+            os.environ["QA_DRIFT_MIN_SHRINK_ABS"] = floor
+        buf = io.StringIO()
+        code = 0
+        try:
+            with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
+                common.gate_snapshot_drift("m", observed, snapshot)
+        except SystemExit as exit_code:
+            code = exit_code.code
+        finally:
+            os.environ.pop("QA_DRIFT_MAX_SHRINK_PCT", None)
+            if previous is not None:
+                os.environ["QA_DRIFT_MAX_SHRINK_PCT"] = previous
+            os.environ.pop("QA_DRIFT_MIN_SHRINK_ABS", None)
+            if previous_floor is not None:
+                os.environ["QA_DRIFT_MIN_SHRINK_ABS"] = previous_floor
+        return code, buf.getvalue()
+
+    code, out = _gate(100, 100, "2")
+    _check("דלתא 0: שורה חיובית אחת, לא אזהרה",
+           code == 0 and out.strip() == "drift m: 0 (snapshot 100)", out)
+    code, out = _gate(99, 100, "2")
+    _check("התכווצות בתוך הסף: ‎::warning:: עם המספרים",
+           code == 0 and "::warning::drift" in out and "delta=-1" in out, out)
+    code, out = _gate(150, 100, "2")
+    _check("גדילה: ‎::warning:: בלבד, לעולם לא כשל",
+           code == 0 and "::warning::drift" in out and "delta=+50" in out, out)
+    code, out = _gate(97, 100, "2", "0")
+    _check("התכווצות מעבר לסף (רצפה 0): ‎::error:: ויציאה 1",
+           code == 1 and "::error::drift" in out, out)
+    code, out = _gate(97, 100, "2")
+    _check("מעבר לאחוז אך מתחת לרצפה 10 (ברירת מחדל): ‎::warning:: בלבד",
+           code == 0 and "::warning::drift" in out and "QA_DRIFT_MIN_SHRINK_ABS=10" in out, out)
+    code, out = _gate(1, 2, "2")
+    _check("guides 2→1 (50%): אזהרה, לא כשל", code == 0 and "::warning::drift" in out, out)
+    code, out = _gate(80, 100, "2")
+    _check("התכווצות 20 ≥ רצפה 10 ומעבר ל-2%: ‎::error::",
+           code == 1 and "::error::drift" in out, out)
+    code, out = _gate(80, 100, "2", "50")
+    _check("רצפה מפורשת 50: התכווצות 20 היא אזהרה", code == 0 and "::warning::drift" in out, out)
+    code, out = _gate(80, 100, "2", "לא-מספר")
+    _check("רצפה לא-מספרית: כשל", code not in (0, None) and "QA_DRIFT_MIN_SHRINK_ABS" in out, out)
+    code, out = _gate(1, 100, None)
+    _check("שער כבוי: שקט מוחלט", code == 0 and out == "", out)
+
+
+# --- מדיניות schema לא-קריא: Sheet.json מוחרג במפורש, כל השאר נכשל ----------------
+def test_unreadable_schema_policy():
+    print("schemas לא-קריאים: Sheet.json = INFO מוסבר, כל קובץ אחר = כשל")
+    with tempfile.TemporaryDirectory() as tmp:
+        known = os.path.join(tmp, "known")
+        os.makedirs(known)
+        _write_schema(known, "a.json", "A", "ספר א", dependence="commentary")
+        # בדיוק מה שהייצוא האמיתי שולח: Sheet.json באורך 0.
+        open(os.path.join(known, "Sheet.json"), "w", encoding="utf-8").close()
+        db = os.path.join(tmp, "d.db")
+        _make_db(db, books=[(1, "ספר א", "commentary", None, None, 0, 1, SRC_SEFARIA)])
+        rc, out = _run("check6_metadata_rowbyrow.py", "--db", db, "--sefaria-dir", known)
+        _check("Sheet.json ריק: עובר", rc == 0, out.strip().splitlines()[-2:])
+        _check("Sheet.json ריק: שורת INFO אחת שמסבירה למה",
+               out.count("INFO: schemas ידועים") == 1 and "Sheet.json" in out,
+               out.strip().splitlines()[-3:])
+        _check("Sheet.json ריק: אין יותר 'אזהרה: schema לא-קריא' ולא שורת-ספירה",
+               "אזהרה: schema לא-קריא" not in out
+               and "unreadable schema files" not in out,
+               out.strip().splitlines()[-3:])
+        # קובץ לא-פריס אחר בארכיון מקובע ומאומת-digest = נזק, לא דילוג שקט.
+        bogus = os.path.join(tmp, "bogus")
+        os.makedirs(bogus)
+        _write_schema(bogus, "a.json", "A", "ספר א", dependence="commentary")
+        with open(os.path.join(bogus, "Broken.json"), "w", encoding="utf-8") as fh:
+            fh.write("<html>not json</html>")
+        rc, out = _run("check6_metadata_rowbyrow.py", "--db", db, "--sefaria-dir", bogus)
+        _check("schema לא-קריא שאינו ברשימה: כשל", rc != 0, out.strip().splitlines()[-2:])
+        _check("הכשל נוקב בקובץ", "Broken.json" in out, out.strip().splitlines()[-3:])
+
+
+# --- schema פריס אך לא-שמיש: מערך בשורש / אובייקט בלי schema מקונן ---------------
+def test_unusable_schema_shape_policy():
+    print("schemas פריסים אך לא-שמישים: נספרים, ניתנים להחרגה מפורשת, אחרת כשל")
+    before = len(_FAILURES)
+
+    def _load(d):
+        # load_schema_books בתהליך: die() הוא sys.exit ולכן נתפס כאן כ-SystemExit.
+        buf = io.StringIO()
+        code, books = 0, []
+        try:
+            with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
+                books = common.load_schema_books(d)
+        except SystemExit as exit_code:
+            code = exit_code.code or 1
+        return code, buf.getvalue(), books
+
+    with tempfile.TemporaryDirectory() as tmp:
+        d = os.path.join(tmp, "schemas")
+        os.makedirs(d)
+        _write_schema(d, "Good.json", "Good", "ספר טוב", dependence="commentary")
+        # שני הקבצים האלה הם JSON תקין לחלוטין — ובדיוק לכן דולגו בשקט עד כה.
+        with open(os.path.join(d, "Array.json"), "w", encoding="utf-8") as fh:
+            json.dump([{"schema": {"title": "A", "heTitle": "א"}}], fh, ensure_ascii=False)
+        with open(os.path.join(d, "NoSchema.json"), "w", encoding="utf-8") as fh:
+            json.dump({"title": "B", "heTitle": "ב"}, fh, ensure_ascii=False)
+
+        code, out, books = _load(d)
+        _check("מערך בשורש + אובייקט בלי schema: כשל, לא דילוג שקט", code != 0, out)
+        _check("הכשל נוקב בשני הקבצים ובסיבת כל אחד",
+               "Array.json" in out and "top-level JSON is list, not an object" in out
+               and "NoSchema.json" in out and "no object-valued 'schema' key" in out, out)
+        _check("שניהם נספרים (2), לא נבלעים", "2 קובצי schema לא-שמישים" in out, out)
+
+        # אותם קבצים בדיוק, מוחרגים בשם ובסיבה כמו Sheet.json: דילוג מוסבר, לא כשל.
+        original = common.KNOWN_UNREADABLE_SCHEMAS
+        try:
+            common.KNOWN_UNREADABLE_SCHEMAS = dict(
+                original, **{"Array.json": "פיקסטורה: אינו ספר",
+                             "NoSchema.json": "פיקסטורה: אינו ספר"})
+            code, out, books = _load(d)
+        finally:
+            common.KNOWN_UNREADABLE_SCHEMAS = original
+        _check("מוחרגים ברשימה המפורשת: עוברים", code == 0, out)
+        _check("מוחרגים ברשימה: שורת INFO אחת עם שני השמות",
+               out.count("INFO: schemas ידועים") == 1
+               and "Array.json" in out and "NoSchema.json" in out, out)
+        _check("מוחרגים ברשימה: הספר התקין עדיין נטען",
+               [b.he_title for b in books] == ["ספר טוב"], [b.he_title for b in books])
+
+    # ומקצה-לקצה: בדיקה אמיתית נכשלת, במקום לעבור על קבוצת-צפי שהצטמצמה בשקט.
+    with tempfile.TemporaryDirectory() as tmp:
+        d = os.path.join(tmp, "schemas")
+        os.makedirs(d)
+        _write_schema(d, "a.json", "A", "ספר א", dependence="commentary")
+        with open(os.path.join(d, "NoSchema.json"), "w", encoding="utf-8") as fh:
+            json.dump({"title": "B"}, fh)
+        db = os.path.join(tmp, "d.db")
+        _make_db(db, books=[(1, "ספר א", "commentary", None, None, 0, 1, SRC_SEFARIA)])
+        rc, out = _run("check6_metadata_rowbyrow.py", "--db", db, "--sefaria-dir", d)
+        _check("check6 מקצה-לקצה: נכשל ונוקב בקובץ", rc != 0 and "NoSchema.json" in out,
+               out.strip().splitlines()[-3:])
+
+    # תחת pytest אין מי שקורא את _FAILURES (main אינו רץ), ולכן חוסמים כאן במפורש.
+    if "pytest" in sys.modules:
+        assert len(_FAILURES) == before, _FAILURES[before:]
 
 
 def main():
     for t in (test_primary_beats_earlier_alias, test_resolve_order,
               test_check2, test_check6, test_check7,
               test_source_filter_regression, test_check5,
+              test_snapshot_drift_gate, test_unreadable_schema_policy,
+              test_unusable_schema_shape_policy,
               test_run_all_require_all):
         t()
     print()
