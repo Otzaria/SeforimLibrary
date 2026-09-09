@@ -114,11 +114,19 @@ def main() -> int:
     parser.add_argument("--expected-asset-sha256", required=True)
     args = parser.parse_args()
     try:
-        validate(load(args.path), args.expected_target, args.expected_tag, args.expected_asset_sha256)
-        return 0
+        value = load(args.path)
+        validate(value, args.expected_target, args.expected_tag, args.expected_asset_sha256)
     except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
         print(f"Otzaria provenance contract error: {exc}", file=sys.stderr)
         return 2
+    # Positive evidence, one line: a green step must not look the same as a
+    # validator that was never wired up.
+    print(
+        f"ok: otzaria_provenance v{value['schema_version']}, {len(value)} fields, "
+        f"asset {value['asset']['name']} + {len(value['auxiliary_assets'])} auxiliary, "
+        f"tag={value['tag']} target={value['target_commit'][:12]}"
+    )
+    return 0
 
 
 if __name__ == "__main__":

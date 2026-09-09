@@ -7,6 +7,7 @@ import io.github.kdroidfilter.seforimlibrary.common.changes.TouchedBookDetector
 import io.github.kdroidfilter.seforimlibrary.common.ids.IdAllocator
 import io.github.kdroidfilter.seforimlibrary.common.ids.IdAllocatorBindings
 import io.github.kdroidfilter.seforimlibrary.common.ids.InMemoryIdAllocator
+import io.github.kdroidfilter.seforimlibrary.common.reports.GeneratorReport
 import io.github.kdroidfilter.seforimlibrary.core.models.Author
 import io.github.kdroidfilter.seforimlibrary.core.models.Book
 import io.github.kdroidfilter.seforimlibrary.core.models.Category
@@ -636,13 +637,23 @@ class SefariaDirectImporter(
         // (i.e. whose natural key now exists in the allocator), so books that were
         // filtered out (blacklists, dedup vs Sefaria) don't get spurious hashes.
         var recorded = 0
+        // A computed hash whose natural key never reached the allocator has no
+        // book to attach to, so the next build sees that book as `added` and
+        // reprocesses it in full — every cycle, forever. 391 of 6,216 in the
+        // audited build, reported only as a bare `5825 / 6216`. Classify them.
+        val unrecordedByReason = LinkedHashMap<String, MutableList<String>>()
         for ((key, hash) in currentSourceHashes) {
             if (allocator.peekBookId(key.sourceName, key.canonicalHeTitle) != null) {
                 allocator.recordSourceHash(key, hash)
                 recorded++
+            } else {
+                unrecordedByReason
+                    .getOrPut(classifyUnimportedSefariaBook(key, blacklistResult)) { mutableListOf() }
+                    .add(key.canonicalHeTitle)
             }
         }
         logger.i { "Recorded source hashes for $recorded / ${currentSourceHashes.size} Sefaria books" }
+        reportUnrecordedSefariaSourceHashes(currentSourceHashes.size, unrecordedByReason, logger)
 
         logger.i {
             "Category descriptions: parsed=${categoryDescriptions.size}, " +
@@ -661,6 +672,78 @@ class SefariaDirectImporter(
  * mechanism (§4.5) in a later phase.
  */
 private fun canonicalHeTitle(payload: BookPayload): String = payload.heTitle
+
+/** How many book titles each source-hash class names before deferring to the report file. */
+private const val MAX_REPORTED_UNRECORDED_HASHES = 20
+
+/**
+ * Why a Sefaria book whose source hash was computed never reached the allocator.
+ *
+ * The hash computer walks `json/**/merged.json` and keys every book it finds by
+ * its `heTitle` — exactly [canonicalHeTitle] — but it runs BEFORE the blacklist
+ * filter, so every blacklisted book contributes a hash that no book id will ever
+ * claim. In the audited build that is essentially the whole gap: 395 payloads
+ * skipped by blacklist against 391 unrecorded hashes (the difference being books
+ * blacklisted only recently, whose ids the allocator still carries from an
+ * earlier cycle, so `peekBookId` still answers).
+ *
+ * Anything the blacklist does not explain is a genuinely unaccounted book and
+ * says so rather than being folded into a plausible-looking bucket.
+ */
+internal fun classifyUnimportedSefariaBook(key: BookKey, blacklist: BlacklistFilterResult): String =
+    if (key.canonicalHeTitle in blacklist.skippedHeTitles) {
+        "skipped by the book/author blacklist"
+    } else {
+        "not imported (reason not tracked)"
+    }
+
+/**
+ * One WARN per class with counts and a bounded, sorted name list; the complete
+ * list goes to the report file. Recording itself is unchanged — which books get
+ * a hash decides which books the NEXT build treats as touched, so a "fix" here
+ * would change that build's content, not this one's logging.
+ */
+internal fun reportUnrecordedSefariaSourceHashes(
+    computed: Int,
+    byReason: Map<String, List<String>>,
+    logger: Logger,
+) {
+    if (byReason.isEmpty()) return
+    val total = byReason.values.sumOf { it.size }
+    logger.w {
+        "source hashes: $total of $computed Sefaria books have no source hash — " +
+            "they are fully reprocessed every cycle"
+    }
+    val ordered = byReason.entries.sortedWith(
+        compareByDescending<Map.Entry<String, List<String>>> { it.value.size }.thenBy { it.key },
+    )
+    for ((reason, titles) in ordered) {
+        val names = titles.sorted()
+        logger.w {
+            "source hashes: ${titles.size} not recorded — $reason " +
+                "(${names.take(MAX_REPORTED_UNRECORDED_HASHES).joinToString()}" +
+                if (names.size > MAX_REPORTED_UNRECORDED_HASHES) {
+                    ", … and ${names.size - MAX_REPORTED_UNRECORDED_HASHES} more)"
+                } else {
+                    ")"
+                }
+        }
+    }
+    GeneratorReport.write("sefaria-source-hashes-not-recorded", logger) {
+        put("computed", computed.toLong())
+        put("notRecorded", total.toLong())
+        putRows(
+            "byReason",
+            ordered.map { (reason, titles) -> mapOf<String, Any?>("reason" to reason, "books" to titles.size) },
+        )
+        putRows(
+            "books",
+            ordered.flatMap { (reason, titles) ->
+                titles.sorted().map { mapOf<String, Any?>("title" to it, "reason" to reason) }
+            },
+        )
+    }
+}
 
 /**
  * One book's contribution to the title→bookId index, in priority order.

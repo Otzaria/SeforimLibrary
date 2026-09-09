@@ -6,6 +6,21 @@ has to rebuild the DB, however, and Sefaria image embedding can legitimately
 change an image ``src`` from its remote ``textimages.sefaria.org`` URL to an
 inline data URI when a previously transient download succeeds. Such a change
 cannot affect Linker output, but every other source change must still fail.
+
+Two entry points share one implementation of the payload-metadata checks:
+
+``--preflight --payload-meta META``
+    Input-only. Validates the Linker's published ``meta.json`` alone, with no
+    database, so the dispatch-time preflight in manual-generate-release.yml can
+    reject a drifted Linker payload in seconds. Build 34021998271 spent 48
+    minutes — DB generation, snapshot dump and a 987 MiB upload — before Phase-2
+    rejected a ``meta.json`` that was downloadable at second 0.
+
+the full comparison (all five paths)
+    Everything above plus the semantic snapshot comparison, run in Phase-2.
+
+Both call :func:`check_payload_meta`, so the accepted schema set cannot drift
+between the cheap gate and the expensive one.
 """
 
 from __future__ import annotations
@@ -31,6 +46,18 @@ DATA_IMAGE = re.compile(
     re.IGNORECASE,
 )
 MAX_IMAGE_BYTES = 5 * 1024 * 1024
+SNAPSHOT_SHA256 = re.compile(r"[0-9a-f]{64}\Z")
+# The single source of truth for which Linker payload metadata this pipeline can
+# consume. The file is written by LinkerToOtzaria ``src/incremental.py`` in
+# ``write_meta`` (``"schema_version": 3`` at line 280 as of a9ae2d4, 2026-08-31);
+# only ``snapshot.sha256`` is read here, and schema 3 left that field untouched.
+# Add a version ONLY after observing the Linker's real writer and confirming that
+# ``snapshot.sha256`` still means the sha256 of the uncompressed lines snapshot.
+# The tripwire for the next bump is not this constant: it is the dispatch-time
+# ``--preflight`` run in manual-generate-release.yml, which feeds the Linker's
+# actually published meta.json to this exact check before the build spends a
+# minute (SeforimLibrary .github/scripts/test_verify_relink_recovery_snapshot.py
+# pins the fixture to the writer's real key layout).
 PAYLOAD_META_SCHEMAS = frozenset({2, 3})
 BASELINE_SCHEMA = 2
 
@@ -45,6 +72,43 @@ def _sha256(path: Path) -> str:
 
 def _json(path: Path) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def check_payload_meta(path: Path) -> tuple[int, str]:
+    """Validate the input-only fields of the Linker's payload ``meta.json``.
+
+    Returns ``(schema_version, snapshot_sha256)``. Needs no database, so the
+    dispatch-time preflight and Phase-2 run byte-identical logic.
+    """
+    meta = _json(path)
+    if not isinstance(meta, dict):
+        raise SystemExit(f"{path}: payload meta must be a JSON object, got {type(meta).__name__}")
+    schema = meta.get("schema_version")
+    if schema not in PAYLOAD_META_SCHEMAS:
+        raise SystemExit(
+            f"{path}: schema_version {schema!r} is not an accepted Linker meta schema "
+            f"{sorted(PAYLOAD_META_SCHEMAS)}"
+        )
+    snapshot = meta.get("snapshot")
+    sha = snapshot.get("sha256") if isinstance(snapshot, dict) else None
+    if not isinstance(sha, str) or not SNAPSHOT_SHA256.fullmatch(sha):
+        raise SystemExit(
+            f"{path}: snapshot.sha256 {sha!r} is not a 64-character lowercase sha256"
+        )
+    return schema, sha
+
+
+def check_baseline_manifest(path: Path) -> object:
+    """Validate the line baseline manifest schema; return its snapshot sha256."""
+    baseline = _json(path)
+    if not isinstance(baseline, dict):
+        raise SystemExit(f"{path}: baseline manifest must be a JSON object")
+    if baseline.get("schema_version") != BASELINE_SCHEMA:
+        raise SystemExit(
+            f"{path}: schema_version {baseline.get('schema_version')!r} is not the accepted "
+            f"line baseline schema {BASELINE_SCHEMA}"
+        )
+    return baseline.get("snapshot_sha256")
 
 
 def _remote_inline_equivalent(src_a: str, src_b: str) -> bool:
@@ -110,27 +174,18 @@ def verify(
     payload_meta: Path,
     baseline_manifest: Path,
 ) -> tuple[int, int]:
-    meta = _json(payload_meta)
-    baseline = _json(baseline_manifest)
+    # Schema first, digests second: both metadata files are input-only, so a
+    # drifted schema must never cost the sha256 of a 5 GiB snapshot. The Linker
+    # bumped meta.json to schema 3 in a9ae2d4 (2026-08-31) without changing
+    # ``snapshot.sha256`` — the only field read here. The line baseline manifest
+    # is still schema 2 (LinkerToOtzaria src/line_baseline.py SCHEMA_VERSION).
+    _, expected_sha = check_payload_meta(payload_meta)
+    baseline_sha = check_baseline_manifest(baseline_manifest)
     original_sha = _sha256(original)
-    expected_sha = meta.get("snapshot", {}).get("sha256")
-    if not isinstance(expected_sha, str) or original_sha != expected_sha:
+    if original_sha != expected_sha:
         raise SystemExit("original raw snapshot SHA does not match Linker payload metadata")
-    if baseline.get("snapshot_sha256") != original_sha:
+    if baseline_sha != original_sha:
         raise SystemExit("line baseline is not bound to the original raw snapshot")
-    # The Linker bumped meta.json to schema 3 in a9ae2d4 (2026-08-31) without
-    # changing ``snapshot.sha256`` — the only field read here. The line baseline
-    # manifest is still schema 2 (line_baseline.SCHEMA_VERSION).
-    if meta.get("schema_version") not in PAYLOAD_META_SCHEMAS:
-        raise SystemExit(
-            "recovery snapshot comparison requires Linker meta schema "
-            f"{sorted(PAYLOAD_META_SCHEMAS)}, got {meta.get('schema_version')!r}"
-        )
-    if baseline.get("schema_version") != BASELINE_SCHEMA:
-        raise SystemExit(
-            f"recovery snapshot comparison requires line baseline schema {BASELINE_SCHEMA}, "
-            f"got {baseline.get('schema_version')!r}"
-        )
 
     connections = []
     for path in (original, rebuilt):
@@ -195,12 +250,43 @@ def verify(
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--original", required=True, type=Path)
-    parser.add_argument("--rebuilt", required=True, type=Path)
-    parser.add_argument("--artifacts", required=True, type=Path)
+    parser.add_argument(
+        "--preflight",
+        action="store_true",
+        help="validate only the Linker payload meta.json (no database needed)",
+    )
+    parser.add_argument("--original", type=Path)
+    parser.add_argument("--rebuilt", type=Path)
+    parser.add_argument("--artifacts", type=Path)
     parser.add_argument("--payload-meta", required=True, type=Path)
-    parser.add_argument("--baseline-manifest", required=True, type=Path)
+    parser.add_argument("--baseline-manifest", type=Path)
     args = parser.parse_args()
+    comparison = (
+        ("--original", args.original),
+        ("--rebuilt", args.rebuilt),
+        ("--artifacts", args.artifacts),
+        ("--baseline-manifest", args.baseline_manifest),
+    )
+    if args.preflight:
+        # Fail closed rather than silently downgrading: --preflight next to the
+        # comparison flags would otherwise turn Phase-2's 5 GiB check into a
+        # 759-byte schema read and still exit 0.
+        supplied = [flag for flag, value in comparison if value is not None]
+        if supplied:
+            raise SystemExit(
+                "--preflight validates the payload meta.json alone and cannot be combined with "
+                + ", ".join(supplied)
+            )
+        schema, snapshot_sha = check_payload_meta(args.payload_meta)
+        print(f"RECOVERY_META_PREFLIGHT_OK schema={schema} snapshot_sha256={snapshot_sha}")
+        return
+    # Nothing about the full comparison is optional: the flags are declared
+    # optional only so --preflight can omit them, and every one is required here.
+    missing = [flag for flag, value in comparison if value is None]
+    if missing:
+        raise SystemExit(
+            "the full recovery comparison requires " + ", ".join(missing) + " (or --preflight)"
+        )
     rows, differences = verify(
         args.original,
         args.rebuilt,

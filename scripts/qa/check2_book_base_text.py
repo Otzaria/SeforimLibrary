@@ -8,7 +8,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from common import (load_schema_books, normalize_title_key, open_db,
                     require_columns, resolve_schemas_dir, sefaria_source_id, die,
                     default_priority_list_path, load_priority_list,
-                    order_books_by_priority, build_normalized_title_to_bookid)
+                    order_books_by_priority, build_normalized_title_to_bookid,
+                    gate_snapshot_drift)
 
 # ‏5,426 הוא ה-baseline הנכון (אחרי תיקון היבואן ב-8358a16). ‏5,437 שנצפה קודם היה תוצר
 # באג ביבואן — alias של ספר מוקדם (מ"מעילה") האפיל על פרימרי של ספר מאוחר, וכפל 11 זוגות.
@@ -75,6 +76,8 @@ def main():
         print(f"expected∖DB (עד 10): {sorted(missing)[:10]}", file=sys.stderr)
         print(f"DB∖expected (עד 10): {sorted(extra)[:10]}", file=sys.stderr)
         die(f"אי-התאמת זוגות: {len(missing)} חסרים, {len(extra)} עודפים")
+
+    gate_snapshot_drift("book_base_text rows", len(db_pairs), SNAPSHOT_ROWS)
 
     if args.expect_snapshot and len(db_pairs) != SNAPSHOT_ROWS:
         die(f"snapshot: rows={len(db_pairs)} != {SNAPSHOT_ROWS}")

@@ -10,7 +10,7 @@ import sys
 import os
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from common import open_db, require_columns, die
+from common import open_db, require_columns, die, gate_snapshot_drift
 
 SNAPSHOT_INFERRED = 13056          # baseProvenance=1
 SNAPSHOT_INFERRED_PAIRS = 20       # זוגות ספרים מוסקים
@@ -53,6 +53,9 @@ def main():
         big = inferred_pairs[0]
         print(f"  הזוג הגדול: source={big['s']} target={big['t']} ({big['c']} קישורים)")
     print(f"reference snapshot: {SNAPSHOT_INFERRED} קישורים, {SNAPSHOT_INFERRED_PAIRS} זוגות")
+    gate_snapshot_drift("baseProvenance=1 links", inferred_total, SNAPSHOT_INFERRED)
+    gate_snapshot_drift("baseProvenance=1 book pairs", len(inferred_pairs),
+                        SNAPSHOT_INFERRED_PAIRS)
 
     # (ב) baseProvenance=2 (SEFARIA_DECLARED): לא-ריק ועקבי עם book_base_text.
     # book_base_text מאוחסן (bookId=תלוי, baseBookId=בסיס); קישור מוצהר מאוחסן base→dependant

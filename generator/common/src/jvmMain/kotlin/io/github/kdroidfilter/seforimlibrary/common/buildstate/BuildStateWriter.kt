@@ -15,6 +15,7 @@ import java.sql.DriverManager
 class BuildStateWriter(private val logger: Logger = Logger.withTag("BuildStateWriter")) {
 
     fun write(snapshot: BuildStateSnapshot, target: Path) {
+        val startedAtNanos = System.nanoTime()
         Files.createDirectories(target.toAbsolutePath().parent)
         val tmp = target.resolveSibling("${target.fileName}.tmp")
         if (Files.exists(tmp)) Files.delete(tmp)
@@ -36,11 +37,26 @@ class BuildStateWriter(private val logger: Logger = Logger.withTag("BuildStateWr
             java.nio.file.StandardCopyOption.REPLACE_EXISTING,
             java.nio.file.StandardCopyOption.ATOMIC_MOVE,
         )
+        // The elapsed time goes BEFORE the counter list on purpose: the pipeline
+        // monitor's phase splitter anchors this line on `links=<N>)` at
+        // end-of-line (pipeline-monitor/generate_phases.sh, marker
+        // `buildstate_write_2`), so nothing may be appended after it.
+        // Five of these run per build (one per generator stage, each in its own
+        // JVM, each seeding the next stage's IdAllocator) and together they were
+        // 546 s / 26% of the step — a cost that was previously invisible because
+        // the write reported no duration at all.
+        val elapsedSeconds = elapsedSecondsSince(startedAtNanos)
         logger.i {
-            "build_state.db snapshot written to $target (" +
+            "build_state.db snapshot written to $target in ${elapsedSeconds}s (" +
                 "books=${snapshot.books.size}, lines=${snapshot.lines.size}, " +
                 "tocEntries=${snapshot.tocEntries.size}, links=${snapshot.links.size})"
         }
+    }
+
+    /** `113.2` — one decimal, integer arithmetic so the runner's locale cannot change it. */
+    private fun elapsedSecondsSince(startedAtNanos: Long): String {
+        val tenths = (System.nanoTime() - startedAtNanos) / 100_000_000L
+        return "${tenths / 10}.${tenths % 10}"
     }
 
     private fun applyDdl(conn: Connection) {

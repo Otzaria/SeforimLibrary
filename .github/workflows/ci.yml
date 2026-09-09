@@ -11,12 +11,86 @@ on:
       - otzaria
 
 jobs:
+  # The eight Python contract suites that gate the weekly release live in
+  # .github/scripts and, until now, ran in exactly one place: the release
+  # workflow's own `reconcile` job, i.e. only after that build had already
+  # started on the self-hosted runner. Run 34195296928 never started a job at
+  # all — GitHub refused to load manual-generate-release.yml because a `run:`
+  # script had grown past the 21,000-character template ceiling — so nothing
+  # local ever ran, on a change that had been merged. The suites are pure
+  # Python over this repository's own text and cost seconds, so a pull request
+  # can carry the same verdict. Deliberately no Gradle and no JVM here: the
+  # `test` job below owns that side and takes minutes.
+  contracts:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v5
+
+      # Three of the eight suites (test_ci_workflows, and the workflow-parsing
+      # half of test_manual_release_workflow and test_prefetch_patch_anchors)
+      # are `@unittest.skipIf(yaml is None)`, so an image without PyYAML would
+      # report a green check over skipped tests — exactly the hollow verdict
+      # the release workflow's counting loop exists to prevent. The
+      # ubuntu-latest image ships PyYAML; this makes that assumption explicit
+      # and fails loudly rather than quietly if it ever stops being true.
+      - name: Verify the interpreter can parse workflows
+        run: |
+          set -euo pipefail
+          if ! python3 -c "import yaml" 2>/dev/null; then
+            pip3 install --quiet --disable-pip-version-check pyyaml \
+              || { echo "::error::PyYAML is unavailable and could not be installed — the contract suites would skip themselves and report a hollow green"; exit 1; }
+          fi
+          python3 -c "import sys, yaml; print('python ' + sys.version.split()[0] + ', PyYAML ' + yaml.__version__)"
+
+      # The same loop, in the same order, as "Validate local orchestration
+      # boundary contracts" in the release workflow's `reconcile` job: one log
+      # per suite, unittest's own "Ran N tests" as the only source of the
+      # count, and a suite that collects nothing fails instead of passing
+      # quietly. test_ci_workflows pins the two suite lists to each other, so
+      # a suite added to one has to be added to the other.
+      - name: Validate local orchestration boundary contracts
+        run: |
+          set -euo pipefail
+          total=0
+          for suite in \
+            test_build_provenance \
+            test_otzaria_provenance \
+            test_host_safety \
+            test_manual_release_workflow \
+            test_verify_relink_recovery_snapshot \
+            test_ci_workflows \
+            test_patch_anchor_schema \
+            test_prefetch_patch_anchors; do
+            log="$RUNNER_TEMP/$suite.log"
+            if ! python3 ".github/scripts/$suite.py" > "$log" 2>&1; then
+              cat "$log"
+              echo "::error::$suite failed — see its output above"
+              exit 1
+            fi
+            ran=$(sed -n 's/^Ran \([0-9][0-9]*\) test.*/\1/p' "$log" | tail -n1)
+            skipped=$(sed -n 's/^OK (skipped=\([0-9][0-9]*\)).*/\1/p' "$log" | tail -n1)
+            if [ -z "$ran" ] || [ "$ran" -eq 0 ]; then
+              cat "$log"
+              echo "::error::$suite reported no tests — it collected nothing"
+              exit 1
+            fi
+            passed=$((ran - ${skipped:-0}))
+            echo "tests: $suite $passed passed${skipped:+ ($skipped skipped)}"
+            total=$((total + passed))
+          done
+          echo "tests: local orchestration boundary contracts $total passed"
+
   test:
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Install JBR 25
         run: |
@@ -27,18 +101,93 @@ jobs:
           echo "JAVA_HOME=$JBR_DIR" >> "$GITHUB_ENV"
           echo "$JBR_DIR/bin" >> "$GITHUB_PATH"
 
+      # gradle/gradle-build-action@v3 is deprecated — every run of this job
+      # printed "##[warning]This job uses deprecated functionality from the
+      # 'gradle/gradle-build-action' action" — and it is the same code as
+      # gradle/actions/setup-gradle, which the contract job already used: two
+      # action generations in one repo. This job got `67 actionable tasks: 67
+      # executed` (nothing reused) while contract's v4 got `16 actionable
+      # tasks: 9 executed, 7 from cache`. v3 took no inputs here, so nothing
+      # but the name and the cache policy migrates.
+      #
+      # v5 is the first major that runs on Node 24 (v4 is Node 20 and is named
+      # in this repo's "Node.js 20 is deprecated" warnings). v6 exists but
+      # moves caching into `gradle-actions-caching`, a proprietary component
+      # under Gradle's commercial Terms of Use — a licence decision for the
+      # operator, not a CI cleanup.
       - name: Setup Gradle
-        uses: gradle/gradle-build-action@v3
+        uses: gradle/actions/setup-gradle@v5
+        with:
+          # Only the trunk writes the cache; PR jobs read what it wrote instead
+          # of each seeding an entry nothing else can reuse. This is also the
+          # action's own default rule — stated here so it survives a change of
+          # default, and so the policy is visible where the job is read.
+          cache-read-only: ${{ github.ref != 'refs/heads/otzaria' }}
 
       - name: Grant execute permission for gradlew
         run: chmod +x gradlew
 
+      # --warning-mode all: the release build reports "Deprecated Gradle
+      # features were used in this build, making it incompatible with Gradle
+      # 10" four times per run and never says which ones. This is the ONE
+      # invocation in the repo that shows them (the self-hosted release build
+      # keeps the quiet default) — as of 2026-09-08 both come from the Android
+      # Gradle plugin's multi-string dependency notation (lint-gradle, aapt2),
+      # none from this repo's build scripts.
+      #
+      # Two other standing warnings in this step are NOT stale build config and
+      # cannot be fixed here: `Kotlin does not yet support 25 JDK target,
+      # falling back to Kotlin JVM_24` and the KGP "Inconsistent JVM Target
+      # Compatibility ... This will become an error in Gradle 8.0" that follows
+      # it. jvmToolchain is 25 everywhere (the release runner gates on Java 25)
+      # and KGP has no JVM_25 target yet. The Gradle-8 deadline in that text is
+      # stale — this build runs Gradle 9.1 — and the mismatch it reports is
+      # inert: the repo has zero .java sources, so compileJava is NO-SOURCE in
+      # every module and produces no bytecode to be inconsistent with. Pinning
+      # jvmTarget to 24 to silence it would change a compiler that compiles
+      # nothing; both lines stay until KGP ships a 25 target.
+      #
+      # --continue so one failing module still lets the rest report their
+      # counts; the step's exit status is still Gradle's.
       - name: Run all tests
-        run: ./gradlew allTests --no-daemon
+        run: |
+          set -uo pipefail
+          rc=0
+          ./gradlew allTests --no-daemon --continue --warning-mode all || rc=$?
+          # A green check used to carry zero evidence: no "tests run" line
+          # exists anywhere in either CI log of run 33987355439, and 4 of the
+          # 11 modules are allTests NO-SOURCE. Count the JUnit XML the test
+          # tasks wrote (restored ones included, so a FROM-CACHE module still
+          # reports what it verified) and end the step with one explicit line.
+          python3 - <<'PY' || rc=1
+          import glob
+          import xml.etree.ElementTree as ET
+
+          reports = sorted(glob.glob("**/build/test-results/**/*.xml", recursive=True))
+          classes = tests = failures = errors = skipped = 0
+          for report in reports:
+              root = ET.parse(report).getroot()
+              if root.tag != "testsuite":
+                  continue
+              classes += 1
+              tests += int(root.get("tests", 0))
+              failures += int(root.get("failures", 0))
+              errors += int(root.get("errors", 0))
+              skipped += int(root.get("skipped", 0))
+          print(
+              f"tests: allTests {tests - failures - errors - skipped} passed, "
+              f"{failures + errors} failed, {skipped} skipped "
+              f"({classes} test classes)"
+          )
+          if classes == 0:
+              print("::error::allTests wrote no test-result XML — no test ran")
+              raise SystemExit(1)
+          PY
+          exit "$rc"
 
       - name: Upload test reports
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: test-reports
           path: '**/build/reports/tests/'

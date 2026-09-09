@@ -9,6 +9,7 @@ import io.github.kdroidfilter.seforimlibrary.common.countVisibleChars
 import io.github.kdroidfilter.seforimlibrary.common.ids.IdAllocator
 import io.github.kdroidfilter.seforimlibrary.common.ids.IdAllocatorBindings
 import io.github.kdroidfilter.seforimlibrary.common.ids.InMemoryIdAllocator
+import io.github.kdroidfilter.seforimlibrary.common.reports.GeneratorReport
 import io.github.kdroidfilter.seforimlibrary.core.models.*
 import io.github.kdroidfilter.seforimlibrary.core.text.HebrewTextUtils
 import io.github.kdroidfilter.seforimlibrary.dao.repository.SeforimRepository
@@ -37,6 +38,32 @@ import kotlin.io.path.readText
  * @property repository The repository used to store the generated data
  */
 private const val LINE_FLUSH_THRESHOLD = 1000
+
+/**
+ * otzaria-library ships `<masechet>_headings.json` inside the very same `links/`
+ * directory as the real `<book>_links.json` files, but those are heading → line
+ * number maps (`{"בבא בתרא": 1, "דף ב.": 2, …}`), not link files. Nothing in this
+ * repository reads them: the link parser failed on all 37 of them twice per
+ * build (once from [DatabaseGenerator.buildHearotMergePlans] in phase 1, once
+ * from [DatabaseGenerator.processLinks] in phase 2), each failure dragging a
+ * JSON dump into the log, and each file then produced a "Source book not found
+ * for links" warning — 481 lines that buried any genuine parse failure.
+ *
+ * They are excluded at discovery instead. This is a strict no-op on database
+ * content: a `_headings` file parsed to an empty link list, and an empty list
+ * inserts nothing and allocates no id.
+ */
+private const val HEADINGS_FILE_SUFFIX = "_headings"
+
+/** True for the `links/` entries that really are link files. See [HEADINGS_FILE_SUFFIX]. */
+private fun isLinkJsonFile(file: Path): Boolean =
+    file.extension == "json" && !file.nameWithoutExtension.endsWith(HEADINGS_FILE_SUFFIX)
+
+/** Longest bounded name list any single summary line prints. */
+private const val MAX_NAMES_PER_SUMMARY_LINE = 20
+
+/** Collapses newlines/tabs so a quoted excerpt can never break a log line in two. */
+private fun String.oneLine(): String = replace(Regex("\\s+"), " ").trim()
 
 class DatabaseGenerator(
     private val sourceDirectory: Path,
@@ -117,9 +144,75 @@ class DatabaseGenerator(
     // Tracks books processed from the priority list to avoid double insertion
     private val processedPriorityBookKeys = mutableSetOf<String>()
 
-    // Overall progress across books
+    // Overall progress across books.
+    // The operator-facing signal is `progress` (throttled, INFO); everything
+    // per-book is DEBUG and its counts are folded into the progress/summary
+    // lines. See GeneratorProgress.kt.
     private var totalBooksToProcess: Int = 0
-    private var processedBooksCount: Int = 0
+    private val progress = BookProgressReporter()
+
+    // Counters folded into the end-of-phase summary line, replacing the
+    // per-book/per-directory INFO lines they used to be derived from.
+    private var directoriesVisited: Int = 0
+    private var skippedBooksCount: Int = 0
+    private var acronymBooksCount: Int = 0
+    private var hearotMergedBooksCount: Int = 0
+
+    // Breadcrumb for the serial insert path. The per-book INFO block used to be
+    // the only thing naming the book when allocator.bookId / insertBook /
+    // getBook / updateBookCategoryId threw; those failures are otherwise
+    // anonymous now that the block is a single DEBUG line emitted only AFTER
+    // the insert succeeded. Assigned (never read) inside the loop, so the loop's
+    // control flow is unchanged; read by the phase-level catch.
+    private var currentBook: String? = null
+
+    // Titles the importer deliberately did NOT insert, kept so the end-of-import
+    // source-hash accounting can say WHY a computed hash has no book id instead
+    // of just reporting "1545 / 1561".
+    private val skippedBlacklistedSourceTitles = mutableSetOf<String>()
+    private val skippedSefariaShadowedTitles = mutableSetOf<String>()
+    private val skippedBlacklistedFileTitles = mutableSetOf<String>()
+    private val skippedUncategorizedTitles = mutableSetOf<String>()
+
+    // Manual-link drop accounting (finding: 643 of 2,932 links silently dropped,
+    // 642 of them for one missing book, logged as two INFO lines per link).
+    private class DroppedLinkTarget(var links: Int, val firstPath: String)
+
+    private val droppedLinkTargets = LinkedHashMap<String, DroppedLinkTarget>()
+    private var manualLinkRowsSeen: Int = 0
+
+    /**
+     * Starts (or restarts) the book-import phase clock and zeroes every counter
+     * that feeds the end-of-phase summary, so a second phase on the same
+     * instance reports its own numbers rather than cumulative ones.
+     */
+    private fun startBookImport(total: Int) {
+        directoriesVisited = 0
+        skippedBooksCount = 0
+        acronymBooksCount = 0
+        hearotMergedBooksCount = 0
+        currentBook = null
+        skippedBlacklistedSourceTitles.clear()
+        skippedSefariaShadowedTitles.clear()
+        skippedBlacklistedFileTitles.clear()
+        skippedUncategorizedTitles.clear()
+        progress.start(total)
+    }
+
+    /** Counts one finished book (content or skip) and emits the throttled INFO line. */
+    private fun noteBookFinished(lines: Int = 0, tocEntries: Int = 0) {
+        progress.onBookFinished(lines, tocEntries)?.let { line -> logger.i { line } }
+    }
+
+    private fun bookImportSummary(label: String): String = progress.summaryLine(
+        label,
+        mapOf(
+            "directories" to directoriesVisited.toLong(),
+            "skipped" to skippedBooksCount.toLong(),
+            "acronymBooks" to acronymBooksCount.toLong(),
+            "hearotMerged" to hearotMergedBooksCount.toLong(),
+        ),
+    )
 
     // Normalization helpers for categories/titles
     private fun normalizeHebrewLabel(raw: String): String {
@@ -257,13 +350,72 @@ class DatabaseGenerator(
     internal fun recordSourceHashesAtEndOfImport() {
         if (otzariaSourceHashes.isEmpty()) return
         var recorded = 0
+        // A hash with no allocated book id is a book that will be fully
+        // reprocessed on every future cycle, so the gap is worth naming rather
+        // than leaving as a bare "N / M".
+        val unrecorded = LinkedHashMap<String, MutableList<String>>()
         for ((key, hash) in otzariaSourceHashes) {
             if (allocator.peekBookId(key.sourceName, key.canonicalHeTitle) != null) {
                 allocator.recordSourceHash(key, hash)
                 recorded++
+            } else {
+                unrecorded.getOrPut(classifyUnimportedBook(key.canonicalHeTitle)) { mutableListOf() }
+                    .add(key.canonicalHeTitle)
             }
         }
         logger.i { "Recorded source hashes for $recorded / ${otzariaSourceHashes.size} Otzaria books" }
+        reportUnrecordedSourceHashes(unrecorded)
+    }
+
+    /**
+     * Why a book whose source hash was computed never reached the allocator.
+     * Every branch mirrors one deliberate `continue`/early-return in the import
+     * path; anything left over is a genuinely unexplained gap and says so.
+     */
+    private fun classifyUnimportedBook(title: String): String = when (title) {
+        in mergedHearotTitles -> "merged into a base book as inline notes"
+        in skippedSefariaShadowedTitles -> "already exists from Sefaria (priority source)"
+        in skippedBlacklistedSourceTitles -> "blacklisted source"
+        in skippedBlacklistedFileTitles -> "blacklisted file name"
+        in skippedUncategorizedTitles -> "file has no category (library root)"
+        else -> "not imported (reason not tracked)"
+    }
+
+    /** One WARN per class with counts + bounded names; the full list goes to a report file. */
+    private fun reportUnrecordedSourceHashes(byClass: Map<String, List<String>>) {
+        if (byClass.isEmpty()) return
+        val total = byClass.values.sumOf { it.size }
+        logger.w {
+            "source hashes: $total of ${otzariaSourceHashes.size} Otzaria books have no source hash — " +
+                "they are fully reprocessed every cycle"
+        }
+        val ordered = byClass.entries.sortedWith(
+            compareByDescending<Map.Entry<String, List<String>>> { it.value.size }.thenBy { it.key },
+        )
+        for ((reason, titles) in ordered) {
+            val names = titles.sorted()
+            logger.w {
+                "source hashes: ${titles.size} not recorded — $reason " +
+                    "(${names.take(MAX_NAMES_PER_SUMMARY_LINE).joinToString()}" +
+                    (if (names.size > MAX_NAMES_PER_SUMMARY_LINE) ", … and ${names.size - MAX_NAMES_PER_SUMMARY_LINE} more)" else ")")
+            }
+        }
+        GeneratorReport.write("otzaria-source-hashes-not-recorded", logger) {
+            put("computed", otzariaSourceHashes.size.toLong())
+            put("notRecorded", total.toLong())
+            putRows(
+                "byReason",
+                ordered.map { (reason, titles) ->
+                    mapOf<String, Any?>("reason" to reason, "books" to titles.size)
+                },
+            )
+            putRows(
+                "books",
+                ordered.flatMap { (reason, titles) ->
+                    titles.sorted().map { mapOf<String, Any?>("title" to it, "reason" to reason) }
+                },
+            )
+        }
     }
 
 
@@ -319,6 +471,7 @@ class DatabaseGenerator(
                     }
                 } catch (_: Exception) { 0 }
                 logger.i { "Planned to process approximately $totalBooksToProcess books" }
+                startBookImport(totalBooksToProcess)
 
                 // Process priority books first (if any), then process the full library
                 runCatching {
@@ -332,6 +485,7 @@ class DatabaseGenerator(
                 preloadAllBookContents(libraryPath)
                 processDirectory(libraryPath, null, 0, metadata)
                 assertAllHearotMergesApplied()
+                logger.i { bookImportSummary("Otzaria book import") }
 
                 // Process links
                 processLinks()
@@ -366,10 +520,19 @@ class DatabaseGenerator(
                 repository.setJournalModeWal()
             } catch (_: Exception) {}
 
-            logger.e(e) { "Error during generation" }
+            logger.e(e) { "Error during generation${bookBreadcrumb()}" }
             throw e
         }
     }
+
+    /**
+     * ` (last book: 5848 'X' file=X.txt categoryId=612)` — the breadcrumb the
+     * deleted per-book INFO block used to provide for failures on the insert
+     * path (`allocator.bookId`, `insertBook`, `getBook`,
+     * `updateBookCategoryId`), which throw before the per-book DEBUG line is
+     * reached. Empty when nothing has been inserted yet.
+     */
+    private fun bookBreadcrumb(): String = currentBook?.let { " (last book: $it)" } ?: ""
 
     /**
      * Phase 1: Generate categories, books, TOCs and lines only (no links).
@@ -436,6 +599,7 @@ class DatabaseGenerator(
                     }
                 } catch (_: Exception) { 0 }
                 logger.i { "Planned to process approximately $totalBooksToProcess books (phase 1)" }
+                startBookImport(totalBooksToProcess)
 
                 runCatching { processPriorityBooks(loadMetadata = { metadata }) }
                     .onFailure { e -> logger.w(e) { "Failed processing priority list; continuing with full generation (phase 1)" } }
@@ -443,12 +607,18 @@ class DatabaseGenerator(
                 preloadAllBookContents(libraryPath)
                 processDirectory(libraryPath, null, 0, metadata)
                 assertAllHearotMergesApplied()
+                logger.i { bookImportSummary("Otzaria book import (phase 1)") }
 
                 // Build category closure after categories insertion
                 logger.i { "Building category_closure table (phase 1)..." }
                 repository.rebuildCategoryClosure()
             }
             recordSourceHashesAtEndOfImport()
+        } catch (e: Throwable) {
+            // Rethrown unchanged — this exists only to name the book the serial
+            // insert loop was on. See [bookBreadcrumb].
+            logger.e(e) { "Error during phase 1${bookBreadcrumb()}" }
+            throw e
         } finally {
             runCatching { enableForeignKeys() }
             runCatching { repository.setSynchronousNormal() }
@@ -639,8 +809,9 @@ class DatabaseGenerator(
         var mergedPairs = 0
         var totalNotes = 0
 
-        val linkFiles = Files.list(linksDir).use { s -> s.filter { it.extension == "json" }.toList() }
-            .sortedBy { it.fileName.toString() }
+        val jsonFiles = Files.list(linksDir).use { s -> s.filter { it.extension == "json" }.toList() }
+        val linkFiles = jsonFiles.filter(::isLinkJsonFile).sortedBy { it.fileName.toString() }
+        noteSkippedHeadingFiles(jsonFiles.size - linkFiles.size)
         for (jsonFile in linkFiles) {
             val baseTitle = normalizeBookTitle(jsonFile.nameWithoutExtension.removeSuffix("_links"))
             val jsonBytes = runCatching { Files.readAllBytes(jsonFile) }.getOrNull() ?: continue
@@ -735,6 +906,11 @@ class DatabaseGenerator(
             logger.i { "📝 Companion-notes merge plan: $mergedPairs pairs, $totalNotes notes → inline footnotes" }
             standalone.forEach { logger.w { "📝 Companion notes stay standalone: $it" } }
         }
+    }
+
+    /** One INFO line for the `_headings` files skipped at link discovery. See [HEADINGS_FILE_SUFFIX]. */
+    private fun noteSkippedHeadingFiles(count: Int) {
+        if (count > 0) logger.i { "skipped $count *$HEADINGS_FILE_SUFFIX files (heading maps, not link files)" }
     }
 
     /**
@@ -894,7 +1070,8 @@ class DatabaseGenerator(
         metadata: Map<String, BookMetadata>,
         parentPath: String = ""
     ) {
-        logger.i { "=== Processing directory: ${directory.fileName} with parentCategoryId: $parentCategoryId (level: $level) ===" }
+        directoriesVisited += 1
+        logger.d { "=== Processing directory: ${directory.fileName} with parentCategoryId: $parentCategoryId (level: $level) ===" }
 
         Files.list(directory).use { stream ->
             val entries = stream.sorted { a, b ->
@@ -909,7 +1086,7 @@ class DatabaseGenerator(
                         logger.d { "Processing subdirectory: ${entry.fileName} with parentId: $parentCategoryId" }
                         val placement = ensureCategoryHierarchy(entry.fileName.toString(), parentCategoryId, level, parentPath)
                         val normalizedPath = placement.normalizedPath.joinToString(" / ")
-                        logger.i { "✅ Category '${entry.fileName}' normalized to '$normalizedPath' with ID: ${placement.id} (parent: $parentCategoryId)" }
+                        logger.d { "✅ Category '${entry.fileName}' normalized to '$normalizedPath' with ID: ${placement.id} (parent: $parentCategoryId)" }
                         processDirectory(entry, placement.id, placement.leafLevel + 1, metadata, placement.canonicalPath)
                     }
 
@@ -923,18 +1100,25 @@ class DatabaseGenerator(
                         val fname = entry.fileName.toString()
                         // Skip files explicitly blacklisted by name
                         if (fileNameBlacklist.contains(fname)) {
+                            skippedBlacklistedFileTitles += normalizeBookTitle(fname.substringBeforeLast('.'))
                             logger.i { "⛔ Skipping blacklisted file '$fname' by name" }
                             continue
                         }
                         if (normalizeBookTitle(fname.substringBeforeLast('.')) in mergedHearotTitles) {
-                            logger.i { "📝 Skipping '$fname' — merged into its base book as inline notes" }
+                            hearotMergedBooksCount += 1
+                            logger.d { "📝 Skipping '$fname' — merged into its base book as inline notes" }
                             continue
                         }
                         if (parentCategoryId == null) {
+                            skippedUncategorizedTitles += normalizeBookTitle(fname.substringBeforeLast('.'))
                             logger.w { "❌ Book found without category: $entry" }
                             continue
                         }
-                        logger.i { "📚 Processing book ${entry.fileName} with categoryId: $parentCategoryId" }
+                        // No per-book INFO header here: this site and the one inside
+                        // createAndProcessBook each printed one per book (1,500 + 1,501
+                        // lines / 0.39 MB in one build). Both are gone; createAndProcessBook
+                        // now emits a single per-book DEBUG line once the book is done,
+                        // and that site also covers the priority-list caller.
                         createAndProcessBook(entry, parentCategoryId, metadata)
                     }
 
@@ -944,7 +1128,7 @@ class DatabaseGenerator(
                 }
             }
         }
-        logger.i { "=== Finished processing directory: ${directory.fileName} ===" }
+        logger.d { "=== Finished processing directory: ${directory.fileName} ===" }
     }
 
 
@@ -965,16 +1149,16 @@ class DatabaseGenerator(
         val rawTitle = filename.substringBeforeLast('.')
         val title = normalizeBookTitle(rawTitle)
         val meta = metadata[rawTitle] ?: metadata[title] ?: metadata[stripQuotesForLookup(rawTitle)]
-
-        logger.i { "Processing book: $title with categoryId: $categoryId" }
+        // Breadcrumb only — never read by this function. See [bookBreadcrumb].
+        currentBook = "'$title' file=$filename categoryId=$categoryId"
 
         // Apply source blacklist
         val srcName = getSourceNameFor(path)
         if (sourceBlacklist.contains(srcName)) {
+            skippedBlacklistedSourceTitles += title
             logger.i { "⛔ Skipping '$title' from blacklisted source '$srcName'" }
-            processedBooksCount += 1
-            val pct = if (totalBooksToProcess > 0) (processedBooksCount * 100 / totalBooksToProcess) else 0
-            logger.i { "Books progress: $processedBooksCount/$totalBooksToProcess (${pct}%)" }
+            skippedBooksCount += 1
+            noteBookFinished()
             return
         }
 
@@ -983,16 +1167,17 @@ class DatabaseGenerator(
         if (existingBook != null) {
             val existingSource = repository.getSourceById(existingBook.sourceId)
             if (existingSource?.name == "Sefaria") {
+                skippedSefariaShadowedTitles += title
                 logger.i { "⏭️ Skipping '$title' - already exists from Sefaria (priority source)" }
-                processedBooksCount += 1
-                val pct = if (totalBooksToProcess > 0) (processedBooksCount * 100 / totalBooksToProcess) else 0
-                logger.i { "Books progress: $processedBooksCount/$totalBooksToProcess (${pct}%)" }
+                skippedBooksCount += 1
+                noteBookFinished()
                 return
             }
         }
 
         // Assign a stable ID via IdAllocator so cross-build reproducibility holds.
         val currentBookId = allocator.bookId(srcName, title)
+        currentBook = "$currentBookId '$title' file=$filename categoryId=$categoryId"
         logger.d { "Assigning ID $currentBookId to book '$title' (source=$srcName) with categoryId: $categoryId" }
 
         // Pre-resolve author / pubPlace / pubDate IDs through the IdAllocator
@@ -1038,23 +1223,37 @@ class DatabaseGenerator(
         logger.d { "Book '${book.title}' inserted with ID: $insertedBookId and categoryId: $categoryId" }
 
         // Insert acronyms for this book if an Acronymizer DB is available
+        var acronymCount = 0
         try {
             val terms = fetchAcronymsForTitle(title)
             if (terms.isNotEmpty()) {
                 repository.bulkInsertBookAcronyms(insertedBookId, terms)
-                logger.i { "Inserted ${terms.size} acronyms for '${title}'" }
+                acronymCount = terms.size
+                acronymBooksCount += 1
+                logger.d { "Inserted ${terms.size} acronyms for '${title}'" }
             }
         } catch (e: Exception) {
             logger.w(e) { "Failed to insert acronyms for '$title'" }
         }
 
-        // Process content of the book
-        processBookContent(path, insertedBookId, title, categoryId)
+        // Process content of the book. One DEBUG line per book replaces the
+        // six INFO lines this used to print; on failure the book is named at
+        // ERROR level so the breadcrumb survives without the INFO chatter.
+        val startedAtMs = monotonicMillis()
+        val stats = try {
+            processBookContent(path, insertedBookId, title, categoryId)
+        } catch (e: Throwable) {
+            logger.e(e) { "Failed processing book $insertedBookId '$title' (file=$filename, categoryId=$categoryId)" }
+            throw e
+        }
+        logger.d {
+            "book $insertedBookId '$title' file=$filename categoryId=$categoryId " +
+                "lines=${stats.lines} toc=${stats.tocEntries} tocWithChildren=${stats.tocEntriesWithChildren} " +
+                "acronyms=$acronymCount ${monotonicMillis() - startedAtMs}ms"
+        }
 
-        // Book-level progress
-        processedBooksCount += 1
-        val pct = if (totalBooksToProcess > 0) (processedBooksCount * 100 / totalBooksToProcess) else 0
-        logger.i { "Books progress: $processedBooksCount/$totalBooksToProcess (${pct}%)" }
+        // Book-level progress (throttled: see BookProgressReporter)
+        noteBookFinished(lines = stats.lines, tocEntries = stats.tocEntries)
     }
 
     /**
@@ -1063,9 +1262,13 @@ class DatabaseGenerator(
      * @param path The path to the book file
      * @param bookId The ID of the book in the database
      */
-    private suspend fun processBookContent(path: Path, bookId: Long, bookTitle: String, categoryId: Long) = coroutineScope {
+    private suspend fun processBookContent(
+        path: Path,
+        bookId: Long,
+        bookTitle: String,
+        categoryId: Long,
+    ): BookContentStats = coroutineScope {
         logger.d { "Processing content for book ID: $bookId" }
-        logger.i { "Processing content of book ID: $bookId (ID generated by the database)" }
 
         // Prefer preloaded content from RAM if available
         val key = toLibraryRelativeKey(path)
@@ -1079,19 +1282,29 @@ class DatabaseGenerator(
             val stats = HearotCompanionMerge.MergeStats()
             HearotCompanionMerge.mergeLines(bookTitle, rawLines, plan, stats).also {
                 pendingHearotMergeBases.remove(bookTitle)
-                logger.i { "📝 '$bookTitle': merged companion notes — ${stats.inPlace} anchored in place, ${stats.appended} appended" }
+                logger.d { "📝 '$bookTitle': merged companion notes — ${stats.inPlace} anchored in place, ${stats.appended} appended" }
             }
         }
-        logger.i { "Number of lines: ${lines.size}" }
 
         // Process each line one by one, handling TOC entries as we go
-        processLinesWithTocEntries(bookId, bookTitle, categoryId, lines)
+        val tocStats = processLinesWithTocEntries(bookId, bookTitle, categoryId, lines)
 
         // Update the total number of lines
         repository.updateBookTotalLines(bookId, lines.size)
 
-        logger.i { "Content processed successfully for book ID: $bookId (ID generated by the database)" }
+        BookContentStats(
+            lines = lines.size,
+            tocEntries = tocStats.tocEntries,
+            tocEntriesWithChildren = tocStats.tocEntriesWithChildren,
+        )
     }
+
+    /** Per-book counters folded into the per-book DEBUG line and the phase summary. */
+    private data class BookContentStats(
+        val lines: Int,
+        val tocEntries: Int,
+        val tocEntriesWithChildren: Int,
+    )
 
 
     /**
@@ -1100,7 +1313,12 @@ class DatabaseGenerator(
      * @param bookId The ID of the book in the database
      * @param lines The lines of the book content
      */
-    private suspend fun processLinesWithTocEntries(bookId: Long, bookTitle: String, categoryId: Long, lines: List<String>) {
+    private suspend fun processLinesWithTocEntries(
+        bookId: Long,
+        bookTitle: String,
+        categoryId: Long,
+        lines: List<String>,
+    ): BookContentStats {
         logger.d { "Processing lines and TOC entries together for book ID: $bookId" }
 
         // Structure pour stocker toutes les entrées TOC créées
@@ -1124,6 +1342,8 @@ class DatabaseGenerator(
         val lineBuffer = ArrayList<Line>(LINE_FLUSH_THRESHOLD)
         val tocEntryLineIdUpdates = ArrayList<Pair<Long, Long>>()
         val lineTocEntryUpdates = ArrayList<Pair<Long, Long>>()
+        // Line ticks: silent for small books, ≥10% (or 60 s) apart for large ones.
+        val lineTicks = LineTickGate(totalLines = lines.size)
 
         suspend fun flushLineBatch() {
             if (lineBuffer.isEmpty()) return
@@ -1228,9 +1448,8 @@ class DatabaseGenerator(
                 lineTocBuffer.clear()
             }
 
-            if (lineIndex % 1000 == 0) {
-                val pct = if (lines.isNotEmpty()) (lineIndex * 100 / lines.size) else 0
-                logger.i { "Book $bookId '$bookTitle': $lineIndex/${lines.size} lines (${pct}%)" }
+            if (lineTicks.shouldTick(lineIndex)) {
+                logger.i { lineTicks.tickLine(bookId, bookTitle, lineIndex) }
             }
         }
 
@@ -1252,9 +1471,11 @@ class DatabaseGenerator(
         val lastChildIds = entriesByParent.values.mapNotNull { it.lastOrNull() }
         repository.bulkUpdateTocEntryFlags(hasChildrenIds, lastChildIds)
 
-        logger.i { "✅ Finished processing lines and TOC entries for book ID: $bookId" }
-        logger.i { "   Total TOC entries: ${allTocEntries.size}" }
-        logger.i { "   Entries with children: ${parentIds.size}" }
+        return BookContentStats(
+            lines = lines.size,
+            tocEntries = allTocEntries.size,
+            tocEntriesWithChildren = parentIds.size,
+        )
     }
 
     private fun cleanHtml(html: String): String {
@@ -1331,6 +1552,14 @@ class DatabaseGenerator(
 
         logger.i { "Processing ${entries.size} priority entries first" }
         val metadata = loadMetadata()
+        // The list has drifted almost entirely out of the library (430 of 431
+        // entries pointed at files that no longer exist in the audited build).
+        // One WARN summary replaces one WARN per entry; the full list goes to a
+        // report file so the operator can decide re-pin vs delete. Re-pinning or
+        // deleting the list here would change the book insertion ORDER, hence
+        // the allocated ids — never a fix this code may make on its own.
+        var priorityFilesFound = 0
+        val priorityMissing = mutableListOf<String>()
 
         outer@ for ((idx, relative) in entries.withIndex()) {
             // Build the absolute path under the library root
@@ -1342,6 +1571,7 @@ class DatabaseGenerator(
             val bookFileName = parts.last()
             // Skip files explicitly blacklisted by name
             if (fileNameBlacklist.contains(bookFileName)) {
+                skippedBlacklistedFileTitles += normalizeBookTitle(bookFileName.substringBeforeLast('.'))
                 logger.i { "⛔ Skipping blacklisted file in priority list: $bookFileName" }
                 continue@outer
             }
@@ -1356,9 +1586,11 @@ class DatabaseGenerator(
             val bookPath = currentPath.resolve(bookFileName)
 
             if (!Files.isRegularFile(bookPath)) {
-                logger.w { "Priority entry ${idx + 1}/${entries.size}: file not found: $bookPath" }
+                priorityMissing += relative
+                logger.d { "Priority entry ${idx + 1}/${entries.size}: file not found: $bookPath" }
                 continue@outer
             }
+            priorityFilesFound += 1
 
             // Avoid processing duplicates listed multiple times
             val key = toLibraryRelativeKey(bookPath)
@@ -1388,6 +1620,36 @@ class DatabaseGenerator(
 
             // Mark as processed to avoid double insertion during full traversal
             processedPriorityBookKeys.add(key)
+        }
+
+        reportPriorityListDrift(entries.size, priorityFilesFound, priorityMissing)
+    }
+
+    /**
+     * One WARN for the whole priority pass instead of one per missing entry
+     * (430 WARNs / 0.11 MB in the audited build). The list itself is left
+     * exactly as it is: re-pinning or deleting entries reorders the book
+     * inserts and therefore the allocated ids, which is an operator decision,
+     * not a logging fix.
+     */
+    private fun reportPriorityListDrift(total: Int, found: Int, missing: List<String>) {
+        if (missing.isEmpty()) {
+            logger.i { "priority list: $found/$total entries found" }
+            return
+        }
+        logger.w {
+            "priority list: $found/$total entries found, ${missing.size} missing " +
+                "(first: ${missing.take(3).joinToString()}) — list is " +
+                "otzariasqlite/src/commonMain/resources/priority.txt (loaded by " +
+                "DatabaseGenerator.loadPriorityList in Generator.kt); needs re-pinning or " +
+                "removal (operator decision)"
+        }
+        GeneratorReport.write("otzaria-priority-list-missing", logger) {
+            put("entries", total.toLong())
+            put("found", found.toLong())
+            put("missing", missing.size.toLong())
+            put("listResource", "otzariasqlite/src/commonMain/resources/priority.txt")
+            putStrings("missingEntries", missing)
         }
     }
 
@@ -1509,8 +1771,12 @@ class DatabaseGenerator(
         logger.d { "Links in database before processing: $linksBefore" }
 
         logger.i { "Loading all link JSON files into RAM..." }
+        droppedLinkTargets.clear()
+        manualLinkRowsSeen = 0
         // Preload all links JSON into memory to minimize IO
-        val linkFiles = Files.list(linksDir).use { s -> s.filter { it.extension == "json" }.toList() }
+        val jsonFiles = Files.list(linksDir).use { s -> s.filter { it.extension == "json" }.toList() }
+        val linkFiles = jsonFiles.filter(::isLinkJsonFile)
+        noteSkippedHeadingFiles(jsonFiles.size - linkFiles.size)
         val linksByBook = coroutineScope {
             linkFiles.map { file ->
                 async {
@@ -1529,10 +1795,12 @@ class DatabaseGenerator(
         logger.i { "Processing links from RAM..." }
         var totalLinks = 0
         for ((bookTitle, links) in linksByBook) {
+            manualLinkRowsSeen += links.size
             val processedLinks = processLinksForBook(bookTitle, links)
             totalLinks += processedLinks
             logger.d { "Processed $processedLinks links for $bookTitle, total so far: $totalLinks" }
         }
+        reportDroppedManualLinks()
 
         // Count links after processing
         val linksAfter = repository.countLinks()
@@ -1543,6 +1811,55 @@ class DatabaseGenerator(
 
         // Update the book_has_links table
         updateBookHasLinksTable()
+    }
+
+    /**
+     * Manual links whose target book does not exist in the DB are dropped — that
+     * is upstream data drift (otzaria-library), not something this importer can
+     * repair, and the drop behaviour is deliberately unchanged. What changes is
+     * that it is now visible: one WARN per missing target book with its link
+     * count and original path, bounded, plus a total. Previously this was two
+     * INFO lines per dropped link and no summary at all, so a fifth of the
+     * manual-link corpus vanished without a single warning.
+     */
+    private fun reportDroppedManualLinks() {
+        if (droppedLinkTargets.isEmpty()) return
+        val ordered = droppedLinkTargets.entries.sortedWith(
+            compareByDescending<Map.Entry<String, DroppedLinkTarget>> { it.value.links }.thenBy { it.key },
+        )
+        val droppedLinks = ordered.sumOf { it.value.links }
+        logger.w {
+            "manual links: $droppedLinks of $manualLinkRowsSeen links dropped — " +
+                "${ordered.size} target book(s) not found"
+        }
+        for ((title, target) in ordered.take(MAX_NAMES_PER_SUMMARY_LINE)) {
+            logger.w {
+                "manual links: ${target.links} links dropped — target book not found: " +
+                    "'$title' (${target.firstPath})"
+            }
+        }
+        val rest = ordered.drop(MAX_NAMES_PER_SUMMARY_LINE)
+        if (rest.isNotEmpty()) {
+            logger.w {
+                "manual links: … and ${rest.size} more missing target books " +
+                    "(${rest.sumOf { it.value.links }} links)"
+            }
+        }
+        GeneratorReport.write("otzaria-manual-links-dropped", logger) {
+            put("linkRowsSeen", manualLinkRowsSeen.toLong())
+            put("droppedLinks", droppedLinks.toLong())
+            put("missingTargetBooks", ordered.size.toLong())
+            putRows(
+                "missingTargets",
+                ordered.map { (title, target) ->
+                    mapOf<String, Any?>(
+                        "title" to title,
+                        "links" to target.links,
+                        "originalPath" to target.firstPath,
+                    )
+                },
+            )
+        }
     }
 
     /**
@@ -1566,7 +1883,9 @@ class DatabaseGenerator(
         val rangeBatch = mutableListOf<LinkRange>()
         val coverageBatch = mutableListOf<LinkCoverage>()
         val touchedLinkIds = mutableSetOf<Long>()
-        for ((index, linkData) in links.withIndex()) {
+        // `withIndex()` dropped with the per-link "Link i/N" log line it existed
+        // for: same list, same order, same iterations.
+        for (linkData in links) {
             try {
                 val path = linkData.path_2
                 val targetTitle = if (path.contains('\\')) {
@@ -1583,8 +1902,12 @@ class DatabaseGenerator(
                     if (HearotCompanionMerge.isMergeableCompanionTitle(normalizeBookTitle(targetTitle))) {
                         logger.d { "Skipping link into merged companion notes: $targetTitle" }
                     } else {
-                        logger.i { "Link ${index + 1}/${links.size} - Target book not found: $targetTitle" }
-                        logger.i { "Original path: ${linkData.path_2}" }
+                        // Counted, not printed: two INFO lines per dropped link
+                        // was 1,286 lines for 643 drops. The drop itself is
+                        // unchanged — see [reportDroppedManualLinks].
+                        droppedLinkTargets
+                            .getOrPut(targetTitle) { DroppedLinkTarget(0, linkData.path_2) }
+                            .links += 1
                     }
                     continue
                 }
@@ -2154,7 +2477,15 @@ class DatabaseGenerator(
                 logger.w { "DictaToOtzaria format conversion not yet implemented for $bookTitle" }
                 emptyList<LinkData>()
             } catch (e2: Exception) {
-                logger.w(e2) { "Failed to parse links from file for $bookTitle in any known format" }
+                // One line, no throwable: kermit renders the JsonDecodingException
+                // together with the whole offending document, which was 146 log
+                // lines of JSON body per build. The head of the content says just
+                // as much about what the file actually is.
+                logger.w {
+                    "Failed to parse links for '$bookTitle' in any known format " +
+                        "(${e2::class.simpleName}: ${e2.message?.take(120)?.oneLine()}); " +
+                        "content starts: ${content.take(80).oneLine()}"
+                }
                 emptyList<LinkData>()
             }
         }

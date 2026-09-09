@@ -83,14 +83,14 @@ jobs:
           fi
 
       - name: Checkout the exact updater
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           ref: ${{ inputs.seforim_tool_commit }}
           fetch-depth: 0
           persist-credentials: false
 
       - name: Checkout the exact Otzaria corpus
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           repository: Otzaria/otzaria-library
           ref: ${{ inputs.otzaria_commit }}
@@ -98,7 +98,7 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: '25'
@@ -195,7 +195,7 @@ jobs:
             "$OUTPUT/.manual-links-refresh-complete" corpus-result/
 
       - name: Upload the output-only corpus evidence
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: manual-links-corpus-result
           path: corpus-result/

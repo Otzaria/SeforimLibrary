@@ -138,8 +138,19 @@ fun main(args: Array<String>) {
     // it out client-side. Without this the manifest claims a catalogBlobName
     // but the patch.db ships with an empty blobs table — caught by the real
     // e2e on Zayit (catalog.pb timestamp stayed at v1).
-    val catalogPath = System.getProperty("catalogPb")
-        ?: System.getenv("CATALOG_PB_PATH")
+    //
+    // On THIS branch catalog.pb is no longer produced at all (see BRANCH-STACK
+    // "ביטול catalog.pb"; the release workflow even `rm -f build/catalog.pb`s any
+    // stale copy a dirty self-hosted workspace might smuggle in), and the
+    // manifest below correctly omits catalogBlobName when nothing was embedded —
+    // so a consumer never looks for a blob that is not there. The default,
+    // nobody-asked-for-a-catalog case is therefore expected and is reported as
+    // INFO; it was a WARN, which meant every cycle shipped 5 standing warnings
+    // (one per anchor) that no one could ever act on. Only an EXPLICIT request
+    // (-DcatalogPb / CATALOG_PB_PATH) pointing at a missing file is a real gap
+    // and keeps its warning.
+    val requestedCatalogPath = System.getProperty("catalogPb") ?: System.getenv("CATALOG_PB_PATH")
+    val catalogPath = requestedCatalogPath
         ?: outPath.resolveSibling("catalog.pb").toAbsolutePath().toString()
     val catalogFile = Paths.get(catalogPath)
     val catalogEmbedded = Files.isRegularFile(catalogFile)
@@ -152,8 +163,16 @@ fun main(args: Array<String>) {
             }
         }
         logger.i { "Embedded catalog.pb (${Files.size(catalogFile)} bytes) into patch.blobs" }
+    } else if (requestedCatalogPath != null) {
+        logger.w {
+            "No catalog.pb at the explicitly requested $catalogPath — patch ships without a " +
+                "catalog blob and its manifest omits catalogBlobName"
+        }
     } else {
-        logger.w { "No catalog.pb at $catalogPath — patch ships without a catalog blob" }
+        logger.i {
+            "no catalog.pb produced by this pipeline — patch ships without a catalog blob and " +
+                "its manifest omits catalogBlobName, which is the supported shape"
+        }
     }
 
     // Compress the patch with zstd. The .db file remains around so

@@ -3,8 +3,10 @@ package io.github.kdroidfilter.seforimlibrary.sefariasqlite
 import app.cash.sqldelight.driver.jdbc.sqlite.JdbcSqliteDriver
 import co.touchlab.kermit.Logger
 import co.touchlab.kermit.Severity
+import io.github.kdroidfilter.seforimlibrary.common.buildstate.BuildStateVerifier
 import io.github.kdroidfilter.seforimlibrary.common.ids.IdAllocatorBindings
 import io.github.kdroidfilter.seforimlibrary.common.ids.InMemoryIdAllocator
+import io.github.kdroidfilter.seforimlibrary.common.reports.GeneratorReport
 import io.github.kdroidfilter.seforimlibrary.core.text.normalizeCategoryPath
 import io.github.kdroidfilter.seforimlibrary.dao.repository.CategoryDescriptionUpdate
 import io.github.kdroidfilter.seforimlibrary.dao.repository.SeforimRepository
@@ -88,20 +90,34 @@ fun main(args: Array<String>) = runBlocking {
         val categoryPlan = planCategoryDescriptionOverrides(repository, categoryOverrides)
         val result = applyMetadata(repository, bindings, bulk, descriptions, logger)
         val categoryResult = applyCategoryDescriptionPlan(repository, categoryPlan, logger)
+        // This stage writes straight to the on-disk DB (no VACUUM INTO), so there
+        // is no persist step for the snapshot to run ahead of.
+        val buildStateMeta = mapOf(
+            "generator" to "seedallmetadata",
+            "generated_at" to Instant.now().toString(),
+        )
         runCatching {
-            allocator.snapshotTo(
-                target = buildStatePath,
-                extraMeta = mapOf(
-                    "generator" to "seedallmetadata",
-                    "generated_at" to Instant.now().toString(),
-                ),
-            )
-        }.onFailure { logger.w(it) { "Failed to write build_state to $buildStatePath" } }
+            allocator.snapshotTo(target = buildStatePath, extraMeta = buildStateMeta)
+        }.onFailure { e ->
+            // Fail closed: a build that cannot write its allocator state would
+            // publish last week's — and the build after it would re-issue ids
+            // this one already handed out. The catch below turns this into
+            // exitProcess(1).
+            logger.e(e) { "Failed to write build_state to $buildStatePath" }
+            throw e
+        }
+        BuildStateVerifier.verifyFreshSnapshot(
+            buildStatePath = buildStatePath,
+            dbPath = dbPath,
+            expectedMeta = buildStateMeta,
+            logger = logger,
+        )
         logger.i {
             "All-metadata done: updated=${result.updated} unmatched=${result.unmatched}; " +
                 "category records=${categoryResult.records} updates=${categoryResult.updated} " +
                 "unchanged=${categoryResult.unchanged}"
         }
+        reportUnmatchedMetadataTitles(result.unmatchedTitles, logger)
     } catch (e: Exception) {
         logger.e(e) { "Failed to seed all-metadata; aborting" }
         exitProcess(1)
@@ -126,7 +142,39 @@ internal data class Description(
     val heDesc: String?,
 )
 
-internal data class MetadataResult(val updated: Int, val unmatched: Int)
+internal data class MetadataResult(
+    val updated: Int,
+    val unmatched: Int,
+    /** The titles behind [unmatched], in iteration order. See [reportUnmatchedMetadataTitles]. */
+    val unmatchedTitles: List<String> = emptyList(),
+)
+
+/** How many unmatched titles the summary names before deferring to the report file. */
+private const val MAX_REPORTED_UNMATCHED_TITLES = 20
+
+/**
+ * One bounded WARN naming the ForDB metadata records that matched no book, plus
+ * the complete list in a report file. The records are skipped exactly as before
+ * — the metadata corpus legitimately covers the whole library, which is a
+ * superset of any single generated DB — but "unmatched=1116" alone gave nobody
+ * a way to tell a benign superset from a title-normalisation regression.
+ */
+internal fun reportUnmatchedMetadataTitles(titles: List<String>, logger: Logger) {
+    if (titles.isEmpty()) return
+    logger.w {
+        "all-metadata: ${titles.size} ForDB metadata record(s) matched no book " +
+            "(skipped): ${titles.take(MAX_REPORTED_UNMATCHED_TITLES).joinToString()}" +
+            if (titles.size > MAX_REPORTED_UNMATCHED_TITLES) {
+                ", … and ${titles.size - MAX_REPORTED_UNMATCHED_TITLES} more"
+            } else {
+                ""
+            }
+    }
+    GeneratorReport.write("sefaria-all-metadata-unmatched", logger) {
+        put("unmatched", titles.size.toLong())
+        putStrings("titles", titles)
+    }
+}
 
 internal sealed interface DescriptionEdit {
     data object Keep : DescriptionEdit
@@ -304,12 +352,18 @@ internal suspend fun applyMetadata(
     val bookIdsByTitle = repository.getAllBookTitleIds().groupBy({ it.second }, { it.first })
 
     var updated = 0
-    var unmatched = 0
+    // Names, not just a count: `unmatched=1116` (24.5% of the ForDB metadata
+    // corpus) said nothing about WHICH books were missing their publication
+    // data, so nobody downstream — otzaria-library's own metadata pass in
+    // particular — could act on it. Iteration order is the deterministic
+    // `bulk.keys + descriptions.keys` set order, so the list is stable
+    // build-to-build.
+    val unmatchedTitles = ArrayList<String>()
 
     for (title in bulk.keys + descriptions.keys) {
         val ids = bookIdsByTitle[title]
         if (ids == null) {
-            unmatched++
+            unmatchedTitles += title
             continue
         }
         if (ids.size > 1) {
@@ -335,7 +389,7 @@ internal suspend fun applyMetadata(
         }
         updated++
     }
-    return MetadataResult(updated, unmatched)
+    return MetadataResult(updated, unmatchedTitles.size, unmatchedTitles)
 }
 
 private fun JsonObject.string(key: String): String? =

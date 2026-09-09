@@ -159,7 +159,12 @@ internal fun applyGenerations(
                 unmatchedTitles.take(20).joinToString()
         }
     }
-    return GenerationApplyResult(generationsCreated, linksCreated, 0)
+    // The count MUST be the one the warning above reports. It used to be
+    // hard-coded to 0, so the same run printed
+    // `Generation CSV has 13 unmatched book title(s)` and then
+    // `Generations done: … unmatched=0` — the second line is the one a reader
+    // scanning the summary sees, and it said the opposite of the truth.
+    return GenerationApplyResult(generationsCreated, linksCreated, unmatchedTitles.size)
 }
 
 // `book.title` is not UNIQUE in the schema, so even an exact match can return

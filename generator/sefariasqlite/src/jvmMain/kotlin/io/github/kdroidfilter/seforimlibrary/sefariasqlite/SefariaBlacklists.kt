@@ -25,7 +25,16 @@ internal data class BlacklistFilterResult(
     val skippedByAuthor: Int,
     val skippedBookExamples: List<String>,
     val skippedAuthorExamples: List<String>,
-    val skippedNormalizedPaths: Set<String>
+    val skippedNormalizedPaths: Set<String>,
+    /**
+     * `heTitle` of every skipped payload — the same string
+     * `SefariaDirectImporter.canonicalHeTitle` uses as the book's natural key,
+     * and therefore the key `SefariaSourceHashComputer` builds its `BookKey`
+     * from. Lets the end-of-import source-hash accounting name blacklisting as
+     * the reason a computed hash never reached the allocator, instead of
+     * reporting a bare `5825 / 6216`. Diagnostics only — nothing filters on it.
+     */
+    val skippedHeTitles: Set<String> = emptySet(),
 )
 
 /** Blacklist of book editions (book_version). Format rules: see black_versions.txt. */
@@ -113,6 +122,7 @@ internal fun filterBlacklistedPayloads(
     val skippedBookExamples = ArrayList<String>(5)
     val skippedAuthorExamples = ArrayList<String>(5)
     val skippedNormalizedPaths = LinkedHashSet<String>()
+    val skippedHeTitles = LinkedHashSet<String>()
 
     val filtered = payloads.filter { payload ->
         val bookBlacklisted = isBookBlacklisted(payload, blacklists)
@@ -121,6 +131,7 @@ internal fun filterBlacklistedPayloads(
         if (bookBlacklisted || authorBlacklisted) {
             skippedTotal++
             skippedNormalizedPaths += normalizedBookPath(payload.categoriesHe, payload.heTitle)
+            skippedHeTitles += payload.heTitle
 
             if (bookBlacklisted) {
                 skippedByBook++
@@ -147,7 +158,8 @@ internal fun filterBlacklistedPayloads(
         skippedByAuthor = skippedByAuthor,
         skippedBookExamples = skippedBookExamples,
         skippedAuthorExamples = skippedAuthorExamples,
-        skippedNormalizedPaths = skippedNormalizedPaths
+        skippedNormalizedPaths = skippedNormalizedPaths,
+        skippedHeTitles = skippedHeTitles,
     )
 }
 

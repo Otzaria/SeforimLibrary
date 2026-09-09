@@ -7,6 +7,42 @@ plugins {
     alias(libs.plugins.android.application).apply(false)
 }
 
+// ─── JDK 25: pre-approve the native access sqlite-jdbc already performs ────
+// Every JVM that opens a seforim.db makes sqlite-jdbc call System::load, and
+// JDK 25 answers on stderr with
+//   WARNING: A restricted method in java.lang.System has been called
+//   WARNING: java.lang.System::load has been called by org.sqlite.SQLiteJDBCLoader …
+//   WARNING: Use --enable-native-access=ALL-UNNAMED to avoid a warning …
+//   WARNING: Restricted methods will be blocked in a future release …
+// Run 34024655297 printed that four-line block 15 times — 60 log lines — from
+// "Generate Seforim Database" (×9), "Dump lines snapshot for the linker",
+// "Apply LINKER links (Phase-2)" and "Produce + verify patch fan" (×4). The
+// flag grants exactly the access the code already takes: no bytecode, no
+// behaviour and no artifact change. The last line is also the reason not to
+// leave it: the same call becomes an error in a future JDK.
+//
+// Added as an argument PROVIDER rather than by appending to `jvmArgs`: ~25
+// JavaExec tasks assign `jvmArgs = listOf(…)` in their own configuration
+// blocks (manual-generate-release.yml greps two of those lines verbatim), and
+// an assignment discards anything appended here. jvmArgumentProviders is a
+// separate list that no assignment can clear.
+//
+// The patch fan does not fork through Gradle at all — it runs PatchPipelineCli
+// with `java` from generator/common's published launcher spec — so its copy of
+// the flag lives in `patchPipelineJvmArgs` there.
+class EnableNativeAccess : org.gradle.process.CommandLineArgumentProvider {
+    override fun asArguments(): Iterable<String> = listOf("--enable-native-access=ALL-UNNAMED")
+}
+
+allprojects {
+    tasks.withType<JavaExec>().configureEach {
+        jvmArgumentProviders.add(EnableNativeAccess())
+    }
+    tasks.withType<Test>().configureEach {
+        jvmArgumentProviders.add(EnableNativeAccess())
+    }
+}
+
 tasks.register("generateSeforimDb") {
     group = "application"
     description = "Generate build/seforim.db from Sefaria, append Otzaria, and release info."
@@ -39,6 +75,42 @@ project(":generator-common").tasks.matching { it.name == "stampSchemaVersion" }.
     mustRunAfter(":sefariasqlite:synthesizeSeifimAltToc")
     mustRunAfter(":generator-common:buildLineRefIndex")
     mustRunAfter(":generator-common:buildLineDhIndex")
+}
+
+// Generator diagnostics side-channel (see GeneratorReport). Findings that are
+// too long for the build log — the missing priority entries, the metadata
+// records that matched no book, the books with no source hash, the ambiguous
+// line_ref keys — log one bounded summary line and write the full list here.
+//
+// Every generator stage is a forked JavaExec whose working directory is its OWN
+// subproject, so GeneratorReport's relative default would scatter the files
+// across generator/*/build/generator-reports and none of them would be under
+// the root build/ that the workflow's tmpfs and its release staging address.
+// Pin all writers to one absolute directory in the ROOT build dir.
+// -PgeneratorReportDir overrides it.
+//
+// NOTE: nothing collects this directory off the runner today — build/ is a
+// tmpfs the job unmounts, and manual-generate-release.yml deliberately has no
+// Actions artifact upload to hook into (see
+// test_weekly_workflow_has_no_actions_artifact_handoffs and
+// test_generator_reports_are_not_collected_off_the_runner_yet). Every finding's
+// counts and its first names are in the build log regardless; only the tail of
+// each list dies with the run. Publishing them is an operator decision.
+val generatorReportDir: String =
+    (findProperty("generatorReportDir") as String?)
+        ?: layout.buildDirectory.dir("generator-reports").get().asFile.absolutePath
+listOf(
+    ":sefariasqlite" to "generateSefariaSqlite",
+    ":sefariasqlite" to "seedAllMetadata",
+    ":otzariasqlite" to "generateLines",
+    ":otzariasqlite" to "generateLinks",
+    ":otzariasqlite" to "appendOtzariaLines",
+    ":otzariasqlite" to "appendOtzariaLinks",
+    ":generator-common" to "buildLineRefIndex",
+).forEach { (projectPath, taskName) ->
+    project(projectPath).tasks.matching { it.name == taskName }.configureEach {
+        (this as JavaExec).systemProperty("generatorReportDir", generatorReportDir)
+    }
 }
 
 // line_ref is derived from line.heRef + book.title, so it must be rebuilt
