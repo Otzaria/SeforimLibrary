@@ -44,6 +44,23 @@ class BuildLineRefIndexCliTest {
             assertEquals(listOf("לא תואם"), report.titleMismatchBooks)
             assertEquals(8, report.indexed)
             assertEquals(1, report.ambiguousKeys)
+            // `90 keys resolving to more than one line` named none of them, so
+            // nobody could look at the data behind the warning. Each collision
+            // now carries the book and BOTH line indexes; the trailing `!`/`?`
+            // variants at 12 and 13 collapse onto the ref first claimed at 10,
+            // and a key is reported once no matter how many lines pile onto it.
+            assertEquals(
+                listOf(
+                    AmbiguousLineRef(
+                        bookId = 6,
+                        bookTitle = "פת לחם",
+                        heRef = "פת לחם, שער רביעי - שער הביטחון, א, א",
+                        firstLineIndex = 10,
+                        secondLineIndex = 12,
+                    ),
+                ),
+                report.ambiguous,
+            )
             conn.createStatement().use { st ->
                 st.executeQuery("SELECT COUNT(DISTINCT refKeyHash) FROM line_ref WHERE bookId = 6").use { rs ->
                     assertEquals(2, rs.getInt(1))

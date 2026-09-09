@@ -2,6 +2,7 @@ package io.github.kdroidfilter.seforimlibrary.common.refs
 
 import co.touchlab.kermit.Logger
 import co.touchlab.kermit.Severity
+import io.github.kdroidfilter.seforimlibrary.common.reports.GeneratorReport
 import io.github.kdroidfilter.seforimlibrary.core.refs.RefKey
 import java.nio.file.Files
 import java.nio.file.Paths
@@ -41,16 +42,54 @@ fun main() {
             }
         }
         if (report.ambiguousKeys > 0) {
-            logger.w { "line_ref: ${report.ambiguousKeys} keys resolving to more than one line" }
+            // "90 keys" alone is unactionable: nothing said WHICH refs collide,
+            // so nobody could look at the data. The colliding refs are named
+            // here (bounded) and listed in full in the report file.
+            logger.w {
+                "line_ref: ${report.ambiguousKeys} keys resolving to more than one line, e.g. " +
+                    report.ambiguous.take(MAX_REPORTED_AMBIGUOUS).joinToString {
+                        "'${it.bookTitle}' ${it.heRef} (lines ${it.firstLineIndex}, ${it.secondLineIndex})"
+                    }
+            }
+            GeneratorReport.write("line-ref-ambiguous-keys", logger) {
+                put("ambiguousKeys", report.ambiguousKeys.toLong())
+                put("indexedKeys", report.indexed.toLong())
+                put("books", report.books.toLong())
+                putRows(
+                    "ambiguous",
+                    report.ambiguous.map {
+                        mapOf<String, Any?>(
+                            "bookId" to it.bookId,
+                            "bookTitle" to it.bookTitle,
+                            "heRef" to it.heRef,
+                            "firstLineIndex" to it.firstLineIndex,
+                            "secondLineIndex" to it.secondLineIndex,
+                        )
+                    },
+                )
+            }
         }
     }
 }
+
+/** How many colliding refs the single WARN line names before deferring to the report file. */
+private const val MAX_REPORTED_AMBIGUOUS = 20
+
+/** One ref key that two or more lines of the same book resolve to. */
+internal data class AmbiguousLineRef(
+    val bookId: Long,
+    val bookTitle: String,
+    val heRef: String,
+    val firstLineIndex: Long,
+    val secondLineIndex: Long,
+)
 
 internal data class LineRefIndexReport(
     val books: Int,
     val indexed: Int,
     val ambiguousKeys: Int,
     val titleMismatchBooks: List<String>,
+    val ambiguous: List<AmbiguousLineRef> = emptyList(),
 )
 
 internal fun rebuildLineRefIndex(conn: Connection, logger: Logger): LineRefIndexReport {
@@ -84,6 +123,9 @@ internal fun indexAllBooks(conn: Connection, logger: Logger): LineRefIndexReport
     var indexed = 0
     var ambiguous = 0
     val mismatched = ArrayList<String>()
+    // Named collisions, in discovery order: the first line that claimed a hash
+    // and the second one that collided with it.
+    val ambiguousRefs = ArrayList<AmbiguousLineRef>()
 
     val bookRows = ArrayList<Triple<Long, String, String?>>()
     conn.prepareStatement("SELECT id, title, heRef FROM book ORDER BY id").use { ps ->
@@ -102,6 +144,9 @@ internal fun indexAllBooks(conn: Connection, logger: Logger): LineRefIndexReport
                 val aliases = listOfNotNull(bookHeRef, title).filter { it.isNotBlank() }
                 val seen = HashSet<Long>()
                 val seenAmbiguous = HashSet<Long>()
+                // hash -> (heRef, lineIndex) of the line that claimed it first,
+                // so a collision can be reported with both sides named.
+                val firstByHash = HashMap<Long, Pair<String, Long>>()
                 var hasTitleMismatch = false
 
                 selectLines.setLong(1, bookId)
@@ -114,7 +159,21 @@ internal fun indexAllBooks(conn: Connection, logger: Logger): LineRefIndexReport
                         // for titles that themselves contain a hyphen or Hebrew maqaf.
                         val key = RefKey.ofLine(heRef, aliases) ?: continue
                         val hash = RefKey.hash(key)
-                        if (!seen.add(hash) && seenAmbiguous.add(hash)) ambiguous++
+                        if (!seen.add(hash)) {
+                            if (seenAmbiguous.add(hash)) {
+                                ambiguous++
+                                val (firstRef, firstIndex) = firstByHash[hash] ?: (heRef to lineIndex)
+                                ambiguousRefs += AmbiguousLineRef(
+                                    bookId = bookId,
+                                    bookTitle = title,
+                                    heRef = firstRef,
+                                    firstLineIndex = firstIndex,
+                                    secondLineIndex = lineIndex,
+                                )
+                            }
+                        } else {
+                            firstByHash[hash] = heRef to lineIndex
+                        }
                         insert.setLong(1, bookId)
                         insert.setLong(2, hash)
                         insert.setLong(3, lineIndex)
@@ -130,5 +189,5 @@ internal fun indexAllBooks(conn: Connection, logger: Logger): LineRefIndexReport
         }
     }
 
-    return LineRefIndexReport(books, indexed, ambiguous, mismatched)
+    return LineRefIndexReport(books, indexed, ambiguous, mismatched, ambiguousRefs)
 }

@@ -304,18 +304,20 @@ internal class SefariaLinksImporter(
 
         // Per-connection-type importer summary (QA plan §10.5); semantics in
         // [LinkImportTypeMetrics].
+        //
+        // The three read-side counters and the write-side one are keyed by
+        // DIFFERENT types — see [LinkImportTypeMetrics] — and printing them
+        // unqualified side by side made the line read as a contradiction:
+        // `type=REFERENCE rowsRead=381152 dropped=376731 resolvedPairs=4421
+        // written=106912` looks like 24 rows written per resolved pair. It is
+        // not: 4,421 is how many pairs came from rows the CSV *typed* REFERENCE,
+        // 106,912 is how many links were *stored* as REFERENCE — nearly all of
+        // them from blank-typed rows that [inferBlankConnectionType] resolved to
+        // REFERENCE. The write path is correct and is left untouched; the field
+        // names now say which keying each number uses, and the totals line gives
+        // the one comparison that is meaningful across the two keyings.
         val metrics = metricsSnapshot()
-        logger.i {
-            buildString {
-                append("Sefaria links importer per-type counters:")
-                for ((name, t) in metrics.insertedByType) {
-                    append("\ntype=$name rowsRead=${t.rowsRead}")
-                    append(" dropped=${t.dropped}")
-                    append(" resolvedPairs=${t.resolvedPairs}")
-                    append(" written=${t.written}")
-                }
-            }
-        }
+        logger.i { formatPerTypeCounters(metrics) }
     }
 
     /**
@@ -1105,6 +1107,41 @@ internal fun parseSuppressionMask(cell: String?, source: String): Int {
         "Suppression mask $mask contains unknown reasons at $source"
     }
     return mask
+}
+
+/**
+ * Renders the per-type importer summary.
+ *
+ * The prefix `Sefaria links importer per-type counters` is load-bearing:
+ * pipeline-monitor's `generate_phases.sh` anchors its `links_post` phase marker
+ * on it. Everything after it is free-form.
+ */
+internal fun formatPerTypeCounters(metrics: LinkImportMetrics): String = buildString {
+    append(
+        "Sefaria links importer per-type counters " +
+            "(csv* keyed by the CSV's `Conection Type`; storedWritten keyed by the type " +
+            "the link was STORED under, after blank-type inference and base→dependant " +
+            "direction normalisation — the two keyings describe different row sets, so " +
+            "only the totals are comparable):"
+    )
+    var rowsRead = 0L
+    var dropped = 0L
+    var resolvedPairs = 0L
+    var written = 0L
+    for ((name, t) in metrics.insertedByType) {
+        append("\ntype=$name csvRowsRead=${t.rowsRead}")
+        append(" csvDropped=${t.dropped}")
+        append(" csvResolvedPairs=${t.resolvedPairs}")
+        append(" storedWritten=${t.written}")
+        rowsRead += t.rowsRead
+        dropped += t.dropped
+        resolvedPairs += t.resolvedPairs
+        written += t.written
+    }
+    append("\ntotals csvRowsRead=$rowsRead csvDropped=$dropped")
+    append(" csvResolvedPairs=$resolvedPairs storedWritten=$written")
+    append(" (resolvedPairs-written=${resolvedPairs - written}: pairs dropped by the")
+    append(" heading/self-link filters or collapsed by INSERT OR IGNORE)")
 }
 
 internal fun mapCsvConnectionType(raw: String, source: String): ConnectionType {

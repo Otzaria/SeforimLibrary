@@ -1,0 +1,466 @@
+package io.github.kdroidfilter.seforimlibrary.otzariasqlite
+
+import co.touchlab.kermit.Logger
+import io.github.kdroidfilter.seforimlibrary.common.buildstate.BuildStateVerifier
+import io.github.kdroidfilter.seforimlibrary.common.buildstate.IdTable
+import kotlinx.coroutines.runBlocking
+import java.lang.reflect.InvocationTargetException
+import java.nio.file.Files
+import java.nio.file.Path
+import java.sql.DriverManager
+import kotlin.test.AfterTest
+import kotlin.test.Test
+import kotlin.test.assertContentEquals
+import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
+import kotlin.test.assertFalse
+import kotlin.test.assertTrue
+
+/**
+ * The Otzaria phases used to keep going after a failed seed and after a failed
+ * build_state write, and to report success either way.
+ *
+ * That matters because `appendOtzariaLines` / `appendOtzariaLinks` pass the SAME
+ * path as `baseDb` and `persistDb` (build.gradle.kts): the seed reads
+ * build/seforim.db and the VACUUM INTO at the end of the phase deletes and
+ * rewrites it. A swallowed seed failure therefore replaced the DB the run had
+ * just produced with an empty one — and a swallowed snapshot failure published
+ * the previous release's id allocator state beside it.
+ *
+ * These drive the real entry points (through their file facades, since all three
+ * declare `main` in this package) and assert the phase now stops.
+ */
+class OtzariaBuildFailClosedTest {
+
+    private val savedProperties = mutableMapOf<String, String?>()
+    private val previousSeverity = Logger.config.minSeverity
+
+    @AfterTest
+    fun restoreGlobals() {
+        savedProperties.forEach { (key, value) ->
+            if (value == null) System.clearProperty(key) else System.setProperty(key, value)
+        }
+        savedProperties.clear()
+        Logger.setMinSeverity(previousSeverity)
+    }
+
+    private fun setProperty(key: String, value: String) {
+        if (key !in savedProperties) savedProperties[key] = System.getProperty(key)
+        System.setProperty(key, value)
+    }
+
+    /** Runs a generator entry point; unwraps the reflective invocation. */
+    private fun runGenerator(facade: String) {
+        val main = Class.forName("io.github.kdroidfilter.seforimlibrary.otzariasqlite.$facade")
+            .getMethod("main", Array<String>::class.java)
+        try {
+            main.invoke(null, arrayOf<String>() as Any)
+        } catch (e: InvocationTargetException) {
+            throw e.targetException
+        }
+    }
+
+    /**
+     * Pins the abort to the ATTACH of the corrupt base — not to some later step
+     * that happens to fail too, which would make these tests pass on the code
+     * that swallowed the seed failure.
+     */
+    private fun assertSeedFailure(failure: Throwable) {
+        val text = generateSequence<Throwable>(failure) { it.cause }.mapNotNull { it.message }.joinToString(" | ")
+        assertTrue(
+            text.contains("not a database", ignoreCase = true),
+            "expected the corrupt base DB to be the cause, got: $text",
+        )
+    }
+
+    private fun corruptDb(dir: Path): Path {
+        val file = dir.resolve("corrupt-base.db")
+        Files.write(file, "this is emphatically not a SQLite database".repeat(8).toByteArray())
+        return file
+    }
+
+    /** A stand-in for the DB a previous phase produced: three books, on disk. */
+    private fun populatedTargetDb(dir: Path): Path {
+        val file = dir.resolve("seforim.db")
+        Class.forName("org.sqlite.JDBC")
+        DriverManager.getConnection("jdbc:sqlite:${file.toAbsolutePath()}").use { conn ->
+            conn.createStatement().use { st ->
+                st.executeUpdate("CREATE TABLE book (id INTEGER PRIMARY KEY NOT NULL, title TEXT)")
+                st.executeUpdate("INSERT INTO book(id, title) VALUES (1, 'א'), (2, 'ב'), (3, 'ג')")
+            }
+        }
+        return file
+    }
+
+    private fun countBooks(db: Path): Long {
+        DriverManager.getConnection("jdbc:sqlite:${db.toAbsolutePath()}").use { conn ->
+            conn.createStatement().use { st ->
+                st.executeQuery("SELECT COUNT(*) FROM book").use { rs ->
+                    rs.next()
+                    return rs.getLong(1)
+                }
+            }
+        }
+    }
+
+    private fun maxId(db: Path, table: String): Long {
+        DriverManager.getConnection("jdbc:sqlite:${db.toAbsolutePath()}").use { conn ->
+            conn.createStatement().use { st ->
+                st.executeQuery("SELECT COALESCE(MAX(id), 0) FROM \"$table\"").use { rs ->
+                    rs.next()
+                    return rs.getLong(1)
+                }
+            }
+        }
+    }
+
+    // ─── (1) seed fail-closed ──────────────────────────────────────────────
+
+    @Test
+    fun `phase 2 aborts on an unreadable base DB instead of overwriting the target`() {
+        val dir = Files.createTempDirectory("s13-links-seed")
+        val target = populatedTargetDb(dir)
+        val before = Files.readAllBytes(target)
+
+        setProperty("seforimDb", ":memory:")
+        setProperty("persistDb", target.toAbsolutePath().toString())
+        setProperty("baseDb", corruptDb(dir).toAbsolutePath().toString())
+        setProperty("sourceDir", Files.createDirectory(dir.resolve("source")).toAbsolutePath().toString())
+        setProperty("buildStatePath", dir.resolve("seforim.db.buildstate").toAbsolutePath().toString())
+
+        val failure = assertFailsWith<Exception> { runGenerator("GenerateLinksKt") }
+        assertSeedFailure(failure)
+
+        assertContentEquals(before, Files.readAllBytes(target), "the target DB must survive a failed seed")
+        assertEquals(3, countBooks(target))
+        assertTrue(Files.notExists(dir.resolve("seforim.db.buildstate")), "no buildstate for a phase that failed")
+    }
+
+    @Test
+    fun `phase 1 aborts on an unreadable base DB instead of overwriting the target`() {
+        val dir = Files.createTempDirectory("s13-lines-seed")
+        val target = populatedTargetDb(dir)
+        val before = Files.readAllBytes(target)
+
+        setProperty("seforimDb", ":memory:")
+        setProperty("appendExistingDb", "true")
+        setProperty("persistDb", target.toAbsolutePath().toString())
+        setProperty("baseDb", corruptDb(dir).toAbsolutePath().toString())
+        setProperty("sourceDir", Files.createDirectory(dir.resolve("source")).toAbsolutePath().toString())
+        setProperty("acronymDb", dir.resolve("acronymizer.db").toAbsolutePath().toString())
+        setProperty("buildStatePath", dir.resolve("seforim.db.buildstate").toAbsolutePath().toString())
+
+        val failure = assertFailsWith<Exception> { runGenerator("GenerateLinesKt") }
+        assertSeedFailure(failure)
+
+        assertContentEquals(before, Files.readAllBytes(target), "the target DB must survive a failed seed")
+        assertEquals(3, countBooks(target))
+    }
+
+    // ─── (1b) a MISSING base is fail-closed too ────────────────────────────
+    //
+    // The absence of the base used to be a WARN and the phase continued: with
+    // baseDb == persistDb (the release path) that vacuumed an empty in-memory DB
+    // over the target and exited 0 — an empty database published as a success.
+
+    private fun assertNamesTheMissingBase(failure: Throwable, missing: Path) {
+        val text = generateSequence<Throwable>(failure) { it.cause }.mapNotNull { it.message }.joinToString(" | ")
+        assertTrue(text.contains(missing.toAbsolutePath().toString()), "the abort must name the base path, got: $text")
+        assertTrue(text.contains("allowEmptyBase"), "the abort must name the opt-in that overrides it, got: $text")
+    }
+
+    @Test
+    fun `phase 2 refuses a missing base DB before it touches the target`() {
+        val dir = Files.createTempDirectory("s16-links-missing-base")
+        val target = populatedTargetDb(dir)
+        val before = Files.readAllBytes(target)
+        val missing = dir.resolve("nowhere").resolve("base.db")
+
+        setProperty("seforimDb", ":memory:")
+        setProperty("persistDb", target.toAbsolutePath().toString())
+        setProperty("baseDb", missing.toAbsolutePath().toString())
+        setProperty("sourceDir", Files.createDirectory(dir.resolve("source")).toAbsolutePath().toString())
+        setProperty("buildStatePath", dir.resolve("seforim.db.buildstate").toAbsolutePath().toString())
+
+        val failure = assertFailsWith<IllegalStateException> { runGenerator("GenerateLinksKt") }
+        assertNamesTheMissingBase(failure, missing)
+
+        assertContentEquals(before, Files.readAllBytes(target), "the target must be byte-identical")
+        assertEquals(3, countBooks(target))
+        assertTrue(Files.notExists(dir.resolve("seforim.db.buildstate")), "no buildstate for a phase that failed")
+        assertNoCandidateBeside(target)
+    }
+
+    @Test
+    fun `phase 1 with appendExistingDb refuses a missing base DB before it touches the target`() {
+        val dir = Files.createTempDirectory("s16-lines-missing-base")
+        val target = populatedTargetDb(dir)
+        val before = Files.readAllBytes(target)
+        val missing = dir.resolve("nowhere").resolve("base.db")
+
+        setProperty("seforimDb", ":memory:")
+        setProperty("appendExistingDb", "true")
+        setProperty("persistDb", target.toAbsolutePath().toString())
+        setProperty("baseDb", missing.toAbsolutePath().toString())
+        setProperty("sourceDir", Files.createDirectory(dir.resolve("source")).toAbsolutePath().toString())
+        setProperty("acronymDb", dir.resolve("acronymizer.db").toAbsolutePath().toString())
+        setProperty("buildStatePath", dir.resolve("seforim.db.buildstate").toAbsolutePath().toString())
+
+        val failure = assertFailsWith<IllegalStateException> { runGenerator("GenerateLinesKt") }
+        assertNamesTheMissingBase(failure, missing)
+
+        assertContentEquals(before, Files.readAllBytes(target), "the target must be byte-identical")
+        assertEquals(3, countBooks(target))
+        assertTrue(Files.notExists(dir.resolve("seforim.db.buildstate")), "no buildstate for a phase that failed")
+        assertNoCandidateBeside(target)
+    }
+
+    @Test
+    fun `phase 1 on disk with appendExistingDb refuses a missing DB before the driver creates it`() {
+        // The on-disk append path has no seed and no VACUUM INTO: the JDBC driver
+        // simply creates an empty file at dbPath and the phase runs on it. Same
+        // explicit flag, same rule — and the check has to come before the driver
+        // opens the URL, or the "missing" DB exists by the time it is reported.
+        val dir = Files.createTempDirectory("s16-lines-disk-missing")
+        val missing = dir.resolve("nowhere").resolve("seforim.db")
+
+        setProperty("seforimDb", missing.toAbsolutePath().toString())
+        setProperty("appendExistingDb", "true")
+        setProperty("sourceDir", Files.createDirectory(dir.resolve("source")).toAbsolutePath().toString())
+        setProperty("acronymDb", dir.resolve("acronymizer.db").toAbsolutePath().toString())
+        setProperty("buildStatePath", dir.resolve("seforim.db.buildstate").toAbsolutePath().toString())
+
+        val failure = assertFailsWith<IllegalStateException> { runGenerator("GenerateLinesKt") }
+        assertNamesTheMissingBase(failure, missing)
+
+        assertTrue(Files.notExists(missing), "no DB may be created at the path that was reported missing")
+        assertTrue(Files.notExists(missing.parent), "nor its directory")
+        assertTrue(Files.notExists(dir.resolve("seforim.db.buildstate")), "no buildstate for a phase that failed")
+    }
+
+    // ─── (1c) the publish is atomic ────────────────────────────────────────
+
+    private fun assertNoCandidateBeside(target: Path) {
+        assertTrue(
+            Files.notExists(target.resolveSibling(target.fileName.toString() + DbPublish.CANDIDATE_SUFFIX)),
+            "no .candidate may survive",
+        )
+    }
+
+    @Test
+    fun `a successful publish renames the candidate and leaves none behind`() {
+        val dir = Files.createTempDirectory("s16-publish-ok")
+        val target = populatedTargetDb(dir)
+
+        runBlocking {
+            DbPublish.publishAtomically(target, Logger.withTag("test")) { candidate ->
+                DriverManager.getConnection("jdbc:sqlite:${candidate.toAbsolutePath()}").use { conn ->
+                    conn.createStatement().use { st ->
+                        st.executeUpdate("CREATE TABLE book (id INTEGER PRIMARY KEY NOT NULL, title TEXT)")
+                        st.executeUpdate("INSERT INTO book(id, title) VALUES (1, 'א'), (2, 'ב')")
+                    }
+                }
+            }
+        }
+
+        assertEquals(2, countBooks(target), "the target now holds what the candidate held")
+        assertNoCandidateBeside(target)
+    }
+
+    @Test
+    fun `a publish that fails mid-write keeps the previous DB and discards the candidate`() {
+        val dir = Files.createTempDirectory("s16-publish-torn")
+        val target = populatedTargetDb(dir)
+        val before = Files.readAllBytes(target)
+
+        assertFailsWith<IllegalStateException> {
+            runBlocking {
+                DbPublish.publishAtomically(target, Logger.withTag("test")) { candidate ->
+                    // A half-written file, then death — exactly what an OOM or a
+                    // cancelled job leaves behind mid-VACUUM.
+                    Files.write(candidate, byteArrayOf(1, 2, 3))
+                    error("vacuum died")
+                }
+            }
+        }
+
+        assertContentEquals(before, Files.readAllBytes(target), "the previous DB is still there, untouched")
+        assertEquals(3, countBooks(target))
+        assertNoCandidateBeside(target)
+    }
+
+    @Test
+    fun `a candidate that is not a database is never published`() {
+        val dir = Files.createTempDirectory("s16-publish-garbage")
+        val target = populatedTargetDb(dir)
+        val before = Files.readAllBytes(target)
+
+        assertFailsWith<Exception> {
+            runBlocking {
+                DbPublish.publishAtomically(target, Logger.withTag("test")) { candidate ->
+                    Files.write(candidate, ByteArray(0))
+                }
+            }
+        }
+
+        assertContentEquals(before, Files.readAllBytes(target))
+        assertNoCandidateBeside(target)
+    }
+
+    @Test
+    fun `a stale candidate from a killed run is replaced, not appended to`() {
+        val dir = Files.createTempDirectory("s16-publish-stale")
+        val target = populatedTargetDb(dir)
+        val stale = target.resolveSibling(target.fileName.toString() + DbPublish.CANDIDATE_SUFFIX)
+        Files.write(stale, "left over by a killed run".toByteArray())
+
+        runBlocking {
+            DbPublish.publishAtomically(target, Logger.withTag("test")) { candidate ->
+                assertTrue(Files.notExists(candidate), "the stale candidate is removed before the write")
+                DriverManager.getConnection("jdbc:sqlite:${candidate.toAbsolutePath()}").use { conn ->
+                    conn.createStatement().use { st ->
+                        st.executeUpdate("CREATE TABLE book (id INTEGER PRIMARY KEY NOT NULL, title TEXT)")
+                        st.executeUpdate("INSERT INTO book(id, title) VALUES (1, 'א')")
+                    }
+                }
+            }
+        }
+
+        assertEquals(1, countBooks(target))
+        assertNoCandidateBeside(target)
+    }
+
+    @Test
+    fun `a stale WAL or journal beside the target does not survive the publish`() {
+        // Every on-disk Otzaria stage opens seforim.db in WAL mode; one killed
+        // mid-run leaves seforim.db-wal/-shm behind. SQLite trusts a -wal it finds
+        // next to a database whatever that database's header says, so a fresh
+        // file renamed under a stale one has the old frames replayed into it on
+        // the next open. The publish must take those files with the old DB.
+        val dir = Files.createTempDirectory("s16-publish-stale-wal")
+        val target = populatedTargetDb(dir)
+        val stale = DbPublish.SQLITE_SIDECAR_SUFFIXES.map { suffix ->
+            target.resolveSibling(target.fileName.toString() + suffix).also {
+                Files.write(it, "frames of the previous database".toByteArray())
+            }
+        }
+        assertEquals(3, stale.size, "premise: -journal, -wal and -shm are all covered")
+
+        runBlocking {
+            DbPublish.publishAtomically(target, Logger.withTag("test")) { candidate ->
+                DriverManager.getConnection("jdbc:sqlite:${candidate.toAbsolutePath()}").use { conn ->
+                    conn.createStatement().use { st ->
+                        st.executeUpdate("CREATE TABLE book (id INTEGER PRIMARY KEY NOT NULL, title TEXT)")
+                        st.executeUpdate("INSERT INTO book(id, title) VALUES (1, 'א'), (2, 'ב')")
+                    }
+                }
+            }
+        }
+
+        stale.forEach { assertTrue(Files.notExists(it), "${it.fileName} must not outlive the DB it belonged to") }
+        assertEquals(2, countBooks(target), "the published DB reads back as the candidate, not as a WAL replay")
+        assertNoCandidateBeside(target)
+    }
+
+    // ─── (1d) the build script keeps the contract these rules rest on ──────
+
+    private fun otzariaBuildScript(): String = generateSequence(Path.of("").toAbsolutePath()) { it.parent }
+        .map { it.resolve("generator/otzariasqlite/build.gradle.kts") }
+        .firstOrNull { Files.isRegularFile(it) }
+        ?.let { Files.readString(it) }
+        ?: error("could not locate generator/otzariasqlite/build.gradle.kts")
+
+    /** The body of one `tasks.register<JavaExec>("name")` block. */
+    private fun javaExecTask(script: String, name: String): String {
+        val header = "tasks.register<JavaExec>(\"$name\")"
+        val start = script.indexOf(header)
+        assertTrue(start >= 0, "the build script must still register $name")
+        val next = script.indexOf("tasks.register<", start + header.length)
+        return if (next < 0) script.substring(start) else script.substring(start, next)
+    }
+
+    @Test
+    fun `the release tasks pass one path as both base and target and forward the opt-in`() {
+        val script = otzariaBuildScript()
+        // Every rule above rests on this: the append phases are seeded from the
+        // very file they publish back, so a missing base is a lost input and
+        // continuing would vacuum an empty DB over the release DB. If this ever
+        // stops being true the fail-closed rule needs rethinking, not silence.
+        val links = javaExecTask(script, "appendOtzariaLinks")
+        assertTrue(
+            links.contains("""systemProperty("baseDb", persistDb)"""),
+            "appendOtzariaLinks must seed from the file it publishes",
+        )
+        assertTrue(
+            links.contains("""systemProperty("persistDb", persistDb)"""),
+            "appendOtzariaLinks must publish to the file it was seeded from",
+        )
+        // -PallowEmptyBase is what every abort message advertises as the way
+        // past a missing base. A Gradle project property is NOT a system
+        // property of the forked JVM, so without this forwarding the flag would
+        // silently do nothing and the message would be a lie.
+        listOf("generateLines", "generateLinks", "appendOtzariaLines", "appendOtzariaLinks").forEach { task ->
+            assertTrue(
+                javaExecTask(script, task)
+                    .contains("""systemProperty("allowEmptyBase", project.property("allowEmptyBase")"""),
+                "$task must forward -PallowEmptyBase to the JVM it starts",
+            )
+        }
+    }
+
+    // ─── (2) build_state fail-closed ───────────────────────────────────────
+
+    @Test
+    fun `a build_state that cannot be written stops the stage`() {
+        val dir = Files.createTempDirectory("s13-havrouta-unwritable")
+        val db = dir.resolve("seforim.db")
+        // The snapshot's parent is a regular file, so BuildStateWriter's
+        // createDirectories fails — the cheapest portable unwritable target.
+        val blocker = Files.write(dir.resolve("blocker"), byteArrayOf(0))
+        val statePath = blocker.resolve("seforim.db.buildstate")
+
+        setProperty("seforimDb", db.toAbsolutePath().toString())
+        setProperty("sourceDir", Files.createDirectory(dir.resolve("source")).toAbsolutePath().toString())
+        setProperty("buildStatePath", statePath.toAbsolutePath().toString())
+
+        val failure = assertFailsWith<Exception> { runGenerator("GenerateHavroutaLinksKt") }
+        val text = generateSequence<Throwable>(failure) { it.cause }.mapNotNull { it.message }.joinToString(" | ")
+        assertTrue(text.contains("blocker"), "expected the unwritable build_state path in the cause, got: $text")
+        // It must be the snapshot's own rethrow that stops the stage, not the
+        // verifier noticing the file afterwards — otherwise dropping the rethrow
+        // would leave this test green.
+        assertFalse(
+            text.contains("was reported written but"),
+            "the snapshot failure must propagate itself, not be caught downstream by the verifier: $text",
+        )
+
+        assertTrue(Files.notExists(statePath))
+    }
+
+    // ─── (3) happy path + the written-state self-check ─────────────────────
+
+    @Test
+    fun `a completed stage leaves a build_state whose counters lead the DB`() {
+        val dir = Files.createTempDirectory("s13-havrouta-ok")
+        val db = dir.resolve("seforim.db")
+        val statePath = dir.resolve("seforim.db.buildstate")
+
+        setProperty("seforimDb", db.toAbsolutePath().toString())
+        setProperty("sourceDir", Files.createDirectory(dir.resolve("source")).toAbsolutePath().toString())
+        setProperty("buildStatePath", statePath.toAbsolutePath().toString())
+
+        runGenerator("GenerateHavroutaLinksKt")
+
+        assertTrue(Files.exists(statePath), "the stage must leave its build_state behind")
+        val header = BuildStateVerifier.readHeader(statePath)
+        assertEquals("havroutalinks", header.meta["generator"])
+        // The stage pre-registers every ConnectionType through the allocator, so
+        // its counter has to sit above what the DB now holds.
+        val connectionTypes = maxId(db, "connection_type")
+        assertTrue(connectionTypes > 0, "the stage inserted connection types")
+        assertTrue(
+            header.counters.getValue(IdTable.CONNECTION_TYPE) > connectionTypes,
+            "next_id must lead MAX(id)",
+        )
+    }
+}

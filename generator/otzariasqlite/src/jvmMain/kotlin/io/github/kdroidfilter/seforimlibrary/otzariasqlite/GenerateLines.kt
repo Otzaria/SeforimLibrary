@@ -6,6 +6,7 @@ import app.cash.sqldelight.driver.jdbc.sqlite.JdbcSqliteDriver
 import co.touchlab.kermit.Logger
 import co.touchlab.kermit.Severity
 import io.github.kdroidfilter.seforimlibrary.common.db.SEFORIM_DB_PAGE_SIZE_PRAGMA
+import io.github.kdroidfilter.seforimlibrary.common.buildstate.BuildStateVerifier
 import io.github.kdroidfilter.seforimlibrary.common.buildstate.IdTable
 import io.github.kdroidfilter.seforimlibrary.common.ids.InMemoryIdAllocator
 import io.github.kdroidfilter.seforimlibrary.dao.repository.SeforimRepository
@@ -70,8 +71,20 @@ fun main(args: Array<String>) = runBlocking {
         val dbFile = File(dbPath)
         if (dbFile.exists()) {
             logger.i { "Appending to existing DB at ${dbFile.absolutePath}" }
+        } else if (DbPublish.allowEmptyBase()) {
+            logger.w { "appendExistingDb enabled but no DB found at $dbPath; -PallowEmptyBase is set, a new DB will be created" }
         } else {
-            logger.i { "appendExistingDb enabled but no DB found at $dbPath; a new DB will be created" }
+            // Same rule as the in-memory seed below: appendExistingDb is an
+            // explicit opt-in, so a DB that is not there is a lost input, not a
+            // first build. Thrown before the driver opens — and thereby creates —
+            // the file, so nothing is left at dbPath.
+            throw IllegalStateException(
+                DbPublish.missingBaseMessage(
+                    "phase 1 (lines) with appendExistingDb",
+                    dbFile.absolutePath,
+                    "-PseforimDb / SEFORIM_DB",
+                )
+            )
         }
     }
 
@@ -96,6 +109,8 @@ fun main(args: Array<String>) = runBlocking {
             val baseFile = File(baseDbPath)
             if (baseFile.exists()) {
                 logger.i { "Seeding in-memory DB from base file: ${baseFile.absolutePath}" }
+                // Names the table the copy died on; see the fail-closed note below.
+                var copyingTable: String? = null
                 runCatching {
                     repository.executeRawQuery("PRAGMA foreign_keys=OFF")
                     val escaped = baseFile.absolutePath.replace("'", "''")
@@ -113,20 +128,57 @@ fun main(args: Array<String>) = runBlocking {
                         0
                     ).value
                     for (t in tables) {
+                        copyingTable = t
                         repository.executeRawQuery("DELETE FROM \"$t\"")
                         repository.executeRawQuery("INSERT INTO \"$t\" SELECT * FROM disk.\"$t\"")
                     }
+                    copyingTable = null
                     repository.executeRawQuery("DETACH DATABASE disk")
                     repository.executeRawQuery("PRAGMA foreign_keys=ON")
                     logger.i { "Seeding completed. Imported ${tables.size} tables." }
                 }.onFailure { e ->
-                    logger.e(e) { "Failed to seed in-memory DB from $baseDbPath; continuing with empty DB." }
+                    // Fail closed. In the release path baseDb and persistDb are the
+                    // SAME file (build.gradle.kts:appendOtzariaLines), so "continuing
+                    // with empty DB" meant the VACUUM INTO below would delete the DB
+                    // this run produced and replace it with an empty one — reported
+                    // as a success. A half-copied seed is just as fatal.
+                    val where = copyingTable?.let { " while copying table \"$it\"" } ?: ""
+                    logger.e(e) { "Failed to seed in-memory DB from $baseDbPath$where; aborting phase 1." }
+                    // This seed runs BEFORE the try/finally below, which is what
+                    // would otherwise close the repository on the way out.
+                    runCatching { repository.close() }
+                    throw e
                 }
+            } else if (DbPublish.allowEmptyBase()) {
+                logger.w { "appendExistingDb enabled but base DB not found at $baseDbPath; -PallowEmptyBase is set, starting from an empty in-memory DB" }
             } else {
-                logger.w { "appendExistingDb enabled but base DB not found at $baseDbPath; starting from empty in-memory DB" }
+                // appendExistingDb is an EXPLICIT opt-in (property/env, default
+                // false): a first-ever build simply does not set it and takes
+                // the rotate path above. Once it IS set, the base is this run's
+                // input, and since baseDb == persistDb in the release path
+                // (build.gradle.kts:appendOtzariaLines) continuing meant
+                // vacuuming an empty DB over the target and exiting 0.
+                runCatching { repository.close() }
+                throw IllegalStateException(
+                    DbPublish.missingBaseMessage(
+                        "phase 1 (lines) with appendExistingDb",
+                        baseDbPath,
+                        "-PbaseDb / SEFORIM_DB_BASE / -PseforimDb",
+                    )
+                )
             }
         } else {
-            logger.w { "appendExistingDb enabled in-memory but no base DB path provided; starting from empty DB" }
+            if (!DbPublish.allowEmptyBase()) {
+                runCatching { repository.close() }
+                throw IllegalStateException(
+                    DbPublish.missingBaseMessage(
+                        "phase 1 (lines) with appendExistingDb",
+                        baseDbPath,
+                        "-PbaseDb / SEFORIM_DB_BASE / -PseforimDb",
+                    )
+                )
+            }
+            logger.w { "appendExistingDb enabled in-memory but no base DB path provided; -PallowEmptyBase is set, starting from an empty DB" }
         }
     }
 
@@ -165,17 +217,15 @@ fun main(args: Array<String>) = runBlocking {
         )
         generator.generateLinesOnly()
         if (useMemoryDb) {
-            // Persist in-memory DB to disk using VACUUM INTO (target must not exist)
+            // VACUUM INTO a candidate beside the target, then rename it over the
+            // target in one step — never delete-then-write, which left no DB at
+            // all if the process died in between (see [DbPublish]).
             runCatching {
-                val outFile = File(persistDbPath)
-                outFile.parentFile?.mkdirs()
-                if (outFile.exists()) {
-                    outFile.delete()
-                    logger.i { "Existing DB removed to allow VACUUM INTO" }
-                }
-                val escaped = persistDbPath.replace("'", "''")
                 logger.i { "Persisting in-memory DB to $persistDbPath via VACUUM INTO..." }
-                repository.executeRawQuery("VACUUM INTO '$escaped'")
+                DbPublish.publishAtomically(Paths.get(persistDbPath), logger) { candidate ->
+                    val escaped = candidate.toString().replace("'", "''")
+                    repository.executeRawQuery("VACUUM INTO '$escaped'")
+                }
                 logger.i { "In-memory DB persisted to $persistDbPath" }
             }.onFailure { e ->
                 logger.e(e) { "Failed to persist in-memory DB to $persistDbPath" }
@@ -183,16 +233,27 @@ fun main(args: Array<String>) = runBlocking {
             }
         }
         // Persist build_state so subsequent phases/builds reuse the same ids.
+        // Written after the persist above on purpose: a failed VACUUM INTO must
+        // not leave an advanced buildstate beside a DB that was never written.
+        val buildStateMeta = mapOf(
+            "generator" to "otzariasqlite/generateLines",
+            "generated_at" to java.time.Instant.now().toString(),
+        )
         runCatching {
-            allocator.snapshotTo(
-                target = buildStatePath,
-                extraMeta = mapOf(
-                    "generator" to "otzariasqlite/generateLines",
-                    "generated_at" to java.time.Instant.now().toString(),
-                ),
-            )
-        }.onFailure { logger.w(it) { "Failed to write build_state to $buildStatePath" } }
-        Unit
+            allocator.snapshotTo(target = buildStatePath, extraMeta = buildStateMeta)
+        }.onFailure { e ->
+            // Fail closed: a build that cannot write its allocator state would
+            // publish last week's — and the build after it would re-issue ids
+            // this one already handed out.
+            logger.e(e) { "Failed to write build_state to $buildStatePath" }
+            throw e
+        }
+        BuildStateVerifier.verifyFreshSnapshot(
+            buildStatePath = buildStatePath,
+            dbPath = Paths.get(if (useMemoryDb) persistDbPath else dbPath),
+            expectedMeta = buildStateMeta,
+            logger = logger,
+        )
         logger.i { "Phase 1 completed successfully. DB at ${if (useMemoryDb) persistDbPath else dbPath}" }
     } catch (e: Exception) {
         logger.e(e) { "Error during phase 1 generation" }

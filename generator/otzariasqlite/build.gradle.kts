@@ -112,6 +112,10 @@ tasks.register<JavaExec>("generateLines") {
     if (project.hasProperty("baseDb")) {
         systemProperty("baseDb", project.property("baseDb") as String)
     }
+    // The ONLY way past a missing base DB — see DbPublish.allowEmptyBase().
+    if (project.hasProperty("allowEmptyBase")) {
+        systemProperty("allowEmptyBase", project.property("allowEmptyBase") as String)
+    }
 
     // If in-memory DB is used, persist destination (default to build/seforim.db)
     if (inMemory) {
@@ -169,6 +173,10 @@ tasks.register<JavaExec>("generateLinks") {
             }
         )
     }
+    // The ONLY way past a missing base DB — see DbPublish.allowEmptyBase().
+    if (project.hasProperty("allowEmptyBase")) {
+        systemProperty("allowEmptyBase", project.property("allowEmptyBase") as String)
+    }
 
     if (project.hasProperty("sourceDir")) {
         systemProperty("sourceDir", project.property("sourceDir") as String)
@@ -207,6 +215,10 @@ tasks.register<JavaExec>("appendOtzariaLines") {
     systemProperty("appendExistingDb", "true")
     systemProperty("baseDb", baseDb)
     systemProperty("persistDb", persistDb)
+    // The ONLY way past a missing base DB — see DbPublish.allowEmptyBase().
+    if (project.hasProperty("allowEmptyBase")) {
+        systemProperty("allowEmptyBase", project.property("allowEmptyBase") as String)
+    }
 
     val defaultAcronymDb = layout.buildDirectory.file("acronymizer/acronymizer.db").get().asFile.absolutePath
     if (project.hasProperty("acronymDb")) {
@@ -246,8 +258,15 @@ tasks.register<JavaExec>("appendOtzariaLinks") {
     val persistDb = if (project.hasProperty("persistDb")) project.property("persistDb") as String else baseDb
 
     args(":memory:")
+    // baseDb == persistDb on purpose: phase 2 appends links to the DB phase 1
+    // produced and publishes it back over the same path (atomically — see
+    // DbPublish). GenerateLinks refuses to run when that file is missing.
     systemProperty("baseDb", persistDb)
     systemProperty("persistDb", persistDb)
+    // The ONLY way past a missing base DB — see DbPublish.allowEmptyBase().
+    if (project.hasProperty("allowEmptyBase")) {
+        systemProperty("allowEmptyBase", project.property("allowEmptyBase") as String)
+    }
 
     if (project.hasProperty("sourceDir")) {
         systemProperty("sourceDir", project.property("sourceDir") as String)

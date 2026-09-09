@@ -3,6 +3,7 @@ package io.github.kdroidfilter.seforimlibrary.sefariasqlite
 import app.cash.sqldelight.driver.jdbc.sqlite.JdbcSqliteDriver
 import co.touchlab.kermit.Logger
 import co.touchlab.kermit.Severity
+import io.github.kdroidfilter.seforimlibrary.common.buildstate.BuildStateVerifier
 import io.github.kdroidfilter.seforimlibrary.common.db.SEFORIM_DB_PAGE_SIZE_PRAGMA
 import io.github.kdroidfilter.seforimlibrary.common.ids.InMemoryIdAllocator
 import io.github.kdroidfilter.seforimlibrary.dao.repository.SeforimRepository
@@ -152,17 +153,28 @@ fun main(args: Array<String>) = runBlocking {
         } ?: logger.i { "No links phase ran — link-import metrics report not written." }
 
         // Persist build_state.db so the next build re-uses the same primary keys.
+        // Already ordered after the VACUUM INTO above, so a failed persist cannot
+        // advance the buildstate.
+        val buildStateMeta = mapOf(
+            "generator" to "sefariasqlite",
+            "generated_at" to java.time.Instant.now().toString(),
+            "build_version" to buildVersion.toString(),
+        )
         runCatching {
-            allocator.snapshotTo(
-                target = buildStatePath,
-                extraMeta = mapOf(
-                    "generator" to "sefariasqlite",
-                    "generated_at" to java.time.Instant.now().toString(),
-                    "build_version" to buildVersion.toString(),
-                ),
-            )
-        }.onFailure { logger.w(it) { "Failed to write build_state to $buildStatePath" } }
-        Unit
+            allocator.snapshotTo(target = buildStatePath, extraMeta = buildStateMeta)
+        }.onFailure { e ->
+            // Fail closed: a build that cannot write its allocator state would
+            // publish last week's — and the build after it would re-issue ids
+            // this one already handed out.
+            logger.e(e) { "Failed to write build_state to $buildStatePath" }
+            throw e
+        }
+        BuildStateVerifier.verifyFreshSnapshot(
+            buildStatePath = buildStatePath,
+            dbPath = Paths.get(persistedDbPath),
+            expectedMeta = buildStateMeta,
+            logger = logger,
+        )
 
         logger.i { "Sefaria -> SQLite completed. DB at ${if (useMemoryDb) persistDbPath else dbPath}" }
     } catch (e: Exception) {

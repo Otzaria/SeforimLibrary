@@ -50,7 +50,13 @@ kotlin {
 // publishes them verbatim, so the direct invocation cannot drift from the task
 // it stands in for.
 val patchPipelineMainClass = "io.github.kdroidfilter.seforimlibrary.common.patch.PatchPipelineCliKt"
-val patchPipelineJvmArgs = listOf("-Xmx$generatorHeap", "-XX:+UseG1GC")
+// --enable-native-access: the fan runs this CLI through `java` directly (see
+// the launcher below), so it never passes through the root build's JavaExec
+// argument provider; without the flag every fan fork re-prints JDK 25's
+// four-line sqlite-jdbc restricted-method warning (16 log lines across the 4
+// anchors of run 34024655297). It changes no bytecode and no output.
+val patchPipelineJvmArgs =
+    listOf("-Xmx$generatorHeap", "-XX:+UseG1GC", "--enable-native-access=ALL-UNNAMED")
 // A function, not a val: like every other JavaExec here it must resolve inside
 // a task's configuration block, never at script-evaluation time.
 fun patchPipelineClasspath() = files(tasks.named("jvmJar")) + configurations.getByName("jvmRuntimeClasspath")

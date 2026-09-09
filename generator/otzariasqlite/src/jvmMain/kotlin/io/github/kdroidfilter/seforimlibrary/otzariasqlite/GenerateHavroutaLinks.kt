@@ -4,6 +4,7 @@ import app.cash.sqldelight.db.QueryResult
 import app.cash.sqldelight.driver.jdbc.sqlite.JdbcSqliteDriver
 import co.touchlab.kermit.Logger
 import co.touchlab.kermit.Severity
+import io.github.kdroidfilter.seforimlibrary.common.buildstate.BuildStateVerifier
 import io.github.kdroidfilter.seforimlibrary.common.ids.IdAllocatorBindings
 import io.github.kdroidfilter.seforimlibrary.common.ids.InMemoryIdAllocator
 import io.github.kdroidfilter.seforimlibrary.core.models.ConnectionType
@@ -90,17 +91,28 @@ fun main(args: Array<String>) = runBlocking {
         repository.executeRawQuery("PRAGMA synchronous = NORMAL")
         repository.executeRawQuery("PRAGMA journal_mode = WAL")
 
-        // Persist build_state so subsequent runs preserve link ids.
+        // Persist build_state so subsequent runs preserve link ids. This stage
+        // writes straight to the on-disk DB (no VACUUM INTO), so there is no
+        // persist step for the snapshot to run ahead of.
+        val buildStateMeta = mapOf(
+            "generator" to "havroutalinks",
+            "generated_at" to java.time.Instant.now().toString(),
+        )
         runCatching {
-            allocator.snapshotTo(
-                target = buildStatePath,
-                extraMeta = mapOf(
-                    "generator" to "havroutalinks",
-                    "generated_at" to java.time.Instant.now().toString(),
-                ),
-            )
-        }.onFailure { logger.w(it) { "Failed to write build_state to $buildStatePath" } }
-        Unit
+            allocator.snapshotTo(target = buildStatePath, extraMeta = buildStateMeta)
+        }.onFailure { e ->
+            // Fail closed: a build that cannot write its allocator state would
+            // publish last week's — and the build after it would re-issue ids
+            // this one already handed out.
+            logger.e(e) { "Failed to write build_state to $buildStatePath" }
+            throw e
+        }
+        BuildStateVerifier.verifyFreshSnapshot(
+            buildStatePath = buildStatePath,
+            dbPath = Paths.get(dbPath),
+            expectedMeta = buildStateMeta,
+            logger = logger,
+        )
     } catch (e: Exception) {
         logger.e(e) { "Error generating Havrouta links" }
         throw e
@@ -174,8 +186,12 @@ private fun isSectionHeader(content: String): Boolean {
 
 /**
  * Generates links between Havrouta books and their corresponding Talmud tractates.
+ *
+ * `internal` rather than private so the found-vs-processed accounting can be
+ * tested: the audited build found 38 Havrouta books and processed 37 without
+ * saying which one it dropped or why.
  */
-private suspend fun generateHavroutaLinks(
+internal suspend fun generateHavroutaLinks(
     repository: SeforimRepository,
     bindings: IdAllocatorBindings,
     logger: Logger
@@ -206,16 +222,28 @@ private suspend fun generateHavroutaLinks(
     }
     logger.i { "Deleted existing Havrouta links" }
 
+    // "Found N Havrouta books" followed by fewer "Processing:" lines used to be
+    // the only trace that a book was dropped; the reason is named per book below
+    // and the gap is closed by an explicit N/M line after the loop.
+    var processedBooks = 0
+    val unmatched = mutableListOf<String>()
+
     for (havroutaBook in havroutaBooks) {
         val tractateName = havroutaBook.title.removePrefix("חברותא על ")
         val talmudTractateName = tractateNameMapping[tractateName] ?: tractateName
 
         val talmudBook = talmudBooks[talmudTractateName]
         if (talmudBook == null) {
-            logger.w { "No Talmud match for: ${havroutaBook.title}" }
+            unmatched += havroutaBook.title
+            logger.w {
+                "No Talmud match for: ${havroutaBook.title} — no book titled '$talmudTractateName' " +
+                    "among the Bavli tractates (sourceId=1, excluding משנה / תלמוד ירושלמי / תוספתא); " +
+                    "no links created for it"
+            }
             continue
         }
 
+        processedBooks++
         logger.i { "Processing: ${havroutaBook.title} -> ${talmudBook.title}" }
 
         val linksForBook = processBookPair(
@@ -231,6 +259,15 @@ private suspend fun generateHavroutaLinks(
 
         logger.i { "  Created $linksForBook links" }
         totalLinksCreated += linksForBook
+    }
+
+    if (unmatched.isEmpty()) {
+        logger.i { "Havrouta-Talmud: $processedBooks/${havroutaBooks.size} books processed" }
+    } else {
+        logger.w {
+            "Havrouta-Talmud: $processedBooks/${havroutaBooks.size} books processed, " +
+                "${unmatched.size} skipped with no matching Talmud tractate: ${unmatched.joinToString()}"
+        }
     }
 
     // Update book_has_links table
