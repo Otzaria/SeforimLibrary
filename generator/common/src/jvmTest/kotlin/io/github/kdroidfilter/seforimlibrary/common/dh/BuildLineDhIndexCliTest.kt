@@ -160,6 +160,42 @@ class BuildLineDhIndexCliTest {
     }
 
     @Test
+    fun `a lead-bold book takes the full quotation, other bold lines keep the prefix`() {
+        withDb { conn ->
+            conn.createStatement().use { it.execute("INSERT INTO book (id, title) VALUES (20, 'חידושי אגדות')") }
+            val lead = List(8) { "<b>אין</b> שלום $it כו'. הכא ניחא דמשמע ליה" }
+            val plain = List(2) { "<b>והיינו</b> דאמרי אינשי $it בין קני לאורבני" }
+            insertLines(conn, 20, lead + plain)
+
+            val report = indexAllBooks(conn, Logger.withTag("test"))
+
+            assertEquals(1, report.leadBooks)
+            assertEquals(1, report.boldBooks)
+            assertEquals(10, report.indexed)
+            val keys = dhRows(conn).map { it.second }
+            assertEquals(List(8) { "אין שלום $it" }, keys.take(8))
+            assertEquals(listOf("והיינו", "והיינו"), keys.drop(8))
+        }
+    }
+
+    @Test
+    fun `a bold book with an occasional nearby marker stays a plain bold book`() {
+        withDb { conn ->
+            conn.createStatement().use { it.execute("INSERT INTO book (id, title) VALUES (21, 'רש\"י')") }
+            val plain = List(19) { "<b>מאימתי קורין $it.</b> משעה שהכהנים נכנסין לאכול" }
+            val marker = listOf("<b>ואמר</b> רבי כו'. פירוש")
+            insertLines(conn, 21, plain + marker)
+
+            val report = indexAllBooks(conn, Logger.withTag("test"))
+
+            assertEquals(0, report.leadBooks)
+            assertEquals(1, report.boldBooks)
+            assertEquals(20, report.indexed)
+            assertEquals("ואמר", dhRows(conn).last().second)
+        }
+    }
+
+    @Test
     fun `rebuilding replaces stale rows`() {
         withDb { conn ->
             conn.createStatement().use { it.execute("INSERT INTO book (id, title) VALUES (5, 'ספר')") }
