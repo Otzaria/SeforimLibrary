@@ -12,6 +12,9 @@ import io.github.kdroidfilter.seforimlibrary.core.dh.DhKey
  *    `<b>בראשית.</b> אמר רבי יצחק…`
  *  - [Format.DASH] — the dibbur is the text before the first spaced dash
  *    (Sefaria's Talmud commentaries): `עד סוף האשמורה הראשונה – שליש הלילה…`
+ *  - [Format.BOLD_LEAD] — only the first word of the dibbur is bold and the
+ *    quotation runs on until `כו'` / `וגו'` (Maharsha's Chiddushei Aggadot):
+ *    `<b>אין</b> שלום כו'. הכא ניחא…` → `אין שלום`
  *
  * Extraction is deliberately conservative: a line yields a dibbur only when
  * it matches the shape exactly, the dibbur is short, actual commentary text
@@ -22,7 +25,7 @@ import io.github.kdroidfilter.seforimlibrary.core.dh.DhKey
  */
 object DhExtractor {
 
-    enum class Format { BOLD, DASH }
+    enum class Format { BOLD, DASH, BOLD_LEAD }
 
     /**
      * One extracted dibbur: [key] is the [DhKey] form the index is searched
@@ -59,6 +62,12 @@ object DhExtractor {
 
     private val TAG = Regex("<[^>]+>")
 
+    /** `כו'` / `וכו'` / `וגו'` closing a quotation, with any apostrophe glyph. */
+    private val LEAD_END_MARKER = Regex("""(?:^|\s)(?:ו?כו|וגו)['׳’](?=\s|$|[.,:;)\]])""")
+
+    /** A lead-bold dibbur ends within this many words of the line start. */
+    private const val MAX_LEAD_WORDS = 10
+
     /**
      * Structural markers that open lines in the same position and shape as a
      * dibbur but locate rather than quote (`מתני'`, `גמרא`, `בא"ד`, `שם`…).
@@ -83,6 +92,7 @@ object DhExtractor {
     fun extract(line: String, format: Format): Dh? = when (format) {
         Format.BOLD -> extractBold(line)
         Format.DASH -> extractDash(line)
+        Format.BOLD_LEAD -> extractBoldLead(line)
     }
 
     /** `true` when [line] is a `<h1>`–`<h6>` heading (never carries a dibbur). */
@@ -94,6 +104,20 @@ object DhExtractor {
         val rest = TAG.replace(m.groupValues[2], "").trim()
         if (rest.isEmpty()) return null // whole-line bold: a heading, not a dibbur
         return accept(m.groupValues[1])
+    }
+
+    private fun extractBoldLead(line: String): Dh? {
+        if (isHeadingLine(line)) return null
+        val m = BOLD_PREFIX.find(line) ?: return null
+        val text = m.groupValues[1] + " " + TAG.replace(m.groupValues[2], "")
+        val marker = LEAD_END_MARKER.find(text) ?: return null
+        val dh = text.substring(0, marker.range.first)
+        if (dh.isBlank() || dh.length > MAX_DH_LENGTH) return null
+        // A quotation has no sentence break; a marker after one belongs to the commentary.
+        if (SENTENCE_BREAK in dh) return null
+        if (WHITESPACE.split(dh.trim()).size > MAX_LEAD_WORDS) return null
+        if (text.substring(marker.range.last + 1).none(Char::isLetterOrDigit)) return null
+        return accept(dh)
     }
 
     private fun extractDash(line: String): Dh? {

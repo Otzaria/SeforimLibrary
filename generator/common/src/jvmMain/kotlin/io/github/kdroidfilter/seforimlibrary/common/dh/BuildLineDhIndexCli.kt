@@ -17,7 +17,10 @@ import java.sql.DriverManager
  * from scratch on each run.
  *
  * A book is indexed only when one extraction format dominates its content
- * lines ([MIN_COVERAGE] of them, at least [MIN_LINES] hits). This book-level
+ * lines ([MIN_COVERAGE] of them, at least [MIN_LINES] hits). A bold book in
+ * which at least [LEAD_SHARE] of the bold lines run on to `כו'` is a
+ * "lead" book: those lines take the full quotation, the rest keep the bold
+ * prefix. This book-level
  * gate is the main false-positive defence: books that merely bold an
  * occasional word, or use a spaced dash mid-sentence here and there, never
  * reach the threshold and contribute nothing. Base texts themselves are
@@ -46,9 +49,10 @@ fun main() {
     DriverManager.getConnection("jdbc:sqlite:${path.toAbsolutePath()}").use { conn ->
         val report = rebuildLineDhIndex(conn, logger)
         logger.i {
-            "line_dh: ${report.indexed} dibburim over ${report.boldBooks} bold-format + " +
-                "${report.dashBooks} dash-format books (${report.skippedBooks} books below threshold, " +
-                "${report.noisyBooks} books dropped as paragraph-opener noise)"
+            "line_dh: ${report.indexed} dibburim over ${report.boldBooks} bold-format " +
+                "(${report.leadBooks} of them lead-bold) + ${report.dashBooks} dash-format books " +
+                "(${report.skippedBooks} books below threshold, " +
+                "${report.noisyBooks} books dropped as non-dibbur marking)"
         }
     }
 }
@@ -174,12 +178,20 @@ internal data class NoiseRatios(
     }
 }
 
+/**
+ * Share of a book's bold hits that must run on to `כו'` for the bold to be
+ * read as the first word of a longer quotation (Maharsha ≈ 0.9; Rashi,
+ * Metzudot, Be'er Heitev ≤ 0.04).
+ */
+internal const val LEAD_SHARE = 0.5
+
 internal data class LineDhIndexReport(
     val boldBooks: Int,
     val dashBooks: Int,
     val skippedBooks: Int,
     val noisyBooks: Int,
     val indexed: Int,
+    val leadBooks: Int = 0,
 )
 
 private fun bookTitle(conn: Connection, bookId: Long): String =
@@ -188,9 +200,19 @@ private fun bookTitle(conn: Connection, bookId: Long): String =
         ps.executeQuery().use { rs -> if (rs.next()) rs.getString(1) ?: "" else "" }
     }
 
+/** Bold hits of a lead book, with the lead-bold quotation replacing the bare prefix where it exists. */
+internal fun mergeLeadHits(
+    bold: List<Pair<Long, DhExtractor.Dh>>,
+    lead: List<Pair<Long, DhExtractor.Dh>>,
+): List<Pair<Long, DhExtractor.Dh>> {
+    val leadByLine = lead.associate { it }
+    return bold.map { (lineIndex, dh) -> lineIndex to (leadByLine[lineIndex] ?: dh) }
+}
+
 internal fun indexAllBooks(conn: Connection, logger: Logger): LineDhIndexReport {
     var boldBooks = 0
     var dashBooks = 0
+    var leadBooks = 0
     var skipped = 0
     var noisy = 0
     var indexed = 0
@@ -218,6 +240,7 @@ internal fun indexAllBooks(conn: Connection, logger: Logger): LineDhIndexReport 
                 var contentLines = 0
                 var linesWithBold = 0
                 val bold = ArrayList<Pair<Long, DhExtractor.Dh>>()
+                val boldLead = ArrayList<Pair<Long, DhExtractor.Dh>>()
                 val dash = ArrayList<Pair<Long, DhExtractor.Dh>>()
 
                 selectLines.setLong(1, bookId)
@@ -228,14 +251,19 @@ internal fun indexAllBooks(conn: Connection, logger: Logger): LineDhIndexReport 
                         if (content.isBlank() || DhExtractor.isHeadingLine(content)) continue
                         contentLines++
                         if (content.contains("<b>")) linesWithBold++
-                        DhExtractor.extract(content, DhExtractor.Format.BOLD)
-                            ?.let { bold += lineIndex to it }
+                        DhExtractor.extract(content, DhExtractor.Format.BOLD)?.let {
+                            bold += lineIndex to it
+                            DhExtractor.extract(content, DhExtractor.Format.BOLD_LEAD)
+                                ?.let { lead -> boldLead += lineIndex to lead }
+                        }
                         DhExtractor.extract(content, DhExtractor.Format.DASH)
                             ?.let { dash += lineIndex to it }
                     }
                 }
 
-                val winner = if (bold.size >= dash.size) bold else dash
+                val leadBook = bold.isNotEmpty() && boldLead.size >= LEAD_SHARE * bold.size
+                val boldHits = if (leadBook) mergeLeadHits(bold, boldLead) else bold
+                val winner = if (boldHits.size >= dash.size) boldHits else dash
                 if (contentLines == 0 ||
                     winner.size < MIN_LINES ||
                     winner.size.toDouble() / contentLines < MIN_COVERAGE
@@ -244,7 +272,7 @@ internal fun indexAllBooks(conn: Connection, logger: Logger): LineDhIndexReport 
                     continue
                 }
 
-                val ratios = NoiseRatios.of(winner.map { it.second }, if (winner === bold) linesWithBold else 0)
+                val ratios = NoiseRatios.of(winner.map { it.second }, if (winner === boldHits) linesWithBold else 0)
                 if (ratios.isNoisy) {
                     noisy++
                     logger.i {
@@ -266,7 +294,15 @@ internal fun indexAllBooks(conn: Connection, logger: Logger): LineDhIndexReport 
                 }
                 insert.executeBatch()
                 indexed += winner.size
-                if (winner === bold) boldBooks++ else dashBooks++
+                if (winner === boldHits) {
+                    boldBooks++
+                    if (leadBook) {
+                        leadBooks++
+                        logger.i { "line_dh: lead-bold book $bookId '${bookTitle(conn, bookId)}' (${boldLead.size} of ${bold.size} bold lines run on to a marker)" }
+                    }
+                } else {
+                    dashBooks++
+                }
                 if ((boldBooks + dashBooks) % 500 == 0) {
                     logger.i { "line_dh: ${boldBooks + dashBooks} books, $indexed dibburim" }
                 }
@@ -274,5 +310,5 @@ internal fun indexAllBooks(conn: Connection, logger: Logger): LineDhIndexReport 
         }
     }
 
-    return LineDhIndexReport(boldBooks, dashBooks, skipped, noisy, indexed)
+    return LineDhIndexReport(boldBooks, dashBooks, skipped, noisy, indexed, leadBooks)
 }
