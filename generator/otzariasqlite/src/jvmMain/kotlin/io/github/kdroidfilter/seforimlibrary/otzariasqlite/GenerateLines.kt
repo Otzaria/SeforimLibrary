@@ -55,20 +55,33 @@ fun main(args: Array<String>) = runBlocking {
         ?: false
     val persistDbPath = System.getProperty("persistDb")
         ?: System.getenv("SEFORIM_DB_OUT")
-        ?: if (appendExistingDb) seforimDbPropOrEnv else null
+        ?: (if (appendExistingDb) seforimDbPropOrEnv else null)
         ?: Paths.get("build", "seforim.db").toString()
 
-    // If writing directly to disk, rotate existing DB; for in-memory we will persist at the end
+    // The allocator state belongs to the file this invocation publishes, not
+    // merely to the default build path. Recover an interrupted pair BEFORE
+    // opening either the DB or the allocator: otherwise an advanced DB beside
+    // an old state could hand out IDs that the DB already used.
+    val publishedDbPath = Paths.get(if (useMemoryDb) persistDbPath else dbPath)
+    val buildStatePath: Path = run {
+        val explicit = System.getProperty("buildStatePath") ?: System.getenv("BUILD_STATE_PATH")
+        if (explicit != null) Paths.get(explicit) else Paths.get("$publishedDbPath.buildstate")
+    }
+    DbPublish.recoverInterruptedPair(publishedDbPath, buildStatePath, logger)
+    val appendBaseDbPath = System.getProperty("baseDb")
+        ?: System.getenv("SEFORIM_DB_BASE")
+        ?: dbPath
+
+    // Disk-backed generation now builds a candidate too. The former rotate
+    // deleted/moved the only published DB before its matching build_state was
+    // ready, which made pair-atomic publication impossible.
     if (!useMemoryDb && !appendExistingDb) {
         val dbFile = File(dbPath)
         if (dbFile.exists()) {
-            val backupFile = File("$dbPath.bak")
-            if (backupFile.exists()) backupFile.delete()
-            dbFile.renameTo(backupFile)
-            logger.i { "Existing DB moved to ${backupFile.absolutePath}" }
+            logger.i { "Keeping existing DB at ${dbFile.absolutePath} until the new DB/build_state pair is committed" }
         }
     } else if (!useMemoryDb && appendExistingDb) {
-        val dbFile = File(dbPath)
+        val dbFile = File(appendBaseDbPath)
         if (dbFile.exists()) {
             logger.i { "Appending to existing DB at ${dbFile.absolutePath}" }
         } else if (DbPublish.allowEmptyBase()) {
@@ -82,20 +95,30 @@ fun main(args: Array<String>) = runBlocking {
                 DbPublish.missingBaseMessage(
                     "phase 1 (lines) with appendExistingDb",
                     dbFile.absolutePath,
-                    "-PseforimDb / SEFORIM_DB",
+                    "-PbaseDb / SEFORIM_DB_BASE / -PseforimDb",
                 )
             )
         }
     }
 
-    val jdbcUrl = if (useMemoryDb) "jdbc:sqlite::memory:" else "jdbc:sqlite:$dbPath"
+    val workingDbPath = if (useMemoryDb) {
+        dbPath
+    } else {
+        val candidate = DbPublish.prepareDatabaseCandidate(publishedDbPath, logger)
+        if (appendExistingDb) {
+            DbPublish.copyDatabaseIntoCandidate(Paths.get(appendBaseDbPath), candidate)
+        }
+        candidate.toString()
+    }
+    val jdbcUrl = if (useMemoryDb) "jdbc:sqlite::memory:" else "jdbc:sqlite:$workingDbPath"
     val driver = JdbcSqliteDriver(url = jdbcUrl)
     // Set 16 KiB pages before any table is created (no-op on an already-populated
     // DB, e.g. the appendExistingDb path). VACUUM INTO carries it to the on-disk file.
     driver.execute(null, SEFORIM_DB_PAGE_SIZE_PRAGMA, 0)
     // Ensure schema exists on a brand-new DB before repository init (idempotent)
     runCatching { SeforimDb.Schema.create(driver) }
-    val repository = SeforimRepository(dbPath, driver)
+    val repository = SeforimRepository(workingDbPath, driver)
+    var repositoryClosed = false
     // The repository init downgrades the GLOBAL kermit severity to Assert;
     // restore Info so this CLI's logs stay visible.
     Logger.setMinSeverity(Severity.Info)
@@ -105,7 +128,7 @@ fun main(args: Array<String>) = runBlocking {
             ?: System.getenv("SEFORIM_DB_BASE")
             ?: seforimDbPropOrEnv
             ?: persistDbPath
-        if (baseDbPath != null && baseDbPath != ":memory:") {
+        if (baseDbPath != ":memory:") {
             val baseFile = File(baseDbPath)
             if (baseFile.exists()) {
                 logger.i { "Seeding in-memory DB from base file: ${baseFile.absolutePath}" }
@@ -183,10 +206,6 @@ fun main(args: Array<String>) = runBlocking {
     }
 
     // ─── IdAllocator (delta-update support) ────────────────────────────────────
-    val buildStatePath: Path = run {
-        val explicit = System.getProperty("buildStatePath") ?: System.getenv("BUILD_STATE_PATH")
-        if (explicit != null) Paths.get(explicit) else Paths.get("$persistDbPath.buildstate")
-    }
     val prev = buildStatePath.takeIf { Files.exists(it) }
     val allocator = InMemoryIdAllocator.load(prev, Logger.withTag("IdAllocator"))
 
@@ -216,49 +235,60 @@ fun main(args: Array<String>) = runBlocking {
             buildVersion = buildVersion,
         )
         generator.generateLinesOnly()
-        if (useMemoryDb) {
-            // VACUUM INTO a candidate beside the target, then rename it over the
-            // target in one step — never delete-then-write, which left no DB at
-            // all if the process died in between (see [DbPublish]).
-            runCatching {
-                logger.i { "Persisting in-memory DB to $persistDbPath via VACUUM INTO..." }
-                DbPublish.publishAtomically(Paths.get(persistDbPath), logger) { candidate ->
-                    val escaped = candidate.toString().replace("'", "''")
-                    repository.executeRawQuery("VACUUM INTO '$escaped'")
-                }
-                logger.i { "In-memory DB persisted to $persistDbPath" }
-            }.onFailure { e ->
-                logger.e(e) { "Failed to persist in-memory DB to $persistDbPath" }
-                throw e
-            }
-        }
-        // Persist build_state so subsequent phases/builds reuse the same ids.
-        // Written after the persist above on purpose: a failed VACUUM INTO must
-        // not leave an advanced buildstate beside a DB that was never written.
+        // Build both members beside their targets, verify the candidate state
+        // against the candidate DB, and only then commit the recoverable pair.
+        // Writing the state after a DB rename is not safe: a failed snapshot
+        // would leave a newer DB paired with an old counter file and the retry
+        // could re-issue IDs.
         val buildStateMeta = mapOf(
             "generator" to "otzariasqlite/generateLines",
             "generated_at" to java.time.Instant.now().toString(),
         )
-        runCatching {
-            allocator.snapshotTo(target = buildStatePath, extraMeta = buildStateMeta)
-        }.onFailure { e ->
-            // Fail closed: a build that cannot write its allocator state would
-            // publish last week's — and the build after it would re-issue ids
-            // this one already handed out.
-            logger.e(e) { "Failed to write build_state to $buildStatePath" }
-            throw e
+        val verifyCandidates = { database: Path, state: Path ->
+            BuildStateVerifier.verifyFreshSnapshot(
+                buildStatePath = state,
+                dbPath = database,
+                expectedMeta = buildStateMeta,
+                logger = logger,
+            )
+        }
+        val stateCandidate = DbPublish.prepareFileCandidate(buildStatePath, logger)
+        try {
+            if (useMemoryDb) {
+                val databaseCandidate = DbPublish.prepareDatabaseCandidate(publishedDbPath, logger)
+                val escaped = databaseCandidate.toString().replace("'", "''")
+                repository.executeRawQuery("VACUUM INTO '$escaped'")
+            }
+            allocator.snapshotTo(target = stateCandidate, extraMeta = buildStateMeta)
+            // A disk-backed candidate is opened in WAL mode by the repository.
+            // Close its driver before DbPublish seals/checkpoints it; the same
+            // ordering keeps the publish boundary uniform for in-memory output.
+            repository.close()
+            repositoryClosed = true
+            DbPublish.publishPreparedPair(
+                databaseTarget = publishedDbPath,
+                buildStateTarget = buildStatePath,
+                logger = logger,
+                verifyCandidates = verifyCandidates,
+            )
+        } catch (error: Throwable) {
+            if (!DbPublish.hasPendingPairRecovery(publishedDbPath)) {
+                runCatching { DbPublish.discardCandidate(publishedDbPath, logger) }
+                runCatching { DbPublish.discardCandidate(buildStatePath, logger) }
+            }
+            throw error
         }
         BuildStateVerifier.verifyFreshSnapshot(
             buildStatePath = buildStatePath,
-            dbPath = Paths.get(if (useMemoryDb) persistDbPath else dbPath),
+            dbPath = publishedDbPath,
             expectedMeta = buildStateMeta,
             logger = logger,
         )
-        logger.i { "Phase 1 completed successfully. DB at ${if (useMemoryDb) persistDbPath else dbPath}" }
+        logger.i { "Phase 1 completed successfully. DB at $publishedDbPath" }
     } catch (e: Exception) {
         logger.e(e) { "Error during phase 1 generation" }
         throw e
     } finally {
-        repository.close()
+        if (!repositoryClosed) repository.close()
     }
 }

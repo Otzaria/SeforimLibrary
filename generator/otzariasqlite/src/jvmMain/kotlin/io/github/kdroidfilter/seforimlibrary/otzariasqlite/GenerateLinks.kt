@@ -37,13 +37,43 @@ fun main(args: Array<String>) = runBlocking {
         ?: System.getenv("OTZARIA_SOURCE_DIR")
         ?: OtzariaFetcher.ensureLocalSource(logger).toString()
 
-    val jdbcUrl = if (useMemoryDb) "jdbc:sqlite::memory:" else "jdbc:sqlite:$dbPath"
+    val publishedDbPath = Paths.get(if (useMemoryDb) persistDbPath else dbPath)
+    val buildStatePath: Path = run {
+        val explicit = System.getProperty("buildStatePath") ?: System.getenv("BUILD_STATE_PATH")
+        if (explicit != null) Paths.get(explicit) else Paths.get("$publishedDbPath.buildstate")
+    }
+    // Do this before opening an SQLite URL or loading allocator counters. A
+    // surviving journal always restores a complete old pair (or completes
+    // cleanup for a complete new one) before this phase can issue another ID.
+    DbPublish.recoverInterruptedPair(publishedDbPath, buildStatePath, logger)
+
+    val diskBaseDb = System.getProperty("baseDb")
+        ?: System.getenv("SEFORIM_DB_BASE")
+        ?: dbPath
+    val workingDbPath = if (useMemoryDb) {
+        dbPath
+    } else {
+        val candidate = DbPublish.prepareDatabaseCandidate(publishedDbPath, logger)
+        val base = Paths.get(diskBaseDb)
+        if (Files.isRegularFile(base)) {
+            DbPublish.copyDatabaseIntoCandidate(base, candidate)
+        } else if (!DbPublish.allowEmptyBase()) {
+            DbPublish.discardCandidate(publishedDbPath, logger)
+            throw IllegalStateException(
+                DbPublish.missingBaseMessage("phase 2 (links)", diskBaseDb, "-PbaseDb / SEFORIM_DB_BASE"),
+            )
+        }
+        candidate.toString()
+    }
+
+    val jdbcUrl = if (useMemoryDb) "jdbc:sqlite::memory:" else "jdbc:sqlite:$workingDbPath"
     val driver = JdbcSqliteDriver(url = jdbcUrl)
     // This phase does the final VACUUM INTO of the Otzaria chain, so the in-memory DB
     // must use 16 KiB pages before its schema is created (in SeforimRepository.init),
     // otherwise the persisted file would revert to SQLite's 4 KiB default.
     driver.execute(null, SEFORIM_DB_PAGE_SIZE_PRAGMA, 0)
-    val repository = SeforimRepository(dbPath, driver)
+    val repository = SeforimRepository(workingDbPath, driver)
+    var repositoryClosed = false
     // The repository init downgrades the GLOBAL kermit severity to Assert;
     // restore Info so this CLI's logs stay visible.
     Logger.setMinSeverity(Severity.Info)
@@ -111,10 +141,6 @@ fun main(args: Array<String>) = runBlocking {
             }
         }
 
-        val buildStatePath: Path = run {
-            val explicit = System.getProperty("buildStatePath") ?: System.getenv("BUILD_STATE_PATH")
-            if (explicit != null) Paths.get(explicit) else Paths.get("$persistDbPath.buildstate")
-        }
         val prev = buildStatePath.takeIf { Files.exists(it) }
         val allocator = InMemoryIdAllocator.load(prev, Logger.withTag("IdAllocator"))
 
@@ -126,49 +152,57 @@ fun main(args: Array<String>) = runBlocking {
             allocator = allocator,
         )
         generator.generateLinksOnly()
-        if (useMemoryDb) {
-            // VACUUM INTO a candidate beside the target, then rename it over the
-            // target in one step — never delete-then-write, which left no DB at
-            // all if the process died in between (see [DbPublish]).
-            runCatching {
-                logger.i { "Persisting in-memory DB to $persistDbPath via VACUUM INTO..." }
-                DbPublish.publishAtomically(Paths.get(persistDbPath), logger) { candidate ->
-                    val escaped = candidate.toString().replace("'", "''")
-                    repository.executeRawQuery("VACUUM INTO '$escaped'")
-                }
-                logger.i { "In-memory DB persisted to $persistDbPath" }
-            }.onFailure { e ->
-                logger.e(e) { "Failed to persist in-memory DB to $persistDbPath" }
-                throw e
-            }
-        }
-        // Persist build_state AFTER the DB itself is on disk (this is also the
-        // order GenerateLines uses): written first, a failed VACUUM INTO would
-        // leave an advanced buildstate beside a DB that was never written.
+        // The DB and allocator snapshot describe one ID space. Prepare and
+        // validate both candidates first; publishing either one by itself would
+        // let a snapshot failure pair this run's link IDs with old counters.
         val buildStateMeta = mapOf(
             "generator" to "otzariasqlite/generateLinks",
             "generated_at" to java.time.Instant.now().toString(),
         )
-        runCatching {
-            allocator.snapshotTo(target = buildStatePath, extraMeta = buildStateMeta)
-        }.onFailure { e ->
-            // Fail closed: a build that cannot write its allocator state would
-            // publish last week's — and the build after it would re-issue ids
-            // this one already handed out.
-            logger.e(e) { "Failed to write build_state to $buildStatePath" }
-            throw e
+        val verifyCandidates = { database: Path, state: Path ->
+            BuildStateVerifier.verifyFreshSnapshot(
+                buildStatePath = state,
+                dbPath = database,
+                expectedMeta = buildStateMeta,
+                logger = logger,
+            )
+        }
+        val stateCandidate = DbPublish.prepareFileCandidate(buildStatePath, logger)
+        try {
+            if (useMemoryDb) {
+                val databaseCandidate = DbPublish.prepareDatabaseCandidate(publishedDbPath, logger)
+                val escaped = databaseCandidate.toString().replace("'", "''")
+                repository.executeRawQuery("VACUUM INTO '$escaped'")
+            }
+            allocator.snapshotTo(target = stateCandidate, extraMeta = buildStateMeta)
+            // The disk candidate's repository owns a JDBC SQLite connection;
+            // close it before sealing/checkpointing and committing the pair.
+            repository.close()
+            repositoryClosed = true
+            DbPublish.publishPreparedPair(
+                databaseTarget = publishedDbPath,
+                buildStateTarget = buildStatePath,
+                logger = logger,
+                verifyCandidates = verifyCandidates,
+            )
+        } catch (error: Throwable) {
+            if (!DbPublish.hasPendingPairRecovery(publishedDbPath)) {
+                runCatching { DbPublish.discardCandidate(publishedDbPath, logger) }
+                runCatching { DbPublish.discardCandidate(buildStatePath, logger) }
+            }
+            throw error
         }
         BuildStateVerifier.verifyFreshSnapshot(
             buildStatePath = buildStatePath,
-            dbPath = Paths.get(if (useMemoryDb) persistDbPath else dbPath),
+            dbPath = publishedDbPath,
             expectedMeta = buildStateMeta,
             logger = logger,
         )
-        logger.i { "Phase 2 completed successfully. Links processed. DB at ${if (useMemoryDb) persistDbPath else dbPath}" }
+        logger.i { "Phase 2 completed successfully. Links processed. DB at $publishedDbPath" }
     } catch (e: Exception) {
         logger.e(e) { "Error during phase 2 (links)" }
         throw e
     } finally {
-        repository.close()
+        if (!repositoryClosed) repository.close()
     }
 }

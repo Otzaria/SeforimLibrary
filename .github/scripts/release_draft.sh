@@ -215,12 +215,24 @@ release_upload_summary() {
   echo "release ${RELEASE_TAG}: ${RELEASE_UPLOAD_ASSETS} assets, ${RELEASE_UPLOAD_BYTES} bytes, ${RELEASE_UPLOAD_SECONDS}s"
 }
 
+# GNU coreutils spells this `stat --format`, while macOS/BSD stat uses `-f`.
+# Release verification must calculate the same byte count on a developer's Mac
+# as on the Ubuntu runner; probing the implementation is less ambiguous than
+# trying one format string and accepting an implementation-specific result.
+file_size_bytes() {
+  if stat --version >/dev/null 2>&1; then
+    stat --format='%s' "$1"
+  else
+    stat -f '%z' "$1"
+  fi
+}
+
 # Upload one asset. If an upload response is lost, reconcile by exact
 # name+size+digest and continue. Never use --clobber.
 upload_asset() {
   local asset_path="$1" expected_size expected_digest state attempt
   local name="${asset_path##*/}" started="$SECONDS"
-  expected_size=$(stat --format='%s' "$asset_path")
+  expected_size=$(file_size_bytes "$asset_path")
   expected_digest=$(sha256sum "$asset_path" | cut -d ' ' -f1)
   state=$(asset_state "$asset_path" "$expected_size" "$expected_digest") || return 1
   case "$state" in

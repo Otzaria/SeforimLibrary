@@ -533,6 +533,7 @@ jobs:
           sparse-checkout: |
             .github/scripts
             .github/host
+            .github/contracts
             generator/common/src/jvmMain/kotlin/io/github/kdroidfilter/seforimlibrary/common/ids/DiskBackedLinkIdAllocator.kt
             generator/sefariasqlite/src/jvmMain/kotlin/io/github/kdroidfilter/seforimlibrary/sefariasqlite/GenerateLinkerLinks.kt
           persist-credentials: false
@@ -1430,6 +1431,11 @@ jobs:
           # mid-dispatch would silently change the engine under our pinned inputs.
           # Capture the expected head + the dispatch time; discovery requires both.
           LINKER_HEAD=$(gh api repos/Otzaria/LinkerToOtzaria/commits/main --jq .sha)
+          # The wait budget is a cross-repository contract.  Pass the digest of
+          # the exact contract this parent used; both Linker entry workflows
+          # reject a different digest before any GPU/CPU-heavy work starts.
+          WAIT_CONTRACT_SHA256=$(sha256sum .pipeline-control/.github/contracts/linker_relink_timeouts_v1.json | cut -d' ' -f1)
+          [[ "$WAIT_CONTRACT_SHA256" =~ ^[0-9a-f]{64}$ ]] || { echo "::error::invalid Linker wait-contract digest"; exit 1; }
           DISPATCHED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
           # Owner decision (2026-07-23): the default split path runs only raw NER on
           # Kaggle, then resolves those responses on the Oracle ARM box.  Therefore BOTH
@@ -1456,6 +1462,7 @@ jobs:
                 -f library_run_id="$GITHUB_RUN_ID" -f target=local \
                 -f relink_request_id="$RELINK_REQUEST_ID" \
                 -f parent_run_attempt="$GITHUB_RUN_ATTEMPT" \
+                -f wait_contract_sha256="$WAIT_CONTRACT_SHA256" \
                 -f sefaria_tag="$SEFARIA_TAG" \
                 -f snapshot_sha256="$SNAPSHOT_ZST_SHA256" \
                 -f sefaria_release_metadata_sha256="$SEFARIA_METADATA_SHA" ;;
@@ -1465,6 +1472,7 @@ jobs:
                 -f library_run_id="$GITHUB_RUN_ID" \
                 -f relink_request_id="$RELINK_REQUEST_ID" \
                 -f parent_run_attempt="$GITHUB_RUN_ATTEMPT" \
+                -f wait_contract_sha256="$WAIT_CONTRACT_SHA256" \
                 -f sefaria_tag="$SEFARIA_TAG" \
                 -f snapshot_sha256="$SNAPSHOT_ZST_SHA256" \
                 -f sefaria_release_metadata_sha256="$SEFARIA_METADATA_SHA" ;;
@@ -1474,6 +1482,7 @@ jobs:
                 -f library_run_id="$GITHUB_RUN_ID" -f target=server \
                 -f relink_request_id="$RELINK_REQUEST_ID" \
                 -f parent_run_attempt="$GITHUB_RUN_ATTEMPT" \
+                -f wait_contract_sha256="$WAIT_CONTRACT_SHA256" \
                 -f sefaria_tag="$SEFARIA_TAG" \
                 -f snapshot_sha256="$SNAPSHOT_ZST_SHA256" \
                 -f sefaria_release_metadata_sha256="$SEFARIA_METADATA_SHA" ;;
@@ -1483,7 +1492,7 @@ jobs:
           # matches on. `gh workflow run` returns no run id, so the run URL is
           # printed once by the wait loop below the moment discovery resolves it
           # — deliberately NOT duplicated here.
-          echo "dispatched $DISPATCHED_WORKFLOW to Otzaria/LinkerToOtzaria: target=$SERIAL_LINKER_TARGET library_run_id=$GITHUB_RUN_ID parent_run_attempt=$GITHUB_RUN_ATTEMPT relink_request_id=$RELINK_REQUEST_ID sefaria_tag=$SEFARIA_TAG snapshot_sha256=$SNAPSHOT_ZST_SHA256"
+          echo "dispatched $DISPATCHED_WORKFLOW to Otzaria/LinkerToOtzaria: target=$SERIAL_LINKER_TARGET library_run_id=$GITHUB_RUN_ID parent_run_attempt=$GITHUB_RUN_ATTEMPT relink_request_id=$RELINK_REQUEST_ID wait_contract_sha256=$WAIT_CONTRACT_SHA256 sefaria_tag=$SEFARIA_TAG snapshot_sha256=$SNAPSHOT_ZST_SHA256"
           # ─── A2 / E2: nothing is uploaded early from HERE any more ─────────
           # A2 used this idle window (20 min of discovery plus the relink itself,
           # 1119 s on run 33865604251) to push lines_snapshot.db.zst to the draft

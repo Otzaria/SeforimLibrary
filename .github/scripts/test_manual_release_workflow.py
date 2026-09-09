@@ -31,6 +31,9 @@ ANCHOR_DERIVATION = Path(__file__).parent / "patch_fan_anchors.sh"
 # the assertions about them read the file that actually runs.
 PATCH_FAN_LIB = Path(__file__).parent / "patch_fan_lib.sh"
 RELINK_WAIT = Path(__file__).parent / "wait_for_relink_run.sh"
+RELINK_TIMEOUT_CONTRACT = (
+    Path(__file__).parents[1] / "contracts" / "linker_relink_timeouts_v1.json"
+)
 SCRIPTS_DIR = Path(__file__).parent
 GENERATOR_COMMON_BUILD = (
     Path(__file__).parents[2] / "generator" / "common" / "build.gradle.kts"
@@ -1517,19 +1520,16 @@ class ManualReleaseWorkflowContractTest(unittest.TestCase):
             timed_out.stdout,
         )
 
-    # relink.yml lives in Otzaria/LinkerToOtzaria, which neither CI job that runs
-    # this suite (ci.yml `contracts`, the release workflow's `reconcile`) checks
-    # out — so the numbers are PINNED here, and the cross-check below runs only
-    # for a developer who happens to have the sibling checkout beside this repo.
-    # Source of every number: LinkerToOtzaria .github/workflows/relink.yml —
-    #   relink  L264   timeout-minutes: kaggle 90 · local 1440 · server 480
-    #                  (the serial `library_run_id != ''` arm this parent uses)
-    #   resolve L1287  480, gated `inputs.target == 'kaggle'` (that path only)
-    #   publish L1607  30, on every path
-    RELINK_YML_JOB_TIMEOUTS = {"relink": {"kaggle": 90, "local": 1440, "server": 480},
-                               "resolve": 480, "publish": 30}
+    # This repository owns the wait-cap calculation, so its input is a local,
+    # versioned release contract. CI always reads it; it never conditionally
+    # skips a cross-check because a developer happens not to have LinkerToOtzaria
+    # checked out beside this repository.
+    RELINK_YML_JOB_TIMEOUTS = json.loads(RELINK_TIMEOUT_CONTRACT.read_text(encoding="utf-8"))["timeouts"]
 
     def test_the_wait_scripts_table_mirrors_relink_ymls_own_timeouts(self):
+        contract = json.loads(RELINK_TIMEOUT_CONTRACT.read_text(encoding="utf-8"))
+        self.assertEqual(contract["contractVersion"], 1)
+        self.assertEqual(contract["workflow"], "relink.yml")
         pinned = self.RELINK_YML_JOB_TIMEOUTS
         relink_job = pinned["relink"]
         self.assertEqual(
@@ -1548,34 +1548,27 @@ class ManualReleaseWorkflowContractTest(unittest.TestCase):
                 "local": relink_job["local"],
             },
         )
-        # The table says where its numbers come from, so the mirror is findable
-        # from the script alone.
-        for source in ("relink.yml:264", "relink.yml:1287", "relink.yml:1607"):
-            self.assertIn(source, self.relink_wait)
+        # The script names the versioned fixture that CI verified.
+        self.assertIn("linker_relink_timeouts_v1.json", self.relink_wait)
 
-        sibling = Path(__file__).parents[3] / "LinkerToOtzaria" / ".github" / "workflows" / "relink.yml"
-        if not sibling.is_file():
-            self.skipTest(f"no LinkerToOtzaria checkout at {sibling} to cross-check")
-        text = sibling.read_text(encoding="utf-8")
-        jobs = {
-            name: body
-            for name, body in re.findall(
-                r"\n  (\w+):\n(.*?)(?=\n  \w+:\n|\Z)", text, re.S
-            )
-        }
-        relink_timeout = re.search(r"timeout-minutes: (.+)", jobs["relink"]).group(1)
-        for expression in (
-            rf"target == 'kaggle' && {relink_job['kaggle']} ",
-            rf"target == 'local' && {relink_job['local']} ",
-            rf"library_run_id != '' && {relink_job['server']} ",
-        ):
-            self.assertIn(expression, relink_timeout)
-        self.assertRegex(
-            re.search(r"timeout-minutes: (.+)", jobs["resolve"]).group(1),
-            rf"library_run_id != '' && {pinned['resolve']} ",
+        dispatch = self.step("Run LinkerToOtzaria relink on this snapshot (and wait)")
+        digest_command = (
+            "WAIT_CONTRACT_SHA256=$(sha256sum "
+            ".pipeline-control/.github/contracts/linker_relink_timeouts_v1.json | cut -d' ' -f1)"
         )
-        self.assertIn("inputs.target == 'kaggle'", jobs["resolve"])
-        self.assertIn(f"timeout-minutes: {pinned['publish']}\n", jobs["publish"])
+        self.assertIn(digest_command, dispatch)
+        self.assertIn('[[ "$WAIT_CONTRACT_SHA256" =~ ^[0-9a-f]{64}$ ]]', dispatch)
+        self.assertEqual(
+            3,
+            dispatch.count('-f wait_contract_sha256="$WAIT_CONTRACT_SHA256"'),
+            "local, split Kaggle, and server dispatches must all bind the same wait contract",
+        )
+        pipeline_checkout = self.step("Checkout immutable pipeline control scripts")
+        self.assertIn(
+            ".github/contracts",
+            pipeline_checkout,
+            "the immutable sparse checkout must actually contain the hashed contract",
+        )
 
     def test_a_child_that_finishes_inside_the_cap_is_not_truncated(self):
         done = self._drive_relink_wait(cap="10", terminal_after=4)
@@ -2055,6 +2048,57 @@ class ManualReleaseWorkflowContractTest(unittest.TestCase):
             "the upload invocations themselves must be untouched (never --clobber)",
         )
 
+    def test_release_draft_uses_the_right_stat_dialect_on_gnu_and_bsd(self):
+        """The shared uploader works on the Ubuntu runner and a stock macOS shell."""
+        bash = shutil.which("bash")
+        if bash is None:  # pragma: no cover - only on a host without bash
+            self.skipTest("bash unavailable")
+        source = RELEASE_DRAFT.read_text(encoding="utf-8")
+        self.assertIn("file_size_bytes()", source)
+        self.assertIn("stat --version", source)
+        self.assertIn("stat --format='%s'", source)
+        self.assertIn("stat -f '%z'", source)
+
+        for flavor in ("gnu", "bsd"):
+            with self.subTest(flavor=flavor), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                shutil.copy(RELEASE_DRAFT, root / "release_draft.sh")
+                fake_bin = root / "bin"
+                fake_bin.mkdir()
+                fake_stat = fake_bin / "stat"
+                fake_stat.write_text(
+                    textwrap.dedent(
+                        """\
+                        #!/usr/bin/env bash
+                        if [ "$1" = --version ]; then
+                          [ "$STAT_FLAVOR" = gnu ] && exit 0
+                          exit 1
+                        fi
+                        if [ "$STAT_FLAVOR" = gnu ] && [ "$1" = "--format=%s" ]; then
+                          printf '17\\n'
+                          exit 0
+                        fi
+                        if [ "$STAT_FLAVOR" = bsd ] && [ "$1" = -f ] && [ "$2" = %z ]; then
+                          printf '17\\n'
+                          exit 0
+                        fi
+                        echo "unexpected stat invocation: $*" >&2
+                        exit 99
+                        """
+                    ),
+                    encoding="utf-8",
+                )
+                fake_stat.chmod(0o755)
+                result = subprocess.run(
+                    [bash, "-c", "source ./release_draft.sh; file_size_bytes asset.bin"],
+                    cwd=root,
+                    env=dict(os.environ, PATH=f"{fake_bin}{os.pathsep}{os.environ['PATH']}", STAT_FLAVOR=flavor),
+                    capture_output=True,
+                    text=True,
+                )
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertEqual(result.stdout.strip(), "17")
+
     def test_upload_asset_reports_each_asset_against_a_stub_gh(self):
         """Drive the real upload_asset in a sandbox: three assets, one reused."""
         bash = shutil.which("bash")
@@ -2318,6 +2362,7 @@ class ManualReleaseWorkflowContractTest(unittest.TestCase):
             'echo "dispatched $DISPATCHED_WORKFLOW to Otzaria/LinkerToOtzaria: '
             "target=$SERIAL_LINKER_TARGET library_run_id=$GITHUB_RUN_ID "
             "parent_run_attempt=$GITHUB_RUN_ATTEMPT relink_request_id=$RELINK_REQUEST_ID "
+            "wait_contract_sha256=$WAIT_CONTRACT_SHA256 "
             'sefaria_tag=$SEFARIA_TAG snapshot_sha256=$SNAPSHOT_ZST_SHA256"',
             relink,
         )

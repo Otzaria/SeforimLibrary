@@ -1,0 +1,13 @@
+{
+  "contractVersion": 1,
+  "workflow": "relink.yml",
+  "timeouts": {
+    "relink": {
+      "kaggle": 90,
+      "local": 1440,
+      "server": 480
+    },
+    "resolve": 480,
+    "publish": 30
+  }
+}

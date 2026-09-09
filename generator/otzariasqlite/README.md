@@ -39,3 +39,25 @@ Default input/output DB is `build/seforim.db` at the repo root (override with `-
   - `-PacronymDb=/path/to/acronymizer.db` or env `ACRONYM_DB`
 - In-memory mode:
   - default is in-memory for speed; set `-PinMemoryDb=false` to work directly on disk.
+
+## Publication safety
+
+`generateLines` and `generateLinks` publish `seforim.db` together with its
+`seforim.db.buildstate` allocator snapshot. Both files are first written as
+same-directory `.candidate` files and verified against each other. Their final
+replacement is a journaled pair commit: if a process dies between the two
+renames, the next phase restores the complete preceding pair before it reads
+any allocator IDs. A commit that reached its durable marker is retained and
+only its temporary backups are cleaned up.
+
+Before the pair journal is written, SQLite seals both old and candidate members:
+it verifies a WAL checkpoint, switches to `journal_mode=DELETE`, confirms no
+sidecar remains, and fsyncs the main file. That can normalize SQLite's physical
+bytes, but preserves the same committed logical contents and allocator identity;
+the publisher never deletes a target WAL to make a rename possible. A WAL that
+cannot be checkpointed causes a failure before the pair moves begin.
+
+The publisher never falls back to delete-and-write when there is insufficient
+room for a DB candidate. It fails before modifying the existing DB; free space
+and retry. This can temporarily require approximately one additional DB copy
+plus 12.5% and 64 MiB of headroom while a release is being replaced.

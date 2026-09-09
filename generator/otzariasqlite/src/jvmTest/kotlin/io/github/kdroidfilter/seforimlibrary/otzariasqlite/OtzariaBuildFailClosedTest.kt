@@ -3,10 +3,12 @@ package io.github.kdroidfilter.seforimlibrary.otzariasqlite
 import co.touchlab.kermit.Logger
 import io.github.kdroidfilter.seforimlibrary.common.buildstate.BuildStateVerifier
 import io.github.kdroidfilter.seforimlibrary.common.buildstate.IdTable
+import io.github.kdroidfilter.seforimlibrary.common.ids.InMemoryIdAllocator
 import kotlinx.coroutines.runBlocking
 import java.lang.reflect.InvocationTargetException
 import java.nio.file.Files
 import java.nio.file.Path
+import java.sql.Connection
 import java.sql.DriverManager
 import kotlin.test.AfterTest
 import kotlin.test.Test
@@ -100,6 +102,66 @@ class OtzariaBuildFailClosedTest {
                     return rs.getLong(1)
                 }
             }
+        }
+    }
+
+    private fun writeBooks(db: Path, ids: Iterable<Long>) {
+        DriverManager.getConnection("jdbc:sqlite:${db.toAbsolutePath()}").use { conn ->
+            conn.createStatement().use { st ->
+                st.executeUpdate("CREATE TABLE book (id INTEGER PRIMARY KEY NOT NULL, title TEXT)")
+                ids.forEach { id -> st.executeUpdate("INSERT INTO book(id, title) VALUES ($id, 'book-$id')") }
+            }
+        }
+    }
+
+    private fun writeStateMarker(db: Path, marker: String) {
+        DriverManager.getConnection("jdbc:sqlite:${db.toAbsolutePath()}").use { conn ->
+            conn.createStatement().use { st ->
+                st.executeUpdate("CREATE TABLE state_marker (value TEXT NOT NULL)")
+                st.executeUpdate("INSERT INTO state_marker(value) VALUES ('$marker')")
+            }
+        }
+    }
+
+    private fun stateMarker(db: Path): String =
+        DriverManager.getConnection("jdbc:sqlite:${db.toAbsolutePath()}").use { conn ->
+            conn.createStatement().use { st ->
+                st.executeQuery("SELECT value FROM state_marker").use { rs ->
+                    check(rs.next())
+                    rs.getString(1)
+                }
+            }
+        }
+
+    private fun walPath(db: Path): Path =
+        db.resolveSibling(db.fileName.toString() + "-wal")
+
+    private fun openWalWriter(db: Path, id: Long): Connection {
+        val conn = DriverManager.getConnection("jdbc:sqlite:${db.toAbsolutePath()}")
+        conn.createStatement().use { st ->
+            st.executeQuery("PRAGMA journal_mode=WAL").use { rs ->
+                check(rs.next())
+                check(rs.getString(1).equals("wal", ignoreCase = true))
+            }
+            st.execute("PRAGMA wal_autocheckpoint=0")
+            st.executeUpdate("CREATE TABLE book (id INTEGER PRIMARY KEY NOT NULL, title TEXT)")
+            st.executeUpdate("INSERT INTO book(id, title) VALUES ($id, 'wal-book-$id')")
+        }
+        assertTrue(Files.isRegularFile(walPath(db)), "premise: the open writer has committed frames in WAL")
+        assertTrue(Files.size(walPath(db)) > 0, "premise: WAL contains frames")
+        return conn
+    }
+
+    /** Makes the exact main+WAL image a killed writer would leave at [target]. */
+    private fun copyUncheckpointedWalImage(target: Path, id: Long) {
+        val source = target.resolveSibling("source-${target.fileName}")
+        val writer = openWalWriter(source, id)
+        try {
+            Files.copy(source, target)
+            Files.copy(walPath(source), walPath(target))
+            assertTrue(Files.size(walPath(target)) > 0, "target fixture has copied uncheckpointed WAL frames")
+        } finally {
+            writer.close()
         }
     }
 
@@ -308,6 +370,30 @@ class OtzariaBuildFailClosedTest {
     }
 
     @Test
+    fun `low candidate space fails closed before the existing DB is touched`() {
+        val dir = Files.createTempDirectory("s29-publish-low-space")
+        val target = populatedTargetDb(dir)
+        val before = Files.readAllBytes(target)
+
+        val failure = assertFailsWith<DbPublish.InsufficientCandidateSpaceException> {
+            runBlocking {
+                DbPublish.publishAtomically(
+                    target = target,
+                    logger = Logger.withTag("test"),
+                    // Injection avoids filling a real filesystem merely to
+                    // exercise the fail-closed branch.
+                    availableSpace = { 0L },
+                ) { error("writer must not run after the space preflight") }
+            }
+        }
+
+        assertTrue(failure.message.orEmpty().contains("existing DB was left untouched"))
+        assertContentEquals(before, Files.readAllBytes(target))
+        assertEquals(3, countBooks(target))
+        assertNoCandidateBeside(target)
+    }
+
+    @Test
     fun `a stale candidate from a killed run is replaced, not appended to`() {
         val dir = Files.createTempDirectory("s16-publish-stale")
         val target = populatedTargetDb(dir)
@@ -336,7 +422,8 @@ class OtzariaBuildFailClosedTest {
         // mid-run leaves seforim.db-wal/-shm behind. SQLite trusts a -wal it finds
         // next to a database whatever that database's header says, so a fresh
         // file renamed under a stale one has the old frames replayed into it on
-        // the next open. The publish must take those files with the old DB.
+        // the next open. The publisher must ask SQLite to normalize them before
+        // moving either main file; it must not delete a target WAL itself.
         val dir = Files.createTempDirectory("s16-publish-stale-wal")
         val target = populatedTargetDb(dir)
         val stale = DbPublish.SQLITE_SIDECAR_SUFFIXES.map { suffix ->
@@ -360,6 +447,185 @@ class OtzariaBuildFailClosedTest {
         stale.forEach { assertTrue(Files.notExists(it), "${it.fileName} must not outlive the DB it belonged to") }
         assertEquals(2, countBooks(target), "the published DB reads back as the candidate, not as a WAL replay")
         assertNoCandidateBeside(target)
+    }
+
+    @Test
+    fun `a WAL candidate is closed sealed and published as one main file`() {
+        val dir = Files.createTempDirectory("s29-seal-candidate-wal")
+        val database = populatedTargetDb(dir)
+        val state = dir.resolve("seforim.db.buildstate")
+        writeStateMarker(state, "old")
+
+        var candidateWriter: Connection? = null
+        try {
+            runBlocking {
+                DbPublish.publishPairAtomically(
+                    databaseTarget = database,
+                    buildStateTarget = state,
+                    logger = Logger.withTag("test"),
+                    writeDatabaseCandidate = { candidate ->
+                        // Deliberately leave the writer open while the
+                        // candidate callback returns. The pair code must not
+                        // seal/move it until beforePublish closes this owner.
+                        candidateWriter = openWalWriter(candidate, 91)
+                    },
+                    writeBuildStateCandidate = { candidate -> writeStateMarker(candidate, "new") },
+                    verifyCandidates = { _, _ -> },
+                    beforePublish = {
+                        candidateWriter?.close()
+                        candidateWriter = null
+                    },
+                )
+            }
+        } finally {
+            candidateWriter?.close()
+        }
+
+        assertEquals(91L, maxId(database, "book"))
+        assertEquals("new", stateMarker(state))
+        DbPublish.SQLITE_SIDECAR_SUFFIXES.forEach { suffix ->
+            assertTrue(
+                Files.notExists(database.resolveSibling(database.fileName.toString() + suffix)),
+                "published main file must have no $suffix sidecar",
+            )
+        }
+    }
+
+    @Test
+    fun `old WAL frames survive backup crash recovery after sealing`() {
+        val dir = Files.createTempDirectory("s29-seal-old-wal")
+        val database = dir.resolve("seforim.db")
+        // Copy the main+WAL image while the source writer is still open, then
+        // close only the source. Do not open target before DbPublish seals it.
+        copyUncheckpointedWalImage(database, 41)
+        assertTrue(Files.isRegularFile(walPath(database)), "premise: old target still has committed WAL frames")
+        val state = dir.resolve("seforim.db.buildstate")
+        writeStateMarker(state, "old")
+
+        assertFailsWith<DbPublish.SimulatedProcessDeathForTest> {
+            runBlocking {
+                DbPublish.publishPairAtomically(
+                    databaseTarget = database,
+                    buildStateTarget = state,
+                    logger = Logger.withTag("test"),
+                    writeDatabaseCandidate = { candidate -> writeBooks(candidate, listOf(99)) },
+                    writeBuildStateCandidate = { candidate -> writeStateMarker(candidate, "new") },
+                    verifyCandidates = { _, _ -> },
+                    afterTransition = { transition ->
+                        if (transition == DbPublish.PairPublishTransition.DATABASE_BACKED_UP) {
+                            throw DbPublish.SimulatedProcessDeathForTest()
+                        }
+                    },
+                )
+            }
+        }
+
+        DbPublish.recoverInterruptedPair(database, state, Logger.withTag("test"))
+        assertEquals(41L, maxId(database, "book"), "checkpointed old WAL row survives backup/recovery")
+        assertEquals("old", stateMarker(state))
+        assertFalse(DbPublish.hasPendingPairRecovery(database))
+    }
+
+    // ─── (1e) DB + build_state are a recoverable pair ─────────────────────
+
+    @Test
+    fun `snapshot failure preserves the old pair and retry allocates no reused ID`() {
+        val dir = Files.createTempDirectory("s29-pair-snapshot")
+        val database = dir.resolve("seforim.db")
+        writeBooks(database, listOf(1))
+        val state = dir.resolve("seforim.db.buildstate")
+        val oldAllocator = InMemoryIdAllocator.load(null)
+        assertEquals(1L, oldAllocator.bookId("test", "old"))
+        oldAllocator.snapshotTo(state, mapOf("run" to "old"))
+        val beforeDatabase = Files.readAllBytes(database)
+        val beforeState = Files.readAllBytes(state)
+
+        assertFailsWith<IllegalStateException> {
+            runBlocking {
+                DbPublish.publishPairAtomically(
+                    databaseTarget = database,
+                    buildStateTarget = state,
+                    logger = Logger.withTag("test"),
+                    writeDatabaseCandidate = { candidate -> writeBooks(candidate, listOf(1, 2)) },
+                    writeBuildStateCandidate = { error("simulated snapshot failure") },
+                    verifyCandidates = { _, _ -> error("verification must not run without a state candidate") },
+                )
+            }
+        }
+
+        assertContentEquals(beforeDatabase, Files.readAllBytes(database), "new DB must not precede its state")
+        assertContentEquals(beforeState, Files.readAllBytes(state), "old state remains paired with old DB")
+        assertNoCandidateBeside(database)
+        assertNoCandidateBeside(state)
+
+        // A retry loads the old pair, so the id that the failed candidate had
+        // planned to use is still safe: it is not present in the published DB.
+        val retry = InMemoryIdAllocator.load(state)
+        assertEquals(2L, retry.bookId("test", "new"))
+        val retryMeta = mapOf("run" to "retry")
+        runBlocking {
+            DbPublish.publishPairAtomically(
+                databaseTarget = database,
+                buildStateTarget = state,
+                logger = Logger.withTag("test"),
+                writeDatabaseCandidate = { candidate -> writeBooks(candidate, listOf(1, 2)) },
+                writeBuildStateCandidate = { candidate -> retry.snapshotTo(candidate, retryMeta) },
+                verifyCandidates = { candidateDatabase, candidateState ->
+                    BuildStateVerifier.verifyFreshSnapshot(
+                        buildStatePath = candidateState,
+                        dbPath = candidateDatabase,
+                        expectedMeta = retryMeta,
+                    )
+                },
+            )
+        }
+        assertEquals(2, countBooks(database))
+        assertEquals(3L, InMemoryIdAllocator.load(state).bookId("test", "after-retry"))
+    }
+
+    @Test
+    fun `recovery restores a complete old pair at every uncommitted move boundary`() {
+        val boundaries = DbPublish.PairPublishTransition.entries
+        for (boundary in boundaries) {
+            val dir = Files.createTempDirectory("s29-pair-crash-${boundary.name.lowercase()}")
+            val database = dir.resolve("seforim.db")
+            writeBooks(database, listOf(1))
+            val state = dir.resolve("seforim.db.buildstate")
+            writeStateMarker(state, "old-state")
+
+            assertFailsWith<DbPublish.SimulatedProcessDeathForTest> {
+                runBlocking {
+                    DbPublish.publishPairAtomically(
+                        databaseTarget = database,
+                        buildStateTarget = state,
+                        logger = Logger.withTag("test"),
+                        writeDatabaseCandidate = { candidate -> writeBooks(candidate, listOf(2)) },
+                        writeBuildStateCandidate = { candidate -> writeStateMarker(candidate, "new-state") },
+                        verifyCandidates = { _, _ -> },
+                        afterTransition = { reached ->
+                            if (reached == boundary) throw DbPublish.SimulatedProcessDeathForTest()
+                        },
+                    )
+                }
+            }
+
+            assertTrue(DbPublish.hasPendingPairRecovery(database), "the crash must leave a recovery journal")
+            DbPublish.recoverInterruptedPair(database, state, Logger.withTag("test"))
+            assertFalse(DbPublish.hasPendingPairRecovery(database))
+            if (boundary == DbPublish.PairPublishTransition.COMMITTED_MARKED) {
+                assertEquals(2L, maxId(database, "book"), "committed recovery keeps the new DB")
+                assertEquals("new-state", stateMarker(state))
+            } else {
+                // Sealing/checkpointing the old members happens before the
+                // journal is durable, so recovery promises the same committed
+                // logical pair (and allocator identity), not byte-for-byte
+                // SQLite layout. The dedicated low-space tests retain the
+                // stricter untouched-byte guarantee because their preflight
+                // exits before sealing either target.
+                assertEquals(1L, maxId(database, "book"), "$boundary restores the old DB contents")
+                assertEquals("old-state", stateMarker(state), "$boundary restores the old allocator state")
+            }
+        }
     }
 
     // ─── (1d) the build script keeps the contract these rules rest on ──────

@@ -52,8 +52,10 @@ hhmm() { printf '%02d:%02d' $(( $1 / 3600 )) $(( $1 % 3600 / 60 )); }
 #                         `child_job_max_min` cancelled a healthy kaggle run at
 #                         150 minutes, 450 minutes inside its own contract.
 #
-# One table, mirroring the `timeout-minutes:` of the corresponding jobs in
-# LinkerToOtzaria .github/workflows/relink.yml — update together:
+# One table, mirrored from the versioned local contract
+# `.github/contracts/linker_relink_timeouts_v1.json`. Update that contract with
+# the Linker workflow change; the hosted CI gate always validates this file and
+# never skips because a sibling checkout is unavailable:
 #
 #   relink  (relink.yml:264)   kaggle 90 · local 1440 · server 480 (serial mode,
 #                              i.e. library_run_id != '', which is how this
