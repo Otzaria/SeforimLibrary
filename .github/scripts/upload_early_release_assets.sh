@@ -44,18 +44,21 @@ process_alive() {
   ps -o args= -p "$pid" 2>/dev/null | grep -q 'upload_early_release_assets\.sh'
 }
 
+# Exit status is the ONLY channel back to `abort`, which turns it into the line
+# that says what it aborted and why: 0 signalled · 1 nothing was ever started ·
+# 2 the recorded pid is no longer this script · 3 the signal itself failed.
 kill_group() {
   local pid
   pid=$(cat "$pid_file" 2>/dev/null || true)
-  [ -n "${pid:-}" ] || return 0
+  [ -n "${pid:-}" ] || return 1
   # This runner lives for weeks and pids get reused: only ever signal a process
   # that is still this very script.
-  ps -o args= -p "$pid" 2>/dev/null | grep -q 'upload_early_release_assets\.sh' || return 0
-  kill -TERM -- "-$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null || true
+  ps -o args= -p "$pid" 2>/dev/null | grep -q 'upload_early_release_assets\.sh' || return 2
+  kill -TERM -- "-$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null || return 3
 }
 
 run_uploads() {
-  local path started elapsed
+  local path
   # shellcheck source=release_draft.sh
   source "$(dirname "$self")/release_draft.sh" || return 1
   use_token "$RELEASE_TOKEN_KIND" || {
@@ -69,11 +72,12 @@ run_uploads() {
   }
   for path in "$@"; do
     [ -f "$path" ] || { echo "asset $path does not exist — refusing to guess"; return 1; }
-    started=$(date +%s)
+    # upload_asset now prints the per-asset summary line itself (name, size,
+    # digest prefix, elapsed, rate) for every caller, so restating size/elapsed
+    # here would only duplicate it in this log.
     upload_asset "$path" || return 1
-    elapsed=$(( $(date +%s) - started ))
-    echo "early upload ${path##*/}: $(stat --format='%s' "$path") bytes in ${elapsed}s"
   done
+  release_upload_summary
 }
 
 case "$mode" in
@@ -130,8 +134,18 @@ case "$mode" in
     esac
     ;;
   abort)
-    kill_group
-    echo "early release-asset upload '$label' aborted (if it was still running)"
+    # "(if it was still running)" covered four different outcomes with one
+    # sentence, and the caller's `|| true` hid the rest: say which one it was.
+    aborted_pid=$(cat "$pid_file" 2>/dev/null || true)
+    verdict=$(head -n1 "$done_file" 2>/dev/null || true)
+    abort_rc=0
+    kill_group || abort_rc=$?
+    case "$abort_rc" in
+      0) echo "early release-asset upload '$label' aborted: signalled pid $aborted_pid before it wrote a verdict — the publish step uploads whatever is missing" ;;
+      1) echo "early release-asset upload '$label': nothing to abort — no upload was ever started for this label" ;;
+      2) echo "early release-asset upload '$label': nothing to abort — it had already finished (${verdict:-no verdict recorded})" ;;
+      *) echo "::warning::early release-asset upload '$label': could not signal pid $aborted_pid — it may still be uploading; the publish step re-verifies every asset by name+size+digest either way" ;;
+    esac
     ;;
   *)
     echo "usage: ${0##*/} start|wait|run|abort <label> ..." >&2
