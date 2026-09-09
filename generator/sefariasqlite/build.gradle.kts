@@ -129,6 +129,16 @@ tasks.register<JavaExec>("generateSefariaSqlite") {
     if (project.hasProperty("linkerSidecar")) {
         systemProperty("linkerSidecarPath", project.property("linkerSidecar") as String)
     }
+    // Durable textimages.sefaria.org cache (see SefariaImageEmbedder.defaultCacheDir).
+    if (project.hasProperty("imageCacheDir")) {
+        systemProperty("imageCacheDir", project.property("imageCacheDir") as String)
+    }
+    // Where the embedder reports what it could NOT inline; the workflow gates
+    // on it (see SefariaImageEmbedder.defaultReportPath). Absolute path please —
+    // this JavaExec runs with the project dir as its working directory.
+    if (project.hasProperty("imageEmbedReport")) {
+        systemProperty("imageEmbedReport", project.property("imageEmbedReport") as String)
+    }
 
     // Optional JVM tuning (similar to generator)
     jvmArgs = listOf(
