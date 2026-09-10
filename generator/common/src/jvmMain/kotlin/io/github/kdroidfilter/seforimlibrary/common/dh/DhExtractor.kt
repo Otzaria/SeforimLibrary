@@ -62,11 +62,17 @@ object DhExtractor {
 
     private val TAG = Regex("<[^>]+>")
 
+    /** HTML entities carry no visible commentary text by themselves. */
+    private val HTML_ENTITY = Regex("""&(?:#\d+|#x[\da-fA-F]+|[A-Za-z][A-Za-z0-9]+);""")
+
     /** `כו'` / `וכו'` / `וגו'` closing a quotation, with any apostrophe glyph. */
     private val LEAD_END_MARKER = Regex("""(?:^|\s)(?:ו?כו|וגו)['׳’](?=\s|$|[.,:;)\]])""")
 
     /** A lead-bold dibbur ends within this many words of the line start. */
     private const val MAX_LEAD_WORDS = 10
+
+    /** A marker after one of these boundaries belongs to commentary, not to the quotation. */
+    private val SENTENCE_DELIMITER = Regex("""[.:;?!]\s""")
 
     /**
      * Structural markers that open lines in the same position and shape as a
@@ -109,15 +115,42 @@ object DhExtractor {
     private fun extractBoldLead(line: String): Dh? {
         if (isHeadingLine(line)) return null
         val m = BOLD_PREFIX.find(line) ?: return null
-        val text = m.groupValues[1] + " " + TAG.replace(m.groupValues[2], "")
-        val marker = LEAD_END_MARKER.find(text) ?: return null
-        val dh = text.substring(0, marker.range.first)
-        if (dh.isBlank() || dh.length > MAX_DH_LENGTH) return null
-        // A quotation has no sentence break; a marker after one belongs to the commentary.
-        if (SENTENCE_BREAK in dh) return null
-        if (WHITESPACE.split(dh.trim()).size > MAX_LEAD_WORDS) return null
-        if (text.substring(marker.range.last + 1).none(Char::isLetterOrDigit)) return null
-        return accept(dh)
+        val boldRaw = m.groupValues[1].trim()
+        val rest = m.groupValues[2]
+
+        // BOLD_LEAD means that the quotation continues *after* </b>. A marker
+        // inside the already-bold dibbur belongs to the ordinary BOLD shape;
+        // searching the flattened whole line used to shorten tens of thousands
+        // of valid, fully-bold dibburim at their first כו'/וגו'.
+        val marker = LEAD_END_MARKER.find(rest) ?: return null
+
+        // Do not cross another HTML segment. In particular, adjacent <b>
+        // blocks often hold a second dibbur on the same physical line.
+        val firstTag = rest.indexOf('<')
+        if (firstTag >= 0 && firstTag < marker.range.first) return null
+
+        val continuation = rest.substring(0, marker.range.first).trim()
+        if (continuation.isEmpty()) return null
+        val rawDh = "$boldRaw $continuation"
+        if (rawDh.length > MAX_DH_LENGTH) return null
+
+        // Terminal punctuation on the bold prefix, or a sentence delimiter in
+        // the continuation, marks the boundary between the original dibbur and
+        // commentary. A later כו' must not pull that commentary into the key.
+        if (boldRaw.lastOrNull()?.let { it in ".,:;?!" } == true) return null
+        if (SENTENCE_DELIMITER.containsMatchIn(rawDh)) return null
+        if (WHITESPACE.split(rawDh.trim()).size > MAX_LEAD_WORDS) return null
+
+        // Commentary must begin in the same plain-text segment. A later HTML
+        // element cannot be used as evidence that the marker ended a quote.
+        val commentaryStart = marker.range.last + 1
+        val nextTag = rest.indexOf('<', commentaryStart).let { if (it < 0) rest.length else it }
+        val commentary = HTML_ENTITY.replace(rest.substring(commentaryStart, nextTag), "").trim()
+        if (commentary.none(Char::isLetterOrDigit)) return null
+
+        val boldDh = accept(boldRaw) ?: return null
+        val leadDh = accept(rawDh) ?: return null
+        return leadDh.takeIf { it.display.length > boldDh.display.length }
     }
 
     private fun extractDash(line: String): Dh? {
