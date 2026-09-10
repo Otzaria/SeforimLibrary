@@ -59,7 +59,7 @@ internal class SefariaCharLevelAnchors(
                 continue
             }
             val shift = book.cleanShiftByLineIndex[entry.lineIndex0] ?: 0
-            if (shift == CLEAN_MODIFIED) {
+            if (lineWasModifiedByCleaning(shift)) {
                 skip("line modified by cleaning")
                 continue
             }

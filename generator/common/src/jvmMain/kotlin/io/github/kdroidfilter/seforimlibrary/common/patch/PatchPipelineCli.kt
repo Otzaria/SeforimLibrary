@@ -23,9 +23,10 @@ import kotlin.system.exitProcess
  *
  * Exit codes:
  *   - `0` patch produced and verified.
- *   - [UnpatchableAnchorException.EXIT_CODE] (3) the (prev, new) pair cannot
- *     be expressed as a delta at all (missing PK column, or a column dropped
- *     without a `db_schema_version` bump). A `<out>.unpatchable` marker file
+ *   - [UnpatchableAnchorException.EXIT_CODE] (3) this anchor must not ship a
+ *     delta: either the pair cannot be expressed as one at all (missing PK
+ *     column, or a column dropped without a `db_schema_version` bump), or the
+ *     delta is oversized (see [PatchSizeGuard]). A `<out>.unpatchable` marker file
  *     carrying the reason is written next to the patch, the Gradle task lets
  *     the build succeed, and the release workflow skips just that anchor.
  *   - any other non-zero: a genuine failure (hash mismatch, IO, …) — the
@@ -88,11 +89,35 @@ fun main(args: Array<String>) {
         }
         exitProcess(UnpatchableAnchorException.EXIT_CODE)
     }
+
     val totalUpserts = output.upsertCounts.values.sum()
     val totalDeletes = output.deleteCounts.values.sum()
+    // Logged before the size guard: on a skip these counts are the only clue to
+    // WHY the delta blew up (id churn shows as an upsert per line).
     logger.i { "patch.db produced — upserts=$totalUpserts, deletes=$totalDeletes" }
     logger.i { "  upserts by table: ${output.upsertCounts.filterValues { it > 0 }}" }
     logger.i { "  deletes by table: ${output.deleteCounts.filterValues { it > 0 }}" }
+
+    // Oversized-delta guard. Runs before verify/compress: an anchor we will not
+    // publish should not burn the apply-and-hash pass either.
+    val sizeDecision = PatchSizeGuard.decide(
+        patchUncompressedSize = Files.size(outPath),
+        newDbSize = Files.size(newPath),
+        maxRatio = PatchSizeGuard.configuredMaxRatio(),
+    )
+    if (!sizeDecision.publish) {
+        // Leading token, not prose: the release workflow tells a size-guard skip
+        // (still a publishable full-only release) from a structural one by it.
+        val reason = "${PatchSizeGuard.MARKER_REASON_TOKEN}: anchor v$from → v$to produced an oversized delta: " +
+            "${sizeDecision.describe()}, upserts=$totalUpserts deletes=$totalDeletes — " +
+            "a full-bundle download is faster for the client than applying it"
+        Files.createDirectories(unpatchableMarker.toAbsolutePath().parent)
+        Files.write(unpatchableMarker, "$reason\n".toByteArray(Charsets.UTF_8))
+        runCatching { Files.deleteIfExists(outPath) }
+        logger.w { "$reason — wrote $unpatchableMarker and exiting ${UnpatchableAnchorException.EXIT_CODE}" }
+        exitProcess(UnpatchableAnchorException.EXIT_CODE)
+    }
+    logger.i { "Patch size within budget: ${sizeDecision.describe()}" }
 
     // Verify apply: copy prev, apply patch, hash, compare with hash(new).
     val target = outPath.resolveSibling("verify-${outPath.fileName}")

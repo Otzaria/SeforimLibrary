@@ -2,6 +2,7 @@ package io.github.kdroidfilter.seforimlibrary.sefariasqlite
 
 import io.github.kdroidfilter.seforimlibrary.common.countVisibleChars
 import io.github.kdroidfilter.seforimlibrary.common.ids.IdAllocatorBindings
+import io.github.kdroidfilter.seforimlibrary.common.ids.LegacyLineKey
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -67,9 +68,14 @@ class LinePrecomputeTest {
         p.lines.forEachIndexed { idx, content ->
             val refEntry = pre.refsByLineIndex[idx]
             assertContentEquals(
-                IdAllocatorBindings.lineNaturalKeyHash(content, refEntry?.heRef),
+                IdAllocatorBindings.lineNaturalKeyHash(content),
                 hashes[idx],
                 "hash mismatch at line $idx",
+            )
+            assertContentEquals(
+                LegacyLineKey.hash(content, refEntry?.heRef),
+                requireNotNull(pre.legacyLineKeyHashes)[idx],
+                "legacy hash mismatch at line $idx",
             )
             assertEquals(20, hashes[idx].size, "natural key hash must stay 20 bytes at line $idx")
             assertEquals(countVisibleChars(content), charCounts[idx], "charCount mismatch at line $idx")
@@ -91,13 +97,18 @@ class LinePrecomputeTest {
     }
 
     @Test
-    fun heRefIsPreferredOverContentForLinesThatHaveOne() {
+    fun heRefNeverEntersTheNaturalKey() {
         val p = payload().precomputeLineData()
-        val hashes = requireNotNull(p.precomputed).lineKeyHashes!!
-        // Line 1 has a heRef → keyed on the ref, not the content.
-        assertContentEquals(IdAllocatorBindings.lineNaturalKeyHash("anything", "בראשית א׳:א׳"), hashes[1])
-        // Line 0 has none → keyed on content.
-        assertContentEquals(IdAllocatorBindings.lineNaturalKeyHash(p.lines[0], null), hashes[0])
+        val pre = requireNotNull(p.precomputed)
+        val hashes = pre.lineKeyHashes!!
+        // Line 1 has a heRef; line 0 has none — both keyed on content alone.
+        assertContentEquals(IdAllocatorBindings.lineNaturalKeyHash(p.lines[1]), hashes[1])
+        assertContentEquals(IdAllocatorBindings.lineNaturalKeyHash(p.lines[0]), hashes[0])
+        // The legacy array still carries the heRef — it only seeds the shim.
+        assertContentEquals(
+            LegacyLineKey.hash("anything", "בראשית א׳:א׳"),
+            pre.legacyLineKeyHashes!![1],
+        )
     }
 
     @Test
@@ -106,6 +117,7 @@ class LinePrecomputeTest {
         val pre = requireNotNull(p.precomputed)
         assertEquals(0, pre.lineCount)
         assertEquals(0, pre.lineKeyHashes!!.size)
+        assertEquals(0, pre.legacyLineKeyHashes!!.size)
         assertEquals(0, pre.lineCharCounts!!.size)
         assertEquals(0, pre.lineIsHeading!!.size)
     }
@@ -120,6 +132,7 @@ class LinePrecomputeTest {
         pre.release()
 
         assertNull(pre.lineKeyHashes)
+        assertNull(pre.legacyLineKeyHashes)
         assertNull(pre.lineCharCounts)
         assertNull(pre.lineIsHeading)
         // The inline-anchor pass holds refsByLineIndex for the whole build, and
@@ -170,6 +183,9 @@ class LinePrecomputeTest {
             assertContentEquals(serial.lineIsHeading, pre.lineIsHeading)
             serial.lineKeyHashes!!.forEachIndexed { idx, expected ->
                 assertContentEquals(expected, pre.lineKeyHashes!![idx], "hash mismatch at line $idx")
+            }
+            serial.legacyLineKeyHashes!!.forEachIndexed { idx, expected ->
+                assertContentEquals(expected, pre.legacyLineKeyHashes!![idx], "legacy hash mismatch at line $idx")
             }
         }
     }

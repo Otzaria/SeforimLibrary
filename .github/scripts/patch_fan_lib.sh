@@ -39,6 +39,16 @@ read_schema() {
   printf '%s' "$v"
 }
 
+# Why an anchor shipped no patch has to outlive its own subshell: the driver's
+# final "no patch at all" check must tell a size-guard skip (still a
+# publishable full-only release) from a broken fan.
+SKIP_DIR="$RUNNER_TEMP/patch-fan-skips"
+rm -rf "$SKIP_DIR"
+mkdir -p "$SKIP_DIR"
+record_skip() {  # <oversized|structural> <target-version> <reason>
+  printf 'anchor v%s: %s\n' "$2" "$3" > "$SKIP_DIR/v$2.$1"
+}
+
 # One anchor, start to finish: pre-check, reconstitute, produce,
 # verify, clean up. Every path it touches is scoped to its own offset
 # so two of these can run side by side, it writes to its own log, and
@@ -53,7 +63,7 @@ produce_anchor() {  # <offset> <target-version> <tag>
   local PREV_DB="$ANCHOR_DIR/seforim.db"
   local PATCH_OUT="$PWD/patches/patch-v${TARGET_VER}-v${THIS_VER}.db"
   local PRECHECK WAIT_BUDGET PREFETCH_STATE PREFETCH_WAITED
-  local PREV_SCHEMA PRODUCE_RC REASON
+  local PREV_SCHEMA PRODUCE_RC REASON SKIP_KIND
   local T_START T_DOWNLOADED T_EXTRACTED T_DONE
   echo "=== Producing patch v${TARGET_VER} → v${THIS_VER} (offset $OFFSET, tag=$TAG) ==="
 
@@ -95,6 +105,7 @@ produce_anchor() {  # <offset> <target-version> <tag>
   echo "pre-check: $PRECHECK"
   if [ "${PRECHECK%% *}" = UNPATCHABLE ]; then
     echo "::warning::anchor v${TARGET_VER} ($TAG): ${PRECHECK#* } — pre-download schema check declared the anchor unpatchable; skip anchor"
+    record_skip structural "$TARGET_VER" "${PRECHECK#* }"
     return 0
   fi
 
@@ -175,6 +186,7 @@ produce_anchor() {  # <offset> <target-version> <tag>
       echo "schema $PREV_SCHEMA → $THIS_SCHEMA — producing the supported cross-schema delta"
     else
       echo "schema $PREV_SCHEMA → $THIS_SCHEMA is unsupported — skip anchor"
+      record_skip structural "$TARGET_VER" "schema $PREV_SCHEMA → $THIS_SCHEMA is unsupported"
       rm -rf "$ANCHOR_DIR"
       return 0
     fi
@@ -231,6 +243,11 @@ produce_anchor() {  # <offset> <target-version> <tag>
   if [ "$PRODUCE_RC" -eq 3 ] || [ -f "$PATCH_OUT.unpatchable" ]; then
     REASON=$(cat "$PATCH_OUT.unpatchable" 2>/dev/null || true)
     echo "::warning::anchor v${TARGET_VER} ($TAG): ${REASON:-see PatchPipelineCli output} — producer declared the anchor unpatchable; skip anchor"
+    # PatchSizeGuard.MARKER_REASON_TOKEN leads the marker when the
+    # delta was merely too big — a full-only release, not a defect.
+    SKIP_KIND=structural
+    case "$REASON" in oversized-delta:*) SKIP_KIND=oversized ;; esac
+    record_skip "$SKIP_KIND" "$TARGET_VER" "${REASON:-see PatchPipelineCli output}"
     # Leave nothing behind: the marker plus the producer's half-built
     # .tmp (and any stale .db) must not clutter patches/, which the
     # release staging step globs.
