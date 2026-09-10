@@ -175,8 +175,12 @@ class ManualReleaseWorkflowContractTest(unittest.TestCase):
         mount = self.step("Mount RAM-backed build dir (tmpfs)")
         heaps = self.step("Bridle daemon heaps + generator forks for the 16 GB runner")
 
-        self.assertIn('$((24*1024*1024))', mount)
-        self.assertIn('(<24 GiB)', mount)
+        # The gate must cover the tmpfs cap plus the Phase-2 heap: the atomic
+        # publish holds the old DB and its candidate at once, so a 20 GiB tmpfs
+        # can pin ~15.2 GiB while the 12 GiB heap is live.
+        self.assertIn('size=20G', mount)
+        self.assertIn('$((30*1024*1024))', mount)
+        self.assertIn('(<30 GiB)', mount)
         self.assertIn('generatorHeap=8g', heaps)
         self.assertIn('linkerHeap=12g', heaps)
 

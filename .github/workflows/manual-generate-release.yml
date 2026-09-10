@@ -607,13 +607,16 @@ jobs:
       #
       # Guards so a release build never falls and never endangers the other
       # repos' runners that share this host:
-      #   • size=16G is a HARD cap — a runaway write fails THIS job cleanly with
-      #     ENOSPC instead of OOM-killing the host. Peak is ~11.8 GiB during the
-      #     DB compression step (seforim.db 7.15G + seforim.db.zst 1.3G +
-      #     buildstate 0.99G + buildstate.zst ~0.5G + lines_snapshot.db.zst
-      #     ~1.0G coexist), so 16G leaves ~4 GiB of headroom.
+      #   • size=20G is a HARD cap — a runaway write fails THIS job cleanly with
+      #     ENOSPC instead of OOM-killing the host. The peak is NOT the DB
+      #     compression step (~11.8 GiB) but the atomic publish, which holds the
+      #     old DB and the new candidate at the same time: seforim.db 6.75G +
+      #     candidate 6.75G + siblings ~1.7G (seforim.db.zst, buildstate,
+      #     buildstate.zst, lines_snapshot.db.zst) = ~15.2 GiB. 16G left only
+      #     79 MiB short of that on 2026-09-10 and DbPublish refused the
+      #     replace; 20G restores ~4.8 GiB of headroom as the DB keeps growing.
       #   • Preflight ABORTS before any work if another Runner.Worker is active
-      #     or MemAvailable < 24 GiB — never share the box, never start tight. A
+      #     or MemAvailable < 30 GiB — never share the box, never start tight. A
       #     clean abort + rerun beats a mid-build OOM, which is the real "fall".
       #   • A stale mount from a canceled run is released in a pre-checkout step.
       - name: Mount RAM-backed build dir (tmpfs)
@@ -646,19 +649,21 @@ jobs:
             exit 1
           fi
 
-          # Peak need is ~24 GiB (12 GiB Phase-2 heap + ~7 GiB DB on tmpfs +
-          # Gradle + base). Demand a near-idle box up front rather than risk a
-          # late OOM mid-build. Other generator forks remain capped at 8 GiB.
+          # Peak need is ~29 GiB (12 GiB Phase-2 heap + ~15.2 GiB tmpfs at the
+          # atomic publish + Gradle + base). Demand a near-idle box up front
+          # rather than risk a late OOM mid-build. The old 24 GiB gate was
+          # calibrated against a single ~7 GiB DB copy and understated the
+          # publish, which holds two. Other generator forks stay capped at 8 GiB.
           AVAIL_KB=$(awk '/MemAvailable/{print $2}' /proc/meminfo)
           echo "MemAvailable: $((AVAIL_KB/1024/1024)) GiB"
-          if [ "$AVAIL_KB" -lt $((24*1024*1024)) ]; then
-            echo "::error::Only $((AVAIL_KB/1024/1024)) GiB available (<24 GiB). Aborting before work to avoid an OOM."
+          if [ "$AVAIL_KB" -lt $((30*1024*1024)) ]; then
+            echo "::error::Only $((AVAIL_KB/1024/1024)) GiB available (<30 GiB). Aborting before work to avoid an OOM."
             exit 1
           fi
 
           # Mount. uid/gid = the runner user so the build can write without sudo.
           mkdir -p "$BUILD"
-          sudo mount -t tmpfs -o size=16G,nr_inodes=1m,uid="$(id -u)",gid="$(id -g)",mode=0755 tmpfs "$BUILD"
+          sudo mount -t tmpfs -o size=20G,nr_inodes=1m,uid="$(id -u)",gid="$(id -g)",mode=0755 tmpfs "$BUILD"
           echo "tmpfs mounted on build/:"
           findmnt "$BUILD" || df -h "$BUILD"
 
@@ -1947,7 +1952,7 @@ jobs:
           #     SQLite page cache plus row buffers, well under the ceiling, and
           #     ~1 GB of zstd L19 job buffers) on top of the ~9.5 GiB the tmpfs
           #     build/ pins (seforim.db 7.15 GiB + buildstate + snapshot) and
-          #     the background buildstate upload, inside the ≥24 GiB this job
+          #     the background buildstate upload, inside the ≥30 GiB this job
           #     demanded before it mounted that tmpfs.
           #   Disk — each concurrent anchor owns its extracted 7.15 GiB prev DB
           #     plus the verify copy the CLI makes from it, so ~31 GiB for two
