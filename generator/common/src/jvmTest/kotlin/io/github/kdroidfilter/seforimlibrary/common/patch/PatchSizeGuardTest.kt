@@ -19,30 +19,30 @@ class PatchSizeGuardTest {
 
     @Test
     fun `the v27 shape is rejected`() {
-        // 3 GB of patch against a ~4 GB seforim.db — issue #1211.
-        val d = PatchSizeGuard.decide(patchUncompressedSize = 3_000_000_000L, newDbSize = dbSize)
+        // The real v27 fan ranged from 31.7% to 40.3% of the new DB.
+        val d = PatchSizeGuard.decide(patchUncompressedSize = 1_268_000_000L, newDbSize = dbSize)
         assertFalse(d.publish)
-        assertTrue(d.describe().contains("limit is 50.0%"))
+        assertTrue(d.describe().contains("limit is 30.0%"))
     }
 
     @Test
     fun `exactly at the limit still publishes`() {
-        val d = PatchSizeGuard.decide(patchUncompressedSize = 2_000_000_000L, newDbSize = dbSize)
+        val d = PatchSizeGuard.decide(patchUncompressedSize = 1_200_000_000L, newDbSize = dbSize)
         assertTrue(d.publish)
         assertEquals(PatchSizeGuard.DEFAULT_MAX_DELTA_UNCOMPRESSED_RATIO, d.maxRatio)
     }
 
     @Test
     fun `one byte over the limit is rejected`() {
-        assertFalse(PatchSizeGuard.decide(2_000_000_001L, dbSize).publish)
+        assertFalse(PatchSizeGuard.decide(1_200_000_001L, dbSize).publish)
     }
 
     @Test
     fun `the default is the server-side safety net, looser than the updater's heavy mark`() {
-        assertEquals(0.5, PatchSizeGuard.DEFAULT_MAX_DELTA_UNCOMPRESSED_RATIO)
+        assertEquals(0.30, PatchSizeGuard.DEFAULT_MAX_DELTA_UNCOMPRESSED_RATIO)
         // The updater calls 0.25 "heavy" and lets the user choose; the guard
         // only removes deltas no client should ever be handed.
-        assertTrue(PatchSizeGuard.decide(1_200_000_000L, dbSize).publish)
+        assertTrue(PatchSizeGuard.decide(1_100_000_000L, dbSize).publish)
     }
 
     @Test

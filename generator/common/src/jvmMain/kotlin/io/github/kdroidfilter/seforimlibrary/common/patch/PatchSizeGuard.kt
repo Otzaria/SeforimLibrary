@@ -11,7 +11,9 @@ package io.github.kdroidfilter.seforimlibrary.common.patch
  */
 object PatchSizeGuard {
 
-    const val DEFAULT_MAX_DELTA_UNCOMPRESSED_RATIO: Double = 0.5
+    // v27's pathological patches were 31.7%–40.3% of the new DB, so 0.5
+    // would have allowed the exact incident this guard exists to prevent.
+    const val DEFAULT_MAX_DELTA_UNCOMPRESSED_RATIO: Double = 0.30
 
     /** First token of the `<out>.unpatchable` marker written when this guard fires. */
     const val MARKER_REASON_TOKEN: String = "oversized-delta"
