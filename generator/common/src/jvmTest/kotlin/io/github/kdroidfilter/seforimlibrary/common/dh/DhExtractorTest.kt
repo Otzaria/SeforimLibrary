@@ -161,4 +161,77 @@ class DhExtractorTest {
             DhExtractor.extract("עד  סוף\tהאשמורה – שליש הלילה", Format.DASH)?.display,
         )
     }
+
+    // ── BOLD_LEAD format (Maharsha, Chiddushei Aggadot) ─────────────────────
+
+    @Test
+    fun `lead-bold dibbur runs from the bold word to the closing marker`() {
+        assertEquals(
+            "אין שלום",
+            key("<b>אין</b> שלום כו'. הכא ניחא דמשמע ליה דמשפט ושלום איירי", Format.BOLD_LEAD),
+        )
+        assertEquals(
+            "אין שלום",
+            DhExtractor.extract("<b>אין</b> שלום כו'. הכא ניחא", Format.BOLD_LEAD)?.display,
+        )
+    }
+
+    @Test
+    fun `lead-bold accepts וכו and וגו with a Hebrew geresh`() {
+        assertEquals("וכתיב ואצוה אתכם", key("<b>וכתיב</b> ואצוה אתכם וגו׳. לפי פשוטו", Format.BOLD_LEAD))
+        assertEquals("אמר רא למרק ב חזיונות", key("<b>אמר</b> ר\"א למרק ב' חזיונות וכו'. סיפא דקרא", Format.BOLD_LEAD))
+    }
+
+    @Test
+    fun `lead-bold yields nothing without a marker, or when the marker is too far`() {
+        assertNull(key("<b>אין</b> שלום. הכא ניחא דמשמע ליה", Format.BOLD_LEAD))
+        assertNull(
+            key(
+                "<b>אין</b> שלום אמר ה' לרשעים ומשפט ושלום ואמת בשעריכם תשפטו ולא תשקרו כו'. ביאור",
+                Format.BOLD_LEAD,
+            ),
+        )
+    }
+
+    @Test
+    fun `lead-bold stops at a sentence break before the marker`() {
+        // Sha'arei Korban: the bold is the whole dibbur; the כו' belongs to the comment.
+        assertNull(key("<b>האיש מקדש.</b> וידא אמר דא כו' דתנן", Format.BOLD_LEAD))
+        assertNull(key("<b>רש\"י ד\"ה בסייף.</b> כדי שיהא שמאלו של עובד כוכבים כו' ולא", Format.BOLD_LEAD))
+    }
+
+    @Test
+    fun `lead-bold needs commentary text after the marker`() {
+        assertNull(key("<b>אין</b> שלום כו'.", Format.BOLD_LEAD))
+        assertNull(key("<b>אין</b> שלום כו'", Format.BOLD_LEAD))
+        assertNull(key("<b>אין</b> שלום כו'. &nbsp;", Format.BOLD_LEAD))
+        assertNull(key("<b>אין</b> שלום כו'. <b>דבר אחר</b>", Format.BOLD_LEAD))
+        assertNull(key("<b>אין</b> שלום כו'. <small>פירוש</small>", Format.BOLD_LEAD))
+    }
+
+    @Test
+    fun `lead-bold does not fire on a plain bold dibbur`() {
+        assertNull(key("<b>מאימתי קורין.</b> משעה שהכהנים נכנסין לאכול", Format.BOLD_LEAD))
+    }
+
+    @Test
+    fun `marker inside the original bold dibbur never shortens it`() {
+        val line = "<b>לעולם יכנס אדם בכי טוב ויצא כו' </b> מפורש פרק קמא דתענית"
+
+        assertNull(key(line, Format.BOLD_LEAD))
+        assertEquals("לעולם יכנס אדם בכי טוב ויצא כו", key(line, Format.BOLD))
+    }
+
+    @Test
+    fun `lead-bold never crosses an HTML segment`() {
+        assertNull(key("<b>אין</b> שלום <small>כו'. פירוש</small>", Format.BOLD_LEAD))
+        assertNull(key("<b>אין</b> שלום <br> כו'. פירוש", Format.BOLD_LEAD))
+        assertNull(key("<b>אין</b> שלום <b>נוסף</b> כו'. פירוש", Format.BOLD_LEAD))
+    }
+
+    @Test
+    fun `lead-bold never crosses punctuation into commentary`() {
+        assertNull(key("<b>אין</b> שלום: ועוד ביאור כו'. המשך", Format.BOLD_LEAD))
+        assertNull(key("<b>אין:</b> שלום כו'. המשך", Format.BOLD_LEAD))
+    }
 }
