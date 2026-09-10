@@ -673,7 +673,11 @@ internal class SefariaBookPayloadReader(
                     output += linePrefix + cleaned
                     if (cleanShifts != null) {
                         if (cleaned != content) {
-                            cleanShifts[output.size - 1] = CLEAN_MODIFIED
+                            // Keep the char-offset gate and the generated-prefix
+                            // length in one value: anchors reject every negative
+                            // value, while the line-key path can still strip the
+                            // prefix from cleaned content.
+                            cleanShifts[output.size - 1] = cleanedLineShift(linePrefix.length)
                         } else if (linePrefix.isNotEmpty()) {
                             cleanShifts[output.size - 1] = linePrefix.length
                         }

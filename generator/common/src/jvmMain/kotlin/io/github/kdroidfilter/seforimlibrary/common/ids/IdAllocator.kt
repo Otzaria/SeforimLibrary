@@ -17,8 +17,6 @@ import java.nio.file.Path
  * Contract: for a given natural key, [bookId] / [lineId] / etc. MUST return the
  * same value across builds. New natural keys get a fresh id from a per-table
  * monotonic counter. Implementations are thread-safe.
- *
- * See DELTA_UPDATE_PLAN.md §3.3 and §3.5.
  */
 interface IdAllocator {
 
@@ -49,6 +47,13 @@ interface IdAllocator {
     // ─── Composite-keyed tables ────────────────────────────────────────────────
     fun bookId(sourceName: String, canonicalHeTitle: String): Long
     fun lineId(bookId: Long, contentHash: ByteArray, occurrenceIdx: Int): Long
+
+    /**
+     * As [lineId], but reuses the id stored under [legacy] when the new-scheme
+     * key is unknown. Transition shim — see [LegacyLineKey].
+     */
+    fun lineId(bookId: Long, contentHash: ByteArray, occurrenceIdx: Int, legacy: LegacyLineKey?): Long =
+        lineId(bookId, contentHash, occurrenceIdx)
     fun tocEntryId(bookId: Long, ancestorPath: String): Long
     fun altTocStructureId(bookId: Long, key: String): Long
     fun altTocEntryId(structureId: Long, ancestorPath: String): Long

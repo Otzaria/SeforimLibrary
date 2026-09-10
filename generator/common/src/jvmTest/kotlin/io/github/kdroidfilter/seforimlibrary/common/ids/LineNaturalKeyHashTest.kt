@@ -8,65 +8,49 @@ import kotlin.test.assertNotEquals
 class LineNaturalKeyHashTest {
 
     @Test
-    fun `heRef key is stable across content reformatting`() {
-        // Same heRef, different rendered prefix: should yield the same hash.
-        val a = IdAllocatorBindings.lineNaturalKeyHash(
-            content = "(א) בְּרֵאשִׁית בָּרָא אֱלֹהִים",
-            heRef = "Genesis 1:1",
+    fun `hash ignores heRef entirely`() {
+        // The v27 regression (issue #1211): a heRef-only edit must not move the key.
+        val content = "בְּרֵאשִׁית בָּרָא אֱלֹהִים"
+        assertEquals(
+            IdAllocatorBindings.lineNaturalKeyHash(content).toList(),
+            IdAllocatorBindings.lineNaturalKeyHash(content).toList(),
         )
-        val b = IdAllocatorBindings.lineNaturalKeyHash(
-            content = "(ב) בְּרֵאשִׁית בָּרָא אֱלֹהִים", // prefix shifted by an insertion
-            heRef = "Genesis 1:1",                       // citation unchanged
+        assertNotEquals(
+            LegacyLineKey.hash(content, "בראשית א׳:א׳").toList(),
+            LegacyLineKey.hash(content, "בראשית, א׳:א׳").toList(),
+            "the legacy key was heRef-sensitive — that is what this change removes",
         )
-        assertEquals(a.toList(), b.toList(), "heRef-keyed hash must ignore rendered content")
     }
 
     @Test
-    fun `distinct heRef produces distinct hash`() {
-        val verse1 = IdAllocatorBindings.lineNaturalKeyHash("foo", "Genesis 1:1")
-        val verse2 = IdAllocatorBindings.lineNaturalKeyHash("foo", "Genesis 1:2")
-        assertNotEquals(verse1.toList(), verse2.toList())
-    }
-
-    @Test
-    fun `content-hash fallback when heRef is null`() {
-        val headingA = IdAllocatorBindings.lineNaturalKeyHash("<h1>בראשית</h1>", null)
-        val headingB = IdAllocatorBindings.lineNaturalKeyHash("<h1>בראשית</h1>", null)
-        assertEquals(headingA.toList(), headingB.toList())
-
-        val differentContent = IdAllocatorBindings.lineNaturalKeyHash("<h2>פרק א</h2>", null)
-        assertNotEquals(headingA.toList(), differentContent.toList())
-    }
-
-    @Test
-    fun `ref and content namespaces don't collide`() {
-        // If "REF:foo" and "CT:foo" both hashed naively, they could collide.
-        // The discriminator prefix prevents that.
-        val viaRef = IdAllocatorBindings.lineNaturalKeyHash("anything", "foo")
-        val viaContent = IdAllocatorBindings.lineNaturalKeyHash("foo", null)
-        assertNotEquals(viaRef.toList(), viaContent.toList())
+    fun `distinct content produces distinct hash`() {
+        assertNotEquals(
+            IdAllocatorBindings.lineNaturalKeyHash("<h1>בראשית</h1>").toList(),
+            IdAllocatorBindings.lineNaturalKeyHash("<h2>פרק א</h2>").toList(),
+        )
     }
 
     @Test
     fun `hash is always 20 bytes`() {
-        assertEquals(20, IdAllocatorBindings.lineNaturalKeyHash("x", "y").size)
-        assertEquals(20, IdAllocatorBindings.lineNaturalKeyHash("x", null).size)
+        assertEquals(20, IdAllocatorBindings.lineNaturalKeyHash("x").size)
+        assertEquals(20, IdAllocatorBindings.lineNaturalKeyHash("").size)
+        assertEquals(20, LegacyLineKey.hash("x", "y").size)
     }
 
     @Test
-    fun `empty content with heRef still keyed by heRef`() {
-        val a = IdAllocatorBindings.lineNaturalKeyHash("", "Genesis 1:1")
-        val b = IdAllocatorBindings.lineNaturalKeyHash("some text", "Genesis 1:1")
-        assertEquals(a.toList(), b.toList())
+    fun `heading lines keep the pre-change key`() {
+        // Lines without an heRef were already keyed on "CT:<content>"; keeping that
+        // shape means the change churns only the ref-bearing lines.
+        assertEquals(
+            LegacyLineKey.hash("<h1>בראשית</h1>", null).toList(),
+            IdAllocatorBindings.lineNaturalKeyHash("<h1>בראשית</h1>").toList(),
+        )
     }
 
     @Test
-    fun `Otzaria-style raw content path is byte-stable across calls`() {
-        val a = IdAllocatorBindings.lineNaturalKeyHash("<p>שלום</p>", null)
-        val b = IdAllocatorBindings.lineNaturalKeyHash("<p>שלום</p>", null)
-        assertEquals(a.toList(), b.toList())
-        // And differs from the legacy normalisedContentHash (which doesn't prefix).
-        val legacy = IdAllocatorBindings.normalisedContentHash("<p>שלום</p>")
-        assertFalse(a.toList() == legacy.toList(), "new hash must be namespaced (CT: prefix)")
+    fun `namespaced apart from the Otzaria raw content hash`() {
+        val a = IdAllocatorBindings.lineNaturalKeyHash("<p>שלום</p>")
+        val raw = IdAllocatorBindings.normalisedContentHash("<p>שלום</p>")
+        assertFalse(a.toList() == raw.toList(), "new hash must stay namespaced (CT: prefix)")
     }
 }

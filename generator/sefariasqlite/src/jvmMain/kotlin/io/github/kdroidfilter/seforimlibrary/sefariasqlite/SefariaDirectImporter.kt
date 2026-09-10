@@ -7,6 +7,8 @@ import io.github.kdroidfilter.seforimlibrary.common.changes.TouchedBookDetector
 import io.github.kdroidfilter.seforimlibrary.common.ids.IdAllocator
 import io.github.kdroidfilter.seforimlibrary.common.ids.IdAllocatorBindings
 import io.github.kdroidfilter.seforimlibrary.common.ids.InMemoryIdAllocator
+import io.github.kdroidfilter.seforimlibrary.common.ids.LegacyLineKey
+import io.github.kdroidfilter.seforimlibrary.common.ids.LineOccurrenceCounter
 import io.github.kdroidfilter.seforimlibrary.common.reports.GeneratorReport
 import io.github.kdroidfilter.seforimlibrary.core.models.Author
 import io.github.kdroidfilter.seforimlibrary.core.models.Book
@@ -198,14 +200,10 @@ class SefariaDirectImporter(
 
         // Per-(bookId, contentHash) occurrence counter, so identical lines within
         // the same book still receive distinct stable ids.
-        val lineOccurrenceByBook = ConcurrentHashMap<Long, ConcurrentHashMap<Long, Int>>()
-        fun nextLineOccurrence(bookId: Long, contentHash: ByteArray): Int {
-            // contentHash key: lossy 64-bit hash is enough since collisions inside a
-            // single book are vanishingly rare; we only need a per-book counter.
-            val hashKey = contentHash.fold(0L) { acc, b -> (acc shl 5) - acc + b.toLong() }
-            val map = lineOccurrenceByBook.computeIfAbsent(bookId) { ConcurrentHashMap() }
-            return map.compute(hashKey) { _, v -> (v ?: -1) + 1 }!!
-        }
+        val lineOccurrences = LineOccurrenceCounter()
+        // Transition shim (see LegacyLineKey): the legacy scheme counted
+        // occurrences of content+heRef, so it needs its own counter.
+        val legacyLineOccurrences = LineOccurrenceCounter()
 
         val lineKeyToId = ConcurrentHashMap<Pair<String, Int>, Long>()
         val lineIdToBookId = ConcurrentHashMap<Long, Long>()
@@ -253,6 +251,8 @@ class SefariaDirectImporter(
                     "${precomputed.lineCount} entries for ${payload.lines.size} lines"
             }
             val lineKeyHashes = precomputed.lineKeyHashes
+                ?: error("Payload '${payload.heTitle}' precompute was already released")
+            val legacyLineKeyHashes = precomputed.legacyLineKeyHashes
                 ?: error("Payload '${payload.heTitle}' precompute was already released")
             val lineCharCounts = precomputed.lineCharCounts
                 ?: error("Payload '${payload.heTitle}' precompute was already released")
@@ -369,14 +369,13 @@ class SefariaDirectImporter(
 
             payload.lines.forEachIndexed { idx, content ->
                 val refEntry = refsByLineIndex[idx]
-                // Prefers Sefaria's stable citation address (heRef) as natural key
-                // when available — survives Sefaria's verse-prefix renumbering
-                // (DELTA_UPDATE_PLAN.md §2.1). Falls back to a content hash for
-                // headings / structural lines that have no heRef. Computed on the
-                // parse worker; the array is handed to the allocator as-is.
+                // Keyed on the raw segment only — neither heRef nor the generated
+                // prefix. Both hashes come from the parse worker, used as-is.
                 val contentHash = lineKeyHashes[idx]
-                val occurrence = nextLineOccurrence(bookId, contentHash)
-                val lineId = allocator.lineId(bookId, contentHash, occurrence)
+                val occurrence = lineOccurrences.next(bookId, contentHash)
+                val legacyHash = legacyLineKeyHashes[idx]
+                val legacy = LegacyLineKey(legacyHash, legacyLineOccurrences.next(bookId, legacyHash))
+                val lineId = allocator.lineId(bookId, contentHash, occurrence, legacy)
                 val lineCharCount = lineCharCounts[idx]
                 lineBatch += Line(
                     id = lineId,

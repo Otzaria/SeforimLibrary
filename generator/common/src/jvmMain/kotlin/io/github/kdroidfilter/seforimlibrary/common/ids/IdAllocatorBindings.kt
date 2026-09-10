@@ -18,8 +18,6 @@ import java.util.concurrent.ConcurrentHashMap
  * the row once and returns the same id. This relies on repo `*WithId` methods
  * using `ON CONFLICT DO NOTHING` for lookup tables, and on the existing
  * `entity.id > 0` short-circuit for book/line/tocEntry/altToc.
- *
- * See DELTA_UPDATE_PLAN.md §3.5.
  */
 class IdAllocatorBindings(
     val allocator: IdAllocator,
@@ -204,21 +202,16 @@ class IdAllocatorBindings(
         /**
          * Builds the 20-byte content-hash slot of a line's natural key.
          *
-         * When a Sefaria-style stable citation reference is available (heRef
-         * like "Genesis 1:1"), we hash `"REF:$ref"` so the natural key is
-         * decoupled from the rendered content — Sefaria's pipeline auto-
-         * generates verse prefixes `(א), (ב), …` that mutate the rendered
-         * content of every following verse on a head-insert. By keying on
-         * heRef we keep the line id stable across those reformatting passes
-         * (see DELTA_UPDATE_PLAN.md §2.1 + PHASE1_VALIDATION.md Test C).
+         * Content only: heRef is a rendered label that a formatting pass can
+         * rewrite for a whole corpus at once, and keying on it renumbered every
+         * line of every simple-schema book in v27 (issue #1211). Lines that
+         * repeat inside a book are separated by the occurrence index instead.
          *
-         * Otzaria lines and Sefaria heading lines fall back to a raw content
-         * hash since they have no stable citation address.
+         * [content] must be the RAW segment: a generated prefix ("(א) ", a daf
+         * label) shifts on a neighbour's insert and would churn ids again.
          */
-        fun lineNaturalKeyHash(content: String, heRef: String?): ByteArray {
-            val prefixed = if (heRef != null) "REF:$heRef" else "CT:$content"
-            return MessageDigest.getInstance("SHA-1").digest(prefixed.toByteArray(Charsets.UTF_8))
-        }
+        fun lineNaturalKeyHash(content: String): ByteArray =
+            MessageDigest.getInstance("SHA-1").digest("CT:$content".toByteArray(Charsets.UTF_8))
 
         /**
          * sha1 of the line content, used as part of the natural key for `line`.
