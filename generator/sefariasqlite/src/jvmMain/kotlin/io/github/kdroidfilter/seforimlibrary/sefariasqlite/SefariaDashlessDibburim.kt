@@ -1,6 +1,7 @@
 package io.github.kdroidfilter.seforimlibrary.sefariasqlite
 
 import co.touchlab.kermit.Logger
+import io.github.kdroidfilter.seforimlibrary.common.dh.DhExtractor
 import java.util.concurrent.ConcurrentHashMap
 
 /**
@@ -50,9 +51,17 @@ internal object SefariaDashlessDibburim {
         if (words !in 1..MAX_DIBBUR_WORDS) return line
         val comment = line.substring(cut + 2)
         if (comment.isBlank()) return line
+        val separated = dibbur + SEPARATOR + comment
+        // Keep this source repair aligned with the downstream index. In
+        // particular, structural markers such as `מתני'` and `(הג"ה` must not
+        // be rewritten merely because they happen to end with a period.
+        if (DhExtractor.extract(separated, DhExtractor.Format.DASH) == null) return line
         separatedByBook.merge(bookHeTitle, 1, Int::plus)
-        return dibbur + SEPARATOR + comment
+        return separated
     }
+
+    /** Starts a fresh per-import summary; this object also serves reusable readers in the same JVM. */
+    fun resetSummary() = separatedByBook.clear()
 
     fun logSummary(logger: Logger) {
         for (title in bookHeTitles) {

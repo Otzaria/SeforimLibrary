@@ -48,6 +48,15 @@ class SefariaDashlessDibburimTest {
     }
 
     @Test
+    fun `structural markers from the real corpus are not rewritten as dibburim`() {
+        // Verbatim from Tosafot on Bava Batra 139b and 163b in seforim.db.
+        val mishnah = "מתני'. והבנות יזונו. מה שהזכיר רשב\"ם"
+        val gloss = "(הג\"ה. שיטה ומחצה. נראה ליישב כגון שחתומים עדים"
+        assertEquals(mishnah, SefariaDashlessDibburim.separate("תוספות על בבא בתרא", mishnah))
+        assertEquals(gloss, SefariaDashlessDibburim.separate("תוספות על בבא בתרא", gloss))
+    }
+
+    @Test
     fun `books outside the list are never changed`() {
         val line = "מאימתי קורין. משעה שהכהנים נכנסין לאכול"
         assertEquals(line, SefariaDashlessDibburim.separate("רש\"י על ברכות", line))

@@ -51,6 +51,7 @@ class SefariaDirectImporter(
         private set
 
     suspend fun import() = coroutineScope {
+        SefariaDashlessDibburim.resetSummary()
         val dbRoot = findDatabaseExportRoot(exportRoot)
         val jsonDir = dbRoot.resolve("json")
         val schemaDir = dbRoot.resolve("schemas")
