@@ -51,6 +51,7 @@ class SefariaDirectImporter(
         private set
 
     suspend fun import() = coroutineScope {
+        SefariaDashlessDibburim.resetSummary()
         val dbRoot = findDatabaseExportRoot(exportRoot)
         val jsonDir = dbRoot.resolve("json")
         val schemaDir = dbRoot.resolve("schemas")
@@ -448,6 +449,7 @@ class SefariaDirectImporter(
         }
 
         logger.i { "Inserted all books and lines" }
+        SefariaDashlessDibburim.logSummary(logger)
 
         // Build the title→bookId index in two global phases (all primaries, then
         // all aliases) so a primary title always beats any alias regardless of
