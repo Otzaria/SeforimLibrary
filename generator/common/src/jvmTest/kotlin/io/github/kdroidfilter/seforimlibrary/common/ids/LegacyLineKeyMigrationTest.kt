@@ -1,11 +1,13 @@
 package io.github.kdroidfilter.seforimlibrary.common.ids
 
 import io.github.kdroidfilter.seforimlibrary.common.buildstate.BuildStateReader
+import io.github.kdroidfilter.seforimlibrary.common.buildstate.BuildStateSnapshot
 import io.github.kdroidfilter.seforimlibrary.common.buildstate.LineKey
 import org.junit.Rule
 import org.junit.Test
 import org.junit.rules.TemporaryFolder
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertNotEquals
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
@@ -118,6 +120,59 @@ class LegacyLineKeyMigrationTest {
             listOf("ר׳ א", "ר׳ ב", "ר׳ ג"),
         )
         assertEquals(3, ids.toSet().size, "identical content must still get distinct ids")
+    }
+
+    /**
+     * Review finding on PR #28: line A (heRef, content X) and line B (no heRef, content X)
+     * were seeded as `REF:A#0` and `CT:X#0`. Under the new key A takes `CT:X#0` — B's old
+     * id — and B's legacy key is that very `CT:X#0`; the shim must not hand the id out twice.
+     */
+    @Test
+    fun `legacy hit on an id another line already took this build gets a fresh id`() {
+        val statePath = tmp.newFolder().toPath().resolve("build_state.db")
+        val lines = listOf("אמן", "אמן")
+        val heRefs = listOf<String?>("ר׳ א", null)
+
+        val build1 = InMemoryIdAllocator.load(null)
+        val bookId = build1.bookId("Sefaria", "ספר")
+        val legacyOcc = LineOccurrenceCounter()
+        val legacyIds = lines.mapIndexed { idx, text ->
+            val h = LegacyLineKey.hash(text, heRefs[idx])
+            build1.lineId(bookId, h, legacyOcc.next(bookId, h))
+        }
+        assertNotEquals(legacyIds[0], legacyIds[1])
+        build1.snapshotTo(statePath)
+
+        val build2 = InMemoryIdAllocator.load(statePath)
+        val newIds = allocate(build2, build2.bookId("Sefaria", "ספר"), lines, heRefs)
+        assertEquals(2, newIds.toSet().size, "two lines must never share an id")
+        assertEquals(legacyIds[1], newIds[0], "A now owns CT:X#0 and inherits B's old id")
+        assertEquals(1, build2.legacyLineKeyCollisions())
+        assertEquals(0, build2.legacyLineKeysMigrated())
+
+        val statePath2 = tmp.newFolder().toPath().resolve("build_state.db")
+        build2.snapshotTo(statePath2)
+        val migrated = BuildStateReader().read(statePath2)
+        assertEquals(2, migrated.lines.size)
+        assertEquals(2, migrated.lines.values.toSet().size, "no id may sit under two keys")
+
+        // The next build is stable: same input, same ids, nothing left to migrate.
+        val build3 = InMemoryIdAllocator.load(statePath2)
+        assertEquals(newIds, allocate(build3, build3.bookId("Sefaria", "ספר"), lines, heRefs))
+        assertEquals(0, build3.legacyLineKeyCollisions())
+    }
+
+    @Test
+    fun `a seed that files one id under two keys fails the build instead of dropping a line`() {
+        val bookId = 7L
+        val hashA = IdAllocatorBindings.lineNaturalKeyHash("א")
+        val hashB = IdAllocatorBindings.lineNaturalKeyHash("ב")
+        val corrupt = BuildStateSnapshot.empty().copy(
+            lines = mapOf(LineKey(bookId, hashA, 0) to 5L, LineKey(bookId, hashB, 0) to 5L),
+        )
+        val allocator = InMemoryIdAllocator.fromSnapshot(corrupt)
+        allocator.lineId(bookId, hashA, 0)
+        assertFailsWith<IllegalStateException> { allocator.lineId(bookId, hashB, 0) }
     }
 
     @Test

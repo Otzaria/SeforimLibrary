@@ -139,8 +139,11 @@ The allocator's natural keys are :
 > `LegacyLineKey` is the one-build migration shim: on a miss the allocator
 > retries the pre-#1211 key (`"REF:"+heRef`, else `"CT:"+renderedContent`)
 > for **every** line and re-files the id under the new key, so the snapshot
-> it writes is fully migrated. Delete it once no build_state in circulation
-> predates the change.
+> it writes is fully migrated. The shim reads only the *seed* snapshot, and an
+> id already issued to another line this build is never handed out again
+> (`legacyLineKeyCollisions` in the build summary) — a line whose seed id was
+> taken gets a fresh one rather than a duplicate. Delete the shim once no
+> build_state in circulation predates the change.
 
 ### 1.2 The full producer pipeline
 

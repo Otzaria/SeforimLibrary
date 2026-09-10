@@ -98,9 +98,17 @@ class InMemoryIdAllocator private constructor(
     /** Line keys the seed build_state carried in — 0 means there was nothing to migrate. */
     private val seedLineCount: Int = previous.lines.size
 
+    // The shim reads the seed only, never the live `lines` map: a line processed
+    // earlier this build may already have moved or claimed the id it would find.
+    private val seedLines: Map<LineKey, Long> = previous.lines
+
+    // id -> key issued this build. One id per line is the invariant this guards.
+    private val issuedLineIds = ConcurrentHashMap<Long, LineKey>()
+
     // Transition shim counters (see LegacyLineKey); reported by snapshotTo.
     private val legacyLineKeysMigrated = AtomicLong(0)
     private val legacyLineKeyLookups = AtomicLong(0)
+    private val legacyLineKeyCollisions = AtomicLong(0)
 
     /** How many line ids were carried over from a pre-#1211 build_state. */
     fun legacyLineKeysMigrated(): Long = legacyLineKeysMigrated.get()
@@ -110,6 +118,9 @@ class InMemoryIdAllocator private constructor(
 
     /** Lines the shim was consulted for and could not resolve — they got a fresh id. */
     fun legacyLineKeysMissed(): Long = legacyLineKeyLookups.get() - legacyLineKeysMigrated.get()
+
+    /** Legacy hits whose seed id another line had already taken this build — given a fresh id. */
+    fun legacyLineKeyCollisions(): Long = legacyLineKeyCollisions.get()
 
     // ─── Lookup-table accessors ────────────────────────────────────────────────
 
@@ -177,16 +188,24 @@ class InMemoryIdAllocator private constructor(
         val key = LineKey(bookId, contentHash, occurrenceIdx)
         lines[key]?.let {
             reusedCount.getValue(IdTable.LINE).incrementAndGet()
-            return it
+            return claimLineId(key, it)
         }
         migrateLegacyLineKey(bookId, key, legacy)?.let {
             reusedCount.getValue(IdTable.LINE).incrementAndGet()
             return it
         }
-        return lines.computeIfAbsent(key) {
+        val fresh = lines.computeIfAbsent(key) {
             freshCount.getValue(IdTable.LINE).incrementAndGet()
             counters.getValue(IdTable.LINE).getAndIncrement()
         }
+        return claimLineId(key, fresh)
+    }
+
+    /** Records that [id] belongs to [key] this build; a second key for the same id is a corrupt seed. */
+    private fun claimLineId(key: LineKey, id: Long): Long {
+        val holder = issuedLineIds.putIfAbsent(id, key) ?: return id
+        check(holder == key) { "line id $id is filed under two keys: $holder and $key" }
+        return id
     }
 
     /**
@@ -199,11 +218,23 @@ class InMemoryIdAllocator private constructor(
         val legacyKey = LineKey(bookId, legacy.contentHash, legacy.occurrenceIdx)
         if (legacyKey == newKey) return null
         legacyLineKeyLookups.incrementAndGet()
-        val id = lines.remove(legacyKey) ?: return null
+        val id = seedLines[legacyKey] ?: return null
+        // The seed id may already be live under a different new key (same content, a
+        // shifted occurrence index). Handing it out twice would drop a line on insert.
+        val holder = issuedLineIds.putIfAbsent(id, newKey)
+        if (holder != null && holder != newKey) {
+            legacyLineKeyCollisions.incrementAndGet()
+            return null
+        }
         legacyLineKeysMigrated.incrementAndGet()
-        // remove + putIfAbsent, never a bare put: it is what stops one id from
-        // ending up filed under both keys in the written snapshot.
-        return lines.putIfAbsent(newKey, id) ?: id
+        lines.remove(legacyKey, id)
+        val existing = lines.putIfAbsent(newKey, id)
+        if (existing != null && existing != id) {
+            // Raced with a direct hit on newKey: yield to it and release our claim.
+            issuedLineIds.remove(id, newKey)
+            return claimLineId(newKey, existing)
+        }
+        return id
     }
 
     override fun tocEntryId(bookId: Long, ancestorPath: String): Long {
@@ -296,6 +327,12 @@ class InMemoryIdAllocator private constructor(
         // future re-add would be classified as `added`, not `unchanged`.
         val liveBookIds = books.values.toHashSet()
         val gcLines = lines.entries.removeIfMatches { it.key.bookId !in liveBookIds }
+        // A book processed this build allocated every line it has; any other key of that
+        // book is a leftover (a legacy key whose id went elsewhere) and must not be reseeded.
+        val touchedBookIds = issuedLineIds.values.mapTo(HashSet()) { it.bookId }
+        val gcStaleLineKeys = lines.entries.removeIfMatches {
+            it.key.bookId in touchedBookIds && issuedLineIds[it.value] != it.key
+        }
         val gcTocs = tocEntries.entries.removeIfMatches { it.key.bookId !in liveBookIds }
         val gcAltStructs = altTocStructures.entries.removeIfMatches { it.key.bookId !in liveBookIds }
         val liveStructureIds = altTocStructures.values.toHashSet()
@@ -306,10 +343,10 @@ class InMemoryIdAllocator private constructor(
         }
         val liveBookKeys = books.keys.toHashSet()
         val gcSourceHashes = mergedSourceHashes.entries.removeIfMatches { it.key !in liveBookKeys }
-        if (gcLines + gcTocs + gcAltStructs + gcAltEntries + gcLinks + gcSourceHashes > 0) {
+        if (gcLines + gcStaleLineKeys + gcTocs + gcAltStructs + gcAltEntries + gcLinks + gcSourceHashes > 0) {
             logger.i {
                 "Phase-8 GC pruned orphan entries: " +
-                    "lines=$gcLines, tocEntries=$gcTocs, " +
+                    "lines=$gcLines, staleLineKeys=$gcStaleLineKeys, tocEntries=$gcTocs, " +
                     "altStructures=$gcAltStructs, altEntries=$gcAltEntries, " +
                     "links=$gcLinks, sourceHashes=$gcSourceHashes"
             }
@@ -351,7 +388,8 @@ class InMemoryIdAllocator private constructor(
         val missed = lookups - migrated
         logger.i {
             "Legacy line-key transition: seed held $seedLineCount line keys; " +
-                "$lookups lines re-keyed, $migrated migrated, $missed given fresh ids"
+                "$lookups lines re-keyed, $migrated migrated, $missed given fresh ids " +
+                "(${legacyLineKeyCollisions.get()} of them because the seed id was already taken)"
         }
         if (missed > lookups * LEGACY_MISS_WARN_FRACTION) {
             logger.w {
