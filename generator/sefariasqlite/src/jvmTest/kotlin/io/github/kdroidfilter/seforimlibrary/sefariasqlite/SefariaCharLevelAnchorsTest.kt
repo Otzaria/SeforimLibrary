@@ -18,6 +18,14 @@ import kotlin.test.assertTrue
 class SefariaCharLevelAnchorsTest {
 
     @Test
+    fun cleanedShiftKeepsPrefixLengthButRemainsInexactForAnchors() {
+        val encoded = cleanedLineShift(4)
+        assertTrue(lineWasModifiedByCleaning(encoded))
+        assertEquals(4, generatedPrefixLength(encoded))
+        assertEquals(0, generatedPrefixLength(CLEAN_MODIFIED))
+    }
+
+    @Test
     fun parsesCharBasedCell() {
         val cell = parseCharLevelCell(
             """{"startChar":4639,"endChar":4657,"versionTitle":"Tzeror Hamor, Warsaw, 1879","language":"he"}"""

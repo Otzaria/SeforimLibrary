@@ -50,10 +50,23 @@ internal data class BookMeta(
     val collectiveTitleEn: String? = null,
 )
 
-/// Marker value in [BookPayload.cleanShiftByLineIndex]: the line's stored
-/// content differs from the raw Sefaria segment (cleanSefariaLine modified
-/// it), so raw char offsets cannot be mapped exactly onto it.
+/// Base encoded value in [BookPayload.cleanShiftByLineIndex] for a line whose
+/// content was modified by cleanSefariaLine and has no generated prefix.
+/// A modified line with a prefix of length N is encoded as `CLEAN_MODIFIED - N`.
 internal const val CLEAN_MODIFIED = -1
+
+/** Encodes "cleaned content, generated prefix of [prefixLength] UTF-16 chars". */
+internal fun cleanedLineShift(prefixLength: Int): Int {
+    require(prefixLength >= 0) { "prefixLength must not be negative: $prefixLength" }
+    return CLEAN_MODIFIED - prefixLength
+}
+
+/** Negative shift values mean raw char offsets are no longer exact. */
+internal fun lineWasModifiedByCleaning(encodedShift: Int): Boolean = encodedShift < 0
+
+/** Recovers the generated-prefix length without conflating it with cleaning. */
+internal fun generatedPrefixLength(encodedShift: Int): Int =
+    if (lineWasModifiedByCleaning(encodedShift)) -(encodedShift + 1) else encodedShift
 
 internal data class BookPayload(
     val heTitle: String,
@@ -97,8 +110,8 @@ internal data class BookPayload(
     val singleVersionTitle: String? = null,
     // Sparse per-line offset bookkeeping for charLevelData mapping:
     //   absent          -> stored content == raw segment, no prefix
-    //   n >= 0          -> stored content == "<prefix of raw-length n>" + raw
-    //   CLEAN_MODIFIED  -> cleanSefariaLine changed the content; offsets unusable
+    //   n >= 0          -> unchanged segment behind a generated prefix of length n
+    //   n < 0           -> cleaned segment; prefix length is -(n + 1), offsets unusable
     val cleanShiftByLineIndex: Map<Int, Int> = emptyMap(),
     // All [versionTitle, versionSource] pairs from merged.json's `versions` array
     // (the versions that CONTRIBUTED to the merge). book_version metadata-only
@@ -223,10 +236,9 @@ internal fun BookPayload.precomputeLineData(): BookPayload {
  * the prefixed text would renumber all of their ids (issue #1211).
  */
 private fun BookPayload.rawSegmentForKey(lineIndex: Int, content: String): String {
-    // CLEAN_MODIFIED (or an out-of-range shift) means the raw segment cannot be
-    // recovered from the stored text; the prefixed content is the best key left.
-    val shift = cleanShiftByLineIndex[lineIndex] ?: return content
-    return if (shift in 1..content.length) content.substring(shift) else content
+    val encodedShift = cleanShiftByLineIndex[lineIndex] ?: return content
+    val prefixLength = generatedPrefixLength(encodedShift)
+    return if (prefixLength in 1..content.length) content.substring(prefixLength) else content
 }
 
 internal data class VersionMeta(

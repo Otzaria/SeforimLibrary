@@ -1,14 +1,20 @@
 package io.github.kdroidfilter.seforimlibrary.sefariasqlite
 
+import co.touchlab.kermit.Logger
 import io.github.kdroidfilter.seforimlibrary.common.ids.IdAllocatorBindings
 import io.github.kdroidfilter.seforimlibrary.common.ids.InMemoryIdAllocator
 import io.github.kdroidfilter.seforimlibrary.common.ids.LegacyLineKey
 import io.github.kdroidfilter.seforimlibrary.common.ids.LineOccurrenceCounter
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.jsonObject
 import java.nio.file.Files
 import kotlin.test.Test
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
 import kotlin.test.assertNotEquals
+import kotlin.test.assertTrue
 
 /**
  * Issue #1211, second half: the importer injects "(א) ", "(ב) "… into
@@ -89,6 +95,43 @@ class LineKeyPrefixStabilityTest {
         assertNotEquals(v1, v2)
         assertEquals("פסוק בית", v1.substring(prefixLen))
         assertEquals("פסוק בית", v2.substring(prefixLen))
+    }
+
+    @Test
+    fun `cleaned lines still ignore a generated prefix`() {
+        val json = Json { ignoreUnknownKeys = true }
+        val reader = SefariaBookPayloadReader(json, Logger.withTag("LineKeyPrefixStabilityTest"))
+        val schema = json.parseToJsonElement(
+            """{"depth":1,"sectionNames":["Paragraph"],"addressTypes":["String"]}""",
+        ).jsonObject
+        fun cleanedLineHash(segments: List<String>): ByteArray {
+            val built = reader.walkTextWithSchema(
+                schemaObj = schema,
+                textElement = JsonArray(segments.map(::JsonPrimitive)),
+                bookHeTitle = "ספר בדיקה",
+                bookEnTitle = "Test Book",
+            )
+            val lineIndex = built.lines.indexOfFirst { "טקסט שנוקה" in it }
+            val encodedShift = requireNotNull(built.cleanShifts[lineIndex])
+            assertTrue(lineWasModifiedByCleaning(encodedShift))
+            assertEquals(4, generatedPrefixLength(encodedShift))
+            val payload = BookPayload(
+                heTitle = "ספר בדיקה", enTitle = "Test Book", categoriesHe = listOf("תנך"),
+                lines = built.lines, refEntries = built.refs, headings = built.headings,
+                authors = emptyList(), description = null, heShortDesc = null,
+                pubDates = emptyList(), altStructures = emptyList(),
+                cleanShiftByLineIndex = built.cleanShifts,
+            ).precomputeLineData()
+            return requireNotNull(payload.precomputed).lineKeyHashes!![lineIndex]
+        }
+
+        // The internal <br> forces cleanSefariaLine to modify this segment.
+        // Inserting a segment before it changes its generated prefix (א -> ב),
+        // but must not change the content key.
+        val before = cleanedLineHash(listOf("טקסט<br>שנוקה", "שורה שנייה"))
+        val after = cleanedLineHash(listOf("שורה חדשה", "טקסט<br>שנוקה", "שורה שנייה"))
+        assertContentEquals(IdAllocatorBindings.lineNaturalKeyHash("טקסט שנוקה"), before)
+        assertContentEquals(before, after, "cleaning must not make the generated prefix part of the key")
     }
 
     @Test
