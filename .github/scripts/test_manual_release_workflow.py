@@ -2544,6 +2544,7 @@ class ManualReleaseWorkflowContractTest(unittest.TestCase):
             "test_verify_relink_recovery_snapshot",
             "test_ci_workflows",
             "test_patch_anchor_schema",
+            "test_library_index_workflow",
             "test_prefetch_patch_anchors",
         ]
         positions = [step.index(suite) for suite in suites]

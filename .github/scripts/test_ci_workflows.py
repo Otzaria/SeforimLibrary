@@ -52,6 +52,7 @@ SELF_HOSTED_JOBS = {
     ("delta-pipeline-dryrun.yml", "dryrun"),
     ("delta-real-diff-arm.yml", "real-diff"),
     ("delta-real-diff-test.yml", "real-diff"),
+    ("build-library-index.yml", "index"),
 }
 
 
