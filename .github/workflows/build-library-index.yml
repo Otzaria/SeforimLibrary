@@ -1,0 +1,598 @@
+name: Build and store the library search index
+
+run-name: library-index ${{ github.event.release.tag_name || inputs.release_tag }}
+
+# Builds the Tantivy search index for a published library release ONCE and
+# stores it on that same release, so the application's own release pipeline
+# downloads it instead of rebuilding it on every build.
+#
+# WHY THIS EXISTS
+# ---------------
+# In Otzaria/otzaria the `Linux full x86_64` job ran `otzaria
+# build-release-index` over the whole library on every release build: run
+# 34779834547 spent 118 minutes there against 12 minutes for the same bundle
+# without the index, and `build_windows_indexed_full` plus `create_release`
+# both wait on it. The index is a pure function of seforim.db and of the
+# search engine, neither of which the application build changes, so it belongs
+# to the library release that produced the database.
+#
+# NOT ON THE RELEASE'S CRITICAL PATH
+# ----------------------------------
+# The trigger is `release: published`, i.e. this starts only once the database
+# release is already public; manual-generate-release.yml never waits for it.
+# The database build and this job are served by the same runner registration
+# (actions.runner.Otzaria-SeforimLibrary on DESKTOP-67HOCOQ-WSL), which takes
+# one job at a time, so a build still in flight simply queues this one behind
+# itself — and the next weekly build queues behind this one, which is why the
+# ceiling below is bounded rather than generous. The LinkerToOtzaria runner
+# shares the same WSL distro and is NOT serialised against this job.
+#
+# PLATFORM-NEUTRAL BY CONSTRUCTION
+# --------------------------------
+# Every indexed document is keyed by IndexingRepository.catalogueOrderKey,
+# which for a seforim.db book is `id:<rowid>` — no filesystem path, no path
+# separator, nothing host-specific. A key IS an absolute path only for a local
+# PDF the user dropped into their own library, which no release build ever
+# sees. The resulting index is valid on Windows, Linux, macOS and Android
+# alike.
+#
+# The bundled Talmud Bavli volumes are laid down but never indexed: since
+# 9b67127 IndexingRepository.isIndexableBook excludes them outright, because
+# their text is already in the database and indexing the scan on top of it only
+# duplicated every hit. They are present because catalogueOrder is a position
+# in the whole tree — see the step that lays them down.
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Library release tag to index (v<dbVersion>-<utcTimestamp>)'
+        type: string
+        required: true
+      otzaria_run_id:
+        description: |
+          Exact Otzaria/otzaria build run whose otzaria-linux-raw artifact builds
+          the index. Empty = the newest SUCCESSFUL run of build-and-announce.yml
+          on `otzaria_ref` that still carries both required artifacts.
+
+          Pinned explicitly, the run's conclusion is not checked — only that it
+          still carries the artifacts. That is the bootstrap and the recovery
+          path, and both need it: the first application build after this change
+          finds no stored index and fails, and so does every build after
+          otzaria_search_engine is bumped. In BOTH cases the failing run has
+          already produced otzaria-linux-raw and otzaria-index-inputs (the raw
+          leg finishes long before the full leg), so dispatch this workflow with
+          that run's id, then rerun the application build.
+        type: string
+        required: false
+        default: ''
+      otzaria_ref:
+        description: 'Branch of Otzaria/otzaria to take the build from'
+        type: string
+        required: false
+        default: 'dev'
+      runner_selection:
+        description: 'Which server runs the index build'
+        type: choice
+        required: true
+        default: 'local'
+        options:
+          - 'local'
+          - 'ARM64'
+          - 'server-2'
+
+permissions:
+  contents: write
+
+# One index build at a time. Queue rather than cancel: a run already past the
+# indexing step holds hours of work a newer trigger would throw away. queue:max
+# lifts GitHub's single-pending-slot to a durable queue, exactly as the release
+# build does — without it a third release would supersede the second, and that
+# second release would be left with no index at all until someone noticed.
+concurrency:
+  group: seforim-library-index
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  # Every release in this repository fires `published` — the per-build
+  # lines-snapshot-sha256-* releases (published WHILE the database build is
+  # still running) and the pipeline-result-* ones included. Only a database
+  # release, whose tag manual-generate-release.yml composes as
+  # `v<dbVersion>-<utcTimestamp>`, may start an index build.
+  gate:
+    name: Accept only a database release
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      proceed: ${{ steps.classify.outputs.proceed }}
+      release_tag: ${{ steps.classify.outputs.release_tag }}
+      runner_labels: ${{ steps.classify.outputs.runner_labels }}
+      raw_artifact: ${{ steps.classify.outputs.raw_artifact }}
+    steps:
+      - name: Classify the triggering tag and pick the runner
+        id: classify
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          INPUT_TAG: ${{ inputs.release_tag }}
+          RUNNER_SELECTION: ${{ inputs.runner_selection }}
+        run: |
+          set -euo pipefail
+          TAG="${RELEASE_TAG:-${INPUT_TAG:-}}"
+          if [ -z "$TAG" ]; then
+            echo "::error::No release tag on the event and none supplied as input"
+            exit 1
+          fi
+          if printf '%s' "$TAG" | grep -Eq '^v[0-9]+-[0-9]{14}$'; then
+            echo "proceed=true" >> "$GITHUB_OUTPUT"
+            echo "Database release $TAG — indexing it."
+          elif [ -n "${INPUT_TAG:-}" ]; then
+            # A manual dispatch names the tag explicitly; refuse a typo loudly
+            # rather than skipping the whole run and reporting a green check.
+            echo "::error::release_tag '$TAG' is not a database release tag (v<dbVersion>-<utcTimestamp>)"
+            exit 1
+          else
+            echo "proceed=false" >> "$GITHUB_OUTPUT"
+            echo "Release $TAG is not a database release — nothing to index."
+          fi
+          echo "release_tag=$TAG" >> "$GITHUB_OUTPUT"
+
+          # The bundle must match the runner's architecture — an x86_64 bundle on
+          # the ARM host is an exec format error two hours into the job.
+          case "${RUNNER_SELECTION:-local}" in
+            local|'') LABELS='["otzaria-db"]'; RAW=otzaria-linux-raw ;;
+            ARM64)    LABELS='["self-hosted","Linux","ARM64"]'; RAW=otzaria-linux-raw-arm64 ;;
+            server-2) LABELS='["self-hosted","Linux","X64","server-2"]'; RAW=otzaria-linux-raw ;;
+            *) echo "::error::unknown runner_selection '${RUNNER_SELECTION}'"; exit 1 ;;
+          esac
+          echo "runner_labels=$LABELS" >> "$GITHUB_OUTPUT"
+          echo "raw_artifact=$RAW" >> "$GITHUB_OUTPUT"
+
+  index:
+    name: Build the index and attach it to the release
+    needs: gate
+    if: needs.gate.outputs.proceed == 'true'
+    runs-on: ${{ fromJSON(needs.gate.outputs.runner_labels) }}
+    # Measured reference: 118 minutes for the whole index-and-pack block on a
+    # 4-core hosted runner, plus ~25 minutes to push ~3 GiB up the runner's
+    # ~2.1 MB/s uplink. 360 is generous against that and deliberately not more:
+    # this holds the very runner the database build needs, so a job wedged at
+    # its ceiling delays the NEXT weekly release, not this one.
+    timeout-minutes: 360
+    env:
+      # Cross-repository by necessity: the application binary that builds the
+      # index lives in Otzaria/otzaria, and GITHUB_TOKEN is scoped to this
+      # repository alone.
+      GH_TOKEN: ${{ secrets.PIPELINE_TOKEN }}
+      RELEASE_TAG: ${{ needs.gate.outputs.release_tag }}
+      OTZARIA_REPO: Otzaria/otzaria
+      OTZARIA_REF: ${{ inputs.otzaria_ref || 'dev' }}
+      OTZARIA_RUN_ID: ${{ inputs.otzaria_run_id }}
+      RAW_ARTIFACT: ${{ needs.gate.outputs.raw_artifact }}
+      # The tar the parts are cut from, and the name every consumer resolves
+      # through https://github.com/Otzaria/SeforimLibrary/releases/latest/download/.
+      INDEX_ARCHIVE: otzaria-library-index.tar.zst
+      PROVENANCE_ASSET: otzaria-library-index.provenance.json
+      # GitHub refuses an asset of 2 GiB or more; same part size as the
+      # application's own split assets.
+      PART_SIZE: '1992294400'
+      BUILDER_IMAGE: otzaria-index-builder:bookworm-1
+
+    steps:
+      - name: Checkout SeforimLibrary
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Install workflow dependencies
+        run: bash .github/scripts/install-db-workflow-deps.sh
+
+      - name: Preflight the runner
+        run: |
+          set -euo pipefail
+          # Why a container and not the runner itself: the database runner is a
+          # minimal Ubuntu 24.04 WSL image (its provisioning installs no GTK, no
+          # GL and no X11 at all), while the application binary is built in
+          # debian:bookworm-slim and needs that whole host-side stack — the one
+          # half bundle_wpe.sh deliberately does not bundle. Recreating it by
+          # hand would also mean tracking noble's t64 library renames. The image
+          # the binary was compiled in already has it, exactly.
+          #
+          # docker is provisioned on this runner on purpose: bootstrap-ubuntu.sh
+          # installs docker.io and puts the runner user in the docker group, and
+          # the host's own boot check (verify-local-host.sh) asserts `command -v
+          # docker` on every start. So this fires only if the daemon is down.
+          command -v docker >/dev/null 2>&1 || {
+            echo "::error::docker is required on this runner: the index is built inside debian:bookworm-slim, the image the application binary is compiled in. This host provisions docker.io in bootstrap-ubuntu.sh — check that provisioning rather than working around it."
+            exit 1
+          }
+          docker info >/dev/null 2>&1 || {
+            echo "::error::docker is installed but not usable by the runner user (docker info failed)"
+            exit 1
+          }
+          # Two hours of indexing followed by a 403 on the upload is the one
+          # failure this job must not have; prove the write now.
+          PUSH=$(gh api "repos/$GITHUB_REPOSITORY" --jq '.permissions.push' || echo unreadable)
+          case "$PUSH" in
+            true) ;;
+            unreadable) echo "::error::PIPELINE_TOKEN cannot read $GITHUB_REPOSITORY at all — it cannot attach the finished index to the release"; exit 1 ;;
+            *) echo "::error::PIPELINE_TOKEN has no write access to $GITHUB_REPOSITORY (permissions.push=$PUSH) — the finished index could not be attached to the release"; exit 1 ;;
+          esac
+          # Peak footprint: seforim.db ~7 GiB, the bundled volumes ~1 GiB, the
+          # index they produce, the tar and its parts. 60 GiB holds all of them.
+          AVAIL_KB=$(df -Pk "$GITHUB_WORKSPACE" | awk 'NR==2{print $4}')
+          echo "Free space on the workspace volume: $((AVAIL_KB/1024/1024)) GiB"
+          if [ "$AVAIL_KB" -lt $((60*1024*1024)) ]; then
+            echo "::error::Only $((AVAIL_KB/1024/1024)) GiB free (<60 GiB). Refusing to start."
+            exit 1
+          fi
+
+      - name: Prepare a clean work directory
+        run: |
+          set -euo pipefail
+          WORK="$GITHUB_WORKSPACE/index-build"
+          # The workspace persists between runs on these self-hosted runners.
+          rm -rf "$WORK"
+          mkdir -p "$WORK/books" "$WORK/data" "$WORK/app" "$WORK/parts"
+          echo "WORK=$WORK" >> "$GITHUB_ENV"
+
+      - name: Resolve the application build that will index the library
+        id: otzaria
+        run: |
+          set -euo pipefail
+          # Downloading an artifact needs the `actions: read` scope, which a
+          # plain repository read does not prove — probe the exact endpoint.
+          gh api "repos/$OTZARIA_REPO/actions/workflows/build-and-announce.yml" \
+            --jq '.id' > /dev/null || {
+            echo "::error::PIPELINE_TOKEN cannot read Actions on $OTZARIA_REPO (needs the actions:read scope) — the application bundle that builds the index lives there"
+            exit 1
+          }
+          # Both artifacts must be present on the SAME run: the bundle that
+          # builds the index and the lockfile that says which search engine
+          # produced it. A run whose artifacts have expired is skipped.
+          pick_run() {
+            local run_id="$1"
+            gh api "repos/$OTZARIA_REPO/actions/runs/$run_id/artifacts?per_page=100" \
+              --jq '[.artifacts[] | select(.expired | not) | .name]' > "$WORK/artifacts.json"
+            jq -e --arg raw "$RAW_ARTIFACT" \
+              'index($raw) and index("otzaria-index-inputs")' \
+              "$WORK/artifacts.json" > /dev/null
+          }
+
+          if [ -n "${OTZARIA_RUN_ID:-}" ]; then
+            RUN_ID="$OTZARIA_RUN_ID"
+            pick_run "$RUN_ID" || {
+              echo "::error::run $RUN_ID of $OTZARIA_REPO does not carry both $RAW_ARTIFACT and otzaria-index-inputs (expired, or built before the index handoff landed)"
+              exit 1
+            }
+          else
+            gh api \
+              "repos/$OTZARIA_REPO/actions/workflows/build-and-announce.yml/runs?branch=$OTZARIA_REF&status=success&per_page=30" \
+              --jq '.workflow_runs[] | .id' > "$WORK/candidate-runs.txt"
+            RUN_ID=""
+            while IFS= read -r candidate; do
+              [ -n "$candidate" ] || continue
+              if pick_run "$candidate"; then RUN_ID="$candidate"; break; fi
+              echo "run $candidate lacks the required artifacts — trying the one before it"
+            done < "$WORK/candidate-runs.txt"
+            [ -n "$RUN_ID" ] || {
+              echo "::error::no successful build-and-announce run on $OTZARIA_REF still carries $RAW_ARTIFACT and otzaria-index-inputs"
+              exit 1
+            }
+          fi
+
+          gh api "repos/$OTZARIA_REPO/actions/runs/$RUN_ID" > "$WORK/otzaria-run.json"
+          {
+            echo "run_id=$RUN_ID"
+            echo "head_sha=$(jq -er '.head_sha' "$WORK/otzaria-run.json")"
+            echo "head_branch=$(jq -er '.head_branch' "$WORK/otzaria-run.json")"
+            echo "run_attempt=$(jq -er '.run_attempt' "$WORK/otzaria-run.json")"
+          } >> "$GITHUB_OUTPUT"
+          echo "Indexing with $OTZARIA_REPO run $RUN_ID ($(jq -r '.head_branch' "$WORK/otzaria-run.json") @ $(jq -r '.head_sha' "$WORK/otzaria-run.json"))"
+
+      - name: Download the application bundle and its lockfile
+        run: |
+          set -euo pipefail
+          gh run download "${{ steps.otzaria.outputs.run_id }}" --repo "$OTZARIA_REPO" \
+            -n "$RAW_ARTIFACT" -D "$WORK/app"
+          gh run download "${{ steps.otzaria.outputs.run_id }}" --repo "$OTZARIA_REPO" \
+            -n otzaria-index-inputs -D "$WORK/lock"
+          # A GitHub artifact is a zip and carries no POSIX mode bits, so every
+          # executable arrives as 0644. Restore exactly the files the launcher
+          # and the WPE helper processes need (see bundle_wpe.sh in the
+          # application's build workflow).
+          for required in app/otzaria app/otzaria.bin app/lib/libWPEInjectedBundle.so; do
+            [ -f "$WORK/$required" ] || {
+              echo "::error::$RAW_ARTIFACT of run ${{ steps.otzaria.outputs.run_id }} has no $required — this is not a WPE-bundled Linux build"
+              exit 1
+            }
+          done
+          chmod 755 "$WORK/app/otzaria" "$WORK/app/otzaria.bin"
+          for helper in "$WORK/app"/lib/WPE*Process; do
+            [ -e "$helper" ] || continue
+            chmod 755 "$helper"
+          done
+
+      - name: Read the search engine version the index will be built with
+        id: engine
+        run: |
+          set -euo pipefail
+          LOCK="$WORK/lock/pubspec.lock"
+          [ -f "$LOCK" ] || { echo "::error::otzaria-index-inputs carries no pubspec.lock"; exit 1; }
+          VERSION=$(awk '
+            $1 == "otzaria_search_engine:" { found = 1; next }
+            found && $1 == "version:" { gsub(/"/, "", $2); print $2; exit }
+          ' "$LOCK")
+          [ -n "$VERSION" ] || {
+            echo "::error::pubspec.lock of the application build pins no otzaria_search_engine version"
+            exit 1
+          }
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "otzaria_search_engine $VERSION"
+
+      - name: Download the released database
+        id: database
+        run: |
+          set -euo pipefail
+          gh api "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" > "$WORK/release.json"
+          jq -e '[.assets[] | select(.name == "seforim.db.zst")] | length == 1' \
+            "$WORK/release.json" > /dev/null || {
+            echo "::error::release $RELEASE_TAG carries no seforim.db.zst asset"
+            exit 1
+          }
+          EXPECTED=$(jq -r '
+            [.assets[] | select(.name == "seforim.db.zst")] | .[0].digest // ""
+          ' "$WORK/release.json")
+          EXPECTED="${EXPECTED#sha256:}"
+          printf '%s' "$EXPECTED" | grep -Eq '^[0-9a-f]{64}$' || {
+            echo "::error::release $RELEASE_TAG publishes no sha256 digest for seforim.db.zst"
+            exit 1
+          }
+          gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
+            -p seforim.db.zst -D "$WORK"
+          ACTUAL=$(sha256sum "$WORK/seforim.db.zst" | awk '{print $1}')
+          [ "$ACTUAL" = "$EXPECTED" ] || {
+            echo "::error::seforim.db.zst downloaded as $ACTUAL but the release publishes $EXPECTED"
+            exit 1
+          }
+          echo "seforim_db_zst_sha256=$ACTUAL" >> "$GITHUB_OUTPUT"
+          # --long=31 is how the application expands this same asset. --memory
+          # is NOT a budget for this job: it raises zstd's refusal threshold for
+          # the 2 GiB decompression window the stream declares, and zstd rejects
+          # the asset without it.
+          zstd -d -c --long=31 --memory=2048MB "$WORK/seforim.db.zst" > "$WORK/books/seforim.db"
+          rm -f "$WORK/seforim.db.zst"
+          ls -l "$WORK/books/seforim.db"
+
+      # The bundled Talmud Bavli volumes are NEVER indexed — IndexingRepository
+      # .isIndexableBook excludes them outright (their text is already in the
+      # database, and indexing the scan too only duplicated every hit). They are
+      # laid down anyway because catalogueOrder, the high half of every document
+      # id, is a POSITION in the whole catalogue tree
+      # (SearchCatalogueOrderHelper.buildOrderedKeys): the volumes are inserted
+      # into the תלמוד בבלי subtree, which sorts fourth of seventeen top
+      # categories, so building without them would shift the order of nearly the
+      # entire library against what the application computes on the user's
+      # machine — silently, since the staleness check compares only
+      # kCatalogueOrderRevision and not the order itself.
+      - name: Lay down the bundled Talmud Bavli volumes (present, never indexed)
+        id: talmud
+        run: |
+          set -euo pipefail
+          ARCHIVE="$WORK/talmud_bavli_latest.tar.zst"
+          curl -fsSL --retry 3 --retry-delay 5 -o "$ARCHIVE" \
+            https://github.com/Otzaria/otzaria-library/releases/latest/download/talmud_bavli_latest.tar.zst
+          SHA=$(sha256sum "$ARCHIVE" | awk '{print $1}')
+          zstd -d -c "$ARCHIVE" | tar -xf - -C "$WORK/books"
+
+          # What the application build writes here after its own extraction, and
+          # the only thing that reads it: DatabaseConstants
+          # .isTalmudBavliInstallInProgress treats the literal value 'installing'
+          # as a half-finished install and makes the whole directory invisible —
+          # which would drop every volume out of the catalogue silently. Writing
+          # the digest, exactly as build-and-announce.yml does, makes that
+          # impossible instead of hoping the archive never carries such a file.
+          sha256sum "$ARCHIVE" | cut -d' ' -f1 > "$WORK/books/תלמוד בבלי/.version"
+
+          # The gate the application build enforces is over the volume NAME SET,
+          # because that is what decides catalogue order:
+          # _addBundledTalmudBavliPdfBooksToCategory derives each title with
+          # getTitleFromPath and places it beside the text book of that title.
+          # Hashing the archive instead would be wrong twice over — a re-scan of
+          # the same tractates at better quality would fail a build for nothing,
+          # and it would say nothing about what actually landed on disk.
+          #
+          # Derived from the ARCHIVE LISTING, byte-identically to volume_names()
+          # in the application's tool/release/fetch_prebuilt_library_index.sh —
+          # the two digests are only comparable while these two pipelines stay
+          # the same. Change one, change the other in the same cycle.
+          zstd -d -c "$ARCHIVE" | tar -tf - | sed 's#.*/##' | grep -i '\.pdf$' \
+            | LC_ALL=C sort -u > "$WORK/volumes.txt"
+          # ...and then proved against what is actually on disk. This is what
+          # catches the silent case the digest alone cannot: an archive with
+          # nested directories, or an extraction that landed somewhere the
+          # application will not look, leaves the two lists different.
+          find "$WORK/books/תלמוד בבלי" -maxdepth 1 -name '*.pdf' -printf '%f\n' \
+            | LC_ALL=C sort -u > "$WORK/volumes-on-disk.txt"
+          cmp -s "$WORK/volumes.txt" "$WORK/volumes-on-disk.txt" || {
+            echo "::error::the volumes named in the archive are not the ones sitting in books/תלמוד בבלי — the catalogue the index is built from would not be the one the application computes"
+            diff "$WORK/volumes.txt" "$WORK/volumes-on-disk.txt" || true
+            exit 1
+          }
+          VOLUMES=$(wc -l < "$WORK/volumes.txt")
+          [ "$VOLUMES" -gt 0 ] || {
+            echo "::error::talmud_bavli_latest.tar.zst laid down no PDF volumes — the catalogue order would not match the application's"
+            exit 1
+          }
+          VOLUMES_DIGEST=$(sha256sum "$WORK/volumes.txt" | awk '{print $1}')
+          rm -f "$ARCHIVE"
+          {
+            echo "talmud_bavli_sha256=$SHA"
+            echo "talmud_volumes=$VOLUMES"
+            echo "talmud_volumes_digest=$VOLUMES_DIGEST"
+          } >> "$GITHUB_OUTPUT"
+          echo "$VOLUMES bundled volumes in place (name-set $VOLUMES_DIGEST, archive $SHA)"
+
+      - name: Build the index inside the image the binary was compiled in
+        run: |
+          set -euo pipefail
+          # Not an invented package list: this is verbatim the "Install Linux
+          # build dependencies" step of build_linux in Otzaria/otzaria, which is
+          # the container `otzaria build-release-index` runs in today. Guessing
+          # a smaller runtime-only set is how you discover that bundle_wpe.sh
+          # bundles only the transitive closure of the WPE libraries — the
+          # application's own libsecret, libcurl and libharfbuzz-icu come from
+          # the host and are not in it. libharfbuzz-icu0 is appended because the
+          # deb declares it (linux/packaging/deb/make_config.yaml) and no -dev
+          # package above pulls it in. Xvfb is required because the Linux
+          # embedder brings up a GTK window before Dart main() runs, even for a
+          # command-line invocation.
+          cat > "$WORK/Dockerfile" <<'DOCKERFILE'
+          FROM debian:bookworm-slim
+          ENV DEBIAN_FRONTEND=noninteractive
+          RUN apt-get update -y \
+           && apt-get install -y \
+                build-essential ninja-build libgtk-3-dev libblkid1 liblzma5 \
+                clang-14 lld-14 cmake git pkg-config liblzma-dev rpm cpio patchelf curl xz-utils zstd \
+                libcurl4-openssl-dev \
+                libsecret-1-dev \
+                libglib2.0-dev libsoup-3.0-dev libxkbcommon-dev openjdk-17-jdk-headless \
+                libwebkit2gtk-4.1-dev xvfb xauth \
+                libharfbuzz-icu0 \
+           && rm -rf /var/lib/apt/lists/*
+          DOCKERFILE
+          # Built from stdin: the work directory holds a 7 GiB database and
+          # must never be shipped to the daemon as a build context.
+          # --pull so the base is re-resolved instead of the tag freezing on
+          # whatever the first build cached, runner by runner.
+          docker build --pull -t "$BUILDER_IMAGE" - < "$WORK/Dockerfile"
+
+          # What the library tree must look like for the index to be both
+          # complete and portable: the database, and the bundled volumes that
+          # only shape the catalogue order.
+          [ -f "$WORK/books/seforim.db" ] || {
+            echo "::error::books/seforim.db is missing"; exit 1; }
+          [ -d "$WORK/books/תלמוד בבלי" ] || {
+            echo "::error::books/תלמוד בבלי is missing — catalogue order would drift"; exit 1; }
+          rm -rf "$WORK/index"
+
+          # Nothing here caps memory, deliberately: the container gets whatever
+          # the host has, and grows with it when the host's RAM grows. --ipc=host
+          # is part of that — it hands the container the host's own /dev/shm
+          # instead of docker's fixed 64 MB default, so no number here has to be
+          # revisited after a RAM upgrade.
+          #
+          # As root, because that is how build_linux runs this very binary in
+          # this very image ("ריצה כ-root בקונטיינר"). An unmapped uid has no
+          # /etc/passwd entry, and getpwuid() failing inside GLib or xvfb-run is
+          # not a risk worth taking to save the chown below.
+          docker run --rm \
+            --ipc=host \
+            -e HOME=/work/data \
+            -v "$WORK":/work \
+            -w /work \
+            "$BUILDER_IMAGE" \
+            xvfb-run -a /work/app/otzaria build-release-index \
+              --library /work/books \
+              --index /work/index \
+              --data /work/data \
+            2>&1 | tee "$WORK/index-build.log"
+
+          # Everything the container wrote is root-owned; hand the whole work
+          # tree back so the packing steps and the cleanup need no sudo of their
+          # own. The runner has passwordless sudo (see its provisioning).
+          sudo chown -R "$(id -u):$(id -g)" "$WORK"
+
+          # ReleaseIndexBuilderCli already refuses to exit 0 on a cancelled or
+          # incomplete run, on any per-book failure, and on an indexable book
+          # that is missing from the finished index — so the exit status above
+          # is the completeness verdict. This only proves the run left
+          # something behind, and records the count the CLI printed.
+          [ -n "$(find "$WORK/index" -mindepth 1 -maxdepth 1 -print -quit)" ] || {
+            echo "::error::the index directory is empty after a successful build"
+            exit 1
+          }
+          CATALOGUE=$(sed -n 's/^נמצאו \([0-9][0-9]*\) ספרים.*/\1/p' "$WORK/index-build.log" | tail -n1)
+          echo "CATALOGUE_BOOKS=${CATALOGUE:-null}" >> "$GITHUB_ENV"
+          echo "INDEX_BYTES=$(du -sb "$WORK/index" | cut -f1)" >> "$GITHUB_ENV"
+          echo "Catalogue of ${CATALOGUE:-an unreported number of} books indexed into $(du -sh "$WORK/index" | cut -f1)"
+
+      - name: Pack, describe and split the index
+        run: |
+          set -euo pipefail
+          # shellcheck source=/dev/null
+          . .github/scripts/zstd_workers.sh
+          tar -C "$WORK" -cf - index \
+            | zstd -T"$(zstd_workers)" -19 -o "$WORK/$INDEX_ARCHIVE"
+          ARCHIVE_SHA=$(sha256sum "$WORK/$INDEX_ARCHIVE" | awk '{print $1}')
+
+          # The contract the application build verifies before it packages this
+          # index: the exact database it was built from, and the exact search
+          # engine that built it.
+          jq -n \
+            --arg libraryReleaseTag "$RELEASE_TAG" \
+            --arg seforimDbZstSha256 "${{ steps.database.outputs.seforim_db_zst_sha256 }}" \
+            --arg indexArchive "$INDEX_ARCHIVE" \
+            --arg indexArchiveSha256 "$ARCHIVE_SHA" \
+            --argjson indexUncompressedBytes "$INDEX_BYTES" \
+            --argjson catalogueBooks "$CATALOGUE_BOOKS" \
+            --arg talmudBavliSha256 "${{ steps.talmud.outputs.talmud_bavli_sha256 }}" \
+            --arg talmudVolumesDigest "${{ steps.talmud.outputs.talmud_volumes_digest }}" \
+            --argjson talmudVolumes ${{ steps.talmud.outputs.talmud_volumes }} \
+            --arg searchEngineVersion "${{ steps.engine.outputs.version }}" \
+            --arg otzariaRunId "${{ steps.otzaria.outputs.run_id }}" \
+            --arg otzariaRunAttempt "${{ steps.otzaria.outputs.run_attempt }}" \
+            --arg otzariaHeadSha "${{ steps.otzaria.outputs.head_sha }}" \
+            --arg otzariaHeadBranch "${{ steps.otzaria.outputs.head_branch }}" \
+            --arg builderRunId "$GITHUB_RUN_ID" \
+            --arg builtAt "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            '{
+              schemaVersion: 1,
+              libraryReleaseTag: $libraryReleaseTag,
+              seforimDbZstSha256: $seforimDbZstSha256,
+              indexArchive: $indexArchive,
+              indexArchiveSha256: $indexArchiveSha256,
+              indexUncompressedBytes: $indexUncompressedBytes,
+              catalogueBooks: $catalogueBooks,
+              talmudBavliSha256: $talmudBavliSha256,
+              talmudVolumesDigest: $talmudVolumesDigest,
+              talmudVolumes: $talmudVolumes,
+              includesPdfBooks: false,
+              searchEngineVersion: $searchEngineVersion,
+              otzaria: {
+                repository: "Otzaria/otzaria",
+                runId: $otzariaRunId,
+                runAttempt: $otzariaRunAttempt,
+                headSha: $otzariaHeadSha,
+                headBranch: $otzariaHeadBranch
+              },
+              builtBy: {repository: "Otzaria/SeforimLibrary", runId: $builderRunId},
+              builtAt: $builtAt
+            }' > "$WORK/parts/$PROVENANCE_ASSET"
+
+          bash .github/scripts/split_release_asset.sh \
+            "$WORK/$INDEX_ARCHIVE" "$WORK/split" "$PART_SIZE"
+          mv "$WORK/split"/* "$WORK/parts/"
+          rmdir "$WORK/split"
+          # The intermediate tar is larger than a single asset may be; only the
+          # parts and the two manifests are ever uploaded.
+          rm -f "$WORK/$INDEX_ARCHIVE"
+          ls -l "$WORK/parts"
+
+      - name: Attach the index to the library release
+        run: |
+          set -euo pipefail
+          # --clobber so a rerun (a failed upload, a rebuild against a newer
+          # search engine) replaces the assets instead of failing on the name.
+          gh release upload "$RELEASE_TAG" "$WORK/parts"/* \
+            --repo "$GITHUB_REPOSITORY" --clobber
+          gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
+            --json assets --jq '.assets[] | select(.name | startswith("otzaria-library-index")) | "\(.name)\t\(.size)"'
+
+      - name: Release the work directory
+        if: always()
+        run: rm -rf "$GITHUB_WORKSPACE/index-build"
