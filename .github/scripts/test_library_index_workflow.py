@@ -159,6 +159,17 @@ class LibraryIndexWorkflowTest(unittest.TestCase):
         self.assertIn('> "$WORK/books/תלמוד בבלי/.version"', run)
         self.assertIn("talmudBavliSha256: $talmudBavliSha256", run)
 
+    def test_a_silent_hang_is_impossible(self):
+        run = body(self.index)
+        # `xvfb-run -a` answers a Xvfb that will not start by trying the next
+        # display number, forever. Run 34845248197 printed nothing for two
+        # hours because of it, so the display and the binary are each proved
+        # on their own first, and the real command carries a ceiling.
+        self.assertIn('timeout 120 docker run --rm "$BUILDER_IMAGE" xvfb-run -a true', run)
+        self.assertIn("build-release-index --help", run)
+        self.assertIn("timeout --kill-after=60 60m docker run", run)
+        self.assertLessEqual(self.index["timeout-minutes"], 180)
+
     def test_the_container_runs_the_way_the_application_build_runs_it(self):
         run = body(self.index)
         # build_linux runs this binary in this image as root. An unmapped uid
@@ -215,9 +226,11 @@ class LibraryIndexWorkflowTest(unittest.TestCase):
         self.assertEqual(len(docker), 2, "the index is no longer built in a container")
         invocation = docker[1].split("build-release-index", 1)[0]
         # Owner decision: the job takes whatever the host gives and must keep
-        # doing so after the host's RAM is increased — so no fixed ceiling, and
-        # the host's own /dev/shm rather than docker's 64 MB default.
-        self.assertIn("--ipc=host", invocation)
+        # doing so after the host's RAM is increased — so no fixed ceiling of
+        # any kind. --ipc=host is NOT the way to honour that: run 34845248197
+        # carried it and hung for two hours with no output at all, and the
+        # environment this command is proven in does not use it.
+        self.assertNotIn("--ipc=host", invocation)
         for capped in ("--memory", "--shm-size", "--cpus", "--cpuset"):
             self.assertNotIn(capped, invocation, f"{capped} caps the index build")
         # No RAM precondition either: the release build has one because of its

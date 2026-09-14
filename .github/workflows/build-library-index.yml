@@ -157,12 +157,14 @@ jobs:
     needs: gate
     if: needs.gate.outputs.proceed == 'true'
     runs-on: ${{ fromJSON(needs.gate.outputs.runner_labels) }}
-    # Measured reference: 118 minutes for the whole index-and-pack block on a
-    # 4-core hosted runner, plus ~25 minutes to push ~3 GiB up the runner's
-    # ~2.1 MB/s uplink. 360 is generous against that and deliberately not more:
-    # this holds the very runner the database build needs, so a job wedged at
-    # its ceiling delays the NEXT weekly release, not this one.
-    timeout-minutes: 360
+    # Measured, not estimated: in run 34779834547 the indexing itself took
+    # 4m35s for 7,405 books — the 104 minutes of that job's "Create Linux FULL
+    # portable bundle" step were its two zstd -19 passes over ~19 GiB, not the
+    # index. What is left here is the database download (~5 min), one zstd -19
+    # pass and the upload. 180 is generous against that and deliberately not
+    # more: this holds the very runner the database build needs, so a job
+    # wedged at its ceiling delays the NEXT weekly release, not this one.
+    timeout-minutes: 180
     env:
       # Cross-repository by necessity: the application binary that builds the
       # index lives in Otzaria/otzaria, and GITHUB_TOKEN is scoped to this
@@ -480,18 +482,37 @@ jobs:
             echo "::error::books/תלמוד בבלי is missing — catalogue order would drift"; exit 1; }
           rm -rf "$WORK/index"
 
-          # Nothing here caps memory, deliberately: the container gets whatever
-          # the host has, and grows with it when the host's RAM grows. --ipc=host
-          # is part of that — it hands the container the host's own /dev/shm
-          # instead of docker's fixed 64 MB default, so no number here has to be
-          # revisited after a RAM upgrade.
+          # Two preflights, because run 34845248197 hung here for two hours and
+          # printed NOTHING: `xvfb-run -a` does not fail when Xvfb refuses to
+          # start, it tries the next display number — forever. A silent hang is
+          # the one failure mode this step must not have, so the display and the
+          # binary are each proved on their own, in seconds, first.
           #
-          # As root, because that is how build_linux runs this very binary in
-          # this very image ("ריצה כ-root בקונטיינר"). An unmapped uid has no
-          # /etc/passwd entry, and getpwuid() failing inside GLib or xvfb-run is
-          # not a risk worth taking to save the chown below.
-          docker run --rm \
-            --ipc=host \
+          # That run carried --ipc=host, which this one deliberately does not:
+          # Xvfb uses MIT-SHM, and the environment this command is actually
+          # proven in (build_linux, same image, same binary) runs with docker's
+          # own IPC namespace. Nothing here caps memory either way — no
+          # --memory, no --cpus — so the build still takes whatever the host
+          # has and grows with it when the host's RAM grows.
+          timeout 120 docker run --rm "$BUILDER_IMAGE" xvfb-run -a true || {
+            echo "::error::xvfb-run cannot bring up a display inside $BUILDER_IMAGE — the index build would hang silently instead of failing"
+            exit 1
+          }
+          timeout 300 docker run --rm \
+            -e HOME=/work/data \
+            -v "$WORK":/work \
+            -w /work \
+            "$BUILDER_IMAGE" \
+            xvfb-run -a /work/app/otzaria build-release-index --help || {
+            echo "::error::the application binary cannot start under xvfb in $BUILDER_IMAGE — see the output above"
+            exit 1
+          }
+
+          # Measured: 7,405 books indexed in 4m35s in run 34779834547. The
+          # ceiling is two orders of magnitude above that on purpose — it is
+          # there to turn a hang into a loud failure with a readable log, not to
+          # bound honest work.
+          timeout --kill-after=60 60m docker run --rm \
             -e HOME=/work/data \
             -v "$WORK":/work \
             -w /work \
