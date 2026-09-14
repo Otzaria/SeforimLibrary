@@ -159,13 +159,37 @@ class LibraryIndexWorkflowTest(unittest.TestCase):
         self.assertIn('> "$WORK/books/תלמוד בבלי/.version"', run)
         self.assertIn("talmudBavliSha256: $talmudBavliSha256", run)
 
+    def test_xvfb_run_is_never_the_containers_own_entry_point(self):
+        run = body(self.index)
+        # Measured on the database runner, same image, three minutes apart
+        # (runs 34885017062 and 34885339600): as the container's argv[0] the
+        # wrapper never returns, as a child of a shell it exits 0 in a second.
+        # As PID 1 it never sees the SIGUSR1 Xvfb raises when the display is
+        # up, so its `wait` never returns — runs 34845248197 and 34871116986
+        # sat there 2h06m and 2h07m and printed nothing. Every invocation of
+        # the binary therefore goes through a shell, exactly as build_linux
+        # (where this command is proven) does.
+        for invocation in re.findall(r'"\$BUILDER_IMAGE" *\\?\n? *([^\n]*)', run):
+            self.assertFalse(
+                invocation.strip().startswith("xvfb-run"),
+                f"xvfb-run is the container entry point: {invocation!r}",
+            )
+        self.assertIn("bash -c 'xvfb-run -a true'", run)
+        self.assertIn(
+            "bash -euo pipefail -c 'xvfb-run -a /work/app/otzaria build-release-index",
+            run,
+        )
+
     def test_a_silent_hang_is_impossible(self):
         run = body(self.index)
-        # `xvfb-run -a` answers a Xvfb that will not start by trying the next
-        # display number, forever. Run 34845248197 printed nothing for two
-        # hours because of it, so the display and the binary are each proved
-        # on their own first, and the real command carries a ceiling.
-        self.assertIn('timeout 120 docker run --rm "$BUILDER_IMAGE" xvfb-run -a true', run)
+        # A bound without --kill-after is not a bound here: plain `timeout`
+        # SIGTERMs the docker client, which forwards it and waits on a
+        # container that is not listening. `timeout 120` on the preflight of
+        # run 34871116986 did exactly that and never fired.
+        bounds = re.findall(r"^\s*timeout([^\n]*?) docker run", run, re.M)
+        self.assertEqual(len(bounds), 3, f"unbounded docker run: {bounds}")
+        for bound in bounds:
+            self.assertIn("--kill-after", bound, f"unbounded: timeout{bound}")
         self.assertIn("build-release-index --help", run)
         self.assertIn("timeout --kill-after=60 60m docker run", run)
         self.assertLessEqual(self.index["timeout-minutes"], 180)
@@ -221,7 +245,12 @@ class LibraryIndexWorkflowTest(unittest.TestCase):
         self.assertIn("otzaria-index-inputs", run)
 
     def test_nothing_caps_the_memory_the_build_may_use(self):
-        run = body(self.index)
+        # Comments are stripped first: this asserts on what is executed, and
+        # the step's comments name the very flags it must not carry.
+        run = "\n".join(
+            line for line in body(self.index).splitlines()
+            if not line.lstrip().startswith("#")
+        )
         docker = run.split("docker run", 1)
         self.assertEqual(len(docker), 2, "the index is no longer built in a container")
         invocation = docker[1].split("build-release-index", 1)[0]
