@@ -482,31 +482,49 @@ jobs:
             echo "::error::books/תלמוד בבלי is missing — catalogue order would drift"; exit 1; }
           rm -rf "$WORK/index"
 
-          # xvfb-run is never the container's own argv[0]. Measured on this
-          # runner, same image, three minutes apart (runs 34885017062 and
-          # 34885339600):
+          # xvfb-run is not used, on purpose. It brings the display up by
+          # forking Xvfb and blocking in `wait` until Xvfb raises SIGUSR1 at it
+          # (line 168 of /usr/bin/xvfb-run); when that signal does not arrive
+          # the wrapper waits forever, with no output, no exit code and no
+          # ceiling of its own. On this runner that is not hypothetical — it is
+          # every failure this step has had:
           #
-          #   docker run IMAGE xvfb-run -a true            -> never returns
-          #   docker run IMAGE bash -c 'xvfb-run -a true'  -> exit 0 in 1s
+          #   34845248197  xvfb-run -a <binary>   silent for 2h06m
+          #   34871116986  xvfb-run -a true       silent for 2h07m
+          #   34886226177  xvfb-run -a true       silent until killed at 150s
           #
-          # As PID 1 the wrapper never sees the SIGUSR1 Xvfb raises to say the
-          # display is up, so its `wait` (line 168 of /usr/bin/xvfb-run) never
-          # returns — that is the whole of runs 34845248197 and 34871116986,
-          # which sat there for 2h06m and 2h07m and printed not one line. Xvfb
-          # itself is healthy here: it creates /tmp/.X11-unix/X99 in under a
-          # second and stays alive. build_linux, where this command is proven,
-          # runs it from a shell script — so a shell owns PID 1 there too, and
-          # matching that is the fix.
-          #
-          # Every bound below is --kill-after as well. `timeout 120` alone was
-          # useless against this: it SIGTERMs the docker client, which forwards
-          # the signal and waits for a container that is not listening, so the
-          # bound never fired either. Nothing here caps memory — no --memory,
-          # no --cpus, no --shm-size — so the build takes whatever the host has
-          # and grows with it when the host's RAM grows.
+          # and it is intermittent, which is worse: the same command exited 0
+          # in a second in probe run 34885339600. Xvfb itself is healthy here
+          # and starts in well under a second. So the display is brought up
+          # directly and waited for on a condition that is actually observable
+          # — its socket — with Xvfb's own log printed if it does not appear.
+          # Nothing is retried and nothing is guessed: either /tmp/.X11-unix/X99
+          # exists within 20 seconds or the step fails and says why.
+          XVFB='
+          Xvfb :99 -screen 0 1280x1024x24 -nolisten tcp >/tmp/xvfb.log 2>&1 &
+          xvfb=$!
+          for _ in $(seq 1 200); do
+            [ -e /tmp/.X11-unix/X99 ] && break
+            kill -0 "$xvfb" 2>/dev/null || {
+              echo "Xvfb exited before it created its socket:"; cat /tmp/xvfb.log; exit 1; }
+            sleep 0.1
+          done
+          [ -e /tmp/.X11-unix/X99 ] || {
+            echo "Xvfb did not create /tmp/.X11-unix/X99 within 20 seconds:"
+            cat /tmp/xvfb.log; exit 1; }
+          export DISPLAY=:99
+          '
+          # Every bound is --kill-after as well. `timeout 120` alone was
+          # useless against a hung container: it SIGTERMs the docker client,
+          # which forwards the signal and then waits on a container that is not
+          # listening, so the bound never fires. Nothing here caps memory — no
+          # --memory, no --cpus, no --shm-size — so the build takes whatever
+          # the host has and grows with it when the host's RAM grows.
           timeout --kill-after=30 120 docker run --rm "$BUILDER_IMAGE" \
-            bash -c 'xvfb-run -a true' || {
-            echo "::error::xvfb-run cannot bring up a display inside $BUILDER_IMAGE — the index build would hang silently instead of failing"
+            bash -euo pipefail -c "$XVFB"'
+            echo "display :99 is up"
+            ' || {
+            echo "::error::Xvfb cannot bring up a display inside $BUILDER_IMAGE — see the output above"
             exit 1
           }
           timeout --kill-after=30 300 docker run --rm \
@@ -514,8 +532,10 @@ jobs:
             -v "$WORK":/work \
             -w /work \
             "$BUILDER_IMAGE" \
-            bash -c 'xvfb-run -a /work/app/otzaria build-release-index --help' || {
-            echo "::error::the application binary cannot start under xvfb in $BUILDER_IMAGE — see the output above"
+            bash -euo pipefail -c "$XVFB"'
+            /work/app/otzaria build-release-index --help
+            ' || {
+            echo "::error::the application binary cannot start under X in $BUILDER_IMAGE — see the output above"
             exit 1
           }
 
@@ -528,10 +548,12 @@ jobs:
             -v "$WORK":/work \
             -w /work \
             "$BUILDER_IMAGE" \
-            bash -euo pipefail -c 'xvfb-run -a /work/app/otzaria build-release-index \
+            bash -euo pipefail -c "$XVFB"'
+            /work/app/otzaria build-release-index \
               --library /work/books \
               --index /work/index \
-              --data /work/data' \
+              --data /work/data
+            ' \
             2>&1 | tee "$WORK/index-build.log"
 
           # Everything the container wrote is root-owned; hand the whole work

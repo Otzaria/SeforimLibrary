@@ -49,6 +49,14 @@ def body(job):
     return "\n".join(step["run"] for step in steps_of(job) if "run" in step)
 
 
+def executed(job):
+    """The job's shell, with comment lines removed."""
+    return "\n".join(
+        line for line in body(job).splitlines()
+        if not line.lstrip().startswith("#")
+    )
+
+
 @unittest.skipIf(yaml is None, "PyYAML unavailable on this runner")
 class LibraryIndexWorkflowTest(unittest.TestCase):
     @classmethod
@@ -159,33 +167,35 @@ class LibraryIndexWorkflowTest(unittest.TestCase):
         self.assertIn('> "$WORK/books/תלמוד בבלי/.version"', run)
         self.assertIn("talmudBavliSha256: $talmudBavliSha256", run)
 
-    def test_xvfb_run_is_never_the_containers_own_entry_point(self):
-        run = body(self.index)
-        # Measured on the database runner, same image, three minutes apart
-        # (runs 34885017062 and 34885339600): as the container's argv[0] the
-        # wrapper never returns, as a child of a shell it exits 0 in a second.
-        # As PID 1 it never sees the SIGUSR1 Xvfb raises when the display is
-        # up, so its `wait` never returns — runs 34845248197 and 34871116986
-        # sat there 2h06m and 2h07m and printed nothing. Every invocation of
-        # the binary therefore goes through a shell, exactly as build_linux
-        # (where this command is proven) does.
-        for invocation in re.findall(r'"\$BUILDER_IMAGE" *\\?\n? *([^\n]*)', run):
-            self.assertFalse(
-                invocation.strip().startswith("xvfb-run"),
-                f"xvfb-run is the container entry point: {invocation!r}",
-            )
-        self.assertIn("bash -c 'xvfb-run -a true'", run)
-        self.assertIn(
-            "bash -euo pipefail -c 'xvfb-run -a /work/app/otzaria build-release-index",
-            run,
-        )
+    def test_the_display_is_brought_up_on_an_observable_condition(self):
+        # Comments are stripped: this asserts on what runs, and the step's
+        # comments name the wrapper they exist to explain the absence of.
+        run = executed(self.index)
+        # xvfb-run blocks in `wait` for a SIGUSR1 from Xvfb and has no ceiling
+        # of its own, so when that signal does not arrive it is silent forever:
+        # runs 34845248197 (2h06m), 34871116986 (2h07m) and 34886226177 (killed
+        # at 150s) all died that way, while the identical command exited 0 in a
+        # second in probe run 34885339600. Intermittent and unobservable is the
+        # one thing this step may not be, so the wrapper is gone and the
+        # display is waited for on its socket.
+        self.assertNotIn("xvfb-run", run)
+        self.assertIn("Xvfb :99 -screen 0 1280x1024x24 -nolisten tcp", run)
+        self.assertIn("[ -e /tmp/.X11-unix/X99 ] && break", run)
+        self.assertIn("export DISPLAY=:99", run)
+        # A dead Xvfb must end the wait at once rather than burn the full 20s,
+        # and either way its own log is what the failure prints.
+        self.assertIn('kill -0 "$xvfb"', run)
+        self.assertIn("cat /tmp/xvfb.log", run)
+        # Nothing may be retried or guessed around it.
+        self.assertNotIn("SERVERNUM", run)
 
     def test_a_silent_hang_is_impossible(self):
         run = body(self.index)
         # A bound without --kill-after is not a bound here: plain `timeout`
         # SIGTERMs the docker client, which forwards it and waits on a
         # container that is not listening. `timeout 120` on the preflight of
-        # run 34871116986 did exactly that and never fired.
+        # run 34871116986 did exactly that and never fired; with --kill-after
+        # the same preflight failed loudly at 150s in run 34886226177.
         bounds = re.findall(r"^\s*timeout([^\n]*?) docker run", run, re.M)
         self.assertEqual(len(bounds), 3, f"unbounded docker run: {bounds}")
         for bound in bounds:
@@ -247,10 +257,7 @@ class LibraryIndexWorkflowTest(unittest.TestCase):
     def test_nothing_caps_the_memory_the_build_may_use(self):
         # Comments are stripped first: this asserts on what is executed, and
         # the step's comments name the very flags it must not carry.
-        run = "\n".join(
-            line for line in body(self.index).splitlines()
-            if not line.lstrip().startswith("#")
-        )
+        run = executed(self.index)
         docker = run.split("docker run", 1)
         self.assertEqual(len(docker), 2, "the index is no longer built in a container")
         invocation = docker[1].split("build-release-index", 1)[0]
