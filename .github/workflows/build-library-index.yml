@@ -645,6 +645,16 @@ jobs:
             exit 1
           }
           echo "CATALOGUE_BOOKS=$CATALOGUE" >> "$GITHUB_ENV"
+          # A stalled optimize is a shape, not a number: whether the merges it
+          # declined were cheap or would have rewritten the whole index is
+          # decided by the sizes it left behind, and the count alone cannot
+          # say which. tantivy names every file of a segment after that
+          # segment's uuid, so the per-segment bytes are the sum per prefix.
+          echo "segment sizes on disk, ascending (bytes, segment):"
+          find "$WORK/index" -maxdepth 1 -type f \
+               ! -name 'meta.json' ! -name '.managed.json' -printf '%f %s\n' \
+            | awk -F'[. ]' '{ b[$1] += $NF } END { for (s in b) printf "%14d  %s\n", b[s], s }' \
+            | sort -n
           # A query consults every segment's term dictionary, so the segment
           # count is part of the search speed this index ships with. The engine
           # names its own target: MAX_SEGMENTS_AFTER_OPTIMIZE = 8. Run

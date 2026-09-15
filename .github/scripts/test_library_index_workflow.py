@@ -246,6 +246,25 @@ class LibraryIndexWorkflowTest(unittest.TestCase):
         self.assertNotIn("SEGMENTS=$(grep", run)
         self.assertIn("indexSegments: $indexSegments", body(self.index))
 
+    def test_a_stalled_optimize_reports_the_shape_it_stalled_on(self):
+        # Run 34977132429 came out at 67 -> 10 against the target of 8, and the
+        # count alone could not say whether the merges optimize declined were
+        # six segments worth four megabytes between them or three worth a
+        # gigabyte each — which is the whole difference between a rule that is
+        # too timid and one that is correctly protecting the index. The sizes
+        # must be in the log of the run that failed, not in the next one.
+        run = executed(self.index)
+        self.assertIn("segment sizes on disk", run)
+        self.assertIn("-printf '%f %s", run)
+        # meta.json and .managed.json belong to no segment; counting them
+        # would invent a segment and shift every size.
+        self.assertIn("! -name 'meta.json'", run)
+        self.assertIn("! -name '.managed.json'", run)
+        # It has to print before the gate exits, or the failing run — the only
+        # run that has the shape — reports nothing.
+        self.assertLess(run.index("segment sizes on disk"),
+                        run.index('[ "$SEGMENTS" -le 8 ]'))
+
     def test_a_long_transfer_reports_what_it_is_doing(self):
         # Step 9 of run 34893800787 took 40 minutes against 6 in the green run
         # and printed nothing at all until it was over, so a legitimately slow
