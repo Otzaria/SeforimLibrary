@@ -129,6 +129,55 @@ object RefKey {
         return heRefTokens.subList(prefix.size, heRefTokens.size).joinToString(" ")
     }
 
+    /**
+     * Marks a partial key. Normalised tokens never contain it, so a partial key
+     * can't collide with a full one, and clients that don't know it never query it.
+     */
+    const val PARTIAL_MARKER = "~"
+
+    /** Partial key of a typed reference that may omit the named parts of a line's heRef. */
+    fun partialOf(ref: String): String? = of(ref)?.let { "$PARTIAL_MARKER $it" }
+
+    /**
+     * Partial keys of a line whose heRef, after the title, opens with named parts
+     * ("טור, חושן משפט, שט, ג") — one per omission of the named parts from the
+     * outside in ("~ שט ג"), so a reference typed without them still reaches the
+     * line. Empty unless at least two numeric components follow the named ones.
+     */
+    fun partialLineKeys(heRef: String, titleAliases: Iterable<String>): List<String> {
+        val suffix = suffixAfterTitleAlias(heRef, titleAliases.toList()) ?: return emptyList()
+        val components = suffix.split(',').map { it.trim() }.filter { it.isNotEmpty() }
+        val named = components.indexOfFirst(::isNumeralComponent).let {
+            if (it < 0) components.size else it
+        }
+        val numeric = components.subList(named, components.size)
+        if (named == 0 || numeric.size < 2 || !numeric.all(::isNumeralComponent)) return emptyList()
+        return (1..named).mapNotNull { omitted ->
+            partialOf(components.subList(omitted, components.size).joinToString(", "))
+        }.distinct()
+    }
+
+    private val NUMERAL_VALUES = "אבגדהוזחטיכלמנסעפצקרשת".toList().zip(
+        listOf(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 200, 300, 400),
+    ).toMap()
+
+    /** A heRef component that is a location number ("שט", "סימן ז", "ב.") rather than a name. */
+    internal fun isNumeralComponent(component: String): Boolean {
+        val tokens = tokens(component)
+        return tokens.isNotEmpty() && tokens.all(::isNumeralToken)
+    }
+
+    /**
+     * Digits, or Hebrew letters in non-increasing value order.
+     * A name that happens to read as a number ("נח") only loses its partial key.
+     */
+    internal fun isNumeralToken(token: String): Boolean {
+        if (token.all { it.isDigit() }) return true
+        if (token.length > 6) return false
+        val values = token.map { NUMERAL_VALUES[it] ?: return false }
+        return values.zipWithNext().all { (a, b) -> a >= b }
+    }
+
     /** FNV-1a 64-bit over the UTF-8 bytes of [refKey] — the stored hash. */
     fun hash(refKey: String): Long {
         var hash = -3750763034362895579L // 14695981039346656037 as signed

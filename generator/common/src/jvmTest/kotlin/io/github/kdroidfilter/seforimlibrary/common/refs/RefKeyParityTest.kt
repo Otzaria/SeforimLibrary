@@ -54,6 +54,34 @@ class RefKeyParityTest {
     }
 
     @Test
+    fun `partial line keys match the shared fixtures`() {
+        for (entry in fixtures.getValue("partialLineKeys").jsonArray) {
+            val o = entry.jsonObject
+            val heRef = o.getValue("heRef").jsonPrimitive.content
+            val aliases = o.getValue("aliases").jsonArray.map { it.jsonPrimitive.content }
+            val expected = o.getValue("keys").jsonArray.map { it.jsonObject }
+            val keys = RefKey.partialLineKeys(heRef, aliases)
+            assertEquals(expected.map { it.getValue("key").jsonPrimitive.content }, keys, "partial keys for '$heRef'")
+            assertEquals(
+                expected.map { it.getValue("hash").jsonPrimitive.long },
+                keys.map(RefKey::hash),
+                "partial hashes for '$heRef'",
+            )
+        }
+    }
+
+    @Test
+    fun `partial ref keys match the shared fixtures`() {
+        for (entry in fixtures.getValue("partialRefKeys").jsonArray) {
+            val o = entry.jsonObject
+            val input = o.getValue("input").jsonPrimitive.content
+            val key = RefKey.partialOf(input)
+            assertEquals(o.getValue("key").jsonPrimitive.content, key, "partial key for '$input'")
+            assertEquals(o.getValue("hash").jsonPrimitive.long, RefKey.hash(key!!), "hash for '$input'")
+        }
+    }
+
+    @Test
     fun `a heading line gets no key`() {
         assertNull(RefKey.ofLine("ישעיהו", listOf("ישעיהו")))
     }

@@ -1,6 +1,7 @@
 package io.github.kdroidfilter.seforimlibrary.common.refs
 
 import co.touchlab.kermit.Logger
+import io.github.kdroidfilter.seforimlibrary.core.refs.RefKey
 import java.sql.DriverManager
 import java.sql.SQLException
 import kotlin.test.Test
@@ -62,8 +63,9 @@ class BuildLineRefIndexCliTest {
                 report.ambiguous,
             )
             conn.createStatement().use { st ->
+                // Two full keys, plus "~ א א" / "~ א ב" without the named gate.
                 st.executeQuery("SELECT COUNT(DISTINCT refKeyHash) FROM line_ref WHERE bookId = 6").use { rs ->
-                    assertEquals(2, rs.getInt(1))
+                    assertEquals(4, rs.getInt(1))
                 }
             }
         }
@@ -98,6 +100,40 @@ class BuildLineRefIndexCliTest {
                     assertEquals(99L, rs.getLong(2))
                     assertEquals(99L, rs.getLong(3))
                     assertFalse(rs.next())
+                }
+            }
+        }
+    }
+
+    @Test
+    fun `lines under a named part also get a partial key without it`() {
+        DriverManager.getConnection("jdbc:sqlite::memory:").use { conn ->
+            conn.createStatement().use { st ->
+                st.execute("CREATE TABLE book (id INTEGER PRIMARY KEY, title TEXT NOT NULL, heRef TEXT)")
+                st.execute("CREATE TABLE line (bookId INTEGER NOT NULL, lineIndex INTEGER NOT NULL, heRef TEXT)")
+                st.execute(
+                    "CREATE TABLE line_ref (bookId INTEGER NOT NULL, refKeyHash INTEGER NOT NULL, " +
+                        "lineIndex INTEGER NOT NULL, PRIMARY KEY (bookId, refKeyHash, lineIndex)) WITHOUT ROWID",
+                )
+                st.execute("INSERT INTO book VALUES (1, 'טור', 'טור')")
+                st.execute("INSERT INTO book VALUES (2, 'ישעיהו', 'ישעיהו')")
+                st.execute("INSERT INTO line VALUES (1, 5, 'טור, חושן משפט,  שט, ג')")
+                st.execute("INSERT INTO line VALUES (1, 9, 'טור, יורה דעה,  שט, ג')")
+                st.execute("INSERT INTO line VALUES (2, 1, 'ישעיהו לב, יא')")
+            }
+
+            val report = indexAllBooks(conn, Logger.withTag("BuildLineRefIndexCliTest"))
+
+            assertEquals(3, report.indexed)
+            assertEquals(2, report.partialIndexed)
+            assertEquals(0, report.ambiguousKeys, "partial keys are ambiguous by design")
+            conn.prepareStatement(
+                "SELECT lineIndex FROM line_ref WHERE bookId = 1 AND refKeyHash = ? ORDER BY lineIndex",
+            ).use { ps ->
+                ps.setLong(1, RefKey.hash("~ שט ג"))
+                ps.executeQuery().use { rs ->
+                    val lines = buildList { while (rs.next()) add(rs.getLong(1)) }
+                    assertEquals(listOf(5L, 9L), lines)
                 }
             }
         }

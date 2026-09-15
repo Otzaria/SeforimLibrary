@@ -34,7 +34,9 @@ fun main() {
 
     DriverManager.getConnection("jdbc:sqlite:${path.toAbsolutePath()}").use { conn ->
         val report = rebuildLineRefIndex(conn, logger)
-        logger.i { "line_ref: ${report.indexed} keys over ${report.books} books" }
+        logger.i {
+            "line_ref: ${report.indexed} keys (+${report.partialIndexed} partial) over ${report.books} books"
+        }
         if (report.titleMismatchBooks.isNotEmpty()) {
             logger.w {
                 "line_ref: ${report.titleMismatchBooks.size} books whose heRefs do not start " +
@@ -90,6 +92,7 @@ internal data class LineRefIndexReport(
     val ambiguousKeys: Int,
     val titleMismatchBooks: List<String>,
     val ambiguous: List<AmbiguousLineRef> = emptyList(),
+    val partialIndexed: Int = 0,
 )
 
 internal fun rebuildLineRefIndex(conn: Connection, logger: Logger): LineRefIndexReport {
@@ -121,6 +124,7 @@ internal fun rebuildLineRefIndex(conn: Connection, logger: Logger): LineRefIndex
 internal fun indexAllBooks(conn: Connection, logger: Logger): LineRefIndexReport {
     var books = 0
     var indexed = 0
+    var partialIndexed = 0
     var ambiguous = 0
     val mismatched = ArrayList<String>()
     // Named collisions, in discovery order: the first line that claimed a hash
@@ -179,6 +183,15 @@ internal fun indexAllBooks(conn: Connection, logger: Logger): LineRefIndexReport
                         insert.setLong(3, lineIndex)
                         insert.addBatch()
                         indexed++
+                        // Partial keys are ambiguous by design ("~ א א" in every part),
+                        // so they stay out of the collision report.
+                        for (partial in RefKey.partialLineKeys(heRef, aliases)) {
+                            insert.setLong(1, bookId)
+                            insert.setLong(2, RefKey.hash(partial))
+                            insert.setLong(3, lineIndex)
+                            insert.addBatch()
+                            partialIndexed++
+                        }
                     }
                 }
                 insert.executeBatch()
@@ -189,5 +202,5 @@ internal fun indexAllBooks(conn: Connection, logger: Logger): LineRefIndexReport
         }
     }
 
-    return LineRefIndexReport(books, indexed, ambiguous, mismatched, ambiguousRefs)
+    return LineRefIndexReport(books, indexed, ambiguous, mismatched, ambiguousRefs, partialIndexed)
 }
