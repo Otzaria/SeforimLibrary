@@ -231,39 +231,41 @@ class LibraryIndexWorkflowTest(unittest.TestCase):
         # zstd -19 over the whole index, and the packing it feeds.
         self.assertIn("timeout --kill-after=60 180m bash -c", run)
 
-    def test_a_degraded_index_cannot_be_published(self):
-        # Run 34898795644 published an index in 188 segments where run
-        # 34888351248 had produced 8 from the same inputs, and every check in
-        # the job stayed green: the count is not a correctness property, so
-        # nothing else looks at it. The engine names 8 as its own target.
+    def test_a_degraded_index_is_reported_but_never_refused(self):
+        # It used to be a hard bound at 8. Runs 34977132429 (67 -> 10) and
+        # 34978573727 (194 -> 8) came out differently on byte-identical
+        # inputs — multi-threaded indexing decides the shape optimize is
+        # handed — so the bound failed builds at random over a difference in
+        # search speed, not in correctness. Owner's decision: report it.
         run = executed(self.index)
         self.assertIn("segments in", run)
-        self.assertIn('[ "$SEGMENTS" -le 8 ]', run)
-        # An absent optimize line must fail loudly rather than pass as zero.
-        self.assertIn('[ -n "$SEGMENTS" ]', run)
+        self.assertNotIn('exit 1', run.split("SEGMENTS=")[1].split("INDEX_SEGMENTS")[0])
+        self.assertIn('::warning::the index came out in $SEGMENTS segments', run)
+        # An absent optimize line must still say so, and must still leave the
+        # provenance with something jq can serialise rather than an empty
+        # --argjson, which would take the run down two steps later.
+        self.assertIn('SEGMENTS=null', run)
+        self.assertIn('::warning::the build printed no optimize line', run)
         # grep would exit 1 on no match and, under pipefail, kill the step
         # before either message could be printed.
         self.assertNotIn("SEGMENTS=$(grep", run)
+        # The count is the only durable record left, so it has to ship.
         self.assertIn("indexSegments: $indexSegments", body(self.index))
 
     def test_a_stalled_optimize_reports_the_shape_it_stalled_on(self):
-        # Run 34977132429 came out at 67 -> 10 against the target of 8, and the
-        # count alone could not say whether the merges optimize declined were
+        # The count alone cannot say whether the merges optimize declined were
         # six segments worth four megabytes between them or three worth a
-        # gigabyte each — which is the whole difference between a rule that is
-        # too timid and one that is correctly protecting the index. The sizes
-        # must be in the log of the run that failed, not in the next one.
+        # gigabyte each — which is the difference between a selector that is
+        # too timid and one that is correctly protecting the index. With the
+        # bound gone this listing is the only evidence a build leaves behind.
         run = executed(self.index)
         self.assertIn("segment sizes on disk", run)
         self.assertIn("-printf '%f %s", run)
-        # meta.json and .managed.json belong to no segment; counting them
-        # would invent a segment and shift every size.
-        self.assertIn("! -name 'meta.json'", run)
-        self.assertIn("! -name '.managed.json'", run)
-        # It has to print before the gate exits, or the failing run — the only
-        # run that has the shape — reports nothing.
-        self.assertLess(run.index("segment sizes on disk"),
-                        run.index('[ "$SEGMENTS" -le 8 ]'))
+        # Run 34978573727 printed eleven rows for eight segments: two sidecars
+        # and an empty-named row from the .tantivy lock files. A segment id is
+        # thirty-two hex characters; nothing else in that directory is.
+        self.assertIn("length($1) == 32 && $1 ~ /^[0-9a-f]+$/", run)
+        self.assertNotIn("! -name 'meta.json'", run)
 
     def test_a_long_transfer_reports_what_it_is_doing(self):
         # Step 9 of run 34893800787 took 40 minutes against 6 in the green run

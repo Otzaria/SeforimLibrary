@@ -650,32 +650,43 @@ jobs:
           # decided by the sizes it left behind, and the count alone cannot
           # say which. tantivy names every file of a segment after that
           # segment's uuid, so the per-segment bytes are the sum per prefix.
+          # Run 34978573727 printed eleven rows for eight segments: the two
+          # sidecars this engine writes and the empty-named row the .tantivy
+          # lock files produce under this field separator. A segment id is
+          # thirty-two hex characters and nothing else here is. The length test
+          # avoids an interval expression, which mawk honours only by version.
           echo "segment sizes on disk, ascending (bytes, segment):"
-          find "$WORK/index" -maxdepth 1 -type f \
-               ! -name 'meta.json' ! -name '.managed.json' -printf '%f %s\n' \
-            | awk -F'[. ]' '{ b[$1] += $NF } END { for (s in b) printf "%14d  %s\n", b[s], s }' \
+          find "$WORK/index" -maxdepth 1 -type f -printf '%f %s\n' \
+            | awk -F'[. ]' 'length($1) == 32 && $1 ~ /^[0-9a-f]+$/ { b[$1] += $NF } \
+                            END { for (s in b) printf "%14d  %s\n", b[s], s }' \
             | sort -n
           # A query consults every segment's term dictionary, so the segment
           # count is part of the search speed this index ships with. The engine
           # names its own target: MAX_SEGMENTS_AFTER_OPTIMIZE = 8. Run
-          # 34888351248 met it (32 -> 8); run 34898795644, on identical inputs,
-          # came out at 193 -> 188 — select_similarly_sized_segments measured
-          # its size ratio against the smallest segment in the whole index, so
-          # one short flush from the end of a bulk build vetoed the merging of
-          # every other segment with its own kind. That is fixed in the engine;
-          # this is what proves the fix held, and catches the next regression.
+          # 34898795644 came out at 193 -> 188 — select_similarly_sized_segments
+          # measured its size ratio against the smallest segment in the whole
+          # index, so one short flush from the end of a bulk build vetoed the
+          # merging of every other segment with its own kind. That is fixed in
+          # the engine (0.8.5), and this is what would make the next such
+          # regression visible.
+          # The count is REPORTED, never enforced: owner's decision, after runs
+          # 34977132429 (67 -> 10, refused) and 34978573727 (194 -> 8, passed)
+          # came out differently on byte-identical inputs. Multi-threaded
+          # indexing decides how many segments optimize is handed, so the shape
+          # it can reach varies run to run and a hard bound here would fail
+          # roughly one build in five for a difference in search speed, not in
+          # correctness. The number still travels in the provenance, which is
+          # what makes a future regression visible.
           # grep would exit 1 on no match and, under pipefail, take the step
-          # down before the message below could say why. sed reports nothing.
+          # down before anything could say why. sed reports nothing.
           SEGMENTS=$(sed -n 's/.*optimize: [0-9][0-9]* [^ ][^ ]* \([0-9][0-9]*\) segments in .*/\1/p' "$WORK/index-build.log" | tail -n1)
-          [ -n "$SEGMENTS" ] || {
-            echo "::error::the build printed no optimize line — the engine no longer reports its segment count, and an index that never compacted would publish as if it had"
-            exit 1
-          }
-          [ "$SEGMENTS" -le 8 ] || {
-            echo "::error::the index came out in $SEGMENTS segments against the engine's own target of 8 — optimize could not compact it, and publishing it would ship a search that reads $SEGMENTS segments per query"
+          if [ -z "$SEGMENTS" ]; then
+            echo "::warning::the build printed no optimize line — the engine no longer reports its segment count, so this index ships without one"
+            SEGMENTS=null
+          elif [ "$SEGMENTS" -gt 8 ]; then
+            echo "::warning::the index came out in $SEGMENTS segments against the engine's own target of 8 — a query reads every segment, so this index searches slower than one that compacted fully"
             grep -E 'optimize:' "$WORK/index-build.log" | tail -5
-            exit 1
-          }
+          fi
           echo "INDEX_SEGMENTS=$SEGMENTS" >> "$GITHUB_ENV"
           # The one property that makes a stored index shippable to Windows,
           # macOS and Android at all: no runner path may appear in it. It holds
