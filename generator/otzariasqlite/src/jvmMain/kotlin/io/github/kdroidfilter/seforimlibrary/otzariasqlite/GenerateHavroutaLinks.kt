@@ -211,13 +211,14 @@ internal suspend fun generateHavroutaLinks(
 
     var totalLinksCreated = 0
 
-    // Delete any existing Havrouta-Talmud links before creating new ones.
-    // COMMENTARY only — this task owns just that layer; a blanket delete would
-    // also kill the book's LINKER citations when re-run on an already-built DB.
+    // Delete any existing Havrouta-Talmud and Havrouta-Hearot links before creating
+    // new ones. Scoped to the two types this task owns — COMMENTARY (Talmud→Havrouta)
+    // and FOOTNOTES (Havrouta→Hearot); a blanket delete would also kill the book's
+    // LINKER citations when re-run on an already-built DB.
     for (havroutaBook in havroutaBooks) {
         repository.executeRawQuery(
             "DELETE FROM link WHERE (sourceBookId = ${havroutaBook.id} OR targetBookId = ${havroutaBook.id}) " +
-                "AND connectionTypeId = (SELECT id FROM connection_type WHERE name = 'COMMENTARY')"
+                "AND connectionTypeId IN (SELECT id FROM connection_type WHERE name IN ('COMMENTARY', 'FOOTNOTES'))"
         )
     }
     logger.i { "Deleted existing Havrouta links" }
@@ -551,7 +552,7 @@ private suspend fun generateHavroutaHearotLinks(
     logger: Logger,
     sourceDir: String
 ): Int {
-    val ctCommentary = bindings.upsertConnectionType(ConnectionType.COMMENTARY.name)
+    val ctFootnotes = bindings.upsertConnectionType(ConnectionType.FOOTNOTES.name)
     val linksDir = File(sourceDir, "links")
     if (!linksDir.exists()) {
         logger.w { "Links directory not found: ${linksDir.absolutePath}" }
@@ -642,16 +643,16 @@ private suspend fun generateHavroutaHearotLinks(
                 continue
             }
 
-            // Single canonical direction Havrouta → Hearot (base → commentary).
+            // Single canonical direction Havrouta → Hearot (base → notes).
             // SOURCE is synthesized at read time.
             allLinks.add(Link(
-                id = bindings.allocator.linkId(sourceLineId, targetLineId, ctCommentary),
+                id = bindings.allocator.linkId(sourceLineId, targetLineId, ctFootnotes),
                 sourceBookId = havroutaBook.id,
                 targetBookId = targetBook.id,
                 sourceLineId = sourceLineId,
                 targetLineId = targetLineId,
                 targetLineIndex = targetLineIndex,
-                connectionType = ConnectionType.COMMENTARY
+                connectionType = ConnectionType.FOOTNOTES
             ))
         }
     }
@@ -667,10 +668,24 @@ private suspend fun generateHavroutaHearotLinks(
 }
 
 /**
- * Sets each 'הערות על X' book as a default commentator of every book that links
- * to it. Pairs are derived from the link table (not from title prefixes), so a
- * hearot whose base has a slightly different title is still paired, and a hearot
- * with no links gets no default. Appends to existing defaults so seeded ones survive.
+ * Sets each notes companion as a default commentator of the book it annotates, so
+ * its notes are visible on open instead of waiting for the reader to know that a
+ * "הערות על X" book exists and to tick it by hand. Without this the notes reach no
+ * display path at all: a dependent-text link only enters `linksByLine` once its
+ * target book is an active commentator, which is what the printed-marker popup
+ * reads.
+ *
+ * A pair qualifies on either of two grounds:
+ *  - the link is typed [ConnectionType.FOOTNOTES] — the authoritative signal, and
+ *    the only one for a companion whose title does not follow the "הערות על" shape;
+ *  - the target is titled exactly "הערות על <source title>" — legacy links still
+ *    stored as COMMENTARY, kept so a library that has not been retyped yet does not
+ *    regress. The equality (rather than a LIKE prefix) is what keeps the transitive
+ *    Talmud→Hearot layer out: those are COMMENTARY and their source is the tractate,
+ *    not the annotated Havrouta volume, so on a re-run over an already-built DB they
+ *    can no longer turn a tractate into a notes reader.
+ *
+ * Appends to existing defaults so seeded ones survive.
  */
 private suspend fun setHearotAsDefaultCommentators(
     repository: SeforimRepository,
@@ -681,7 +696,9 @@ private suspend fun setHearotAsDefaultCommentators(
         null,
         "SELECT DISTINCT l.sourceBookId, l.targetBookId FROM link l " +
             "JOIN book tb ON tb.id = l.targetBookId " +
-            "WHERE tb.title LIKE 'הערות על %' " +
+            "JOIN book sb ON sb.id = l.sourceBookId " +
+            "JOIN connection_type ct ON ct.id = l.connectionTypeId " +
+            "WHERE ct.name = 'FOOTNOTES' OR tb.title = 'הערות על ' || sb.title " +
             "ORDER BY l.sourceBookId, l.targetBookId",
         { cursor ->
             val list = mutableListOf<Pair<Long, Long>>()
@@ -694,9 +711,10 @@ private suspend fun setHearotAsDefaultCommentators(
     ).value
 
     var count = 0
+    var alreadySet = 0
     for ((baseBookId, hearotBookId) in pairs) {
         val existing = repository.getDefaultCommentatorsForBook(baseBookId)
-        if (existing.any { it.commentatorBookId == hearotBookId }) continue
+        if (existing.any { it.commentatorBookId == hearotBookId }) { alreadySet++; continue }
         val nextPosition = (existing.maxOfOrNull { it.position } ?: -1) + 1
         repository.setDefaultCommentatorsForBook(
             baseBookId,
@@ -705,7 +723,24 @@ private suspend fun setHearotAsDefaultCommentators(
         count++
     }
 
-    logger.i { "Set default commentators for $count base→hearot pairs" }
+    // Fail closed. Silence here is indistinguishable from success in the log, and the
+    // only symptom downstream is "the notes do not open" — a DB shipped that way is
+    // not reportable as a generator failure by anyone who sees it.
+    if (pairs.isEmpty()) {
+        val companions = driver.executeQuery(
+            null,
+            "SELECT COUNT(*) FROM book WHERE title LIKE 'הערות על %'",
+            { cursor -> cursor.next(); QueryResult.Value(cursor.getLong(0) ?: 0L) },
+            0
+        ).value
+        check(companions == 0L) {
+            "Found $companions 'הערות על' companion books but not one base→notes pair: " +
+                "no book will open its notes. Expect FOOTNOTES-typed links from the base " +
+                "book, or a companion titled exactly 'הערות על <base title>'."
+        }
+    }
+
+    logger.i { "Set default commentators for $count base→hearot pairs ($alreadySet already set)" }
 }
 
 /**
@@ -760,7 +795,7 @@ private suspend fun generateTalmudHearotTransitiveLinks(
         FROM link l1
         JOIN link l2 ON l1.targetLineId = l2.sourceLineId
         JOIN connection_type ct1 ON l1.connectionTypeId = ct1.id AND ct1.name = 'COMMENTARY'
-        JOIN connection_type ct2 ON l2.connectionTypeId = ct2.id AND ct2.name = 'COMMENTARY'
+        JOIN connection_type ct2 ON l2.connectionTypeId = ct2.id AND ct2.name = 'FOOTNOTES'
         WHERE l1.sourceBookId IN ($talmudBookIds)
           AND l1.targetBookId IN ($havroutaBookIds)
           AND l2.sourceBookId IN ($havroutaBookIds)

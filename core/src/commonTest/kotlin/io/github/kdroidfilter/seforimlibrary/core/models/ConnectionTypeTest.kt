@@ -15,7 +15,7 @@ class ConnectionTypeTest {
             "MIDRASH", "QUOTATION", "MESORAT_HASHAS", "EIN_MISHPAT", "DIBUR_HAMATCHIL",
             "PARSHANUT", "MISHNAH_IN_TALMUD", "RELATED", "OTHER", "LINKER",
             "SIFREI_MITZVOT", "ESSAY", "ALLUSION", "LITURGY", "ELUCIDATION",
-            "EXPLICATION", "LAW", "SUMMARY",
+            "EXPLICATION", "LAW", "SUMMARY", "FOOTNOTES",
         )
         assertEquals(expected, ConnectionType.values().map { it.name })
     }
@@ -36,6 +36,8 @@ class ConnectionTypeTest {
         assertEquals(ConnectionType.EXPLICATION, ConnectionType.fromKnownStringOrNull("explication"))
         assertEquals(ConnectionType.LAW, ConnectionType.fromKnownStringOrNull("law"))
         assertEquals(ConnectionType.SUMMARY, ConnectionType.fromKnownStringOrNull("summary"))
+        assertEquals(ConnectionType.FOOTNOTES, ConnectionType.fromKnownStringOrNull("footnotes"))
+        assertEquals(ConnectionType.FOOTNOTES, ConnectionType.fromKnownStringOrNull("footnote"))
     }
 
     @Test

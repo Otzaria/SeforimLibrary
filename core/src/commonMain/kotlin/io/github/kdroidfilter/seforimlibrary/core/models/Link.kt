@@ -85,6 +85,16 @@ enum class ConnectionType {
     EXPLICATION,
     LAW,
     SUMMARY,
+
+    /**
+     * Footnotes on the base text: a separate "הערות על X" companion whose every
+     * entry is anchored to a base line. Behaves as a dependent text (it is shown
+     * in the commentary panel like a commentary), but carries its own type so the
+     * pairing base↔notes is data rather than a guess at the companion's title.
+     * Appended last to keep existing ordinals — and therefore stable ids —
+     * unchanged.
+     */
+    FOOTNOTES,
     ;
 
     companion object {
@@ -126,6 +136,7 @@ enum class ConnectionType {
                 "explication" -> EXPLICATION
                 "law" -> LAW
                 "summary" -> SUMMARY
+                "footnotes", "footnote" -> FOOTNOTES
                 "", "none", "other" -> OTHER
                 else -> null
             }
