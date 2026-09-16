@@ -223,6 +223,7 @@ class SefariaDirectImporter(
         // primary title always beats any alias (see buildNormalizedTitleToBookId).
         val titleIndexEntries = mutableListOf<BookTitleIndexEntry>()
         val headingLineIds = ConcurrentHashMap.newKeySet<Long>()
+        var rangeMarkerLines = 0
         // Deferred base-text-key → bookId resolution. We can't resolve at
         // book-insert time because a commentary's base text may not have been
         // inserted yet. Resolved in a second pass after the main loop. Declared
@@ -399,9 +400,13 @@ class SefariaDirectImporter(
                 lineKeyToId[bookPath to idx] = lineId
                 lineIdToBookId[lineId] = bookId
                 // Track heading lines (contain <h1>, <h2>, etc. tags) — flagged
-                // on the parse worker.
+                // on the parse worker. Range-marker lines join them: they carry no
+                // text to link to (see [SefariaRangeMarkerLines]).
                 if (lineIsHeading[idx]) {
                     headingLineIds.add(lineId)
+                } else if (SefariaRangeMarkerLines.isRangeMarker(content)) {
+                    headingLineIds.add(lineId)
+                    rangeMarkerLines++
                 }
 
                 // Flush batch when full
@@ -458,7 +463,7 @@ class SefariaDirectImporter(
             lineTocBatch.clear()
         }
 
-        logger.i { "Inserted all books and lines" }
+        logger.i { "Inserted all books and lines ($rangeMarkerLines range-marker lines excluded from links)" }
         SefariaDashlessDibburim.logSummary(logger)
 
         // Build the title→bookId index in two global phases (all primaries, then
