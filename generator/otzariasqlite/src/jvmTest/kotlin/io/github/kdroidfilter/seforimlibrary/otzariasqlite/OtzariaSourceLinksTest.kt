@@ -35,11 +35,13 @@ class OtzariaSourceLinksTest {
         val sefariaSourceId = repo.insertSource("Sefaria")
         val nliSourceId = repo.insertSource("NationalLibrary")
         val catId = repo.insertCategory(Category(0, null, "הלכה", level = 0, order = 1))
-        fun book(id: Long, title: String, sourceId: Long, totalLines: Int) = Book(
+        fun book(
+            id: Long, title: String, sourceId: Long, totalLines: Int, isBaseBook: Boolean = false,
+        ) = Book(
             id = id, categoryId = catId, sourceId = sourceId, title = title, heRef = title,
             authors = emptyList(), pubPlaces = emptyList(), pubDates = emptyList(),
             heShortDesc = null, notesContent = null, order = id.toFloat(), topics = emptyList(),
-            isBaseBook = false, totalLines = totalLines, hasAltStructures = false,
+            isBaseBook = isBaseBook, totalLines = totalLines, hasAltStructures = false,
             hasTeamim = false, hasNekudot = false,
         )
         // Rambam is Sefaria-owned; the commentary is an Otzaria (National Library) book.
@@ -105,5 +107,89 @@ class OtzariaSourceLinksTest {
         assertEquals(3, controlLink.sourceBookId)
         assertEquals(4, controlLink.targetBookId)
         assertEquals(ConnectionType.COMMENTARY, controlLink.connectionType)
+    }
+
+    /**
+     * The same reversal, declared as `"commentary"` rather than `"source"` — the
+     * shape of the Sefaria-export files under `extraBooks/`, whose name is the
+     * commentary and whose `path_2` is the base it comments on. Storing that
+     * verbatim makes the base book look like a dependant of its own commentary,
+     * so the reader offers "מפרשים נוספים על <the commentary>" on a Talmud page
+     * (Otzaria/otzaria#1230). `isBaseBook` on the two books settles the direction.
+     */
+    @Test
+    fun dependantTypedLinkIntoABaseBookIsFlipped() = runBlocking {
+        val driver = JdbcSqliteDriver(url = "jdbc:sqlite::memory:")
+        SeforimDb.Schema.create(driver)
+        val repo = SeforimRepository(":memory:", driver)
+
+        val sefariaSourceId = repo.insertSource("Sefaria")
+        val nliSourceId = repo.insertSource("NationalLibrary")
+        val catId = repo.insertCategory(Category(0, null, "תלמוד", level = 0, order = 1))
+        fun book(
+            id: Long, title: String, sourceId: Long, totalLines: Int, isBaseBook: Boolean = false,
+        ) = Book(
+            id = id, categoryId = catId, sourceId = sourceId, title = title, heRef = title,
+            authors = emptyList(), pubPlaces = emptyList(), pubDates = emptyList(),
+            heShortDesc = null, notesContent = null, order = id.toFloat(), topics = emptyList(),
+            isBaseBook = isBaseBook, totalLines = totalLines, hasAltStructures = false,
+            hasTeamim = false, hasNekudot = false,
+        )
+        repo.insertBook(book(1, "עירובין", sefariaSourceId, 2, isBaseBook = true))
+        repo.insertBook(book(2, "קרן אורה על עירובין", nliSourceId, 2))
+        // A super-commentary on a commentary: the target is not a base book, so the
+        // authored direction stands even though the source is not a base book either.
+        repo.insertBook(book(3, "פירוש על קרן אורה", nliSourceId, 2))
+
+        repo.insertLinesBatch(
+            listOf(
+                Line(id = 100, bookId = 1, lineIndex = 0, content = "גמרא 1", heRef = "גמרא 1"),
+                Line(id = 101, bookId = 1, lineIndex = 1, content = "גמרא 2", heRef = "גמרא 2"),
+                Line(id = 200, bookId = 2, lineIndex = 0, content = "קרן אורה 1", heRef = "קא 1"),
+                Line(id = 201, bookId = 2, lineIndex = 1, content = "קרן אורה 2", heRef = "קא 2"),
+                Line(id = 300, bookId = 3, lineIndex = 0, content = "פירוש 1", heRef = "פ 1"),
+                Line(id = 301, bookId = 3, lineIndex = 1, content = "פירוש 2", heRef = "פ 2"),
+            )
+        )
+
+        val sourceDir = Files.createTempDirectory("otzaria-reversed-links")
+        val linksDir = Files.createDirectories(sourceDir.resolve("links"))
+        // Authored from the commentary's file, but typed "commentary" instead of "source".
+        Files.writeString(
+            linksDir.resolve("קרן אורה על עירובין_links.json"),
+            """
+            |[
+            | {"line_index_1": 2, "heRef_2": "עירובין ב א", "path_2": "עירובין.txt",
+            |  "line_index_2": 2, "Conection Type": "commentary"}
+            |]
+            """.trimMargin()
+        )
+        // Control: commentary on a commentary — neither side is a base book.
+        Files.writeString(
+            linksDir.resolve("פירוש על קרן אורה_links.json"),
+            """
+            |[
+            | {"line_index_1": 2, "heRef_2": "קרן אורה", "path_2": "קרן אורה על עירובין.txt",
+            |  "line_index_2": 2, "Conection Type": "commentary"}
+            |]
+            """.trimMargin()
+        )
+
+        DatabaseGenerator(sourceDirectory = sourceDir, repository = repo).generateLinksOnly()
+
+        val flipped = repo.getLinkIdsBetweenLines(101, 201)
+        assertEquals(1, flipped.size)
+        val link = repo.getLink(flipped.single())!!
+        assertEquals(1, link.sourceBookId)   // עירובין (base) is the source
+        assertEquals(2, link.targetBookId)   // the commentary is the target
+        assertEquals(ConnectionType.COMMENTARY, link.connectionType)
+        assertTrue(repo.getLinkIdsBetweenLines(201, 101).isEmpty())
+
+        // Control: stays as authored, so a super-commentary still finds its source.
+        val control = repo.getLinkIdsBetweenLines(301, 201)
+        assertEquals(1, control.size)
+        val controlLink = repo.getLink(control.single())!!
+        assertEquals(3, controlLink.sourceBookId)
+        assertEquals(2, controlLink.targetBookId)
     }
 }
