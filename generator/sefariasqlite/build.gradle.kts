@@ -319,7 +319,18 @@ tasks.register<JavaExec>("validateForDbInputs") {
 // ForDB archive (-PforDbArchive + -PforDbSha256), forward both properties to all
 // of them so they read byte-identical inputs instead of resolving the repository
 // pointer independently. No effect for a local run that omits them.
-tasks.matching { it.name in setOf("renameCategories", "seedGenerations", "seedAllMetadata", "validateForDbInputs") }
+// generateSefariaSqlite is in the set because the Sefaria import now reads
+// sefaria_author_changes.csv while it creates the author rows — too early for a
+// post-process to fix without merging rows the id allocator has already handed out.
+tasks.matching {
+    it.name in setOf(
+        "generateSefariaSqlite",
+        "renameCategories",
+        "seedGenerations",
+        "seedAllMetadata",
+        "validateForDbInputs",
+    )
+}
     .configureEach {
         this as JavaExec
         for (p in listOf("forDbArchive", "forDbSha256")) {

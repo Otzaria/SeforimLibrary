@@ -125,6 +125,10 @@ fun main(args: Array<String>) {
     val categoryDescriptionOverrides = parseCategoryDescriptionOverrides(
         downloadRequiredForDbFile(FOR_DB_CSV_FILES.getValue("categoryDescriptions"), logger),
     )
+    // Optional: an archive published before the file existed simply has none.
+    // Parsed here all the same, so a malformed row fails this gate instead of
+    // the Sefaria import, hours into a release build.
+    val authorCanonicalNames = SefariaAuthorCanonicalNames.load(logger)
 
     DriverManager.getConnection("jdbc:sqlite:$dbPath").use { conn ->
         conn.autoCommit = false
@@ -184,7 +188,8 @@ fun main(args: Array<String>) {
                 "${categoryMoves.size} category moves, ${bookRenames.size} book renames, " +
                 "${bookMoves.size} book moves, ${generations.size} generation rows, " +
                 "${bulkMetadata.size} bulk metadata rows, ${descriptionOverrides.size} description overrides, " +
-                "${categoryDescriptionOverrides.size} category-description overrides. Original DB/buildstate untouched."
+                "${categoryDescriptionOverrides.size} category-description overrides, " +
+                "${authorCanonicalNames.size} author renames. Original DB/buildstate untouched."
         }
     } finally {
         tempDir.toFile().deleteRecursively()

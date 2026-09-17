@@ -40,6 +40,12 @@ class SefariaDirectImporter(
     private val bindings = IdAllocatorBindings(allocator, repository)
     private val sourceName = "Sefaria"
 
+    // Lazy, so constructing the importer (tests included) never reaches for the
+    // ForDB archive; the first book that has an author pays for it, once.
+    private val authorNames: SefariaAuthorCanonicalNames by lazy {
+        SefariaAuthorCanonicalNames.load(logger)
+    }
+
     // Insert-time (PRE-demotion) per-type link-import metrics, set once the links
     // phase ran (null otherwise). See [SefariaLinksImporter.metricsSnapshot].
     internal var linkImportMetrics: LinkImportMetrics? = null
@@ -282,9 +288,13 @@ class SefariaDirectImporter(
             // stay stable across builds (without this, INSERT OR IGNORE INTO author
             // would assign a fresh auto-increment id on every build and break the
             // delta producer's secondary-UNIQUE collision pre-check).
-            val resolvedAuthors = payload.authors.map { name ->
-                Author(id = bindings.upsertAuthor(name), name = name)
-            }
+            // Canonicalize before the id allocator sees the name: an author row
+            // per spelling splits one man in two, and a search by author then
+            // returns only the corpus that happened to match.
+            val resolvedAuthors = payload.authors
+                .map(authorNames::canonical)
+                .distinct()
+                .map { name -> Author(id = bindings.upsertAuthor(name), name = name) }
             val resolvedPubDates = payload.pubDates.map { pd ->
                 io.github.kdroidfilter.seforimlibrary.core.models.PubDate(
                     id = bindings.upsertPubDate(pd.date),

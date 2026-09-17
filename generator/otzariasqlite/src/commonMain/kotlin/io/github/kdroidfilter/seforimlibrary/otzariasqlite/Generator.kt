@@ -12,6 +12,7 @@ import io.github.kdroidfilter.seforimlibrary.common.ids.InMemoryIdAllocator
 import io.github.kdroidfilter.seforimlibrary.common.reports.GeneratorReport
 import io.github.kdroidfilter.seforimlibrary.core.models.*
 import io.github.kdroidfilter.seforimlibrary.core.text.HebrewTextUtils
+import io.github.kdroidfilter.seforimlibrary.core.text.normalizeAuthorName
 import io.github.kdroidfilter.seforimlibrary.dao.repository.SeforimRepository
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -1230,9 +1231,15 @@ class DatabaseGenerator(
         // Pre-resolve author / pubPlace / pubDate IDs through the IdAllocator
         // so they remain stable across builds (required for the delta producer's
         // secondary-UNIQUE collision pre-check).
-        val authors = (meta?.resolveAuthorNames() ?: emptyList()).map { authorName ->
-            Author(id = bindings.upsertAuthor(authorName), name = authorName)
-        }
+        // normalizeAuthorName first: metadata.json carries nikud on a few names
+        // ("חיים בן עֲטַר") that Sefaria writes plain, and an author row per
+        // spelling means a search by author returns only that corpus's half.
+        val authors = (meta?.resolveAuthorNames() ?: emptyList())
+            .map(::normalizeAuthorName)
+            .distinct()
+            .map { authorName ->
+                Author(id = bindings.upsertAuthor(authorName), name = authorName)
+            }
         val pubPlaces = meta?.pubPlace?.let { pubPlaceName ->
             listOf(PubPlace(id = bindings.upsertPubPlace(pubPlaceName), name = pubPlaceName))
         } ?: emptyList()

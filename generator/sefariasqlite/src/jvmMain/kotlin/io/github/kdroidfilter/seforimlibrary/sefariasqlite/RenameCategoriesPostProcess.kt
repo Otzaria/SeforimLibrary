@@ -739,6 +739,18 @@ internal fun resolveSeforimDbPath(args: Array<String>): Path =
 internal fun downloadRequiredForDbFile(fileName: String, logger: Logger): List<String> =
     forDbReleaseFiles(logger).getValue(fileName)
 
+/**
+ * Same, for a file that an older pinned archive may predate: absent returns null
+ * rather than throwing.
+ *
+ * Only for inputs whose absence is a defined state. `sefaria_author_changes.csv`
+ * qualifies — no file means no author is renamed, which is what every archive
+ * published before it existed meant. Anything the build cannot do without stays
+ * on [downloadRequiredForDbFile], where a missing file fails loudly.
+ */
+internal fun downloadOptionalForDbFile(fileName: String, logger: Logger): List<String>? =
+    forDbReleaseFiles(logger)[fileName]
+
 private var cachedForDbFiles: Map<String, List<String>>? = null
 
 private fun forDbReleaseFiles(logger: Logger): Map<String, List<String>> {
