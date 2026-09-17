@@ -65,6 +65,22 @@ private const val MAX_NAMES_PER_SUMMARY_LINE = 20
 /** Collapses newlines/tabs so a quoted excerpt can never break a log line in two. */
 private fun String.oneLine(): String = replace(Regex("\\s+"), " ").trim()
 
+/**
+ * Link types that assert a base->dependant direction, and therefore have a wrong
+ * and a right way round. Mirrors the reader's dependent-text set: exactly the
+ * types it turns into the virtual SOURCE view.
+ */
+private val ORIENTED_DEPENDANT_TYPES = setOf(
+    ConnectionType.COMMENTARY,
+    ConnectionType.SUPER_COMMENTARY,
+    ConnectionType.TARGUM,
+    ConnectionType.MIDRASH,
+    ConnectionType.PARSHANUT,
+    ConnectionType.DIBUR_HAMATCHIL,
+    ConnectionType.ELUCIDATION,
+    ConnectionType.EXPLICATION,
+)
+
 class DatabaseGenerator(
     private val sourceDirectory: Path,
     private val repository: SeforimRepository,
@@ -1933,8 +1949,17 @@ class DatabaseGenerator(
                 // otzaria-library, may linger in old zips) — never imported. The LINKER
                 // layer comes solely from LinkerToOtzaria's Phase-2.
                 if (declaredType == ConnectionType.LINKER) continue
-                val flip = declaredType == ConnectionType.SOURCE
-                val storedType = if (flip) ConnectionType.COMMENTARY else declaredType
+                // Some dependant-authored files name the dependant type instead of
+                // SOURCE (e.g. "משנה למלך על משנה תורה…_links.json" -> "commentary"),
+                // which would store the commentary as the base text. A base book is
+                // never the dependant of a non-base one, so that pair is reversed.
+                val reversedDependant = declaredType in ORIENTED_DEPENDANT_TYPES &&
+                    targetBook.isBaseBook && !sourceBook.isBaseBook
+                val flip = declaredType == ConnectionType.SOURCE || reversedDependant
+                // Only SOURCE has no storable form; a reversed dependant keeps its type.
+                val storedType =
+                    if (declaredType == ConnectionType.SOURCE) ConnectionType.COMMENTARY
+                    else declaredType
                 // Stable link id keyed by (sourceLineId, targetLineId, connectionTypeId), like Sefaria.
                 val typeId = bindings.upsertConnectionType(storedType.name)
                 val linkId = bindings.insertLinkStable(
