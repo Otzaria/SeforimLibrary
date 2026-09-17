@@ -65,11 +65,7 @@ private const val MAX_NAMES_PER_SUMMARY_LINE = 20
 /** Collapses newlines/tabs so a quoted excerpt can never break a log line in two. */
 private fun String.oneLine(): String = replace(Regex("\\s+"), " ").trim()
 
-/**
- * Link types that assert a base->dependant direction, and therefore have a wrong
- * and a right way round. Mirrors the reader's dependent-text set: exactly the
- * types it turns into the virtual SOURCE view.
- */
+/** Persisted dependant types exposed by the repository's virtual SOURCE view. */
 private val ORIENTED_DEPENDANT_TYPES = setOf(
     ConnectionType.COMMENTARY,
     ConnectionType.SUPER_COMMENTARY,
@@ -77,8 +73,25 @@ private val ORIENTED_DEPENDANT_TYPES = setOf(
     ConnectionType.MIDRASH,
     ConnectionType.PARSHANUT,
     ConnectionType.DIBUR_HAMATCHIL,
+    ConnectionType.EIN_MISHPAT,
     ConnectionType.ELUCIDATION,
-    ConnectionType.EXPLICATION,
+    ConnectionType.FOOTNOTES,
+)
+
+private val DEPENDENCY_TITLE_PREFIXES = listOf(
+    "תלמוד בבלי ",
+    "תלמוד ירושלמי ",
+    "מסכת ",
+    "משנה ",
+    "ספר ",
+)
+
+private data class LegacyAuthoredLinkKey(
+    val sourceBookId: Long,
+    val targetBookId: Long,
+    val sourceLineId: Long,
+    val targetLineId: Long,
+    val connectionType: ConnectionType,
 )
 
 class DatabaseGenerator(
@@ -324,6 +337,24 @@ class DatabaseGenerator(
             "תנך", "תנ\"ך" -> "תנ״ך"
             else -> base
         }
+    }
+
+    /** Returns true only when a dependant-style title explicitly names [baseTitle]. */
+    private fun titleDeclaresDependencyOn(dependantTitle: String, baseTitle: String): Boolean {
+        val normalizedDependant = comparableLabel(dependantTitle)
+        val declaredBase = normalizedDependant.substringAfterLast(" על ", missingDelimiterValue = "")
+        if (declaredBase.isBlank()) return false
+
+        fun dependencyKey(raw: String): String {
+            var value = comparableLabel(raw)
+            while (true) {
+                val prefix = DEPENDENCY_TITLE_PREFIXES.firstOrNull(value::startsWith) ?: break
+                value = value.removePrefix(prefix).trim()
+            }
+            return value
+        }
+
+        return dependencyKey(declaredBase) == dependencyKey(baseTitle)
     }
 
     private fun stripQuotesForLookup(title: String): String {
@@ -1808,13 +1839,37 @@ class DatabaseGenerator(
             }.toMap(mutableMapOf())
         }
 
+        val legacyLinksByKey = repository.getNonBaseToBaseLinksByTypes(ORIENTED_DEPENDANT_TYPES)
+            .groupBy(
+                keySelector = {
+                    LegacyAuthoredLinkKey(
+                        sourceBookId = it.sourceBookId,
+                        targetBookId = it.targetBookId,
+                        sourceLineId = it.sourceLineId,
+                        targetLineId = it.targetLineId,
+                        connectionType = it.connectionType,
+                    )
+                },
+                valueTransform = { it.id },
+            )
+        val legacyLinkIdsToDelete = mutableSetOf<Long>()
+
         logger.i { "Processing links from RAM..." }
         var totalLinks = 0
         for ((bookTitle, links) in linksByBook) {
             manualLinkRowsSeen += links.size
-            val processedLinks = processLinksForBook(bookTitle, links)
+            val processedLinks = processLinksForBook(
+                bookTitle = bookTitle,
+                links = links,
+                legacyLinksByKey = legacyLinksByKey,
+                legacyLinkIdsToDelete = legacyLinkIdsToDelete,
+            )
             totalLinks += processedLinks
             logger.d { "Processed $processedLinks links for $bookTitle, total so far: $totalLinks" }
+        }
+        repository.deleteLinksAndDependants(legacyLinkIdsToDelete)
+        if (legacyLinkIdsToDelete.isNotEmpty()) {
+            logger.i { "Removed ${legacyLinkIdsToDelete.size} superseded legacy Otzaria links" }
         }
         reportDroppedManualLinks()
 
@@ -1881,7 +1936,12 @@ class DatabaseGenerator(
     /**
      * Processes links that were preloaded in memory for a given source book.
      */
-    private suspend fun processLinksForBook(bookTitle: String, links: List<LinkData>): Int {
+    private suspend fun processLinksForBook(
+        bookTitle: String,
+        links: List<LinkData>,
+        legacyLinksByKey: Map<LegacyAuthoredLinkKey, List<Long>>,
+        legacyLinkIdsToDelete: MutableSet<Long>,
+    ): Int {
         val sourceBook = booksByTitle[bookTitle]
         if (sourceBook == null) {
             logger.w { "Source book not found for links: $bookTitle" }
@@ -1949,17 +2009,16 @@ class DatabaseGenerator(
                 // otzaria-library, may linger in old zips) — never imported. The LINKER
                 // layer comes solely from LinkerToOtzaria's Phase-2.
                 if (declaredType == ConnectionType.LINKER) continue
-                // Some dependant-authored files name the dependant type instead of
-                // SOURCE (e.g. "משנה למלך על משנה תורה…_links.json" -> "commentary"),
-                // which would store the commentary as the base text. A base book is
-                // never the dependant of a non-base one, so that pair is reversed.
-                val reversedDependant = declaredType in ORIENTED_DEPENDANT_TYPES &&
+                val pointsFromNonBaseIntoBase = declaredType in ORIENTED_DEPENDANT_TYPES &&
                     targetBook.isBaseBook && !sourceBook.isBaseBook
+                val reversedDependant = pointsFromNonBaseIntoBase &&
+                    titleDeclaresDependencyOn(sourceBook.title, targetBook.title)
                 val flip = declaredType == ConnectionType.SOURCE || reversedDependant
-                // Only SOURCE has no storable form; a reversed dependant keeps its type.
-                val storedType =
-                    if (declaredType == ConnectionType.SOURCE) ConnectionType.COMMENTARY
-                    else declaredType
+                val storedType = when {
+                    declaredType == ConnectionType.SOURCE -> ConnectionType.COMMENTARY
+                    pointsFromNonBaseIntoBase && !reversedDependant -> ConnectionType.OTHER
+                    else -> declaredType
+                }
                 // Stable link id keyed by (sourceLineId, targetLineId, connectionTypeId), like Sefaria.
                 val typeId = bindings.upsertConnectionType(storedType.name)
                 val linkId = bindings.insertLinkStable(
@@ -1970,6 +2029,21 @@ class DatabaseGenerator(
                     targetLineIndex = (if (flip) sourceLineIndex else targetLineIndex).toLong(),
                     connectionTypeId = typeId,
                 )
+                if (pointsFromNonBaseIntoBase) {
+                    val legacyKey = LegacyAuthoredLinkKey(
+                        sourceBookId = sourceBook.id,
+                        targetBookId = targetBook.id,
+                        sourceLineId = sourceLineId,
+                        targetLineId = targetLineId,
+                        connectionType = declaredType,
+                    )
+                    legacyLinksByKey[legacyKey]?.let { legacyIds ->
+                        check(linkId !in legacyIds) {
+                            "Stable link id collision while replacing legacy link $legacyKey"
+                        }
+                        legacyLinkIdsToDelete += legacyIds
+                    }
+                }
                 touchedLinkIds += linkId
                 // Anchor is source-side; skip when flipped (that line is now the stored target).
                 if (!flip) {

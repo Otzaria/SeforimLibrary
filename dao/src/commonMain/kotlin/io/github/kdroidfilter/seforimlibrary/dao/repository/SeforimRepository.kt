@@ -1808,6 +1808,44 @@ class SeforimRepository(databasePath: String, private val driver: SqlDriver) : L
         count
     }
 
+    /** Returns possible legacy dependant→base rows for exact importer reconciliation. */
+    suspend fun getNonBaseToBaseLinksByTypes(types: Set<ConnectionType>): List<Link> =
+        withContext(Dispatchers.IO) {
+            if (types.isEmpty()) return@withContext emptyList()
+            database.linkQueriesQueries.selectNonBaseToBaseLinksByTypes(types.map { it.name })
+                .executeAsList()
+                .map {
+                    Link(
+                        id = it.id,
+                        sourceBookId = it.sourceBookId,
+                        targetBookId = it.targetBookId,
+                        sourceLineId = it.sourceLineId,
+                        targetLineId = it.targetLineId,
+                        targetLineIndex = it.targetLineIndex.toInt(),
+                        connectionType = ConnectionType.fromString(it.connectionType),
+                        baseProvenance = it.baseProvenance.toInt(),
+                    )
+                }
+        }
+
+    /**
+     * Deletes links and every child row that refers to them.
+     * Foreign keys are disabled during link generation, so cascades cannot be relied upon.
+     */
+    suspend fun deleteLinksAndDependants(linkIds: Collection<Long>) = withContext(Dispatchers.IO) {
+        if (linkIds.isEmpty()) return@withContext
+        database.transaction {
+            linkIds.distinct().chunked(500).forEach { chunk ->
+                val ids = chunk.joinToString(",")
+                driver.execute(null, "DELETE FROM link_anchor WHERE linkId IN ($ids)", 0)
+                driver.execute(null, "DELETE FROM link_range WHERE linkId IN ($ids)", 0)
+                driver.execute(null, "DELETE FROM link_coverage WHERE linkId IN ($ids)", 0)
+                driver.execute(null, "DELETE FROM link_suppressed_side WHERE linkId IN ($ids)", 0)
+                driver.execute(null, "DELETE FROM link WHERE id IN ($ids)", 0)
+            }
+        }
+    }
+
     /**
      * Authoritative final per-connection-type link counts:
      * `SELECT ct.name, COUNT(*) FROM link JOIN connection_type GROUP BY name`.

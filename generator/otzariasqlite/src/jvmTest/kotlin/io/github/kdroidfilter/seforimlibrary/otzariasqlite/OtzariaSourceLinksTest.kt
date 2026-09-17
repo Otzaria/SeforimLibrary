@@ -1,16 +1,22 @@
 package io.github.kdroidfilter.seforimlibrary.otzariasqlite
 
+import app.cash.sqldelight.db.QueryResult
 import app.cash.sqldelight.driver.jdbc.sqlite.JdbcSqliteDriver
 import io.github.kdroidfilter.seforimlibrary.core.models.Book
 import io.github.kdroidfilter.seforimlibrary.core.models.Category
 import io.github.kdroidfilter.seforimlibrary.core.models.ConnectionType
 import io.github.kdroidfilter.seforimlibrary.core.models.Line
+import io.github.kdroidfilter.seforimlibrary.core.models.LinkAnchor
+import io.github.kdroidfilter.seforimlibrary.core.models.LinkCoverage
+import io.github.kdroidfilter.seforimlibrary.core.models.LinkRange
+import io.github.kdroidfilter.seforimlibrary.core.models.LinkSuppressedSide
 import io.github.kdroidfilter.seforimlibrary.dao.repository.SeforimRepository
 import io.github.kdroidfilter.seforimlibrary.db.SeforimDb
 import kotlinx.coroutines.runBlocking
 import java.nio.file.Files
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 /**
@@ -191,5 +197,94 @@ class OtzariaSourceLinksTest {
         val controlLink = repo.getLink(control.single())!!
         assertEquals(3, controlLink.sourceBookId)
         assertEquals(2, controlLink.targetBookId)
+    }
+
+    @Test
+    fun legacyReversedLinksAreReplacedWithTheirChildren() = runBlocking {
+        val driver = JdbcSqliteDriver(url = "jdbc:sqlite::memory:")
+        SeforimDb.Schema.create(driver)
+        val repo = SeforimRepository(":memory:", driver)
+        val sefariaSourceId = repo.insertSource("Sefaria")
+        val nliSourceId = repo.insertSource("NationalLibrary")
+        val catId = repo.insertCategory(Category(0, null, "תלמוד", level = 0, order = 1))
+        fun book(id: Long, title: String, sourceId: Long, isBaseBook: Boolean = false) = Book(
+            id = id, categoryId = catId, sourceId = sourceId, title = title, heRef = title,
+            authors = emptyList(), pubPlaces = emptyList(), pubDates = emptyList(),
+            heShortDesc = null, notesContent = null, order = id.toFloat(), topics = emptyList(),
+            isBaseBook = isBaseBook, totalLines = 1, hasAltStructures = false,
+            hasTeamim = false, hasNekudot = false,
+        )
+        repo.insertBook(book(1, "עירובין", sefariaSourceId, isBaseBook = true))
+        repo.insertBook(book(2, "קרן אורה על עירובין", nliSourceId))
+        repo.insertLinesBatch(
+            listOf(
+                Line(100, 1, 0, "גמרא", "עירובין"),
+                Line(200, 2, 0, "קרן אורה", "קרן אורה"),
+            )
+        )
+
+        repo.insertConnectionTypeWithId(1, ConnectionType.COMMENTARY.name)
+        repo.insertLinkWithId(900, 2, 1, 200, 100, 0, 1)
+        repo.insertLinkAnchorsBatch(listOf(LinkAnchor(900, charStart = 0)))
+        repo.insertLinkRangesBatch(listOf(LinkRange(900, 0, 200, 0)))
+        repo.insertLinkCoverageBatch(listOf(LinkCoverage(200, 900, 0)))
+        repo.insertLinkSuppressedSidesBatch(listOf(LinkSuppressedSide(900, 0, 1)))
+
+        val sourceDir = Files.createTempDirectory("otzaria-legacy-link")
+        val linksDir = Files.createDirectories(sourceDir.resolve("links"))
+        Files.writeString(
+            linksDir.resolve("קרן אורה על עירובין_links.json"),
+            """[{"line_index_1":1,"heRef_2":"עירובין","path_2":"עירובין.txt","line_index_2":1,"Conection Type":"commentary"}]""",
+        )
+        val generator = DatabaseGenerator(sourceDirectory = sourceDir, repository = repo)
+        generator.generateLinksOnly()
+
+        assertNull(repo.getLink(900))
+        assertTrue(repo.getLinkAnchors(900).isEmpty())
+        fun childRows(table: String): Long = driver.executeQuery(
+            null,
+            "SELECT COUNT(*) FROM $table WHERE linkId = 900",
+            { cursor -> QueryResult.Value(if (cursor.next().value) cursor.getLong(0) ?: 0L else 0L) },
+            0,
+        ).value
+        assertEquals(0, childRows("link_range"))
+        assertEquals(0, childRows("link_coverage"))
+        assertEquals(0, childRows("link_suppressed_side"))
+        assertEquals(1, repo.getLinkIdsBetweenLines(100, 200).size)
+
+        generator.generateLinksOnly()
+        assertEquals(1, repo.countLinks())
+    }
+
+    @Test
+    fun nonPairCommentaryIntoABaseBookIsLateral() = runBlocking {
+        val driver = JdbcSqliteDriver(url = "jdbc:sqlite::memory:")
+        SeforimDb.Schema.create(driver)
+        val repo = SeforimRepository(":memory:", driver)
+        val sefariaSourceId = repo.insertSource("Sefaria")
+        val nliSourceId = repo.insertSource("NationalLibrary")
+        val catId = repo.insertCategory(Category(0, null, "תפילה", level = 0, order = 1))
+        fun book(id: Long, title: String, sourceId: Long, isBaseBook: Boolean = false) = Book(
+            id = id, categoryId = catId, sourceId = sourceId, title = title, heRef = title,
+            authors = emptyList(), pubPlaces = emptyList(), pubDates = emptyList(),
+            heShortDesc = null, notesContent = null, order = id.toFloat(), topics = emptyList(),
+            isBaseBook = isBaseBook, totalLines = 1, hasAltStructures = false,
+            hasTeamim = false, hasNekudot = false,
+        )
+        repo.insertBook(book(1, "בראשית", sefariaSourceId, isBaseBook = true))
+        repo.insertBook(book(2, "סידור אשכנז", nliSourceId))
+        repo.insertLinesBatch(listOf(Line(100, 1, 0, "אנכי מגן לך", "בראשית טו א"), Line(200, 2, 0, "מגן אברהם", "עמידה")))
+        val sourceDir = Files.createTempDirectory("otzaria-lateral-link")
+        val linksDir = Files.createDirectories(sourceDir.resolve("links"))
+        Files.writeString(
+            linksDir.resolve("סידור אשכנז_links.json"),
+            """[{"line_index_1":1,"heRef_2":"בראשית","path_2":"בראשית.txt","line_index_2":1,"Conection Type":"commentary"}]""",
+        )
+
+        DatabaseGenerator(sourceDirectory = sourceDir, repository = repo).generateLinksOnly()
+
+        val link = repo.getLink(repo.getLinkIdsBetweenLines(200, 100).single())!!
+        assertEquals(ConnectionType.OTHER, link.connectionType)
+        assertTrue(repo.getLinkIdsBetweenLines(100, 200).isEmpty())
     }
 }

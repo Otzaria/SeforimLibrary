@@ -115,6 +115,17 @@ FROM link l
 JOIN connection_type ct ON l.connectionTypeId = ct.id
 WHERE l.sourceBookId = ?;
 
+-- Legacy Otzaria rows that may have been persisted in dependant→base direction.
+-- The generator matches these rows against the exact current JSON natural key
+-- before deleting anything; this query alone does not decide that a row is stale.
+selectNonBaseToBaseLinksByTypes:
+SELECT l.*, ct.name AS connectionType
+FROM link l
+JOIN connection_type ct ON l.connectionTypeId = ct.id
+JOIN book sb ON sb.id = l.sourceBookId
+JOIN book tb ON tb.id = l.targetBookId
+WHERE sb.isBaseBook = 0 AND tb.isBaseBook = 1 AND ct.name IN ?;
+
 selectCommentatorsByBook:
 -- A book may have several authors. Grouping by a.name would list the book once
 -- per author, and COUNT(*) would be multiplied by the author-join fan-out — so
