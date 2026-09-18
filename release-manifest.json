@@ -16,6 +16,19 @@
         "url": "https://github.com/Otzaria/SeforimLibrary/releases/download/v28-20260910220310/build_provenance.json"
       },
       {
+        "apiUrl": "https://api.github.com/repos/Otzaria/SeforimLibrary/releases/assets/571432595",
+        "contentType": "application/json",
+        "createdAt": "2026-09-18T00:14:13Z",
+        "digest": "sha256:fac9f2ae7377af9c0891debe33bb2ca4c15bfc08223f5abe1ea518befdaab443",
+        "id": "RA_kwDOQ6kTXM4iD16T",
+        "label": "",
+        "name": "library_stats.json",
+        "size": 82,
+        "state": "uploaded",
+        "updatedAt": "2026-09-18T00:14:13Z",
+        "url": "https://github.com/Otzaria/SeforimLibrary/releases/download/v28-20260910220310/library_stats.json"
+      },
+      {
         "apiUrl": "https://api.github.com/repos/Otzaria/SeforimLibrary/releases/assets/565836417",
         "contentType": "application/json",
         "createdAt": "2026-09-15T14:11:51Z",
