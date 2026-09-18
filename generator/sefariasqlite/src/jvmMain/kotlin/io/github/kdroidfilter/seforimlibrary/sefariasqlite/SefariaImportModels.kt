@@ -234,11 +234,13 @@ internal fun BookPayload.precomputeLineData(): BookPayload {
  * The line's text with the generated prefix (`(א) `, daf labels…) stripped off.
  * Inserting one verse reprefixes every later line of the chapter, and hashing
  * the prefixed text would renumber all of their ids (issue #1211).
+ * Inline `<br>` is keyed as a space for the same reason: it is layout, not identity.
  */
 private fun BookPayload.rawSegmentForKey(lineIndex: Int, content: String): String {
-    val encodedShift = cleanShiftByLineIndex[lineIndex] ?: return content
+    val encodedShift = cleanShiftByLineIndex[lineIndex] ?: return collapseInlineLineBreaks(content)
     val prefixLength = generatedPrefixLength(encodedShift)
-    return if (prefixLength in 1..content.length) content.substring(prefixLength) else content
+    val raw = if (prefixLength in 1..content.length) content.substring(prefixLength) else content
+    return collapseInlineLineBreaks(raw)
 }
 
 internal data class VersionMeta(

@@ -125,13 +125,42 @@ class LineKeyPrefixStabilityTest {
             return requireNotNull(payload.precomputed).lineKeyHashes!![lineIndex]
         }
 
-        // The internal <br> forces cleanSefariaLine to modify this segment.
+        // The Otzar markup forces cleanSefariaLine to modify this segment.
         // Inserting a segment before it changes its generated prefix (א -> ב),
         // but must not change the content key.
-        val before = cleanedLineHash(listOf("טקסט<br>שנוקה", "שורה שנייה"))
-        val after = cleanedLineHash(listOf("שורה חדשה", "טקסט<br>שנוקה", "שורה שנייה"))
+        val before = cleanedLineHash(listOf("@04טקסט} שנוקה", "שורה שנייה"))
+        val after = cleanedLineHash(listOf("שורה חדשה", "@04טקסט} שנוקה", "שורה שנייה"))
         assertContentEquals(IdAllocatorBindings.lineNaturalKeyHash("טקסט שנוקה"), before)
         assertContentEquals(before, after, "cleaning must not make the generated prefix part of the key")
+    }
+
+    @Test
+    fun `an inline br is kept in the text but keyed as a space`() {
+        val json = Json { ignoreUnknownKeys = true }
+        val reader = SefariaBookPayloadReader(json, Logger.withTag("LineKeyPrefixStabilityTest"))
+        val schema = json.parseToJsonElement(
+            """{"depth":1,"sectionNames":["Paragraph"],"addressTypes":["String"]}""",
+        ).jsonObject
+        val built = reader.walkTextWithSchema(
+            schemaObj = schema,
+            textElement = JsonArray(listOf("<b>כותרת</b><br>גוף הדיבור", "שורה שנייה").map(::JsonPrimitive)),
+            bookHeTitle = "ספר בדיקה",
+            bookEnTitle = "Test Book",
+        )
+        val lineIndex = built.lines.indexOfFirst { "גוף הדיבור" in it }
+        assertTrue(built.lines[lineIndex].endsWith("<b>כותרת</b><br>גוף הדיבור"))
+        val payload = BookPayload(
+            heTitle = "ספר בדיקה", enTitle = "Test Book", categoriesHe = listOf("תנך"),
+            lines = built.lines, refEntries = built.refs, headings = built.headings,
+            authors = emptyList(), description = null, heShortDesc = null,
+            pubDates = emptyList(), altStructures = emptyList(),
+            cleanShiftByLineIndex = built.cleanShifts,
+        ).precomputeLineData()
+        // Books built while inline breaks were collapsed keep their line ids.
+        assertContentEquals(
+            IdAllocatorBindings.lineNaturalKeyHash("<b>כותרת</b> גוף הדיבור"),
+            requireNotNull(payload.precomputed).lineKeyHashes!![lineIndex],
+        )
     }
 
     @Test

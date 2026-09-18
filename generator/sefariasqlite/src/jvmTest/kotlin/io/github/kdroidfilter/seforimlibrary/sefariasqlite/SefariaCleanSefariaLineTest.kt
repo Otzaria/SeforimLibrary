@@ -2,6 +2,8 @@ package io.github.kdroidfilter.seforimlibrary.sefariasqlite
 
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
+import kotlin.test.assertTrue
 
 class SefariaCleanSefariaLineTest {
     @Test
@@ -44,19 +46,51 @@ class SefariaCleanSefariaLineTest {
     }
 
     @Test
-    fun collapsesBrTagsIntoSpaces() {
+    fun keepsInlineBrByDefault() {
+        // Even Ha'azel: each <br> separates a dibbur from the next one.
+        assertEquals(
+            "<b>כותרת ההלכה.</b><br><b>דיבור</b> פירוש.<br>המשך",
+            cleanSefariaLine("<b>כותרת ההלכה.</b><br><b>דיבור</b> פירוש.<br/>המשך")
+        )
+    }
+
+    @Test
+    fun collapsesBrTagsIntoSpacesWhenAsked() {
         // Sample from Tikkunei Zohar daf יז (idx=33 in merged.json): the
-        // paragraph is internally split by <br> tags, which the app used to
-        // render as short broken lines.
+        // paragraph is broken mid-sentence into short lines.
         assertEquals(
             "ובר מינך לית יחודא בעלאי ותתאי. ואנת אשתמודע אדון על כלא.",
-            cleanSefariaLine("ובר מינך לית יחודא <br>בעלאי ותתאי. <br>ואנת אשתמודע אדון על כלא.")
+            cleanSefariaLine(
+                "ובר מינך לית יחודא <br>בעלאי ותתאי. <br>ואנת אשתמודע אדון על כלא.",
+                collapseInlineBreaks = true,
+            )
         )
     }
 
     @Test
     fun handlesSelfClosingAndUppercaseBr() {
-        assertEquals("a b c", cleanSefariaLine("a<br/>b<BR />c"))
+        assertEquals("a b c", cleanSefariaLine("a<br/>b<BR />c", collapseInlineBreaks = true))
+        assertEquals("a<br>b<br>c", cleanSefariaLine("a<br/>b<BR />c"))
+    }
+
+    @Test
+    fun collapsesOnlyListedBooks() {
+        assertTrue(collapsesInlineBreaks("Tikkunei Zohar"))
+        assertTrue(collapsesInlineBreaks("The Koren Yom Kippur Mahzor; Ashkenaz"))
+        assertFalse(collapsesInlineBreaks("Even Ha'azel on Mishneh Torah, Sabbath"))
+    }
+
+    @Test
+    fun keptBreaksCollapseToTheFormerlyCleanedLine() {
+        // The line key hashes the collapsed form, so it must match what the
+        // collapsing cleaner produced — otherwise every such line gets a new id.
+        for (raw in listOf("a <br> b", "<br>a<br><br>b <br>", "a<BR/>  b<br>", "<b>x</b><br>y")) {
+            assertEquals(
+                cleanSefariaLine(raw, collapseInlineBreaks = true),
+                collapseInlineLineBreaks(cleanSefariaLine(raw)),
+                raw,
+            )
+        }
     }
 
     @Test
@@ -71,7 +105,8 @@ class SefariaCleanSefariaLineTest {
 
     @Test
     fun collapsesInnerBrButKeepsTrailingOne() {
-        assertEquals("a b<br>", cleanSefariaLine("a<br>b<br>"))
+        assertEquals("a b<br>", cleanSefariaLine("a<br>b<br>", collapseInlineBreaks = true))
+        assertEquals("a<br>b<br>", cleanSefariaLine("a<br>b<br>"))
     }
 
     @Test
