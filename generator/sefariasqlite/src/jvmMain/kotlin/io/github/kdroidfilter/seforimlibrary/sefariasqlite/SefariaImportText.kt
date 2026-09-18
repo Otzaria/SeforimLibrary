@@ -19,6 +19,10 @@ private val HTML_LINE_BREAK_REGEX = Regex("""<br\s*/?>""", RegexOption.IGNORE_CA
 // lines that read as broken prose, so their inline breaks collapse to spaces.
 private val COLLAPSE_INLINE_BREAK_BOOKS = setOf(
     "Tikkunei Zohar",
+    // Koren's print line layout (~50 characters a line).
+    "The Koren Rosh HaShana Mahzor; Ashkenaz",
+    "The Koren Yom Kippur Mahzor; Ashkenaz",
+    "The Koren Shalem Siddur; Ashkenaz",
 )
 
 internal fun collapsesInlineBreaks(bookEnTitle: String): Boolean =

@@ -76,6 +76,7 @@ class SefariaCleanSefariaLineTest {
     @Test
     fun collapsesOnlyListedBooks() {
         assertTrue(collapsesInlineBreaks("Tikkunei Zohar"))
+        assertTrue(collapsesInlineBreaks("The Koren Yom Kippur Mahzor; Ashkenaz"))
         assertFalse(collapsesInlineBreaks("Even Ha'azel on Mishneh Torah, Sabbath"))
     }
 
