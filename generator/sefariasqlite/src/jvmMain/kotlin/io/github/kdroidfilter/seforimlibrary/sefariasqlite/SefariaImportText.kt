@@ -12,13 +12,17 @@ internal fun sanitizeFolder(name: String?): String {
 // where NN is a two-digit style code. We keep the inner text, drop the marker.
 private val OTZAR_MARKUP_REGEX = Regex("""@\d{2}([^}]*)\}""")
 
-// Sefaria's merged.json for some books (most notably Tikkunei Zohar from daf
-// יז onward) uses `<br>` tags to mark internal line breaks inside what is
-// logically a single paragraph — typically piyut/poetry sections. The app
-// renders each `<br>`-delimited fragment as its own short line, which
-// regresses the legacy plain-text Otzaria experience where the paragraph was
-// continuous. Collapse them to a single space so paragraphs read as prose.
 private val HTML_LINE_BREAK_REGEX = Regex("""<br\s*/?>""", RegexOption.IGNORE_CASE)
+
+// In almost every Sefaria book an inline `<br>` is real structure (paragraphs,
+// a bold heading's own line). These books break mid-sentence instead, into short
+// lines that read as broken prose, so their inline breaks collapse to spaces.
+private val COLLAPSE_INLINE_BREAK_BOOKS = setOf(
+    "Tikkunei Zohar",
+)
+
+internal fun collapsesInlineBreaks(bookEnTitle: String): Boolean =
+    bookEnTitle in COLLAPSE_INLINE_BREAK_BOOKS
 
 // A `<br>` at the *end* of a line is not an in-paragraph break: Sefaria's MAM
 // Tanach emits it after `{פ}` to mark an open parasha (פרשה פתוחה), which the
@@ -27,24 +31,27 @@ private val HTML_LINE_BREAK_REGEX = Regex("""<br\s*/?>""", RegexOption.IGNORE_CA
 private val TRAILING_HTML_LINE_BREAK_REGEX =
     Regex("""(?:\s*<br\s*/?>)+\s*$""", RegexOption.IGNORE_CASE)
 
-internal fun cleanSefariaLine(raw: String): String {
+internal fun cleanSefariaLine(raw: String, collapseInlineBreaks: Boolean = false): String {
     var s = if (raw.contains('\n')) raw.replace("\n", "") else raw
     if (OTZAR_MARKUP_REGEX.containsMatchIn(s)) {
         s = OTZAR_MARKUP_REGEX.replace(s, "$1")
     }
-    if (HTML_LINE_BREAK_REGEX.containsMatchIn(s)) {
-        val trailing = TRAILING_HTML_LINE_BREAK_REGEX.find(s)
-        val body = if (trailing != null) s.substring(0, trailing.range.first) else s
-        // Collapse any double spaces we just introduced
-        s = HTML_LINE_BREAK_REGEX.replace(body, " ").replace(Regex(" {2,}"), " ").trim()
-        if (trailing != null && s.isNotEmpty()) {
-            s += "<br>"
-        }
-    }
+    s = normalizeLineBreaks(s, inlineBreak = if (collapseInlineBreaks) " " else "<br>")
     // Inline any Sefaria textimages as base64 data URIs (no-op if the embedder
     // hasn't been prefetched or the line contains no such URL).
     s = SefariaImageEmbedder.substituteImages(s)
     return s
+}
+
+/** [line] with every inline `<br>` as a space — the form a line's id is keyed on. */
+internal fun collapseInlineLineBreaks(line: String): String = normalizeLineBreaks(line, inlineBreak = " ")
+
+private fun normalizeLineBreaks(line: String, inlineBreak: String): String {
+    if (!HTML_LINE_BREAK_REGEX.containsMatchIn(line)) return line
+    val trailing = TRAILING_HTML_LINE_BREAK_REGEX.find(line)
+    val body = if (trailing != null) line.substring(0, trailing.range.first) else line
+    val s = HTML_LINE_BREAK_REGEX.replace(body, inlineBreak).replace(Regex(" {2,}"), " ").trim()
+    return if (trailing != null && s.isNotEmpty()) "$s<br>" else s
 }
 
 // Hebrew label Sefaria's aliyah section name maps to. Named so the alt-TOC

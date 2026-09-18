@@ -464,7 +464,7 @@ class SefariaImageEmbedderTest {
         )
         // Otzar markup, <br>, and image embedding all in one line
         val input = """@04פתיחה} <br> <img src="https://textimages.sefaria.org/a.png"> text"""
-        val out = cleanSefariaLine(input)
+        val out = cleanSefariaLine(input, collapseInlineBreaks = true)
         assertTrue(out.startsWith("פתיחה"))
         assertFalse(out.contains("<br>"))
         assertTrue(out.contains("data:image/png;base64,X"))
