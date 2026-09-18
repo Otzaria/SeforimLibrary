@@ -2108,6 +2108,59 @@ jobs:
           . .pipeline-control/.github/scripts/zstd_workers.sh
           zstd -T"$(zstd_workers)" -19 -f -o build/seforim.db.zst build/seforim.db
 
+      # ─── Library stats (advisory) ──────────────────────────────────────────
+      # One line of JSON — {"schema_version":1,"db_version":N,"books":…,
+      # "links":…,"lines":…} — so a consumer (the website's stats banner) can
+      # show the size of the library without downloading the 1.4 GB DB.
+      #
+      # It is written to build/ and copied by "Stage release assets" BEFORE the
+      # provenance is computed, so it is an ordinary staged asset: listed with
+      # its sha256 in build_provenance.json, uploaded by the same
+      # draft → verify → publish loop (verify_remote demands remote == staged),
+      # and the reuse scan's `provenance assets + 1` count still holds. An asset
+      # uploaded to the release afterwards would break both of those.
+      #
+      # Advisory by design: the numbers are display-only, so no failure here may
+      # cost the weekly release. sqlite3 missing, a failing query, or a result
+      # that does not have the exact expected shape (or names a db_version other
+      # than this build's) each emit a ::warning:: and leave NO file behind — the
+      # release then ships exactly the asset set it shipped before this step.
+      - name: Compute library stats (advisory)
+        env:
+          EXPECTED_DB_VERSION: ${{ steps.discover.outputs.db_version }}
+        run: |
+          set -uo pipefail
+          OUT=build/library_stats.json
+          rm -f "$OUT" "$OUT.tmp"
+          skip() {
+            echo "::warning::library stats: $1 — library_stats.json is not published on this release"
+            rm -f "$OUT" "$OUT.tmp"
+            exit 0
+          }
+          command -v sqlite3 >/dev/null 2>&1 || skip "sqlite3 not found"
+          [ -s build/seforim.db ] || skip "build/seforim.db is missing"
+          sqlite3 -init /dev/null -readonly -bail build/seforim.db "select json_object('schema_version',1,'db_version',(select cast(value as integer) from schema_meta where key='db_version'),'books',(select count(*) from book),'links',(select count(*) from link),'lines',(select count(*) from line));" \
+            > "$OUT.tmp" || skip "the stats query failed"
+          [[ "$EXPECTED_DB_VERSION" =~ ^[1-9][0-9]*$ ]] || skip "no db_version for this build"
+          # Exact shape AND exact bytes: key order, integer counts > 0, compact
+          # separators, one trailing LF — what sqlite3's json_object prints.
+          python3 - "$OUT.tmp" "$EXPECTED_DB_VERSION" <<'PY' || skip "unexpected result $(head -c 300 "$OUT.tmp")"
+          import json, sys
+          raw = open(sys.argv[1], "rb").read()
+          value = json.loads(raw)
+          ok = (
+              isinstance(value, dict)
+              and list(value) == ["schema_version", "db_version", "books", "links", "lines"]
+              and value["schema_version"] == 1
+              and type(value["db_version"]) is int and value["db_version"] == int(sys.argv[2])
+              and all(type(value[k]) is int and value[k] > 0 for k in ("books", "links", "lines"))
+              and raw == json.dumps(value, separators=(",", ":")).encode() + b"\n"
+          )
+          sys.exit(0 if ok else 1)
+          PY
+          mv "$OUT.tmp" "$OUT" || skip "could not write $OUT"
+          echo "library_stats.json: $(cat "$OUT")"
+
       # ─── Stage release assets ──────────────────────────────────────────────
       - name: Stage release assets
         env:
@@ -2144,6 +2197,11 @@ jobs:
           if compgen -G "patches/patch-*.db.zst" > /dev/null; then
             cp patches/patch-*.db.zst "$STAGE/"
             cp patches/patch-*.db.zst.manifest.json "$STAGE/"
+          fi
+          # Advisory display stats — present only when "Compute library stats
+          # (advisory)" produced a valid file; its absence never fails staging.
+          if [ -s build/library_stats.json ]; then
+            cp build/library_stats.json "$STAGE/"
           fi
           echo "Staged assets:"
           ls -lh "$STAGE/"
