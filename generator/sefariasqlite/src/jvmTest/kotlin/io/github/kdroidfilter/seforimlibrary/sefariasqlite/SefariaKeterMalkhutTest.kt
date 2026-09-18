@@ -6,6 +6,7 @@ import kotlinx.serialization.json.Json
 import java.nio.file.Files
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertTrue
 
 /**
@@ -77,7 +78,121 @@ class SefariaKeterMalkhutTest {
         assertEquals(4, payload.refEntries.size)
     }
 
+
+    @Test
+    fun declaredVersionIsReadInsteadOfMerged() = runBlocking {
+        val tempDir = Files.createTempDirectory("seforim-keter-version")
+        val schemaDir = Files.createDirectories(tempDir.resolve("schemas"))
+        val jsonDir = Files.createDirectories(tempDir.resolve("json"))
+        val bookDir = Files.createDirectories(jsonDir.resolve("Keter Malkhut"))
+
+        Files.writeString(schemaDir.resolve("Keter_Malkhut.json"), schemaJson)
+        Files.writeString(bookDir.resolve("merged.json"), keterMergedJson)
+        Files.writeString(bookDir.resolve(MAHBERET_FILE), keterMahberetJson)
+
+        val payload = readSingleBook(jsonDir, schemaDir, preferredVersions())
+
+        // 40 chapters, numbering not shifted by the title/author/preface entries
+        assertEquals(40, payload.headings.count { it.title.startsWith("פרק ") })
+        assertTrue(
+            payload.lines.none { it.contains("שלמה אבן גבירול") },
+            "merged.json preface entries must not reach the payload"
+        )
+        assertEquals("כתר מלכות, א, א", payload.refEntries.first().heRef)
+        assertTrue(
+            payload.lines.first { it.isNotBlank() && !it.startsWith("<h") }
+                .contains("בִּתְפִלָּתִי יִסְכָּן גָּבֶר"),
+            "chapter 1 must be the first stanza of the piyut"
+        )
+        // The closing chapter is no longer duplicated as both ל"ט and מ'
+        assertEquals(
+            1,
+            payload.lines.count { it.contains("אֱלֹהַי יָדַעְתִּי") },
+            "closing chapter should appear exactly once"
+        )
+    }
+
+    @Test
+    fun bookWithoutMappingStillReadsMerged() = runBlocking {
+        val tempDir = Files.createTempDirectory("seforim-no-mapping")
+        val schemaDir = Files.createDirectories(tempDir.resolve("schemas"))
+        val jsonDir = Files.createDirectories(tempDir.resolve("json"))
+        val bookDir = Files.createDirectories(jsonDir.resolve("FakeBook"))
+
+        Files.writeString(schemaDir.resolve("FakeBook.json"), schema2dJson)
+        Files.writeString(bookDir.resolve("merged.json"), merged2dJson)
+
+        val payload = readSingleBook(jsonDir, schemaDir, preferredVersions())
+
+        assertEquals(4, payload.refEntries.size)
+        assertTrue(payload.lines.any { it.contains("ch1 p1") }, "merged.json content expected")
+    }
+
+    @Test
+    fun missingDeclaredVersionFails() = runBlocking {
+        val tempDir = Files.createTempDirectory("seforim-keter-missing")
+        val schemaDir = Files.createDirectories(tempDir.resolve("schemas"))
+        val jsonDir = Files.createDirectories(tempDir.resolve("json"))
+        val bookDir = Files.createDirectories(jsonDir.resolve("Keter Malkhut"))
+
+        Files.writeString(schemaDir.resolve("Keter_Malkhut.json"), schemaJson)
+        Files.writeString(bookDir.resolve("merged.json"), keterMergedJson)
+
+        val reader = SefariaBookPayloadReader(
+            Json { ignoreUnknownKeys = true; coerceInputValues = true },
+            Logger.withTag("SefariaKeterMalkhutTest"),
+            preferredVersions = preferredVersions(),
+        )
+        val schemaLookup = reader.buildSchemaLookup(schemaDir)
+        val error = assertFailsWith<MissingPreferredVersionException> {
+            reader.readBooksInParallel(jsonDir, schemaDir, schemaLookup)
+        }
+        assertTrue(error.message!!.contains(MAHBERET_FILE), "error should name the missing file")
+    }
+
+    private suspend fun readSingleBook(
+        jsonDir: java.nio.file.Path,
+        schemaDir: java.nio.file.Path,
+        preferredVersions: SefariaPreferredVersions,
+    ): BookPayload {
+        val reader = SefariaBookPayloadReader(
+            Json { ignoreUnknownKeys = true; coerceInputValues = true },
+            Logger.withTag("SefariaKeterMalkhutTest"),
+            preferredVersions = preferredVersions,
+        )
+        val schemaLookup = reader.buildSchemaLookup(schemaDir)
+        return reader.readBooksInParallel(jsonDir, schemaDir, schemaLookup).single()
+    }
+
+    private fun preferredVersions(): SefariaPreferredVersions = parsePreferredVersions(
+        listOf("כתר מלכות|$MAHBERET_FILE"),
+        Logger.withTag("SefariaKeterMalkhutTest"),
+    )
+
     companion object {
+        private const val MAHBERET_FILE =
+            "Mahberet miShire Kodesh, I. Davidson. JPS, Philadelphia, 1923.json"
+
+        // מיזוג ספריא: כותרת/מחבר/הקדמה נספרים כפרקים, ופרק הסיום כפול
+        private val keterMergedJson = buildString {
+            append("{\n  \"title\": \"Keter Malkhut\",\n  \"heTitle\": \"כתר מלכות\",\n  \"text\": [")
+            val chapters = listOf("כתר מלכות", "שלמה אבן גבירול", "הקדמה", "בִּתְפִלָּתִי יִסְכָּן גָּבֶר") +
+                (5..39).map { "פסקה $it" } +
+                listOf("אֱלֹהַי יָדַעְתִּי כִּי הַמִּתְחַנְּנִים לְפָנֶיךָ", "אֱלֹהַי יָדַעְתִּי כִּי הַמִּתְחַנְּנִים לְפָנֶיךָ")
+            append(chapters.joinToString(", ") { "[\"$it\"]" })
+            append("]\n}")
+        }
+
+        // הגרסה המוצהרת: 40 פרקים, הפיוט מתחיל בפרק א, הסיום פעם אחת
+        private val keterMahberetJson = buildString {
+            append("{\n  \"title\": \"Keter Malkhut\",\n  \"heTitle\": \"כתר מלכות\",\n  \"text\": [")
+            val chapters = listOf("בִּתְפִלָּתִי יִסְכָּן גָּבֶר") +
+                (2..39).map { "פסקה $it" } +
+                listOf("אֱלֹהַי יָדַעְתִּי כִּי הַמִּתְחַנְּנִים לְפָנֶיךָ")
+            append(chapters.joinToString(", ") { "[\"$it\"]" })
+            append("]\n}")
+        }
+
         private val schemaJson = """
             {
               "title": "Keter Malkhut",

@@ -85,7 +85,8 @@ class SefariaDirectImporter(
         require(jsonDir.isDirectory() && schemaDir.isDirectory()) { "Missing json/schemas under $dbRoot" }
 
         val authorTitles = SefariaAuthorTitles.load(dbRoot, json, logger)
-        val bookPayloadReader = SefariaBookPayloadReader(json, logger, authorTitles)
+        val preferredVersions = loadPreferredVersions(javaClass.classLoader, logger)
+        val bookPayloadReader = SefariaBookPayloadReader(json, logger, authorTitles, preferredVersions)
         val schemaLookup = bookPayloadReader.buildSchemaLookup(schemaDir)
 
         // Pre-download every `textimages.sefaria.org` asset and cache as base64

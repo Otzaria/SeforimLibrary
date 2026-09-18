@@ -189,7 +189,7 @@ private fun isAuthorBlacklisted(payload: BookPayload, blacklists: SefariaBlackli
     }
 }
 
-private fun loadBlacklistEntries(
+internal fun loadBlacklistEntries(
     classLoader: ClassLoader?,
     resourceName: String,
     logger: Logger

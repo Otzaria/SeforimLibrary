@@ -34,6 +34,9 @@ internal class SefariaBookPayloadReader(
     // Sefaria's wider author-name vocabulary. Defaults to empty so an export
     // without authors.json — and every existing caller — behaves as before.
     private val authorTitles: SefariaAuthorTitles = SefariaAuthorTitles.EMPTY,
+    // מיפוי מוצהר של ספרים שמיובאים מקובץ גרסה ולא מ-merged.json.
+    // ריק כברירת מחדל, כך שכל ספר שאינו במיפוי נקרא בדיוק כמו קודם.
+    private val preferredVersions: SefariaPreferredVersions = SefariaPreferredVersions.Empty,
 ) {
     internal data class SelectedBookReadStats(
         val mergedFilesScanned: Int,
@@ -158,7 +161,15 @@ internal class SefariaBookPayloadReader(
         schemaLookup: Map<String, Path>
     ): BookPayload? {
         return runCatching {
-            val textJson = json.parseToJsonElement(textPath.readText()).jsonObject
+            val mergedJson = json.parseToJsonElement(textPath.readText()).jsonObject
+            val preferredPath = preferredVersions.resolve(
+                mergedPath = textPath,
+                enTitle = mergedJson["title"]?.stringOrNull(),
+                heTitle = mergedJson["heTitle"]?.stringOrNull(),
+            )
+            val textJson = preferredPath
+                ?.let { json.parseToJsonElement(it.readText()).jsonObject }
+                ?: mergedJson
             val fileTitle = textJson["title"]?.stringOrNull()
             val fileHeTitle = textJson["heTitle"]?.stringOrNull()
             val folderName = textPath.parent?.fileName?.name
@@ -273,6 +284,8 @@ internal class SefariaBookPayloadReader(
                 categoriesEn = categoriesEn,
             )
         }.onFailure { e ->
+            // גרסה מוצהרת שחסרה בייצוא היא שגיאת קלט — לא בולעים אותה.
+            if (e is MissingPreferredVersionException) throw e
             logger.w(e) { "Failed to prepare book from $textPath" }
         }.getOrNull()
     }
