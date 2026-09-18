@@ -562,6 +562,8 @@ class SefariaDirectImporter(
         // to point directly at the Torah instead of at Rashi. The aggregated
         // `links/links_by_book.csv` exposes this implicitly via link density;
         // see SefariaLinkDensityChaining.kt for the bimodal-distribution rationale.
+        // (base, dependant) edges from step 3 below; exempted from cross-corpus demotion.
+        var densityPrimaryBaseEdges: Set<Pair<Long, Long>> = emptySet()
         run {
             val linksByBookCsv = dbRoot.resolve("links").resolve("links_by_book.csv")
             if (linksByBookCsv.exists()) {
@@ -575,6 +577,17 @@ class SefariaDirectImporter(
                     // Step 2: walk the asymmetric density rule from declared bases
                     // to chain intermediate dependants (super-commentaries).
                     applyLinkDensitySiblingChaining(bookMetaById, countsByBookPair, logger)
+                    // Step 3: undeclared primary bases (Sifra for Malbim on Leviticus) — demotion exemption only.
+                    val withoutCommentaryCsv = dbRoot.resolve("links").resolve("links_by_book_without_commentary.csv")
+                    require(withoutCommentaryCsv.exists()) { "Missing $withoutCommentaryCsv next to $linksByBookCsv" }
+                    densityPrimaryBaseEdges = findPrimaryBaseDensityEdges(
+                        bookMetaById,
+                        dependantTypedLinkCounts(
+                            countsByBookPair,
+                            parseLinksByBookCsv(withoutCommentaryCsv, normalizedTitleToBookId),
+                        ),
+                        logger,
+                    )
                 }
             }
         }
@@ -632,7 +645,7 @@ class SefariaDirectImporter(
         // cross-cutting corpora (חסידות, קבלה) are exempt.
         // See [SefariaLinksImporter.demoteCrossCorpusDependantLinks].
         logger.i { "Demoting cross-corpus dependant links per Sefaria categorisation..." }
-        linksImporter.demoteCrossCorpusDependantLinks()
+        linksImporter.demoteCrossCorpusDependantLinks(densityPrimaryBaseEdges)
         linksImporter.updateBookHasLinks()
 
         // Capture the authoritative post-demotion per-type split. Demotion only

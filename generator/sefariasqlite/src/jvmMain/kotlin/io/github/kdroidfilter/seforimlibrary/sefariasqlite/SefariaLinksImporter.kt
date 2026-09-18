@@ -806,7 +806,8 @@ internal class SefariaLinksImporter(
      * them as cross-references but the commentator panel
      * (`ct.name IN COMMENTARY/SUPER_COMMENTARY/…`) excludes them.
      */
-    suspend fun demoteCrossCorpusDependantLinks() {
+    // keptBaseEdges: (base, dependant) pairs from findPrimaryBaseDensityEdges — never demoted.
+    suspend fun demoteCrossCorpusDependantLinks(keptBaseEdges: Set<Pair<Long, Long>> = emptySet()) {
         val dependantTypes = listOf(
             "COMMENTARY", "SUPER_COMMENTARY", "TARGUM", "MIDRASH", "PARSHANUT", "ELUCIDATION",
         ).joinToString(",") { "'$it'" }
@@ -838,6 +839,17 @@ internal class SefariaLinksImporter(
             WHERE c.title IN ('תנ״ך','תלמוד בבלי','תלמוד ירושלמי','משנה','משניות','הלכה','חסידות','קבלה','מדרש','מוסר','ספרי מוסר','מחשבת ישראל')
             """.trimIndent()
         )
+        repository.executeRawQuery("DROP TABLE IF EXISTS _kept_base_edge")
+        repository.executeRawQuery(
+            "CREATE TABLE _kept_base_edge (baseBookId INTEGER NOT NULL, depBookId INTEGER NOT NULL, " +
+                "PRIMARY KEY (baseBookId, depBookId)) WITHOUT ROWID"
+        )
+        for (chunk in keptBaseEdges.chunked(500)) {
+            repository.executeRawQuery(
+                "INSERT INTO _kept_base_edge (baseBookId, depBookId) VALUES " +
+                    chunk.joinToString(",") { (base, dep) -> "($base, $dep)" }
+            )
+        }
         // Cross-cutting target corpora — commentators in these corpora
         // legitimately span Tanakh/Talmud/Halakha and must NOT be demoted.
         // 'מדרש' is anchored on Tanakh; everything else strict is on its
@@ -855,6 +867,10 @@ internal class SefariaLinksImporter(
             UPDATE link SET connectionTypeId = (SELECT id FROM connection_type WHERE name='RELATED' LIMIT 1)
             WHERE baseProvenance = 0
               AND connectionTypeId IN (SELECT id FROM connection_type WHERE name IN ($dependantTypes))
+              AND NOT EXISTS (
+                SELECT 1 FROM _kept_base_edge k
+                WHERE k.baseBookId = link.sourceBookId AND k.depBookId = link.targetBookId
+              )
               AND EXISTS (
                 SELECT 1
                 FROM book sb JOIN book tb
@@ -872,6 +888,7 @@ internal class SefariaLinksImporter(
             """.trimIndent()
         )
         repository.executeRawQuery("DROP TABLE IF EXISTS _book_corpus")
+        repository.executeRawQuery("DROP TABLE IF EXISTS _kept_base_edge")
     }
 
     suspend fun updateBookHasLinks() {

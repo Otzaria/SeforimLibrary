@@ -234,3 +234,63 @@ internal fun applyLinkDensitySiblingChaining(
     }
     return booksTouched to edgesAdded
 }
+
+/**
+ * Per-pair count of links Sefaria typed commentary/targum: `links_by_book.csv`
+ * minus `links_by_book_without_commentary.csv`. Fails if the two files disagree.
+ */
+internal fun dependantTypedLinkCounts(
+    allLinks: Map<Pair<Long, Long>, Int>,
+    withoutCommentary: Map<Pair<Long, Long>, Int>,
+): Map<Pair<Long, Long>, Int> {
+    val out = HashMap<Pair<Long, Long>, Int>(allLinks.size)
+    for ((key, rest) in withoutCommentary) {
+        val total = allLinks[key] ?: error("links_by_book_without_commentary pair $key missing from links_by_book")
+        require(rest <= total) { "links_by_book_without_commentary count $rest > links_by_book $total for $key" }
+    }
+    for ((key, total) in allLinks) {
+        val dependantTyped = total - (withoutCommentary[key] ?: 0)
+        if (dependantTyped > 0) out[key] = dependantTyped
+    }
+    return out
+}
+
+/** (primary S, dependant D) edges (Sifra → Malbim on Leviticus) where commentary-typed lc(D,S) ≥ floor
+ *  and ≥ threshold × lc(D, densest declared base). Used only as a cross-corpus demotion exemption. */
+internal fun findPrimaryBaseDensityEdges(
+    bookMetaById: Map<Long, BookMeta>,
+    dependantLinkCountByBookPair: Map<Pair<Long, Long>, Int>,
+    logger: Logger,
+): Set<Pair<Long, Long>> {
+    val incidentByBook = HashMap<Long, MutableList<Pair<Long, Int>>>()
+    for ((pair, count) in dependantLinkCountByBookPair) {
+        if (count < LINK_DENSITY_BASE_FLOOR) continue
+        val (a, b) = pair
+        incidentByBook.getOrPut(a) { ArrayList() }.add(b to count)
+        incidentByBook.getOrPut(b) { ArrayList() }.add(a to count)
+    }
+    fun linkCount(a: Long, b: Long): Int =
+        dependantLinkCountByBookPair[if (a < b) a to b else b to a] ?: 0
+
+    val edges = HashSet<Pair<Long, Long>>()
+    for ((d, meta) in bookMetaById) {
+        if (meta.dependence == null) continue
+        val declaredBases = meta.sefariaDeclaredBaseTextBookIds + meta.inferredBaseTextBookIds
+        if (declaredBases.isEmpty()) continue
+        val nDP = declaredBases.maxOf { linkCount(d, it) }
+        if (nDP == 0) continue
+        val additions = incidentByBook[d].orEmpty()
+            .filter { (s, nDS) ->
+                s !in meta.baseTextBookIds &&
+                    bookMetaById[s]?.let { it.dependence == null } == true &&
+                    nDS.toDouble() / nDP >= LINK_DENSITY_CHAIN_THRESHOLD
+            }
+            .map { it.first }
+        additions.forEach { edges.add(it to d) }
+    }
+    logger.i {
+        "Primary-base density edges: ${edges.size} demotion-exempt edges across " +
+            "${edges.map { it.second }.toSet().size} books (threshold $LINK_DENSITY_CHAIN_THRESHOLD)"
+    }
+    return edges
+}
