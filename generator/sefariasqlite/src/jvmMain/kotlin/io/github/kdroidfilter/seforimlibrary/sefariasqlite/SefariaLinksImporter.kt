@@ -811,9 +811,7 @@ internal class SefariaLinksImporter(
             "COMMENTARY", "SUPER_COMMENTARY", "TARGUM", "MIDRASH", "PARSHANUT", "ELUCIDATION",
         ).joinToString(",") { "'$it'" }
         // Build a temp table (bookId, corpusKey) for every book — corpusKey
-        // is the top-level Sefaria-category title the book transitively
-        // descends from (NULL for books whose chain doesn't reach a known
-        // corpus root).
+        // is the title of the book's category root (absent if not a known corpus).
         // NB: a regular table, not TEMP. executeRawQuery runs each statement
         // through the SQLDelight JdbcSqliteDriver, which on a file-backed DB may
         // serve a different pooled connection per call. TEMP tables are
@@ -825,20 +823,19 @@ internal class SefariaLinksImporter(
         repository.executeRawQuery(
             "CREATE TABLE _book_corpus (bookId INTEGER PRIMARY KEY NOT NULL, corpus TEXT) WITHOUT ROWID"
         )
-        // Tag each book by the corpus root among its category ancestors.
+        // Tag by the true root (parentId IS NULL): by title, מדרש>הלכה books were tagged הלכה.
         // flattenTalmudCategories renamed "תלמוד" → "תלמוד בבלי"/"תלמוד ירושלמי";
         // map both back to "תלמוד" or every Talmud book gets a NULL corpus.
         repository.executeRawQuery(
             """
             INSERT INTO _book_corpus (bookId, corpus)
             SELECT b.id,
-                   CASE WHEN MIN(c.title) IN ('תלמוד בבלי','תלמוד ירושלמי') THEN 'תלמוד'
-                        ELSE MIN(c.title) END AS corpus
+                   CASE WHEN c.title IN ('תלמוד בבלי','תלמוד ירושלמי') THEN 'תלמוד'
+                        ELSE c.title END AS corpus
             FROM book b
             JOIN category_closure cc ON cc.descendantId = b.categoryId
-            JOIN category c ON c.id = cc.ancestorId
+            JOIN category c ON c.id = cc.ancestorId AND c.parentId IS NULL
             WHERE c.title IN ('תנ״ך','תלמוד בבלי','תלמוד ירושלמי','משנה','משניות','הלכה','חסידות','קבלה','מדרש','מוסר','ספרי מוסר','מחשבת ישראל')
-            GROUP BY b.id
             """.trimIndent()
         )
         // Cross-cutting target corpora — commentators in these corpora
