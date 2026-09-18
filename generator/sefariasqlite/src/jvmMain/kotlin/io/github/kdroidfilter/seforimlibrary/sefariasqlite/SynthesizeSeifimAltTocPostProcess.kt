@@ -26,14 +26,24 @@ import kotlin.system.exitProcess
  * - one leaf "סעיף X" per contiguous ס"ק group hangs beneath its heading,
  *   pointing at the group's first content line.
  *
- * Only `alt_toc_*` rows are written — no content line is created or moved.
- * Candidates are books whose *declared* base text (`book_base_text`, Sefaria
- * `base_text_titles`) is a שולחן ערוך book; the SA gate is deliberate — on
- * other bases (e.g. Rashi on Torah) a per-verse marker would be noise, not
- * structure. A book that already has a Seifim structure is skipped, so the
- * task is idempotent; so is a book whose main TOC already carries se'if
- * headings under its simanim (Shach) — a synthesized copy would only
- * duplicate them.
+ * Only `alt_toc_*` rows are written — no content line is created or moved. A
+ * line whose main-TOC container the mirror dropped is left out of line_alt_toc
+ * rather than dragged into the previous section's last se'if.
+ * Candidates come from two sources, in this order:
+ *
+ * 1. books whose *declared* base text (`book_base_text`, Sefaria
+ *    `base_text_titles`) is a שולחן ערוך book; the SA gate is deliberate — on
+ *    other bases (e.g. Rashi on Torah) a per-verse marker would be noise, not
+ *    structure. Their se'if comes from the COMMENTARY links.
+ * 2. the base works listed in [HEREF_SEIF_BOOK_TITLES] (שולחן ערוך הרב, ערוך
+ *    השולחן, ערוך השולחן העתיד), which carry no ס"ק links at all and whose
+ *    se'if is read from each line's own `heRef`.
+ *
+ * The link-derived group keeps its order and the heRef group is appended after
+ * it, so existing entry ids never shift (entry ids are positional).
+ * A book that already has a Seifim structure is skipped, so the task is
+ * idempotent; so is a book whose main TOC already carries se'if headings under
+ * its simanim (Shach) — a synthesized copy would only duplicate them.
  *
  * All writes run on one JDBC connection in a single transaction with batched
  * statements — the line_alt_toc map alone is hundreds of thousands of rows,
@@ -97,7 +107,12 @@ internal data class SeifimBookSnapshot(
     val markers: List<SeifMarker>,
     /** Every content line of the book: (lineId, lineIndex), by lineIndex. */
     val lines: List<Pair<Long, Long>>,
+    /** Every main-TOC node, mirrored or not — decides line ownership only. */
+    val tocNodes: List<SeifimTocNode>,
 )
+
+/** A main-TOC node as the line_alt_toc owner walk sees it. */
+internal data class SeifimTocNode(val id: Long, val parentId: Long?, val lineIndex: Long)
 
 internal data class SeifimHeading(
     val tocLevel: Int,
@@ -262,17 +277,22 @@ internal fun computeSeifMarkers(rows: List<SeifLinkRow>): List<SeifMarker> {
 }
 
 /**
- * Reads every candidate book (declared base = שולחן ערוך, no existing Seifim
- * structure) and returns those whose links yield at least one marker.
+ * Reads every candidate book — the link-derived group first (declared base =
+ * שולחן ערוך, no existing Seifim structure), then the heRef-derived group —
+ * and returns those that yield at least one marker. The order is the order the
+ * write phase assigns entry ids in, so the heRef group must stay last.
  */
-internal fun readSeifimCandidateSnapshots(conn: Connection): List<SeifimBookSnapshot> {
+internal fun readSeifimCandidateSnapshots(conn: Connection): List<SeifimBookSnapshot> =
+    readLinkedSeifimCandidateSnapshots(conn) + readHeRefSeifimCandidateSnapshots(conn)
+
+/** The link-derived group: se'if taken from the COMMENTARY link's SA heRef. */
+internal fun readLinkedSeifimCandidateSnapshots(conn: Connection): List<SeifimBookSnapshot> {
     data class Candidate(
         val bookId: Long,
         val title: String,
         val baseBookIds: MutableList<Long>,
         val shulchanAruchBaseBookIds: MutableList<Long>,
     )
-    data class HeadingRow(val id: Long, val parentId: Long?, val heading: SeifimHeading)
 
     // ספר יכול להצהיר על כמה ספרי בסיס (קול יעקב: שולחן ערוך + שולחן ערוך
     // הרב) — מקבצים לפי bookId כדי לא לנסות ליצור מבנה כפול.
@@ -350,77 +370,240 @@ internal fun readSeifimCandidateSnapshots(conn: Connection): List<SeifimBookSnap
         val markers = computeSeifMarkers(linkRows)
         if (markers.isEmpty()) continue
 
-        val headingRows = mutableListOf<HeadingRow>()
-        conn.prepareStatement(
-            """
-            SELECT e.id, e.parentId, e.level, t.text, l.id, l.lineIndex
-            FROM tocEntry e
-            JOIN tocText t ON t.id = e.textId
-            JOIN line l ON l.id = e.lineId
-            WHERE e.bookId = ?
-            ORDER BY l.lineIndex, e.level, e.id
-            """.trimIndent(),
-        ).use { st ->
-            st.setLong(1, candidate.bookId)
-            st.executeQuery().use { rs ->
-                while (rs.next()) {
-                    val parentId = rs.getLong(2).let { if (rs.wasNull()) null else it }
-                    headingRows += HeadingRow(
-                        id = rs.getLong(1),
-                        parentId = parentId,
-                        heading = SeifimHeading(rs.getInt(3), rs.getString(4), rs.getLong(5), rs.getLong(6)),
-                    )
-                }
-            }
-        }
-        val headingById = headingRows.associateBy { it.id }
-        val relevantHeadingIds = HashSet<Long>()
-        for (row in headingRows) {
-            if (!isSimanHeading(row.heading.text)) continue
-            var current: HeadingRow? = row
-            while (current != null && relevantHeadingIds.add(current.id)) {
-                current = current.parentId?.let(headingById::get)
-            }
-        }
-        // A book whose main TOC already breaks simanim into se'ifim (Shach,
-        // Taz on Yoreh De'ah) needs no synthesized copy: the reader would show
-        // "סעיף ג" twice, once per structure, pointing at adjacent lines.
-        val simanIds = headingRows.filter { isSimanHeading(it.heading.text) }.map { it.id }.toHashSet()
-        if (headingRows.any { it.parentId in simanIds && isSeifHeading(it.heading.text) }) continue
-
-        // Keep only siman headings and their structural ancestors. Lower-level
-        // headings such as "סעיף קטן א" are content inside the new se'if
-        // group, not containers above it.
-        val headings = headingRows
-            .filter { it.id in relevantHeadingIds && it.heading.tocLevel >= 1 }
-            .map { it.heading }
+        val headingRows = readTocHeadingRows(conn, candidate.bookId)
+        val headings = simanHeadingMirror(headingRows) ?: continue
         if (headings.isEmpty()) continue
-
-        val lines = mutableListOf<Pair<Long, Long>>()
-        conn.prepareStatement(
-            "SELECT id, lineIndex FROM line WHERE bookId = ? ORDER BY lineIndex",
-        ).use { st ->
-            st.setLong(1, candidate.bookId)
-            st.executeQuery().use { rs ->
-                while (rs.next()) {
-                    lines += rs.getLong(1) to rs.getLong(2)
-                }
-            }
-        }
 
         snapshots += SeifimBookSnapshot(
             bookId = candidate.bookId,
             title = candidate.title,
             headings = headings,
             markers = markers,
-            lines = lines,
+            lines = readBookLineIndex(conn, candidate.bookId),
+            tocNodes = headingRows.map { it.toTocNode() },
         )
     }
     return snapshots
 }
 
+/**
+ * Base works whose se'if is readable from the line's own heRef: Sefaria ships
+ * them with an `Integer` leaf addressType, so neither an inline "(א)" prefix
+ * nor a ס"ק link exists to mark the se'if. Exact titles, and new ones are
+ * appended at the end — the list order is the entry-id order of the group.
+ */
+internal val HEREF_SEIF_BOOK_TITLES = listOf(
+    "שולחן ערוך הרב",
+    "ערוך השולחן",
+    "ערוך השולחן העתיד",
+)
+
+/** One content line as the heRef group reads it. */
+internal data class SeifRefLine(val lineId: Long, val lineIndex: Long, val heRef: String?)
+
+private data class SeifimHeadingRow(val id: Long, val parentId: Long?, val heading: SeifimHeading)
+
+/**
+ * The heRef-derived group: [HEREF_SEIF_BOOK_TITLES], read by exact title.
+ * Appended after the link-derived group so its entry ids never shift.
+ */
+internal fun readHeRefSeifimCandidateSnapshots(conn: Connection): List<SeifimBookSnapshot> {
+    val snapshots = mutableListOf<SeifimBookSnapshot>()
+    for (title in HEREF_SEIF_BOOK_TITLES) {
+        val bookIds = mutableListOf<Long>()
+        conn.prepareStatement("SELECT id FROM book WHERE title = ? ORDER BY id").use { st ->
+            st.setString(1, title)
+            st.executeQuery().use { rs -> while (rs.next()) bookIds += rs.getLong(1) }
+        }
+        // כותר שנעלם (ForDB/book_renames.csv) הוא רגרסיה שלמה של הספר — לא דילוג.
+        require(bookIds.size == 1) {
+            "heRef-seif title '$title' matched ${bookIds.size} books ($bookIds); expected exactly one"
+        }
+        val bookId = bookIds.single()
+        if (hasSeifimStructure(conn, bookId)) continue
+
+        val headingRows = readTocHeadingRows(conn, bookId)
+        // השער היחיד שמדלג בשתיקה: ה-TOC הראשי כבר מפרק סימנים לסעיפים.
+        val headings = simanHeadingMirror(headingRows) ?: continue
+
+        val lines = readBookLines(conn, bookId)
+        val markers = computeHeRefSeifMarkers(
+            bookTitle = title,
+            headingTextByLineIndex = headingTextByLineIndex(title, headingRows),
+            lines = lines,
+        )
+        require(headings.isNotEmpty() && markers.isNotEmpty()) {
+            "No se'if markers derived for '$title' (book $bookId): " +
+                "${headings.size} mirrored headings, ${markers.size} markers"
+        }
+
+        snapshots += SeifimBookSnapshot(
+            bookId = bookId,
+            title = title,
+            headings = headings,
+            markers = markers,
+            lines = lines.map { it.lineId to it.lineIndex },
+            tocNodes = headingRows.map { it.toTocNode() },
+        )
+    }
+    return snapshots
+}
+
+/**
+ * Derives one marker per se'if from the lines' own heRefs.
+ *
+ * A line's container is the nearest preceding main-TOC heading, and only a
+ * siman container gets se'if leaves: the same predicate that selects the
+ * containers selects the content. Everything else the book holds at that depth
+ * — the הקדמה, and named sections such as סדר הגט or הלכות רבית ועיסקא —
+ * numbers פסקאות, not סעיפים, and gets no leaf.
+ *
+ * Inside a siman nothing is guessed: a line whose heRef is missing, too
+ * shallow, does not name its own siman, or repeats a heRef the siman already
+ * closed aborts the build. Only an immediately repeated heRef is legitimate —
+ * several lines of one se'if — and opens a single leaf.
+ */
+internal fun computeHeRefSeifMarkers(
+    bookTitle: String,
+    headingTextByLineIndex: Map<Long, String>,
+    lines: List<SeifRefLine>,
+): List<SeifMarker> {
+    val markers = mutableListOf<SeifMarker>()
+    var container: String? = null
+    var previousRef: String? = null
+    val refsInSiman = HashSet<String>()
+    for (line in lines) {
+        val heading = headingTextByLineIndex[line.lineIndex]
+        if (heading != null) {
+            container = heading
+            previousRef = null
+            refsInSiman.clear()
+            continue
+        }
+        val siman = container?.takeIf(::isSimanHeading) ?: continue
+        val where = "$bookTitle, line ${line.lineIndex} under '${siman.trim()}'"
+        val heRef = line.heRef ?: error("Seif marker: no heRef on $where")
+        // המפריד הוא "," עם רווח כפול אחרי שם החלק — מקצצים כל מקטע.
+        val segments = heRef.split(',').map { it.trim() }
+        val seif = segments.last()
+        require(segments.size >= 4 && seif.isNotEmpty()) { "Seif marker: malformed heRef '$heRef' on $where" }
+        require(segments[segments.size - 2] == siman.trimHeadingStart().removePrefix("סימן").trim()) {
+            "Seif marker: heRef '$heRef' does not sit in its siman on $where"
+        }
+        if (heRef == previousRef) continue
+        require(refsInSiman.add(heRef)) { "Seif marker: heRef '$heRef' reopens a closed se'if on $where" }
+        previousRef = heRef
+        markers += SeifMarker(lineId = line.lineId, lineIndex = line.lineIndex, label = "סעיף $seif")
+    }
+    return markers
+}
+
+private fun SeifimHeadingRow.toTocNode() = SeifimTocNode(id, parentId, heading.lineIndex)
+
+/** Heading text by line, loud on two tocEntry rows sharing one line. */
+private fun headingTextByLineIndex(title: String, rows: List<SeifimHeadingRow>): Map<Long, String> {
+    val byLine = HashMap<Long, String>(rows.size)
+    for (row in rows) {
+        val previous = byLine.put(row.heading.lineIndex, row.heading.text)
+        require(previous == null) {
+            "Two tocEntry rows on line ${row.heading.lineIndex} of '$title': '$previous' and '${row.heading.text}'"
+        }
+    }
+    return byLine
+}
+
+private fun hasSeifimStructure(conn: Connection, bookId: Long): Boolean =
+    conn.prepareStatement("SELECT 1 FROM alt_toc_structure WHERE bookId = ? AND key = ?").use { st ->
+        st.setLong(1, bookId)
+        st.setString(2, SEIFIM_STRUCTURE_KEY)
+        st.executeQuery().use { rs -> rs.next() }
+    }
+
+private fun readTocHeadingRows(conn: Connection, bookId: Long): List<SeifimHeadingRow> {
+    val rows = mutableListOf<SeifimHeadingRow>()
+    conn.prepareStatement(
+        """
+        SELECT e.id, e.parentId, e.level, t.text, l.id, l.lineIndex
+        FROM tocEntry e
+        JOIN tocText t ON t.id = e.textId
+        JOIN line l ON l.id = e.lineId
+        WHERE e.bookId = ?
+        ORDER BY l.lineIndex, e.level, e.id
+        """.trimIndent(),
+    ).use { st ->
+        st.setLong(1, bookId)
+        st.executeQuery().use { rs ->
+            while (rs.next()) {
+                val parentId = rs.getLong(2).let { if (rs.wasNull()) null else it }
+                rows += SeifimHeadingRow(
+                    id = rs.getLong(1),
+                    parentId = parentId,
+                    heading = SeifimHeading(rs.getInt(3), rs.getString(4), rs.getLong(5), rs.getLong(6)),
+                )
+            }
+        }
+    }
+    return rows
+}
+
+/**
+ * The siman headings and their structural ancestors, or null when the book's
+ * main TOC already breaks simanim into se'ifim (Shach, Taz on Yoreh De'ah) —
+ * the reader would then show "סעיף ג" twice, once per structure, pointing at
+ * adjacent lines. Lower-level headings such as "סעיף קטן א" are content inside
+ * the new se'if group, not containers above it.
+ */
+private fun simanHeadingMirror(headingRows: List<SeifimHeadingRow>): List<SeifimHeading>? {
+    val headingById = headingRows.associateBy { it.id }
+    val relevantHeadingIds = HashSet<Long>()
+    for (row in headingRows) {
+        if (!isSimanHeading(row.heading.text)) continue
+        var current: SeifimHeadingRow? = row
+        while (current != null && relevantHeadingIds.add(current.id)) {
+            current = current.parentId?.let(headingById::get)
+        }
+    }
+    val simanIds = headingRows.filter { isSimanHeading(it.heading.text) }.map { it.id }.toHashSet()
+    if (headingRows.any { it.parentId in simanIds && isSeifHeading(it.heading.text) }) return null
+    return headingRows
+        .filter { it.id in relevantHeadingIds && it.heading.tocLevel >= 1 }
+        .map { it.heading }
+}
+
+/** (lineId, lineIndex) only — stays on the covering index idx_line_book_index. */
+private fun readBookLineIndex(conn: Connection, bookId: Long): List<Pair<Long, Long>> {
+    val lines = mutableListOf<Pair<Long, Long>>()
+    conn.prepareStatement(
+        "SELECT id, lineIndex FROM line WHERE bookId = ? ORDER BY lineIndex",
+    ).use { st ->
+        st.setLong(1, bookId)
+        st.executeQuery().use { rs ->
+            while (rs.next()) lines += rs.getLong(1) to rs.getLong(2)
+        }
+    }
+    return lines
+}
+
+private fun readBookLines(conn: Connection, bookId: Long): List<SeifRefLine> {
+    val lines = mutableListOf<SeifRefLine>()
+    conn.prepareStatement(
+        "SELECT id, lineIndex, heRef FROM line WHERE bookId = ? ORDER BY lineIndex",
+    ).use { st ->
+        st.setLong(1, bookId)
+        st.executeQuery().use { rs ->
+            while (rs.next()) {
+                lines += SeifRefLine(rs.getLong(1), rs.getLong(2), rs.getString(3))
+            }
+        }
+    }
+    return lines
+}
+
+/** Kotlin's trimStart() keeps a BOM; the app strips it too (cleanSectionHeadingLabel). */
+private fun String.trimHeadingStart(): String = trimStart('\uFEFF').trimStart()
+
 private fun isSimanHeading(text: String): Boolean {
-    val trimmed = text.trimStart()
+    val trimmed = text.trimHeadingStart()
     return trimmed.startsWith("סימן") &&
         trimmed.length > "סימן".length &&
         trimmed["סימן".length].isWhitespace()
@@ -428,7 +611,7 @@ private fun isSimanHeading(text: String): Boolean {
 
 /** "סעיף ג" — a se'if heading; "סעיף קטן א" is a se'if-katan and stays content. */
 private fun isSeifHeading(text: String): Boolean {
-    val trimmed = text.trimStart()
+    val trimmed = text.trimHeadingStart()
     return trimmed.startsWith("סעיף") &&
         trimmed.length > "סעיף".length &&
         trimmed["סעיף".length].isWhitespace() &&
@@ -501,8 +684,10 @@ internal fun writeSeifimAltToc(
     val entryById = HashMap<Long, PendingEntry>()
     val childrenByParent = LinkedHashMap<Long?, MutableList<PendingEntry>>()
     val headingByLine = HashMap<Long, PendingEntry>() // headingLine -> entry
-    val lineToEntryId = HashMap<Long, Long>() // owning line -> entry id
+    val leafByLine = HashMap<Long, Pair<Long, Long?>>() // markerLine -> (entry id, parent TOC node)
     val stack = ArrayDeque<Pair<Int, PendingEntry>>() // (tocLevel, entry)
+    val nodeByLine = snapshot.tocNodes.associateBy { it.lineIndex }
+    val parentByNode = snapshot.tocNodes.associate { it.id to it.parentId }
 
     for (heading in snapshot.headings) {
         while (stack.isNotEmpty() && stack.last().first >= heading.tocLevel) stack.removeLast()
@@ -519,7 +704,6 @@ internal fun writeSeifimAltToc(
         childrenByParent.getOrPut(parent?.id) { mutableListOf() }.add(entry)
         stack.addLast(heading.tocLevel to entry)
         headingByLine[heading.lineIndex] = entry
-        lineToEntryId[heading.lineIndex] = entry.id
     }
 
     val sortedHeadingLines = snapshot.headings.map { it.lineIndex }.sorted()
@@ -537,7 +721,7 @@ internal fun writeSeifimAltToc(
         entries += entry
         entryById[entry.id] = entry
         childrenByParent.getOrPut(parent.id) { mutableListOf() }.add(entry)
-        lineToEntryId[marker.lineIndex] = entry.id
+        leafByLine[marker.lineIndex] = entry.id to nodeByLine[parentLine]?.id
         leaves++
     }
 
@@ -583,19 +767,33 @@ internal fun writeSeifimAltToc(
         st.executeBatch()
     }
 
-    // line_alt_toc: map every content line to its nearest preceding entry.
+    // line_alt_toc: every line belongs to the nearest preceding entry — but only
+    // while that entry still covers it. A main-TOC node the mirror dropped
+    // (חושן משפט ללא סימנים, סדר הגט, הלכות רבית) ends the previous section's
+    // ownership instead of dragging its content into that section's last se'if;
+    // a node the mirror kept as an ancestor (סעיף קטן under its siman) does not.
     conn.prepareStatement(
         "INSERT OR REPLACE INTO line_alt_toc (lineId, structureId, altTocEntryId) VALUES (?, ?, ?)",
     ).use { st ->
-        val ownerLines = lineToEntryId.keys.sorted()
-        var oi = 0
-        var currentEntryId: Long? = null
+        var ownerEntryId: Long? = null
+        var ownerNodeId: Long? = null
         for ((lineId, lineIndex) in snapshot.lines) {
-            while (oi < ownerLines.size && ownerLines[oi] <= lineIndex) {
-                currentEntryId = lineToEntryId[ownerLines[oi]]
-                oi++
+            val leaf = leafByLine[lineIndex]
+            val node = nodeByLine[lineIndex]
+            if (leaf != null) {
+                ownerEntryId = leaf.first
+                ownerNodeId = leaf.second
+            } else if (node != null) {
+                val mirrored = headingByLine[lineIndex]
+                if (mirrored != null) {
+                    ownerEntryId = mirrored.id
+                    ownerNodeId = node.id
+                } else if (!coversNode(ownerNodeId, node.id, parentByNode)) {
+                    ownerEntryId = null
+                    ownerNodeId = null
+                }
             }
-            val entryId = currentEntryId ?: continue
+            val entryId = ownerEntryId ?: continue
             st.setLong(1, lineId)
             st.setLong(2, structureId)
             st.setLong(3, entryId)
@@ -604,6 +802,17 @@ internal fun writeSeifimAltToc(
         st.executeBatch()
     }
     return leaves
+}
+
+/** True when [ownerNodeId] is [nodeId] or one of its main-TOC ancestors. */
+private fun coversNode(ownerNodeId: Long?, nodeId: Long, parentByNode: Map<Long, Long?>): Boolean {
+    if (ownerNodeId == null) return false
+    var current: Long? = nodeId
+    while (current != null) {
+        if (current == ownerNodeId) return true
+        current = parentByNode[current]
+    }
+    return false
 }
 
 internal const val SEIFIM_STRUCTURE_KEY = "Seifim"
