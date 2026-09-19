@@ -57,7 +57,7 @@ hhmm() { printf '%02d:%02d' $(( $1 / 3600 )) $(( $1 % 3600 / 60 )); }
 # the Linker workflow change; the hosted CI gate always validates this file and
 # never skips because a sibling checkout is unavailable:
 #
-#   relink  (relink.yml:264)   kaggle 90 · local 1440 · server 480 (serial mode,
+#   relink  (relink.yml:264)   kaggle 90 · local 2880 · server 480 (serial mode,
 #                              i.e. library_run_id != '', which is how this
 #                              parent always dispatches it)
 #   resolve (relink.yml:1287)  480 — gated `inputs.target == 'kaggle'`, so it
@@ -66,12 +66,12 @@ hhmm() { printf '%02d:%02d' $(( $1 / 3600 )) $(( $1 % 3600 / 60 )); }
 #
 # path → jobs:  kaggle = relink + resolve + publish (600)
 #               server = relink + publish (510)
-#               local  = relink + publish (1470)
+#               local  = relink + publish (2910)
 # Inter-job queue time (publish sits in the `linker-release-publisher`
 # concurrency group with `queue: max`, and kaggle's resolve waits on the
 # cross-repo host lease) is covered by the hour of grace added below, not here.
-child_job_max_min=1440
-child_path_budget_min=$((1440 + 30))
+child_job_max_min=2880
+child_path_budget_min=$((2880 + 30))
 case "$SERIAL_LINKER_TARGET" in
   kaggle) child_job_max_min=480; child_path_budget_min=$((90 + 480 + 30)) ;;
   server) child_job_max_min=480; child_path_budget_min=$((480 + 30)) ;;

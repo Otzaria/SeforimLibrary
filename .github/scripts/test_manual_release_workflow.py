@@ -915,7 +915,7 @@ class ManualReleaseWorkflowContractTest(unittest.TestCase):
                 self.assertNotIn("seforimlibrary", stripped, line)
         # S2's stale-temp sweep is rooted in $RUNNER_TEMP and matches two name
         # shapes; neither can reach the cache. Keep it that way.
-        sweep = cleanup.split('find "$RUNNER_TEMP" -maxdepth 1 -mtime +2', 1)[1]
+        sweep = cleanup.split('find "$RUNNER_TEMP" -maxdepth 1 -mtime +3', 1)[1]
         self.assertEqual(
             re.findall(r"-name '([^']+)'", sweep),
             ["lines-snapshot-*-*.db", "manual-links-inputs-*-*"],
@@ -1321,12 +1321,12 @@ class ManualReleaseWorkflowContractTest(unittest.TestCase):
     def test_parent_timeout_covers_db_build_and_complete_split_child(self):
         build = self.workflow.split("  build-and-release:\n", 1)[1]
         self.assertIn(
-            "    timeout-minutes: 2880\n",
+            "    timeout-minutes: 4320\n",
             build,
             "the self-hosted parent must outlive DB generation plus the legal split child chain",
         )
         self.assertIn("90m GPU NER + 480m CPU resolution", self.workflow)
-        # The default target is local, one child job with its own 1440-minute
+        # The default target is local, one child job with its own 2880-minute
         # ceiling. At a 1440 PARENT ceiling that child could not be waited out —
         # this job generates the DB first, so the child always outlived it and the
         # `always()` cleanup then killed a run that was still within contract. The
@@ -1336,7 +1336,7 @@ class ManualReleaseWorkflowContractTest(unittest.TestCase):
             "At a 1440 parent ceiling a legal child could not be waited out",
             self.workflow,
         )
-        self.assertIn("2880 − 1530 (largest wait cap) − ~55 (pre-dispatch)", self.workflow)
+        self.assertIn("4320 − 2970 (largest wait cap) − ~55 (pre-dispatch)", self.workflow)
 
         # Read the four numbers back from the files that carry them, so the budget
         # cannot silently stop adding up: parent ceiling, the wait cap the step
@@ -1345,7 +1345,7 @@ class ManualReleaseWorkflowContractTest(unittest.TestCase):
         cap = int(re.search(r'\n          RELINK_WAIT_CAP_MIN: "(\d+)"\n', build).group(1))
         local_budget = self.relink_path_budgets()["local"]
         self.assertEqual(
-            local_budget, 1440 + 30, "must keep tracking relink.yml's local path"
+            local_budget, 2880 + 30, "must keep tracking relink.yml's local path"
         )
         self.assertEqual(
             cap,
@@ -1359,8 +1359,8 @@ class ManualReleaseWorkflowContractTest(unittest.TestCase):
         self.assertLessEqual(parent, 7200, "GitHub terminates a self-hosted job at five days")
 
         ttls = set(re.findall(r"--ttl (\d+)\n", self.workflow))
-        self.assertEqual(ttls, {"176400"})
-        self.assertEqual(self.workflow.count("--ttl 176400"), 2)
+        self.assertEqual(ttls, {"262800"})
+        self.assertEqual(self.workflow.count("--ttl 262800"), 2)
         self.assertEqual(
             int(ttls.pop()) - parent * 60,
             3600,
@@ -1423,9 +1423,9 @@ class ManualReleaseWorkflowContractTest(unittest.TestCase):
         wait = self.relink_wait
         # The cap is configuration handed over by the step, not a literal in the
         # script: the parent's budget stays next to the parent's timeout-minutes.
-        self.assertIn('RELINK_WAIT_CAP_MIN: "1530"', relink)
+        self.assertIn('RELINK_WAIT_CAP_MIN: "2970"', relink)
         self.assertIn('"${RELINK_WAIT_CAP_MIN:-}" =~ ^[1-9][0-9]*$', wait)
-        self.assertNotIn("1530", wait)
+        self.assertNotIn("2970", wait)
         # …but the script still derives its own, per PATH, and takes the tighter
         # of the two, so kaggle (600) and server (510) are not held to the local
         # budget and a missing/garbage value cannot restore an unbounded wait.
@@ -1491,7 +1491,7 @@ class ManualReleaseWorkflowContractTest(unittest.TestCase):
         )
         self.assertIn(
             "::error::relink run 4242 exceeded the 3-minute wait cap "
-            "(the local path's jobs may legally take 1470)",
+            "(the local path's jobs may legally take 2910)",
             done.stdout,
         )
         self.assertIn("out of contract and no longer waited on", done.stdout)
@@ -1507,11 +1507,11 @@ class ManualReleaseWorkflowContractTest(unittest.TestCase):
         healthy child 7.5 hours from the end of its own contract.
         """
         budgets = self.relink_path_budgets()
-        self.assertEqual(budgets, {"kaggle": 600, "server": 510, "local": 1470})
-        for target, cap in (("kaggle", 660), ("server", 570), ("local", 1530)):
-            for passed in (None, "1530"):
+        self.assertEqual(budgets, {"kaggle": 600, "server": 510, "local": 2910})
+        for target, cap in (("kaggle", 660), ("server", 570), ("local", 2970)):
+            for passed in (None, "2970"):
                 with self.subTest(target=target, cap=passed):
-                    # Whether the step passes nothing or its local-target 1530,
+                    # Whether the step passes nothing or its local-target 2970,
                     # the path's own budget is what ends the wait.
                     run = self._drive_relink_wait(cap=passed, target=target)
                     self.assertEqual(run.returncode, 1, run.stdout + run.stderr)
@@ -1546,7 +1546,7 @@ class ManualReleaseWorkflowContractTest(unittest.TestCase):
         path. A kaggle `resolve` may legally run 200 minutes; against the old
         single-job number (90) every such cancel was misreported as a timeout."""
         maxima = self.relink_job_maxima()
-        self.assertEqual(maxima, {"kaggle": 480, "server": 480, "local": 1440})
+        self.assertEqual(maxima, {"kaggle": 480, "server": 480, "local": 2880})
         done = self._drive_relink_wait(
             target="kaggle",
             terminal_after=1,
@@ -1682,8 +1682,8 @@ class ManualReleaseWorkflowContractTest(unittest.TestCase):
               # it: without this bound, deleting the cap branch hangs the suite
               # (unittest runs this case before the static one) until the job's
               # own timeout kills it with nothing in the log. No legitimate cap
-              # can reach the parent job's own 2880-minute ceiling.
-              [ "$SECONDS" -le 172800 ] || { echo "HARNESS: no cap ended the wait within 2880 simulated minutes"; exit 9; }
+              # can reach the parent job's own 4320-minute ceiling.
+              [ "$SECONDS" -le 259200 ] || { echo "HARNESS: no cap ended the wait within 4320 simulated minutes"; exit 9; }
             }
             export -f gh sleep
             bash ./wait_for_relink_run.sh
@@ -1969,7 +1969,7 @@ class ManualReleaseWorkflowContractTest(unittest.TestCase):
         self.assertIn(raw, cleanup)
         self.assertIn(tree, cleanup)
         # The stale-sibling sweep stays bounded and conservative.
-        self.assertIn('find "$RUNNER_TEMP" -maxdepth 1 -mtime +2', cleanup)
+        self.assertIn('find "$RUNNER_TEMP" -maxdepth 1 -mtime +3', cleanup)
         self.assertIn("-name 'lines-snapshot-*-*.db'", cleanup)
         self.assertIn("-name 'manual-links-inputs-*-*'", cleanup)
         self.assertIn("du -sh", cleanup)

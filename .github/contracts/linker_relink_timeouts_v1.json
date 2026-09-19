@@ -4,7 +4,7 @@
   "timeouts": {
     "relink": {
       "kaggle": 90,
-      "local": 1440,
+      "local": 2880,
       "server": 480
     },
     "resolve": 480,

@@ -476,21 +476,24 @@ jobs:
     runs-on: ${{ inputs.runner_selection == 'local' && fromJSON('["otzaria-db"]') || (inputs.runner_selection == 'server-2' && fromJSON('["self-hosted", "Linux", "X64", "server-2"]') || fromJSON('["self-hosted", "Linux", "ARM64"]')) }}
     # Self-hosted jobs have a five-day (7200-minute) execution ceiling.  What this
     # parent waits on is the whole child CHAIN in relink.yml, not one job: the default
-    # target=local is ONE relink job with a 1440-minute ceiling plus a 30m publish;
+    # target=local is ONE relink job with a 2880-minute ceiling plus a 30m publish;
     # the split fallbacks may legally consume 90m GPU NER + 480m CPU resolution
     # (including lease wait) + 30m publish.
     # At a 1440 parent ceiling a legal child could not be waited out:
     # this job spends ~55 minutes generating the DB and publishing the snapshot
     # BEFORE it dispatches, so a target=local child that ran to its own ceiling
     # always outlived the parent and was killed mid-flight by the `always()` cancel
-    # step below — destroying a run that was still within contract.  2880 (48h) is
-    # 40% of GitHub's cap and budgets 2880 − 1530 (largest wait cap) − ~55 (pre-dispatch)
+    # step below — destroying a run that was still within contract.  The child's own
+    # ceiling was then raised from 1440 to 2880 so a genuinely needed FULL local relink
+    # (~20.5h GPU NER for 7,367 books, then resolve) fits inside a waiting build, and
+    # this parent moved with it.  4320 (72h) is 60% of GitHub's cap and budgets
+    # 4320 − 2970 (largest wait cap) − ~55 (pre-dispatch)
     # ≈ 1295 minutes for Phase-2, the patch fan and the ~5.1 GiB of uploads, which
     # measure ~130-160 minutes together.  The wait itself is capped explicitly
     # (RELINK_WAIT_CAP_MIN below), so the parent ceiling is a backstop, not the timer.
-    # The two host leases below live 176400 s = 2940 min, an hour past this ceiling,
+    # The two host leases below live 262800 s = 4380 min, an hour past this ceiling,
     # so no lease can expire under a job that is still running.
-    timeout-minutes: 2880
+    timeout-minutes: 4320
     env:
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -643,7 +646,7 @@ jobs:
           }
           echo "HOST_LEASE_STATE=$RUNNER_TEMP/host-lease.json" >> "$GITHUB_ENV"
           python3 .pipeline-control/.github/scripts/host_lease.py start --lock "$LEASE" \
-            --state "$RUNNER_TEMP/host-lease.json" --ttl 176400
+            --state "$RUNNER_TEMP/host-lease.json" --ttl 262800
           python3 .pipeline-control/.github/scripts/reap_linker_ner.py
 
           # Exclusivity: this host runs three self-hosted runners (SeforimLibrary,
@@ -1299,17 +1302,17 @@ jobs:
           SEFARIA_METADATA_SHA: ${{ inputs.sefaria_release_metadata_sha256 }}
           RECOVERY_RUN_ID: ${{ inputs.relink_recovery_run_id }}
           # Overall cap on the relink wait, in minutes: what the target=local child
-          # CHAIN may legally cost (relink 1440 + publish 30) plus an hour of grace.
+          # CHAIN may legally cost (relink 2880 + publish 30) plus an hour of grace.
           # Past it the child is out of contract and GitHub still has not reported it
           # terminal, so wait_for_relink_run.sh fails with the recovery recipe and a
-          # named cause, instead of going quiet until this job's 2880-minute ceiling
+          # named cause, instead of going quiet until this job's 4320-minute ceiling
           # kills it mid-wait.  That script takes the TIGHTER of this and its own
           # per-PATH derivation, so the kaggle (90 + 480 + 30) and server (480 + 30)
           # fallbacks are not held to the local budget — they cap at 660 and 570.
           # 1500 was the same bug one order of magnitude smaller: it left a legal
           # 1470-minute local child only 30 minutes of margin, while the script's
           # own single-job derivation cancelled a healthy kaggle child at 150.
-          RELINK_WAIT_CAP_MIN: "1530"
+          RELINK_WAIT_CAP_MIN: "2970"
           # For the A2 early upload below, which drives this build's own draft
           # release with the same preflighted credentials as the publish step.
           # GH_TOKEN above stays the cross-repo PAT for every `gh` call in this
@@ -1589,7 +1592,7 @@ jobs:
           # again; if another heavy phase won the race, fail rather than overlap.
           python3 .pipeline-control/.github/scripts/host_lease.py start \
             --lock /run/lock/otzaria/host-heavy.lock \
-            --state "$HOST_LEASE_STATE" --ttl 176400
+            --state "$HOST_LEASE_STATE" --ttl 262800
           fi
           : "${EXPECTED_LINKER_SNAPSHOT_ZST_SHA256:=$SNAPSHOT_ZST_SHA256}"
           echo "EXPECTED_LINKER_SNAPSHOT_ZST_SHA256=$EXPECTED_LINKER_SNAPSHOT_ZST_SHA256" >> "$GITHUB_ENV"
@@ -2365,12 +2368,24 @@ jobs:
           PY
           sha256sum pipeline-result/pipeline-result.json | cut -d' ' -f1 > pipeline-result/pipeline-result.sha256
 
+      # Runs after the relink wait, which may pass the 24h lifetime of the job's
+      # GITHUB_TOKEN, so it takes the preflighted release credential (the PAT when
+      # it can write) exactly like the release steps, instead of the job default.
       - name: Publish exact child result release
-        run: >-
-          bash .pipeline-control/.github/scripts/publish_release_handoff.sh
-          "pipeline-result-run-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-          "Immutable Seforim pipeline result ${GITHUB_RUN_ID}:${GITHUB_RUN_ATTEMPT}"
-          "$GITHUB_SHA" pipeline-result/pipeline-result.json pipeline-result/pipeline-result.sha256
+        env:
+          AUTOMATIC_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CROSS_REPO_TOKEN: ${{ secrets.PIPELINE_TOKEN }}
+        run: |
+          set -euo pipefail
+          source .pipeline-control/.github/scripts/release_draft.sh
+          use_token "${RELEASE_TOKEN_KIND:-}" || {
+            echo "::error::release credential preflight result is missing or invalid"
+            exit 1
+          }
+          bash .pipeline-control/.github/scripts/publish_release_handoff.sh \
+            "pipeline-result-run-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
+            "Immutable Seforim pipeline result ${GITHUB_RUN_ID}:${GITHUB_RUN_ATTEMPT}" \
+            "$GITHUB_SHA" pipeline-result/pipeline-result.json pipeline-result/pipeline-result.sha256
 
       # Release the RAM tmpfs no matter how the job ended. By now assets are
       # already uploaded and staged on real disk, so discarding build/ is safe;
@@ -2442,9 +2457,9 @@ jobs:
           # phases are serialized by the host lease so nothing concurrent can own
           # these, but stay conservative anyway: depth 1, these two name shapes
           # only, and untouched for more than two days. This job's own
-          # timeout-minutes is 2880, so no LIVE attempt of this workflow can own
-          # a temp entry older than 48 h, while `-mtime +2` matches only entries at
-          # least 72 h old (find truncates the age to whole days) — the window still
+          # timeout-minutes is 4320, so no LIVE attempt of this workflow can own
+          # a temp entry older than 72 h, while `-mtime +3` matches only entries at
+          # least 96 h old (find truncates the age to whole days) — the window still
           # cannot race a live attempt, not even a directory whose mtime went stale
           # while its files were in use.
           # This step runs `if: always()`, and the default shell is `bash -e`, so
@@ -2455,7 +2470,7 @@ jobs:
           # $RUNNER_TEMP, and neither name shape below could match it. Keep both
           # true — a cache an unlucky +2 day gap could delete is not a cache, and
           # the ~16 min of re-download is exactly what it exists to prevent.
-          find "$RUNNER_TEMP" -maxdepth 1 -mtime +2 \
+          find "$RUNNER_TEMP" -maxdepth 1 -mtime +3 \
             \( \( -type f -name 'lines-snapshot-*-*.db' \) -o \
                \( -type d -name 'manual-links-inputs-*-*' \) \) -print0 \
             | while IFS= read -r -d '' stale; do
