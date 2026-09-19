@@ -2593,7 +2593,7 @@ jobs:
       # If this build ends while the relink it dispatched is still pending/running — the
       # build hit its own timeout while waiting, failed in Phase-2, or was cancelled —
       # cancel OUR child so it can't outlive us as an orphan holding the linker
-      # host/session (its own ceiling is 24h). Identity is the per-attempt request id
+      # host/session (its own ceiling is 48h). Identity is the per-attempt request id
       # stamped into both run-names: matching is FULL-title equality, so this attempt's
       # cleanup can never touch another attempt's (or any other) runs. Order: cancel the
       # kaggle-relink DISPATCHER first and wait (bounded) until it is terminal — its own
