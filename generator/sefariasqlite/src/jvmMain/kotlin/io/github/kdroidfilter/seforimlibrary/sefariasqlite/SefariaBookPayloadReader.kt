@@ -286,6 +286,7 @@ internal class SefariaBookPayloadReader(
         }.onFailure { e ->
             // גרסה מוצהרת שחסרה בייצוא היא שגיאת קלט — לא בולעים אותה.
             if (e is MissingPreferredVersionException) throw e
+            if (e is SefariaSchemaException) throw e
             logger.w(e) { "Failed to prepare book from $textPath" }
         }.getOrNull()
     }
@@ -573,7 +574,7 @@ internal class SefariaBookPayloadReader(
                 val depth = node["depth"]?.jsonPrimitive?.intOrNullSafe() ?: sectionNames.size
                 val addressTypes = node["addressTypes"]?.jsonArray?.mapNotNull { it.jsonPrimitive.contentOrNull } ?: emptyList()
                 val referenceableSections = node["referenceableSections"]?.jsonArray?.mapNotNull { it.jsonPrimitive.booleanOrNull } ?: emptyList()
-                val childRefOffsets = readIndexOffsets(node, depth)
+                val indexOffsets = readIndexOffsets(node, depth)
                 val nextLevel = if (hasTitle) level + 1 else level
                 recursiveSections(
                     sectionNames = sectionNames,
@@ -589,7 +590,8 @@ internal class SefariaBookPayloadReader(
                     headings = headings,
                     addressTypes = addressTypes,
                     referenceableSections = referenceableSections,
-                    childRefOffsets = childRefOffsets,
+                    refIndexOffset = indexOffsets?.top ?: 0,
+                    childRefOffsets = indexOffsets?.children,
                     cleanShifts = cleanShifts
                 )
             }
@@ -620,7 +622,7 @@ internal class SefariaBookPayloadReader(
             val depth = schemaObj["depth"]?.jsonPrimitive?.intOrNullSafe() ?: sectionNames.size
             val addressTypes = schemaObj["addressTypes"]?.jsonArray?.mapNotNull { it.jsonPrimitive.contentOrNull } ?: emptyList()
             val referenceableSections = schemaObj["referenceableSections"]?.jsonArray?.mapNotNull { it.jsonPrimitive.booleanOrNull } ?: emptyList()
-            val childRefOffsets = readIndexOffsets(schemaObj, depth)
+            val indexOffsets = readIndexOffsets(schemaObj, depth)
             recursiveSections(
                 sectionNames = sectionNames,
                 text = textElement,
@@ -638,7 +640,8 @@ internal class SefariaBookPayloadReader(
                 headings = headings,
                 addressTypes = addressTypes,
                 referenceableSections = referenceableSections,
-                childRefOffsets = childRefOffsets,
+                refIndexOffset = indexOffsets?.top ?: 0,
+                childRefOffsets = indexOffsets?.children,
                 cleanShifts = cleanShifts
             )
         }
@@ -733,6 +736,13 @@ internal class SefariaBookPayloadReader(
                 MarkerRun.NONE -> false
             }
 
+        // גרסה חלקית מותרת (מערך קצר); פרק בלי הסטה — לא.
+        if (childRefOffsets != null && childRefOffsets.size < text.size) {
+            throw SefariaSchemaException(
+                "index_offsets_by_depth has ${childRefOffsets.size} entries for ${text.size} sections at '$refPrefix'"
+            )
+        }
+
         text.forEachIndexed { idx, item ->
             if (item.isTriviallyEmpty()) return@forEachIndexed
 
@@ -784,7 +794,7 @@ internal class SefariaBookPayloadReader(
                 append(letter)
                 append(", ")
             }
-            val nextRefIndexOffset = childRefOffsets?.getOrNull(idx) ?: 0
+            val nextRefIndexOffset = childRefOffsets?.get(idx) ?: 0
 
             recursiveSections(
                 sectionNames = sectionNames,
@@ -808,27 +818,32 @@ internal class SefariaBookPayloadReader(
     }
 
     /**
-     * Reads `index_offsets_by_depth` from a schema node and returns the list
-     * of cumulative offsets that should be applied to the child iteration
-     * when building English refs.
-     *
-     * Sefaria uses this mechanism for books like Zohar where chapters are
-     * stored as arrays but references use a single global paragraph index
-     * per parasha (e.g. "Zohar, Tetzaveh 14:127" means the 127th paragraph of
-     * Tetzaveh, which happens to live inside chapter 14). Without these
-     * offsets the alt-struct daf refs (and all external Zohar links) fail to
-     * resolve and pages like קפו: end up missing from the daf navigation.
-     *
-     * The map is keyed by the schema `depth` it applies at; the only
-     * practical use so far is `{"2": [...]}` on depth-2 Zohar-style nodes.
+     * Reads `index_offsets_by_depth` from a schema node. Sefaria keys it by the
+     * address level (1-based) it shifts:
+     * - `"1"`: a single integer — the node's top-level numbering starts after it
+     *   (Talmud Eser HaSefirot "List of Questions on Topics" 55…, Sulam Idra Zuta 23…).
+     * - `"2"`: one integer per top-level section, shifting its children
+     *   (Zohar: "Tetzaveh 14:127" is the 127th paragraph of the parasha).
+     * Without them the English refs disagree with every Sefaria link to the node.
      */
-    private fun readIndexOffsets(node: JsonObject, schemaDepth: Int): List<Int>? {
+    private fun readIndexOffsets(node: JsonObject, schemaDepth: Int): IndexOffsets? {
         val map = node["index_offsets_by_depth"]?.jsonObject ?: return null
-        val key = schemaDepth.toString()
-        val arr = map[key]?.jsonArray ?: return null
-        val offsets = arr.mapNotNull { it.jsonPrimitive.intOrNullSafe() }
-        return if (offsets.isNotEmpty()) offsets else null
+        val nodeTitle = node["title"]?.jsonPrimitive?.contentOrNull
+        if (!setOf("1", "2").containsAll(map.keys) || (map.containsKey("2") && schemaDepth < 2)) {
+            throw SefariaSchemaException("Unsupported index_offsets_by_depth keys ${map.keys} at depth $schemaDepth in '$nodeTitle'")
+        }
+        val top = map["1"]?.let { schemaInt(it) ?: throw SefariaSchemaException("index_offsets_by_depth[1] is not an integer in '$nodeTitle': $it") }
+        val children = map["2"]?.let { el ->
+            val arr = el as? JsonArray ?: throw SefariaSchemaException("index_offsets_by_depth[2] is not an array in '$nodeTitle'")
+            arr.map { schemaInt(it) ?: throw SefariaSchemaException("index_offsets_by_depth[2] has a non-integer entry in '$nodeTitle': $it") }
+        }
+        return IndexOffsets(top ?: 0, children)
     }
+
+    private fun schemaInt(element: JsonElement): Int? =
+        (element as? JsonPrimitive)?.takeIf { !it.isString }?.intOrNull
+
+    private data class IndexOffsets(val top: Int, val children: List<Int>?)
 
     /**
      * Returns the Hebrew section names for a schema node, filling in blanks
@@ -909,3 +924,6 @@ private fun sourceMarkerRun(items: JsonArray): MarkerRun {
         else -> MarkerRun.BROKEN
     }
 }
+
+/** מבנה סכמה שהמייבא לא יודע לפרש — נפילה רועשת במקום דילוג שקט על הספר. */
+internal class SefariaSchemaException(message: String) : IllegalStateException(message)
