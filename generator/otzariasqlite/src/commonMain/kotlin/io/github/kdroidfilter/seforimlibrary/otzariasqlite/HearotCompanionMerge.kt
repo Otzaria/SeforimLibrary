@@ -16,7 +16,7 @@ internal object HearotCompanionMerge {
     const val COMPANION_PREFIX = "הערות על "
     private const val HAVROUTA_PREFIX = "הערות על חברותא"
 
-    /** Havrouta hearot stay standalone: they feed the Talmud transitive-link pipeline. */
+    /** Havrouta hearot stay standalone: Havrouta links to them by FOOTNOTES. */
     fun isMergeableCompanionTitle(title: String): Boolean =
         title.startsWith(COMPANION_PREFIX) && !title.startsWith(HAVROUTA_PREFIX)
 

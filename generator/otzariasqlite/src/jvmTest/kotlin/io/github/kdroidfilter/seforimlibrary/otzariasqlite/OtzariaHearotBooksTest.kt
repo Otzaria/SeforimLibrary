@@ -295,7 +295,7 @@ class OtzariaHearotBooksTest {
 
         assertNotNull(
             repo.getAllBooks().find { it.title == "הערות על חברותא על ברכות" },
-            "Havrouta hearot must stay standalone — they feed the Talmud transitive links",
+            "Havrouta hearot must stay standalone — Havrouta links to them by FOOTNOTES",
         )
         assertEquals(1, repo.countLinks())
     }

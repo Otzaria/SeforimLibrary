@@ -175,6 +175,9 @@ word-level anchors, ייבוא charLevelData מדויק, ותוויות תצוג
   (יציבות ל-delta) ומחיקה ממוקדת-סוג. — `Havrouta: stable allocator ids for transitive
   links + type-scoped delete`. (`GenerateHavroutaLinks.kt` הוא קובץ-בסיס/upstream; התיקון
   שוכן כאן כי זהו הפיצ'ר שמרחיב את מערכת החברותא — קישורי Talmud-Hearot.)
+- **הסרת הקישורים הטרנזיטיביים Talmud→Hearot** (Otzaria/otzaria#1001): הם הציגו את "הערות על
+  חברותא" כמפרש על דף הגמרא. `generateTalmudHearotTransitiveLinks` (upstream‏ `3e9f02a`) הוסרה;
+  ההערות נפתחות מתוך החברותא דרך קישורי FOOTNOTES. — `fix(havrouta): הערות על חברותא אינן מפרש על התלמוד`
 
 ### 12. `feat/otzaria-ranged-links-and-alt-toc`
 מביא את הגנרטור של **otzariasqlite** לרמת ה-importer של ספריא בשלושה היבטים

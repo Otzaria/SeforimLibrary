@@ -74,16 +74,12 @@ fun main(args: Array<String>) = runBlocking {
         val hearotLinksCreated = generateHavroutaHearotLinks(repository, bindings, logger, sourceDir)
         logger.i { "Havrouta-Hearot link generation completed. Created $hearotLinksCreated links." }
 
-        // Must run before the transitive step: transitive Talmud→Hearot links are
-        // not base→hearot relationships and must not become default commentators.
         logger.i { "Setting Hearot as default commentators for their base books..." }
         setHearotAsDefaultCommentators(repository, driver, logger)
 
-        logger.i { "Creating transitive Talmud-Hearot links..." }
-        val transitiveLinksCreated = generateTalmudHearotTransitiveLinks(repository, driver, bindings, logger)
-        logger.i { "Transitive Talmud-Hearot link generation completed. Created $transitiveLinksCreated links." }
-
-        logger.i { "Total links created: ${talmudLinksCreated + hearotLinksCreated + transitiveLinksCreated}" }
+        // No transitive Talmud→Hearot links: notes on Havrouta are a commentary on a
+        // commentary, not on the Talmud (Otzaria/otzaria#1001).
+        logger.i { "Total links created: ${talmudLinksCreated + hearotLinksCreated}" }
 
         // Restore PRAGMAs
         logger.i { "Restoring PRAGMA settings..." }
@@ -680,8 +676,8 @@ private suspend fun generateHavroutaHearotLinks(
  *    the only one for a companion whose title does not follow the "הערות על" shape;
  *  - the target is titled exactly "הערות על <source title>" — legacy links still
  *    stored as COMMENTARY, kept so a library that has not been retyped yet does not
- *    regress. The equality (rather than a LIKE prefix) is what keeps the transitive
- *    Talmud→Hearot layer out: those are COMMENTARY and their source is the tractate,
+ *    regress. The equality (rather than a LIKE prefix) is what keeps the legacy transitive
+ *    Talmud→Hearot layer (older DBs) out: those are COMMENTARY and their source is the tractate,
  *    not the annotated Havrouta volume, so on a re-run over an already-built DB they
  *    can no longer turn a tractate into a notes reader.
  *
@@ -741,86 +737,4 @@ private suspend fun setHearotAsDefaultCommentators(
     }
 
     logger.i { "Set default commentators for $count base→hearot pairs ($alreadySet already set)" }
-}
-
-/**
- * Creates transitive links from Talmud directly to Hearot al Havrouta.
- *
- * For each path: Talmud line → Havrouta line → Hearot line,
- * this creates a direct link: Talmud line → Hearot line (COMMENTARY).
- *
- * Uses a single SQL query to efficiently find all transitive relationships.
- */
-private suspend fun generateTalmudHearotTransitiveLinks(
-    repository: SeforimRepository,
-    driver: app.cash.sqldelight.db.SqlDriver,
-    bindings: IdAllocatorBindings,
-    logger: Logger
-): Int {
-    val allBooks = repository.getAllBooks()
-    val talmudBooks = allBooks.filter { book ->
-        book.sourceId == 1L &&
-            !book.title.startsWith("משנה") &&
-            !book.title.startsWith("תלמוד ירושלמי") &&
-            !book.title.startsWith("תוספתא")
-    }
-    val havroutaBooks = allBooks.filter { it.title.startsWith("חברותא על ") }
-    val hearotBooks = allBooks.filter { it.title.startsWith("הערות על חברותא") }
-
-    val talmudBookIds = talmudBooks.map { it.id }.joinToString(",")
-    val havroutaBookIds = havroutaBooks.map { it.id }.joinToString(",")
-    val hearotBookIds = hearotBooks.map { it.id }.joinToString(",")
-
-    if (talmudBookIds.isEmpty() || havroutaBookIds.isEmpty() || hearotBookIds.isEmpty()) {
-        logger.w { "Missing books for transitive link generation" }
-        return 0
-    }
-
-    logger.i { "Found ${talmudBooks.size} Talmud, ${havroutaBooks.size} Havrouta, ${hearotBooks.size} Hearot books" }
-
-    // Transitive links: Talmud (l1.source) -> Havrouta (l1.target = l2.source) -> Hearot
-    // (l2.target). SELECT the tuples, then insert through the allocator so their ids are
-    // STABLE across builds — a raw INSERT would take implicit MAX(rowid)+1 ids, which shift
-    // whenever anything below them grows (and collide with later allocator-issued ids).
-    logger.i { "Creating transitive Talmud->Hearot links via the allocator..." }
-    val ctCommentary = bindings.upsertConnectionType(ConnectionType.COMMENTARY.name)
-
-    val selectSql = """
-        SELECT DISTINCT
-            l1.sourceBookId,
-            l2.targetBookId,
-            l1.sourceLineId,
-            l2.targetLineId,
-            l2.targetLineIndex
-        FROM link l1
-        JOIN link l2 ON l1.targetLineId = l2.sourceLineId
-        JOIN connection_type ct1 ON l1.connectionTypeId = ct1.id AND ct1.name = 'COMMENTARY'
-        JOIN connection_type ct2 ON l2.connectionTypeId = ct2.id AND ct2.name = 'FOOTNOTES'
-        WHERE l1.sourceBookId IN ($talmudBookIds)
-          AND l1.targetBookId IN ($havroutaBookIds)
-          AND l2.sourceBookId IN ($havroutaBookIds)
-          AND l2.targetBookId IN ($hearotBookIds)
-    """.trimIndent()
-
-    val batch = ArrayList<Link>(4096)
-    var created = 0
-    driver.executeQuery(null, selectSql, { c ->
-        while (c.next().value) {
-            batch.add(Link(
-                id = bindings.allocator.linkId(c.getLong(2)!!, c.getLong(3)!!, ctCommentary),
-                sourceBookId = c.getLong(0)!!,
-                targetBookId = c.getLong(1)!!,
-                sourceLineId = c.getLong(2)!!,
-                targetLineId = c.getLong(3)!!,
-                targetLineIndex = c.getLong(4)!!.toInt(),
-                connectionType = ConnectionType.COMMENTARY,
-            ))
-            created++
-        }
-        QueryResult.Value(Unit)
-    }, 0)
-    batch.chunked(5000).forEach { repository.insertLinksBatch(it) }
-
-    logger.i { "Transitive Talmud->Hearot links created: $created (allocator-stable ids)" }
-    return created
 }
