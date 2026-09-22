@@ -2305,8 +2305,14 @@ class ManualReleaseWorkflowContractTest(unittest.TestCase):
         self.assertIn("exit 0", stats)
 
         # Staged conditionally, and BEFORE the provenance hashes the stage.
-        copy = 'if [ -s build/library_stats.json ]; then\n            cp build/library_stats.json "$STAGE/"'
-        self.assertIn(copy, stage)
+        copy = 'if [ -s build/library_stats.json ]; then'
+        self.assertIn(
+            copy + "\n"
+            '            if ! cp build/library_stats.json "$STAGE/"; then\n'
+            '              echo "::warning::library stats: could not stage library_stats.json',
+            stage,
+        )
+        self.assertIn('rm -f "$STAGE/library_stats.json" || true', stage)
         self.assertLess(stage.index(copy), stage.index('python3 - "$STAGE"'))
 
         # The query produces the exact published bytes, and the step's own

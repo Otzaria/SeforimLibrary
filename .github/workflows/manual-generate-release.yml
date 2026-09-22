@@ -2201,7 +2201,10 @@ jobs:
           # Advisory display stats — present only when "Compute library stats
           # (advisory)" produced a valid file; its absence never fails staging.
           if [ -s build/library_stats.json ]; then
-            cp build/library_stats.json "$STAGE/"
+            if ! cp build/library_stats.json "$STAGE/"; then
+              echo "::warning::library stats: could not stage library_stats.json — omitting it from this release"
+              rm -f "$STAGE/library_stats.json" || true
+            fi
           fi
           echo "Staged assets:"
           ls -lh "$STAGE/"
