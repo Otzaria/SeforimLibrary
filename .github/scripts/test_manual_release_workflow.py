@@ -2270,6 +2270,87 @@ class ManualReleaseWorkflowContractTest(unittest.TestCase):
         self.assertIn("validate_build_provenance.py \"$STAGE/build_provenance.json\"", stage)
         self.assertNotIn("--quiet", stage)
 
+    def test_library_stats_are_an_advisory_staged_asset(self):
+        # library_stats.json is display-only (the website's stats banner), so it
+        # must never cost the release — and it must still be a STAGED asset:
+        # verify_remote demands remote == staged, and the reuse scan counts
+        # `provenance assets + 1`, so an asset uploaded after publish breaks both.
+        stats = self.step("Compute library stats (advisory)")
+        stage = self.step("Stage release assets")
+
+        # Reads build/seforim.db, which the compress step keeps (-o, no --rm),
+        # and must finish before staging hashes the directory.
+        self.assertLess(
+            self.workflow.index("      - name: Compress Seforim Database (zstd)\n"),
+            self.workflow.index("      - name: Compute library stats (advisory)\n"),
+        )
+        self.assertLess(
+            self.workflow.index("      - name: Compute library stats (advisory)\n"),
+            self.workflow.index("      - name: Stage release assets\n"),
+        )
+        self.assertIn("EXPECTED_DB_VERSION: ${{ steps.discover.outputs.db_version }}", stats)
+
+        # Advisory: GitHub runs the step with `bash -e`, so the script itself
+        # never adds -e and every command that can fail is guarded by
+        # `|| skip` — each failure path is skip() → warning + exit 0, and skip()
+        # leaves no partial file behind for staging to pick up.
+        self.assertIn("set -uo pipefail", stats)
+        self.assertNotIn("set -euo pipefail", stats)
+        self.assertNotIn("exit 1", stats)
+        self.assertNotIn("::error::", stats)
+        self.assertIn('rm -f "$OUT" "$OUT.tmp"\n', stats)
+        self.assertIn('echo "::warning::library stats: $1', stats)
+        # A ~/.sqliterc on the runner must not change the CLI's output format.
+        self.assertIn("sqlite3 -init /dev/null -readonly -bail build/seforim.db", stats)
+        self.assertIn("exit 0", stats)
+
+        # Staged conditionally, and BEFORE the provenance hashes the stage.
+        copy = 'if [ -s build/library_stats.json ]; then'
+        self.assertIn(
+            copy + "\n"
+            '            if ! cp build/library_stats.json "$STAGE/"; then\n'
+            '              echo "::warning::library stats: could not stage library_stats.json',
+            stage,
+        )
+        self.assertIn('rm -f "$STAGE/library_stats.json" || true', stage)
+        self.assertLess(stage.index(copy), stage.index('python3 - "$STAGE"'))
+
+        # The query produces the exact published bytes, and the step's own
+        # validator accepts them — and rejects a foreign db_version.
+        query = re.search(r'build/seforim\.db "(select json_object\(.*?\);)"', stats).group(1)
+        validator = textwrap.dedent(
+            stats.split("<<'PY' || skip", 1)[1].split("\n", 1)[1].split("\n          PY\n", 1)[0]
+        )
+        import sqlite3  # noqa: PLC0415 - stdlib, only this test needs it
+
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Path(tmp) / "seforim.db"
+            with sqlite3.connect(db) as conn:
+                conn.executescript(
+                    "create table schema_meta(key text primary key, value text);"
+                    "insert into schema_meta values ('db_version', '28');"
+                    "create table book(id); insert into book values (1), (2);"
+                    "create table link(id); insert into link values (1);"
+                    "create table line(id); insert into line values (1), (2), (3);"
+                )
+                row = conn.execute(query).fetchone()[0]
+            conn.close()
+            out = Path(tmp) / "library_stats.json"
+            out.write_bytes(row.encode() + b"\n")
+            self.assertEqual(
+                out.read_bytes(),
+                b'{"schema_version":1,"db_version":28,"books":2,"links":1,"lines":3}\n',
+            )
+            script = Path(tmp) / "validate.py"
+            script.write_text(validator, encoding="utf-8")
+            ok = subprocess.run([sys.executable, str(script), str(out), "28"])
+            self.assertEqual(ok.returncode, 0)
+            wrong = subprocess.run([sys.executable, str(script), str(out), "29"])
+            self.assertNotEqual(wrong.returncode, 0)
+            out.write_bytes(row.encode() + b"\r\n")
+            crlf = subprocess.run([sys.executable, str(script), str(out), "28"])
+            self.assertNotEqual(crlf.returncode, 0)
+
     def test_build_provenance_quiet_only_silences_the_positive_line(self):
         sys.path.insert(0, str(Path(__file__).parent))
         import test_build_provenance  # noqa: PLC0415 - sibling fixture, not a package
