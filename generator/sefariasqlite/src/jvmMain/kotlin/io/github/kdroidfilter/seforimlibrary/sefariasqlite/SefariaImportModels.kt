@@ -113,6 +113,10 @@ internal data class BookPayload(
     //   n >= 0          -> unchanged segment behind a generated prefix of length n
     //   n < 0           -> cleaned segment; prefix length is -(n + 1), offsets unusable
     val cleanShiftByLineIndex: Map<Int, Int> = emptyMap(),
+    // Sparse keys for segments whose preserved breaks change the rendered text.
+    // Computed from the previous cleaning + dashless-repair pipeline, before the
+    // generated prefix. Generated headings/authors never pass through cleaning.
+    val lineKeyHashOverrides: Map<Int, ByteArray> = emptyMap(),
     // All [versionTitle, versionSource] pairs from merged.json's `versions` array
     // (the versions that CONTRIBUTED to the merge). book_version metadata-only
     // fallback when no per-version sibling files exist.
@@ -210,7 +214,7 @@ internal fun BookPayload.precomputeLineData(): BookPayload {
     val isHeading = BooleanArray(count)
     for (idx in 0 until count) {
         val content = lines[idx]
-        hashes[idx] = IdAllocatorBindings.lineNaturalKeyHash(rawSegmentForKey(idx, content))
+        hashes[idx] = lineKeyHashOverrides[idx] ?: IdAllocatorBindings.lineNaturalKeyHash(rawSegmentForKey(idx, content))
         legacyHashes[idx] = LegacyLineKey.hash(content, refsByLineIndex[idx]?.heRef)
         charCounts[idx] = countVisibleChars(content)
         isHeading[idx] = content.contains("<h1>") || content.contains("<h2>") ||
@@ -234,13 +238,12 @@ internal fun BookPayload.precomputeLineData(): BookPayload {
  * The line's text with the generated prefix (`(א) `, daf labels…) stripped off.
  * Inserting one verse reprefixes every later line of the chapter, and hashing
  * the prefixed text would renumber all of their ids (issue #1211).
- * Inline `<br>` is keyed as a space for the same reason: it is layout, not identity.
+ * Segments with preserved breaks use the reader's historic-key override above.
  */
 private fun BookPayload.rawSegmentForKey(lineIndex: Int, content: String): String {
-    val encodedShift = cleanShiftByLineIndex[lineIndex] ?: return collapseInlineLineBreaks(content)
+    val encodedShift = cleanShiftByLineIndex[lineIndex] ?: return content
     val prefixLength = generatedPrefixLength(encodedShift)
-    val raw = if (prefixLength in 1..content.length) content.substring(prefixLength) else content
-    return collapseInlineLineBreaks(raw)
+    return if (prefixLength in 1..content.length) content.substring(prefixLength) else content
 }
 
 internal data class VersionMeta(

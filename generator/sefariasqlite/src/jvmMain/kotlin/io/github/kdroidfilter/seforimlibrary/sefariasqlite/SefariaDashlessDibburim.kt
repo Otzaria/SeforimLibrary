@@ -39,8 +39,11 @@ internal object SefariaDashlessDibburim {
 
     private val separatedByBook = ConcurrentHashMap<String, Int>()
 
-    /** Returns [line] with its dibbur separated by a dash, or unchanged when the book or line does not fit. */
-    fun separate(bookHeTitle: String, line: String): String {
+    /**
+     * Returns [line] with its dibbur separated by a dash, or unchanged when it does not fit.
+     * Set [recordStats] to false for key-only replay of the historic cleaning pipeline.
+     */
+    fun separate(bookHeTitle: String, line: String, recordStats: Boolean = true): String {
         if (bookHeTitle !in bookHeTitles) return line
         if (line.startsWith("<h", ignoreCase = true) || SPACED_DASH.containsMatchIn(line)) return line
         val cut = line.indexOf(". ")
@@ -56,7 +59,7 @@ internal object SefariaDashlessDibburim {
         // particular, structural markers such as `מתני'` and `(הג"ה` must not
         // be rewritten merely because they happen to end with a period.
         if (DhExtractor.extract(separated, DhExtractor.Format.DASH) == null) return line
-        separatedByBook.merge(bookHeTitle, 1, Int::plus)
+        if (recordStats) separatedByBook.merge(bookHeTitle, 1, Int::plus)
         return separated
     }
 

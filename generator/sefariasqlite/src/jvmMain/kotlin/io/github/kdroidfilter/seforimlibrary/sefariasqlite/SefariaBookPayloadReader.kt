@@ -1,6 +1,7 @@
 package io.github.kdroidfilter.seforimlibrary.sefariasqlite
 
 import co.touchlab.kermit.Logger
+import io.github.kdroidfilter.seforimlibrary.common.ids.IdAllocatorBindings
 import com.fasterxml.jackson.core.JsonFactory
 import com.fasterxml.jackson.core.JsonToken
 import io.github.kdroidfilter.seforimlibrary.core.models.PubDate
@@ -215,7 +216,7 @@ internal class SefariaBookPayloadReader(
                 listOf(he) + authorTitles.allNameForms(slug)
             }.distinct()
 
-            val (lines, refs, headings, cleanShifts) = buildBookContent(
+            val (lines, refs, headings, cleanShifts, lineKeyHashOverrides) = buildBookContent(
                 schemaObj = schemaObj,
                 textElement = textElement,
                 bookHeTitle = hebrewTitle,
@@ -278,6 +279,7 @@ internal class SefariaBookPayloadReader(
                 titleAliasKeys = titleAliasKeys,
                 singleVersionTitle = singleVersionTitle,
                 cleanShiftByLineIndex = cleanShifts,
+                lineKeyHashOverrides = lineKeyHashOverrides,
                 versionsMeta = versionsMeta,
                 sourceDirPath = textPath.parent?.toString(),
                 schemaFilePath = schemaPath.toString(),
@@ -482,6 +484,7 @@ internal class SefariaBookPayloadReader(
         val refs: List<RefEntry>,
         val headings: List<Heading>,
         val cleanShifts: Map<Int, Int>,
+        val lineKeyHashOverrides: Map<Int, ByteArray>,
     )
 
     /**
@@ -515,6 +518,7 @@ internal class SefariaBookPayloadReader(
         val headings = ArrayList<Heading>(100)
         // See BookPayload.cleanShiftByLineIndex — sparse raw-offset bookkeeping.
         val cleanShifts = HashMap<Int, Int>()
+        val lineKeyHashOverrides = HashMap<Int, ByteArray>()
 
         fun headingTagForLevel(level: Int): Pair<String, String> = when (level) {
             0 -> "<h1>" to "</h1>"
@@ -592,7 +596,8 @@ internal class SefariaBookPayloadReader(
                     referenceableSections = referenceableSections,
                     refIndexOffset = indexOffsets?.top ?: 0,
                     childRefOffsets = indexOffsets?.children,
-                    cleanShifts = cleanShifts
+                    cleanShifts = cleanShifts,
+                    lineKeyHashOverrides = lineKeyHashOverrides,
                 )
             }
         }
@@ -642,11 +647,12 @@ internal class SefariaBookPayloadReader(
                 referenceableSections = referenceableSections,
                 refIndexOffset = indexOffsets?.top ?: 0,
                 childRefOffsets = indexOffsets?.children,
-                cleanShifts = cleanShifts
+                cleanShifts = cleanShifts,
+                lineKeyHashOverrides = lineKeyHashOverrides,
             )
         }
 
-        return BuiltBookContent(output, refs, headings, cleanShifts)
+        return BuiltBookContent(output, refs, headings, cleanShifts, lineKeyHashOverrides)
     }
 
     private fun recursiveSections(
@@ -673,7 +679,8 @@ internal class SefariaBookPayloadReader(
         // level (one entry per outer-dim index).
         childRefOffsets: List<Int>? = null,
         // Sparse raw-offset bookkeeping (see BookPayload.cleanShiftByLineIndex).
-        cleanShifts: MutableMap<Int, Int>? = null
+        cleanShifts: MutableMap<Int, Int>? = null,
+        lineKeyHashOverrides: MutableMap<Int, ByteArray>? = null,
     ) {
         // Leaf when depth reached zero, OR when the data is shallower than the
         // schema declares (e.g. Keter Malkhut: schema says depth=2 but most
@@ -684,11 +691,25 @@ internal class SefariaBookPayloadReader(
         if (depth == 0 || (leafPrimitive != null && leafPrimitive.isString)) {
             val content = leafPrimitive?.takeIf { it.isString }?.content
             if (!content.isNullOrEmpty()) {
-                val cleaned = SefariaDashlessDibburim.separate(
-                    bookHeTitle,
-                    cleanSefariaLine(content, collapseInlineBreaks = collapsesInlineBreaks(bookEnTitle)),
-                )
+                val collapseBreaks = collapsesInlineBreaks(bookEnTitle)
+                val normalized = cleanSefariaLine(content, collapseInlineBreaks = collapseBreaks)
+                val cleaned = SefariaDashlessDibburim.separate(bookHeTitle, normalized)
                 if (cleaned.isNotEmpty()) {
+                    // Reproduce the old pipeline BEFORE the dashless repair: keeping
+                    // a break can either enable or suppress that repair. Collapsing
+                    // the final rendered line cannot undo an already inserted dash.
+                    // Store only changed hashes, so plain lines need no extra scan
+                    // during precomputation and we retain no second copy of the text.
+                    if (lineKeyHashOverrides != null && !collapseBreaks && "<br>" in normalized) {
+                        val keyContent = SefariaDashlessDibburim.separate(
+                            bookHeTitle,
+                            cleanSefariaLine(content, collapseInlineBreaks = true),
+                            recordStats = false,
+                        )
+                        if (keyContent != cleaned) {
+                            lineKeyHashOverrides[output.size] = IdAllocatorBindings.lineNaturalKeyHash(keyContent)
+                        }
+                    }
                     output += linePrefix + cleaned
                     if (cleanShifts != null) {
                         if (cleaned != content) {
@@ -815,7 +836,8 @@ internal class SefariaBookPayloadReader(
                 addressTypes = addressTypes,
                 referenceableSections = referenceableSections,
                 refIndexOffset = nextRefIndexOffset,
-                cleanShifts = cleanShifts
+                cleanShifts = cleanShifts,
+                lineKeyHashOverrides = lineKeyHashOverrides,
             )
         }
     }

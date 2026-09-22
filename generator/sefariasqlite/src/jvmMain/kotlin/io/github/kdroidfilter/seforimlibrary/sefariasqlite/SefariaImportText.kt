@@ -12,6 +12,7 @@ internal fun sanitizeFolder(name: String?): String {
 // where NN is a two-digit style code. We keep the inner text, drop the marker.
 private val OTZAR_MARKUP_REGEX = Regex("""@\d{2}([^}]*)\}""")
 
+private val REPEATED_SPACES_REGEX = Regex(" {2,}")
 private val HTML_LINE_BREAK_REGEX = Regex("""<br\s*/?>""", RegexOption.IGNORE_CASE)
 
 // In almost every Sefaria book an inline `<br>` is real structure (paragraphs,
@@ -47,14 +48,14 @@ internal fun cleanSefariaLine(raw: String, collapseInlineBreaks: Boolean = false
     return s
 }
 
-/** [line] with every inline `<br>` as a space — the form a line's id is keyed on. */
+/** [line] with every inline `<br>` as a space, retaining a terminal break. */
 internal fun collapseInlineLineBreaks(line: String): String = normalizeLineBreaks(line, inlineBreak = " ")
 
 private fun normalizeLineBreaks(line: String, inlineBreak: String): String {
-    if (!HTML_LINE_BREAK_REGEX.containsMatchIn(line)) return line
+    if ('<' !in line || !HTML_LINE_BREAK_REGEX.containsMatchIn(line)) return line
     val trailing = TRAILING_HTML_LINE_BREAK_REGEX.find(line)
     val body = if (trailing != null) line.substring(0, trailing.range.first) else line
-    val s = HTML_LINE_BREAK_REGEX.replace(body, inlineBreak).replace(Regex(" {2,}"), " ").trim()
+    val s = HTML_LINE_BREAK_REGEX.replace(body, inlineBreak).replace(REPEATED_SPACES_REGEX, " ").trim()
     return if (trailing != null && s.isNotEmpty()) "$s<br>" else s
 }
 
