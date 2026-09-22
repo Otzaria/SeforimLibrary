@@ -133,6 +133,7 @@ internal class SefariaVersionsImporter(
                 textElement = textElement,
                 bookHeTitle = payload.heTitle,
                 bookEnTitle = payload.enTitle,
+                collectLineKeyOverrides = false,
             )
             val versionId = allocator.bookVersionId(input.bookId, versionTitle)
             val rows = ArrayList<VersionLine>(walk.refs.size)

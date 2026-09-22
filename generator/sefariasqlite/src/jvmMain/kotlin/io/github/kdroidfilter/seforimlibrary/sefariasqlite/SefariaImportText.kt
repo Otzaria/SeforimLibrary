@@ -53,6 +53,10 @@ internal fun collapseInlineLineBreaks(line: String): String = normalizeLineBreak
 
 private fun normalizeLineBreaks(line: String, inlineBreak: String): String {
     if ('<' !in line || !HTML_LINE_BREAK_REGEX.containsMatchIn(line)) return line
+    // Kotlin's trim() treats Unicode separators (for example NBSP) as
+    // whitespace, while java.util.regex \s does not. Preserve the old cleaner's
+    // behavior for a break-only line before retaining any structural <br>.
+    if (HTML_LINE_BREAK_REGEX.replace(line, "").isBlank()) return ""
     val trailing = TRAILING_HTML_LINE_BREAK_REGEX.find(line)
     val body = if (trailing != null) line.substring(0, trailing.range.first) else line
     val s = HTML_LINE_BREAK_REGEX.replace(body, inlineBreak).replace(REPEATED_SPACES_REGEX, " ").trim()

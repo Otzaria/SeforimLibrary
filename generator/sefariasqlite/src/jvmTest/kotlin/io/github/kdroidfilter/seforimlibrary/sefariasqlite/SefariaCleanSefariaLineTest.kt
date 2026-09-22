@@ -112,5 +112,8 @@ class SefariaCleanSefariaLineTest {
     @Test
     fun dropsBrOnlyLine() {
         assertEquals("", cleanSefariaLine("<br><br>"))
+        assertEquals("", cleanSefariaLine("<br>\u00a0"))
+        assertEquals("", cleanSefariaLine("<br>\u2003"))
+        assertEquals("", cleanSefariaLine("<br>\u00a0<br>"))
     }
 }

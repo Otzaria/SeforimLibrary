@@ -233,6 +233,7 @@ class LineKeyPrefixStabilityTest {
                 "פרשה פתוחה<br>",
                 "שורה ללא תג",
             )
+            val readerSegments = raw + listOf("<br>\u00a0", "<br>\u2003", "<br>\u00a0<br>")
             val oldContents = raw.map {
                 SefariaDashlessDibburim.separate(heTitle, cleanSefariaLine(it, collapseInlineBreaks = true))
             }
@@ -249,7 +250,7 @@ class LineKeyPrefixStabilityTest {
             val reader = SefariaBookPayloadReader(Json, Logger.withTag("LineKeyPrefixStabilityTest"))
             val schemaLookup = reader.buildSchemaLookup(schemaDir)
             for (insertAtHead in listOf(false, true)) {
-                val segments = if (insertAtHead) listOf("מקטע חדש") + raw else raw
+                val segments = if (insertAtHead) listOf("מקטע חדש") + readerSegments else readerSegments
                 Files.writeString(bookDir.resolve("merged.json"), buildJsonObject {
                     put("title", enTitle)
                     put("heTitle", heTitle)
@@ -262,6 +263,8 @@ class LineKeyPrefixStabilityTest {
                 val segmentIds = payload.refEntries.map { ids[it.lineIndex - 1] }
                 assertEquals(oldIds, if (insertAtHead) segmentIds.drop(1) else segmentIds)
                 assertEquals(segmentIds.size, segmentIds.toSet().size)
+                assertEquals(raw.size + if (insertAtHead) 1 else 0, payload.refEntries.size,
+                    "break-only lines with Unicode whitespace must not create refs")
                 assertEquals(4, payload.lineKeyHashOverrides.size, "store only changed segment keys")
                 assertTrue(payload.lines.any { "<b>כותרת</b><br>גוף הדיבור" in it })
             }

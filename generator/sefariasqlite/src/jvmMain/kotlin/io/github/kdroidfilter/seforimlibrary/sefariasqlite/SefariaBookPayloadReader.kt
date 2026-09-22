@@ -497,12 +497,14 @@ internal class SefariaBookPayloadReader(
         textElement: JsonElement,
         bookHeTitle: String,
         bookEnTitle: String,
+        collectLineKeyOverrides: Boolean = true,
     ): BuiltBookContent = buildBookContent(
         schemaObj = schemaObj,
         textElement = textElement,
         bookHeTitle = bookHeTitle,
         bookEnTitle = bookEnTitle,
         authors = emptyList(),
+        collectLineKeyOverrides = collectLineKeyOverrides,
     )
 
     private fun buildBookContent(
@@ -510,7 +512,8 @@ internal class SefariaBookPayloadReader(
         textElement: JsonElement,
         bookHeTitle: String,
         bookEnTitle: String,
-        authors: List<String>
+        authors: List<String>,
+        collectLineKeyOverrides: Boolean = true,
     ): BuiltBookContent {
         // Pre-allocate with estimated capacity
         val output = ArrayList<String>(1000)
@@ -518,7 +521,7 @@ internal class SefariaBookPayloadReader(
         val headings = ArrayList<Heading>(100)
         // See BookPayload.cleanShiftByLineIndex — sparse raw-offset bookkeeping.
         val cleanShifts = HashMap<Int, Int>()
-        val lineKeyHashOverrides = HashMap<Int, ByteArray>()
+        val lineKeyHashOverrides = if (collectLineKeyOverrides) HashMap<Int, ByteArray>() else null
 
         fun headingTagForLevel(level: Int): Pair<String, String> = when (level) {
             0 -> "<h1>" to "</h1>"
@@ -652,7 +655,7 @@ internal class SefariaBookPayloadReader(
             )
         }
 
-        return BuiltBookContent(output, refs, headings, cleanShifts, lineKeyHashOverrides)
+        return BuiltBookContent(output, refs, headings, cleanShifts, lineKeyHashOverrides.orEmpty())
     }
 
     private fun recursiveSections(
