@@ -5,7 +5,10 @@ import io.github.kdroidfilter.seforimlibrary.common.ids.IdAllocatorBindings
 import io.github.kdroidfilter.seforimlibrary.common.ids.InMemoryIdAllocator
 import io.github.kdroidfilter.seforimlibrary.common.ids.LegacyLineKey
 import io.github.kdroidfilter.seforimlibrary.common.ids.LineOccurrenceCounter
+import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.jsonObject
@@ -121,17 +124,153 @@ class LineKeyPrefixStabilityTest {
                 authors = emptyList(), description = null, heShortDesc = null,
                 pubDates = emptyList(), altStructures = emptyList(),
                 cleanShiftByLineIndex = built.cleanShifts,
+                lineKeyHashOverrides = built.lineKeyHashOverrides,
             ).precomputeLineData()
             return requireNotNull(payload.precomputed).lineKeyHashes!![lineIndex]
         }
 
-        // The internal <br> forces cleanSefariaLine to modify this segment.
+        // The Otzar markup forces cleanSefariaLine to modify this segment.
         // Inserting a segment before it changes its generated prefix (א -> ב),
         // but must not change the content key.
-        val before = cleanedLineHash(listOf("טקסט<br>שנוקה", "שורה שנייה"))
-        val after = cleanedLineHash(listOf("שורה חדשה", "טקסט<br>שנוקה", "שורה שנייה"))
+        val before = cleanedLineHash(listOf("@04טקסט} שנוקה", "שורה שנייה"))
+        val after = cleanedLineHash(listOf("שורה חדשה", "@04טקסט} שנוקה", "שורה שנייה"))
         assertContentEquals(IdAllocatorBindings.lineNaturalKeyHash("טקסט שנוקה"), before)
         assertContentEquals(before, after, "cleaning must not make the generated prefix part of the key")
+    }
+
+    @Test
+    fun `an inline br is kept in the text but keyed as a space`() {
+        val json = Json { ignoreUnknownKeys = true }
+        val reader = SefariaBookPayloadReader(json, Logger.withTag("LineKeyPrefixStabilityTest"))
+        val schema = json.parseToJsonElement(
+            """{"depth":1,"sectionNames":["Paragraph"],"addressTypes":["String"]}""",
+        ).jsonObject
+        val built = reader.walkTextWithSchema(
+            schemaObj = schema,
+            textElement = JsonArray(listOf("<b>כותרת</b><br>גוף הדיבור", "שורה שנייה").map(::JsonPrimitive)),
+            bookHeTitle = "ספר בדיקה",
+            bookEnTitle = "Test Book",
+        )
+        val lineIndex = built.lines.indexOfFirst { "גוף הדיבור" in it }
+        assertTrue(built.lines[lineIndex].endsWith("<b>כותרת</b><br>גוף הדיבור"))
+        val payload = BookPayload(
+            heTitle = "ספר בדיקה", enTitle = "Test Book", categoriesHe = listOf("תנך"),
+            lines = built.lines, refEntries = built.refs, headings = built.headings,
+            authors = emptyList(), description = null, heShortDesc = null,
+            pubDates = emptyList(), altStructures = emptyList(),
+            cleanShiftByLineIndex = built.cleanShifts,
+            lineKeyHashOverrides = built.lineKeyHashOverrides,
+        ).precomputeLineData()
+        // Books built while inline breaks were collapsed keep their line ids.
+        assertContentEquals(
+            IdAllocatorBindings.lineNaturalKeyHash("<b>כותרת</b> גוף הדיבור"),
+            requireNotNull(payload.precomputed).lineKeyHashes!![lineIndex],
+        )
+    }
+
+    @Test
+    fun `preserved breaks do not change keys when dashless repair is suppressed`() {
+        assertHistoricDashlessKey("דיבור<br>נוסף. פירוש הדברים")
+    }
+
+    @Test
+    fun `preserved breaks do not change keys when dashless repair is newly enabled`() {
+        assertHistoricDashlessKey("דיבור. פירוש<br>– המשך")
+    }
+
+    private fun assertHistoricDashlessKey(raw: String) {
+        val json = Json { ignoreUnknownKeys = true }
+        val reader = SefariaBookPayloadReader(json, Logger.withTag("LineKeyPrefixStabilityTest"))
+        val heTitle = "תוספות על סוכה"
+        val built = reader.walkTextWithSchema(
+            schemaObj = json.parseToJsonElement(
+                """{"depth":1,"sectionNames":["Paragraph"],"addressTypes":["String"]}""",
+            ).jsonObject,
+            textElement = JsonArray(listOf(raw, "שורה שנייה").map(::JsonPrimitive)),
+            bookHeTitle = heTitle,
+            bookEnTitle = "Tosafot on Sukkah",
+        )
+        val idx = built.refs.first().lineIndex - 1
+        assertTrue("<br>" in built.lines[idx])
+        val payload = BookPayload(
+            heTitle = heTitle, enTitle = "Tosafot on Sukkah", categoriesHe = emptyList(),
+            lines = built.lines, refEntries = built.refs, headings = built.headings,
+            authors = emptyList(), description = null, heShortDesc = null,
+            pubDates = emptyList(), altStructures = emptyList(),
+            cleanShiftByLineIndex = built.cleanShifts,
+            lineKeyHashOverrides = built.lineKeyHashOverrides,
+        ).precomputeLineData()
+        // The old importer collapsed breaks BEFORE deciding whether to add a dash.
+        val oldContent = SefariaDashlessDibburim.separate(
+            heTitle, cleanSefariaLine(raw, collapseInlineBreaks = true),
+        )
+        assertContentEquals(
+            IdAllocatorBindings.lineNaturalKeyHash(oldContent),
+            requireNotNull(payload.precomputed).lineKeyHashes!![idx],
+            "The existing line id must survive both directions of the dashless decision: $raw",
+        )
+    }
+
+    @Test
+    fun `reader preserves persisted ids through breaks duplicates and prefix shifts`() = runBlocking {
+        val tempDir = Files.createTempDirectory("inline-br-ids")
+        try {
+            val schemaDir = Files.createDirectories(tempDir.resolve("schemas"))
+            val jsonDir = Files.createDirectories(tempDir.resolve("json"))
+            val bookDir = Files.createDirectories(jsonDir.resolve("Tosafot_on_Sukkah"))
+            val heTitle = "תוספות על סוכה"
+            val enTitle = "Tosafot on Sukkah"
+            Files.writeString(schemaDir.resolve("$enTitle.json"), """
+                {"title":"$enTitle","heTitle":"$heTitle","schema":{
+                  "title":"$enTitle","heTitle":"$heTitle","depth":1,
+                  "sectionNames":["Paragraph"],"addressTypes":["String"]}}
+            """.trimIndent())
+            val raw = listOf(
+                "דיבור<br>נוסף. פירוש הדברים",
+                "דיבור. פירוש<br>– המשך",
+                "<b>כותרת</b><BR />גוף הדיבור",
+                "דיבור<br>נוסף. פירוש הדברים", // same key, distinct occurrence/id
+                "פרשה פתוחה<br>",
+                "שורה ללא תג",
+            )
+            val readerSegments = raw + listOf("<br>\u00a0", "<br>\u2003", "<br>\u00a0<br>")
+            val oldContents = raw.map {
+                SefariaDashlessDibburim.separate(heTitle, cleanSefariaLine(it, collapseInlineBreaks = true))
+            }
+            val oldAllocator = InMemoryIdAllocator.load(null)
+            val bookId = oldAllocator.bookId("Sefaria", heTitle)
+            val oldOccurrences = LineOccurrenceCounter()
+            val oldIds = oldContents.map {
+                val hash = IdAllocatorBindings.lineNaturalKeyHash(it)
+                oldAllocator.lineId(bookId, hash, oldOccurrences.next(bookId, hash))
+            }
+            val state = tempDir.resolve("build_state.db")
+            oldAllocator.snapshotTo(state)
+
+            val reader = SefariaBookPayloadReader(Json, Logger.withTag("LineKeyPrefixStabilityTest"))
+            val schemaLookup = reader.buildSchemaLookup(schemaDir)
+            for (insertAtHead in listOf(false, true)) {
+                val segments = if (insertAtHead) listOf("מקטע חדש") + readerSegments else readerSegments
+                Files.writeString(bookDir.resolve("merged.json"), buildJsonObject {
+                    put("title", enTitle)
+                    put("heTitle", heTitle)
+                    put("text", JsonArray(segments.map(::JsonPrimitive)))
+                }.toString())
+                val payload = reader.readBooksInParallel(jsonDir, schemaDir, schemaLookup).single()
+                    .precomputeLineData()
+                val allocator = InMemoryIdAllocator.load(state)
+                val ids = allocate(allocator, bookId, payload)
+                val segmentIds = payload.refEntries.map { ids[it.lineIndex - 1] }
+                assertEquals(oldIds, if (insertAtHead) segmentIds.drop(1) else segmentIds)
+                assertEquals(segmentIds.size, segmentIds.toSet().size)
+                assertEquals(raw.size + if (insertAtHead) 1 else 0, payload.refEntries.size,
+                    "break-only lines with Unicode whitespace must not create refs")
+                assertEquals(4, payload.lineKeyHashOverrides.size, "store only changed segment keys")
+                assertTrue(payload.lines.any { "<b>כותרת</b><br>גוף הדיבור" in it })
+            }
+        } finally {
+            tempDir.toFile().deleteRecursively()
+        }
     }
 
     @Test
