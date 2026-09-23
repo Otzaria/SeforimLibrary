@@ -1248,7 +1248,8 @@ class PatchFanDriverSandboxTest(unittest.TestCase):
             # sandbox has to stage it exactly like the runner's
             # pipeline-control checkout does.
             for name in ("patch_anchor_schema.py", "patch_fan_anchors.sh",
-                         "patch_fan_lib.sh", "prefetch_patch_anchors.sh"):
+                         "patch_fan_lib.sh", "prefetch_patch_anchors.sh",
+                         "release_draft.sh"):
                 shutil.copy(SCRIPTS / name, control / name)
             shutil.copy(
                 CONTRACT_TABLES,
@@ -1335,6 +1336,8 @@ class PatchFanDriverSandboxTest(unittest.TestCase):
                 STUB_FAST_VERSION="26",
                 AUTOMATIC_TOKEN="stub",
                 CROSS_REPO_TOKEN="stub",
+                RELEASE_TOKEN_KIND="cross-repo",
+                RELEASE_CROSS_REPO_WRITABLE="true",
                 RELEASE_TAG="v27-sandbox",
                 SOURCE_COMMIT="deadbeef",
             )
