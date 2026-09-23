@@ -33,7 +33,7 @@ schema אחד (למשל `export/` המכיל רק `table_of_contents.json`) — 
 
 ### שער סחיפה מול ה-reference snapshot
 
-בדיקות 1/2/7 נושאות baselines קשיחים. בנוסף להשוואה הפנימית (DB מול schemas) הן
+בדיקות 1/2/6/7 נושאות baselines קשיחים. בנוסף להשוואה הפנימית (DB מול schemas) הן
 מעבירות כל מדד סָפוּר דרך `gate_snapshot_drift`: התכווצות מעבר ל-
 `QA_DRIFT_MAX_SHRINK_PCT` אחוזים מה-baseline היא `::error::` ויציאה 1; כל הפרש אחר
 (התכווצות קטנה יותר, או גדילה) הוא `::warning::` עם המספרים.
@@ -77,7 +77,7 @@ release יש להעביר `--require-all`: אז **כל** דילוג הופך א�
 
 ה-exporter משכפל את Sefaria-Project HEAD ללא הצמדה
 (`05_clone_sefaria_project.sh` — `git clone --depth 1`), ולכן המספרים
-`4,941 / 5,426 / 13,056 / 20` נכונים ל-snapshot הנוכחי בלבד. לכן:
+`4,941 / 5,426 / 5,821 / 13,056 / 20` נכונים ל-snapshot הנוכחי בלבד. לכן:
 
 - **ברירת מחדל:** כל בדיקה מחשבת את ה-`expected` מארטיפקטי אותה בנייה (schemas)
   ומשווה שורה-שורה מול ה-DB. זו ההשוואה המחייבת.
@@ -92,7 +92,7 @@ release יש להעביר `--require-all`: אז **כל** דילוג הופך א�
 | `check2_book_base_text.py` | 10.2 | `book_base_text` (מוצהר) עם רזולוציית alt-titles בסדר-priority; ‏5,426 | `--db --sefaria-dir [--priority-list] [--expect-snapshot]` |
 | `check3_elucidation.py` | 10.3 | 0 קישורי ELUCIDATION ב-DB | `--db` |
 | `check5_import_metrics.py` | 10.5 | דו"ח מדדי ייבוא הקישורים (`<db>.link-import-metrics.json`, צורת `insertedByType`/`persistedByType`): אי-שליליות, ‏dropped ≤ rowsRead פר-סוג, ‏Σwritten ≤ ΣresolvedPairs, ‏Σwritten==Σpersisted, ואופציונלית DB ≥ persisted פר-סוג (או == עם `--sefaria-stage`) + הצלבת schema_meta | `--metrics [--db] [--sefaria-stage]` |
-| `check6_metadata_rowbyrow.py` | 10.6 | שורה-שורה לפי heRef: dependenceType, collectiveTitleHe/En | `--db --sefaria-dir` |
+| `check6_metadata_rowbyrow.py` | 10.6 | שורה-שורה לפי heRef: dependenceType, collectiveTitleHe/En; ‏baseline 5,821 ספרים מותאמים | `--db --sefaria-dir [--expect-snapshot]` |
 | `check7_provenance.py` | 10.7 | baseProvenance 1/2, זוגות מוסקים, עקביות מכוונת (source,target) מול book_base_text, הרכב דרגות פר ספר-מקור (סדר ה-SOURCE עצמו — בבדיקת ה-dao, ר' להלן) | `--db [--expect-snapshot]` |
 | `check8_integrity.py` | 10.8 | `PRAGMA quick_check` + `PRAGMA foreign_key_check` | `--db` |
 
@@ -158,6 +158,17 @@ f92c99c), שרצה מול השאילתה האמיתית `selectInverseLinksByTar
 (בדיקות 1/2/6) נעשית לפי **heRef** — כפי שה-baseline ‏4,941 נקבע בתוכנית
 (עובדה 5: התאמת title נותנת 4,935 שגוי).
 
+### ספר שנעדר כולו מה-DB (בדיקה 6)
+
+אגף ה-`expected` של בדיקות 1/2 מצומצם ל-`schemas ∩ DB` — כך ה-blacklist של ספריא
+(שמסיר ספרי schema לגיטימית) אינו מייצר כשל כוזב, וכך ההשוואה עמידה לשינויי-שם
+בייבוא. המחיר: ספר schema שנעדר **כולו** מה-DB יורד גם מהצפי, ושתי הבדיקות
+נשארות שוות. לכן בדיקה 6 מודדת את `matched` — ספרי `source='Sefaria'` שהותאמו
+ל-schema — מול baseline **5,821** ומעבירה אותו ב-`gate_snapshot_drift`: אובדן
+ספרים אינו יכול עוד לעבור בלי ולו שורת `::warning::` עם המספרים, וקריסה חוצת-סף
+מפילה את ה-release. המדד מכסה כל ספר ספריא, גם כזה שאינו תלוי ואין לו יחסי
+`book_base_text` — התרחיש היחיד שקודם לא הותיר שום עקבה באף אחת משלוש הבדיקות.
+
 ## רזולוציית alt-titles (בדיקה 2 — קריטי)
 
 התאמה נאיבית נותנת 5,420 במקום 5,426 — 6 בסיסים נפתרים רק דרך וריאנט שם.
@@ -210,9 +221,10 @@ f92c99c), שרצה מול השאילתה האמיתית `selectInverseLinksByTar
 נכשל לכל בדיקה — כולם מדווחים כשל בקול ויוצאים בקוד שונה מ-0 (ראו
 `tests/test_qa_synthetic.py`, כולל רגרסיות: פרימרי של ספר מאוחר מנצח alias של ספר
 מוקדם; ספר לא-Sefaria החולק heRef עם schema מוחרג מבדיקות 1/2/6 בלי pass/fail כוזב;
-תרחישי pass/fail ל-check5). ‏baseline סכמה 2 נכון: ‏4,941 / **5,426** / 13,056+20 /
-‏ELUCIDATION=0. ה-`build/seforim.db` שעל הדיסק נבנה **אחרי** תיקון היבואן (8358a16)
-ולכן check2 עובר עליו עם 5,426 בדיוק. הדו"ח `build/seforim.db.link-import-metrics.json`
+ספר schema שנעדר כולו מה-DB מוריד את `matched` ב-check6 ונתפס בשער הסחיפה;
+תרחישי pass/fail ל-check5). ‏baseline סכמה 2 נכון: ‏4,941 / **5,426** / 5,821 /
+13,056+20 / ‏ELUCIDATION=0. ה-`build/seforim.db` שעל הדיסק נבנה **אחרי** תיקון
+היבואן (8358a16) ולכן check2 עובר עליו עם 5,426 בדיוק. הדו"ח `build/seforim.db.link-import-metrics.json`
 עוד לא קיים בבנייה הנוכחית (קוד המדדים, 6917895, מאוחר לבנייה האחרונה) — ולכן check5
 אומת בפיקסטורות סינתטיות בלבד, ו-run_all מדלג עליו עד שתועבר `--metrics` מבנייה חדשה.
 ה-E2E המלא (patch 2→2 דרך ה-updater) — קומיט 13.

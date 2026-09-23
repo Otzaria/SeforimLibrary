@@ -182,6 +182,39 @@ def test_check6():
         _check("check6 fail על מטא-דאטה ללא schema תואם", rc != 0, out.strip().splitlines()[-1:])
 
 
+# --- check6: ספר שנעדר כולו מה-DB מוריד את matched ונתפס בשער הסחיפה -----------
+def test_check6_missing_book_gate():
+    print("check6: matched עובר בשער הסחיפה מול ה-reference snapshot")
+    with tempfile.TemporaryDirectory() as tmp:
+        schemas = os.path.join(tmp, "schemas")
+        os.makedirs(schemas)
+        _write_schema(schemas, "a.json", "A", "ספר א", dependence="commentary")
+        _write_schema(schemas, "b.json", "B", "ספר ב", dependence="commentary")
+        full = [(1, "ספר א", "commentary", None, None, 0, 1, SRC_SEFARIA),
+                (2, "ספר ב", "commentary", None, None, 0, 2, SRC_SEFARIA)]
+        db_full = os.path.join(tmp, "full.db")
+        _make_db(db_full, books=full)
+        # ‏"ספר ב" נעדר כולו מה-DB: הוא יורד גם מאגף הצפי של בדיקות 1/2, וכאן הוא
+        # מוריד את matched — המדד היחיד שמותיר עקבות.
+        db_missing = os.path.join(tmp, "missing.db")
+        _make_db(db_missing, books=full[:1])
+        rc, out = _run("check6_metadata_rowbyrow.py", "--db", db_full, "--sefaria-dir", schemas)
+        _check("check6 pass: matched=2 כששני הספרים ב-DB",
+               rc == 0 and "books שהותאמו ל-schema: 2" in out, out.strip().splitlines()[-3:])
+        rc, out = _run("check6_metadata_rowbyrow.py", "--db", db_missing, "--sefaria-dir", schemas)
+        _check("check6: ספר שנעדר מוריד את matched ל-1",
+               rc == 0 and "books שהותאמו ל-schema: 1" in out, out.strip().splitlines()[-3:])
+        # עם הסף מוגדר (תצורת release) המדד נמדד מול ה-baseline ואינו עובר בשקט.
+        rc, out = _run("check6_metadata_rowbyrow.py", "--db", db_missing,
+                       "--sefaria-dir", schemas, env_extra={"QA_DRIFT_MAX_SHRINK_PCT": "2"})
+        _check("check6: שער הסחיפה מופעל על matched", rc != 0 and "::error::drift" in out,
+               out.strip().splitlines()[-2:])
+        rc, out = _run("check6_metadata_rowbyrow.py", "--db", db_missing,
+                       "--sefaria-dir", schemas, "--expect-snapshot")
+        _check("check6 --expect-snapshot אוכף את ה-baseline המדויק",
+               rc != 0 and "snapshot: matched=" in out, out.strip().splitlines()[-2:])
+
+
 # --- check7: pass + fail (כיוון הפוך, דגימה לא-מייצגת) -------------------------
 def test_check7():
     print("check7_provenance: pass + fail")
@@ -610,7 +643,8 @@ def test_unusable_schema_shape_policy():
 
 def main():
     for t in (test_primary_beats_earlier_alias, test_resolve_order,
-              test_check2, test_check6, test_check7,
+              test_check2, test_check6, test_check6_missing_book_gate,
+              test_check7,
               test_source_filter_regression, test_check5,
               test_snapshot_drift_gate, test_unreadable_schema_policy,
               test_unusable_schema_shape_policy,

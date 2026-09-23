@@ -7,7 +7,13 @@ import os
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from common import (load_schema_books, open_db, require_columns,
-                    resolve_schemas_dir, sefaria_source_id, die)
+                    resolve_schemas_dir, sefaria_source_id, die,
+                    gate_snapshot_drift)
+
+# ספר schema שנעדר כולו מה-DB יורד גם מאגף הצפי בבדיקות 1/2; כאן הוא מוריד את
+# matched, ולכן גם המדד הזה נושא baseline ועובר בשער הסחיפה. ‏5,821 = ספרי
+# source='Sefaria' שהותאמו ל-schema (ר' README, סעיף סינון ה-source).
+SNAPSHOT_MATCHED = 5821
 
 
 def main():
@@ -15,6 +21,7 @@ def main():
     ap.add_argument("--db", required=True)
     ap.add_argument("--sefaria-dir", required=True)
     ap.add_argument("--max-report", type=int, default=20)
+    ap.add_argument("--expect-snapshot", action="store_true")
     args = ap.parse_args()
 
     conn = open_db(args.db)
@@ -61,6 +68,7 @@ def main():
     print(f"books שהותאמו ל-schema: {matched}")
     print(f"books עם מטא-דאטה ללא schema תואם: {len(unmatched_with_meta)}")
     print(f"אי-התאמות שדה: {len(mismatches)}")
+    print(f"reference snapshot = {SNAPSHOT_MATCHED}")
 
     if matched == 0:
         die("אף ספר ב-DB לא הותאם ל-schema (heRef לא תואם אף heTitle) — בדיקה ריקה, כשל")
@@ -72,6 +80,11 @@ def main():
         for heref, field, dbv, schv in mismatches[:args.max_report]:
             print(f"  {heref!r} :: {field}: DB={dbv!r} schema={schv!r}", file=sys.stderr)
         die(f"{len(mismatches)} אי-התאמות מטא-דאטה שורה-שורה")
+
+    gate_snapshot_drift("schema-matched books", matched, SNAPSHOT_MATCHED)
+
+    if args.expect_snapshot and matched != SNAPSHOT_MATCHED:
+        die(f"snapshot: matched={matched} != {SNAPSHOT_MATCHED}")
 
     print(f"PASS: מטא-דאטה תואם schemas ({matched} ספרים)")
     sys.exit(0)
