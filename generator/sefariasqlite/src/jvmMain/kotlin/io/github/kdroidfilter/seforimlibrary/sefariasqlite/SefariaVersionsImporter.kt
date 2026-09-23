@@ -145,8 +145,16 @@ internal class SefariaVersionsImporter(
                 }
                 val lineId = mergedLineIdByRef[ref.ref]
                 if (lineId == null) {
-                    // A version segment whose address has no merged line. Should be
-                    // impossible (merged = union of versions); counted, never guessed.
+                    // טקסט ראשי ממהדורה מוצהרת אינו איחוד המהדורות — כתובת שאין לה
+                    // שורה נופלת בקול, כי אין לאן לשמור אותה.
+                    val preferredFile = payload.preferredVersionFileName
+                    if (preferredFile != null) throw PreferredVersionRefGapException(
+                        "preferred_versions.txt: ${payload.heTitle} נקרא מ-$preferredFile, " +
+                            "ולמהדורה \"$versionTitle\" יש כתובת ללא שורה מקבילה: ${ref.ref}. " +
+                            "לחסום את המהדורה ב-black_versions.txt או לתקן את המיפוי."
+                    )
+                    // A merged-based book keeps the original invariant (merged = union
+                    // of versions); an unmatched address is counted, never guessed.
                     segmentsUnmatched++
                     return@forEach
                 }

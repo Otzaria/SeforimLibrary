@@ -121,3 +121,7 @@ William Davidson Edition - Vocalized Aramaic
 
 # --- תלמוד ירושלמי שקלים: מהדורת ויליאם דוידסון ---
 תלמוד ירושלמי שקלים | William Davidson Edition - Hebrew
+
+# --- כתר מלכות: חלוקה שאינה תואמת את הטקסט המוצהר ב-preferred_versions.txt ---
+# Mahberet מחולקת לפסוקים ו-Tikkun לפרקים מוזזים ב-3 — אין ולו כתובת אחת משותפת.
+כתר מלכות | Tikkun Midot HaNefesh, Jerusalem 1996

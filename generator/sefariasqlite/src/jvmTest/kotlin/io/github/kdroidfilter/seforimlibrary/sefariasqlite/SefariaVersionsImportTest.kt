@@ -14,7 +14,9 @@ import java.nio.file.Files
 import java.sql.Connection
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertNotNull
+import kotlin.test.assertTrue
 
 /**
  * End-to-end versions import: per-version sibling files are walked with the
@@ -412,5 +414,145 @@ class SefariaVersionsImportTest {
         }
 
         repo.close()
+    }
+
+    /** Declared-version text is not the union of addresses — an unmatched segment fails loudly. */
+    @Test
+    fun declaredVersionMakesUnmatchedSegmentsFailLoudly() = runBlocking {
+        // Control: no mapping → merged.json is the book text and both editions join.
+        assertEquals(
+            listOf(
+                "Other 1900" to "נוסח אחר א",
+                "Other 1900" to "נוסח אחר ב",
+                "Preferred 1923" to "נוסח מוצהר א",
+            ),
+            importRefGapFixture(SefariaPreferredVersions.Empty),
+        )
+
+        val logger = Logger.withTag("SefariaVersionsImportTest")
+        val error = assertFailsWith<PreferredVersionRefGapException> {
+            importRefGapFixture(parsePreferredVersions(listOf("ספר בדיקה|$PREFERRED_FILE"), logger))
+        }
+        assertTrue(error.message!!.contains(PREFERRED_FILE), "error should name the declared file")
+        assertTrue(error.message!!.contains("Other 1900"), "error should name the dropped edition")
+    }
+
+    /** Same fixture both ways: merged=2 segments, declared version=1, other edition=2. */
+    private suspend fun importRefGapFixture(
+        preferredVersions: SefariaPreferredVersions,
+    ): List<Pair<String, String>> {
+        val tempDir = Files.createTempDirectory("seforim-versions-refgap")
+        val jsonDir = Files.createDirectories(tempDir.resolve("json"))
+        val schemaDir = Files.createDirectories(tempDir.resolve("schemas"))
+        val bookDir = Files.createDirectories(jsonDir.resolve("Test Book"))
+
+        Files.writeString(
+            schemaDir.resolve("Test_Book.json"),
+            """
+            |{
+            |  "schema": {
+            |    "title": "Test Book",
+            |    "heTitle": "ספר בדיקה",
+            |    "sectionNames": ["Paragraph"],
+            |    "heSectionNames": ["פסקה"],
+            |    "addressTypes": ["Integer"],
+            |    "depth": 1
+            |  },
+            |  "heCategories": ["תנך"]
+            |}
+            """.trimMargin()
+        )
+        Files.writeString(
+            bookDir.resolve("merged.json"),
+            """
+            |{
+            |  "title": "Test Book",
+            |  "heTitle": "ספר בדיקה",
+            |  "language": "he",
+            |  "text": ["נוסח ממוזג א", "נוסח ממוזג ב"],
+            |  "versions": [["Preferred 1923", null], ["Other 1900", null]]
+            |}
+            """.trimMargin()
+        )
+        Files.writeString(
+            bookDir.resolve(PREFERRED_FILE),
+            """
+            |{
+            |  "title": "Test Book",
+            |  "heTitle": "ספר בדיקה",
+            |  "language": "he",
+            |  "versionTitle": "Preferred 1923",
+            |  "text": ["נוסח מוצהר א"]
+            |}
+            """.trimMargin()
+        )
+        Files.writeString(
+            bookDir.resolve("Other 1900.json"),
+            """
+            |{
+            |  "title": "Test Book",
+            |  "heTitle": "ספר בדיקה",
+            |  "language": "he",
+            |  "versionTitle": "Other 1900",
+            |  "text": ["נוסח אחר א", "נוסח אחר ב"]
+            |}
+            """.trimMargin()
+        )
+
+        val json = Json { ignoreUnknownKeys = true; coerceInputValues = true }
+        val logger = Logger.withTag("SefariaVersionsImportTest")
+        val reader = SefariaBookPayloadReader(json, logger, preferredVersions = preferredVersions)
+        val schemaLookup = reader.buildSchemaLookup(schemaDir)
+        val payload = reader.readBooksInParallel(jsonDir, schemaDir, schemaLookup).single()
+
+        val driver = JdbcSqliteDriver(url = "jdbc:sqlite::memory:")
+        SeforimDb.Schema.create(driver)
+        val repo = SeforimRepository(":memory:", driver)
+        val sourceId = repo.insertSource("Sefaria-Test")
+        val catId = repo.insertCategory(Category(0, null, "תנך", level = 0, order = 1))
+        val bookPath = buildBookPath(payload.categoriesHe, payload.heTitle)
+        repo.insertBook(
+            Book(
+                id = 1L, categoryId = catId, sourceId = sourceId,
+                title = payload.heTitle, heRef = payload.heTitle,
+                authors = emptyList(), pubPlaces = emptyList(), pubDates = emptyList(),
+                heShortDesc = null, notesContent = null, order = 1f,
+                topics = emptyList(), isBaseBook = false, totalLines = payload.lines.size,
+                hasAltStructures = false, hasTeamim = false, hasNekudot = false,
+            )
+        )
+        val lineKeyToId = mutableMapOf<Pair<String, Int>, Long>()
+        repo.insertLinesBatch(
+            payload.lines.mapIndexed { idx, content ->
+                val lineId = 100L + idx
+                lineKeyToId[bookPath to idx] = lineId
+                Line(id = lineId, bookId = 1L, lineIndex = idx, content = content, heRef = null)
+            }
+        )
+
+        try {
+            SefariaVersionsImporter(repo, InMemoryIdAllocator.load(path = null), json, reader, logger)
+                .import(
+                    listOf(SefariaVersionsImporter.BookInput(payload, bookId = 1L, bookPath = bookPath)),
+                    lineKeyToId,
+                )
+            val stored = mutableListOf<Pair<String, String>>()
+            val conn: Connection = driver.getConnection()
+            conn.createStatement().use { st ->
+                st.executeQuery(
+                    "SELECT bv.versionTitle, vl.content FROM version_line vl " +
+                        "JOIN book_version bv ON bv.id = vl.versionId ORDER BY bv.versionTitle, vl.lineId"
+                ).use { rs ->
+                    while (rs.next()) stored += rs.getString(1) to rs.getString(2)
+                }
+            }
+            return stored
+        } finally {
+            repo.close()
+        }
+    }
+
+    private companion object {
+        const val PREFERRED_FILE = "Preferred 1923.json"
     }
 }
