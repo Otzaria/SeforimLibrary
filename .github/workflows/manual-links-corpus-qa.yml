@@ -66,6 +66,7 @@ jobs:
       EXPECTED_TARGET_RECORDS: '81496'
       EXPECTED_SOURCE_RECORDS: '17980'
       EXPECTED_ANCHORS: '17980'
+      EXPECTED_UNRELOCATABLE_ANCHORS: '0'
     steps:
       - name: Validate immutable inputs
         run: |
@@ -187,6 +188,7 @@ jobs:
             -PexpectedTargetSefariaRecords="$EXPECTED_TARGET_RECORDS" \
             -PexpectedSourceSefariaRecords="$EXPECTED_SOURCE_RECORDS" \
             -PexpectedAnchors="$EXPECTED_ANCHORS" \
+            -PexpectedUnrelocatableAnchors="$EXPECTED_UNRELOCATABLE_ANCHORS" \
             "${EXTRA_ARGS[@]}"
           jq -e '.refs.missing == 0 and .refs.duplicate == 0 and .anchors.drifted == 0 and .packaging_collisions == 0' \
             "$OUTPUT/manual_links_refresh_report.json" >/dev/null

@@ -262,6 +262,11 @@ class ManualGenerateReleaseWorkflowContractTest {
             "the excluded_files mechanism is gone, in any casing",
         )
         assertTrue(workflow.contains("EXPECTED_ANCHORS: '17980'"))
+        assertTrue(workflow.contains("EXPECTED_UNRELOCATABLE_ANCHORS: '0'"))
+        assertTrue(
+            workflow.contains("-PexpectedUnrelocatableAnchors=\"\$EXPECTED_UNRELOCATABLE_ANCHORS\""),
+            "absorbed anchor drift must be gated, not only logged",
+        )
         assertTrue(workflow.contains("options: [refresh, bootstrap, migrate]"), "migrate must be dispatchable")
         assertTrue(workflow.contains("\"\$MODE\" == refresh || \"\$MODE\" == migrate"), "migrate consumes the pinned lineage")
         assertTrue(workflow.contains("-PexpectedOldConfigSha256=\"\$EXPECTED_OLD_CONFIG_SHA\""))
