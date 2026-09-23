@@ -22,7 +22,6 @@
 אסתר | Emoji Megillah
 רש"י על בראשית | test
 אברבנאל על שופטים | nhhu
-רש"ר הירש על התורה | try hebrew
 חידושי אגדות על בבא מציעא | 1
 אבן עזרא על זכריה | 1
 רש"י על שבת | rashi
@@ -87,10 +86,8 @@ Persian translation by Mashallah Rahman Pour Davud and Hakham Musa Zargari, Otza
 # גרסאות זבל שונות
 סידור ספרד | Modeh Anu
 
-# --- ספרים חיצוניים (מדיניות; ההסרה בגלל סוג החיבור) ---
-בן סירא | Ben Sira, David Kahana ed. -- Wikisource
+# --- ספרים חיצוניים: המהדורה הבסיסית נשמרת; נחסמות רק מהדורות נוספות ---
 בן סירא | The Wisdom of Ben Sira, Cambridge University Press, 1899
-ספר יהודית | Ketuvim Achronim, Seckel Isaac Frankel. Warsaw, 1885
 ספר יהודית | תרגום מיוונית יצחק זעקיל פרענקיל,  ווארשא  1885, אתר דעת
 
 # --- "קדמוניות היהודים": תרגומי AI ותרגומים משכיליים/לא-מדויקים ---
