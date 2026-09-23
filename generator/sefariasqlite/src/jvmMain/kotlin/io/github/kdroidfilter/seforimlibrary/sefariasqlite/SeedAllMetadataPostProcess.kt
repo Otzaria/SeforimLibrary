@@ -78,10 +78,12 @@ fun main(args: Array<String>) = runBlocking {
 
     try {
         val buildStatePath = resolveBuildStatePath(dbPath)
-        val allocator = InMemoryIdAllocator.load(
-            buildStatePath.takeIf { Files.exists(it) },
-            Logger.withTag("IdAllocator"),
-        )
+        // An empty allocator restarts pub_date/pub_place ids at 1, onto rows this DB
+        // already holds — and this stage writes with no transaction to roll back.
+        check(Files.exists(buildStatePath)) {
+            "build_state not found at $buildStatePath; run the DB generation pipeline first"
+        }
+        val allocator = InMemoryIdAllocator.load(buildStatePath, Logger.withTag("IdAllocator"))
         val bindings = IdAllocatorBindings(allocator, repository)
 
         // Resolve every fatal category-path assertion before the first metadata

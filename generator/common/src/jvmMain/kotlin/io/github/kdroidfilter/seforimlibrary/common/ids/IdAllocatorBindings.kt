@@ -66,13 +66,30 @@ class IdAllocatorBindings(
 
     suspend fun upsertPubPlace(name: String): Long {
         val id = allocator.pubPlaceId(name)
-        if (pubPlacesInserted.add(name)) repo.insertPubPlaceWithId(id, name)
+        if (pubPlacesInserted.add(name)) {
+            repo.insertPubPlaceWithId(id, name)
+            // INSERT OR IGNORE: a foreign row on this id, or this name under another id,
+            // is dropped silently and books would be linked to that foreign row.
+            val stored = repo.getPubPlaceByName(name)
+            check(stored != null && stored.id == id) {
+                "pub_place '$name' was allocated id $id but the DB holds ${stored?.id} for it; " +
+                    "the build_state does not describe this DB"
+            }
+        }
         return id
     }
 
     suspend fun upsertPubDate(date: String): Long {
         val id = allocator.pubDateId(date)
-        if (pubDatesInserted.add(date)) repo.insertPubDateWithId(id, date)
+        if (pubDatesInserted.add(date)) {
+            repo.insertPubDateWithId(id, date)
+            // Same INSERT OR IGNORE hazard as upsertPubPlace.
+            val stored = repo.getPubDateByDate(date)
+            check(stored != null && stored.id == id) {
+                "pub_date '$date' was allocated id $id but the DB holds ${stored?.id} for it; " +
+                    "the build_state does not describe this DB"
+            }
+        }
         return id
     }
 
