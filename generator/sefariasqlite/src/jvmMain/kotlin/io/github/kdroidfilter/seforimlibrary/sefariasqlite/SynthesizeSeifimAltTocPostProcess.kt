@@ -2,7 +2,9 @@ package io.github.kdroidfilter.seforimlibrary.sefariasqlite
 
 import co.touchlab.kermit.Logger
 import co.touchlab.kermit.Severity
+import io.github.kdroidfilter.seforimlibrary.common.buildstate.BuildStateVerifier
 import io.github.kdroidfilter.seforimlibrary.common.buildstate.IdTable
+import io.github.kdroidfilter.seforimlibrary.common.ids.altTocChildPath
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.Paths
@@ -49,8 +51,8 @@ import kotlin.system.exitProcess
  * statements — the line_alt_toc map alone is hundreds of thousands of rows,
  * and per-row autocommit turns that into hours of fsyncs. Structure and newly
  * created tocText ids come from the build-state allocator, so they remain
- * stable across releases. Entry ids follow the existing alt-TOC policy: a
- * deterministic wholesale rebuild per book.
+ * stable across releases. Entry ids come from the same allocator, keyed on
+ * (structure_id, ancestor_path) with the path built from per-parent ordinals.
  *
  * Runs AFTER all book- and link-writing stages (Sefaria links carry the
  * COMMENTARY rows this reads).
@@ -85,6 +87,9 @@ fun main(args: Array<String>) {
             val result = synthesizeSeifimAltTocs(conn, snapshots, stableIds)
             logger.i { "Seifim alt-TOC done: structures=${result.structures} leaves=${result.leaves}" }
         }
+        // This stage mutates the ATTACHed build state in place, so no snapshotTo
+        // verifies it. Meta is left to the stage that wrote it; counters are ours.
+        BuildStateVerifier.verifyFreshSnapshot(buildStatePath, dbPath, emptyMap())
     } catch (e: Exception) {
         logger.e(e) { "Failed to synthesize Seifim alt-TOC; aborting" }
         exitProcess(1)
@@ -153,6 +158,26 @@ internal class AttachedBuildStateIds(private val conn: Connection) {
         ).use { st ->
             st.setLong(1, bookId)
             st.setString(2, key)
+            st.setLong(3, id)
+            st.executeUpdate()
+        }
+        return id
+    }
+
+    fun altTocEntryId(structureId: Long, ancestorPath: String): Long {
+        conn.prepareStatement(
+            "SELECT id FROM seifim_state.id_alt_toc_entry WHERE structure_id = ? AND ancestor_path = ?",
+        ).use { st ->
+            st.setLong(1, structureId)
+            st.setString(2, ancestorPath)
+            st.executeQuery().use { rs -> if (rs.next()) return rs.getLong(1) }
+        }
+        val id = allocate(IdTable.ALT_TOC_ENTRY, queryMaxId(conn, "alt_toc_entry"))
+        conn.prepareStatement(
+            "INSERT INTO seifim_state.id_alt_toc_entry(structure_id, ancestor_path, id) VALUES (?, ?, ?)",
+        ).use { st ->
+            st.setLong(1, structureId)
+            st.setString(2, ancestorPath)
             st.setLong(3, id)
             st.executeUpdate()
         }
@@ -668,6 +693,10 @@ internal fun writeSeifimAltToc(
     }
     if (usableMarkers.isEmpty()) return 0
 
+    // Allocated up-front: every entry's natural key is scoped to this structure.
+    val structureId = stableIds?.altTocStructureId(snapshot.bookId, SEIFIM_STRUCTURE_KEY)
+        ?: (queryMaxId(conn, "alt_toc_structure") + 1)
+
     // Build the whole entry tree in memory.
     data class PendingEntry(
         val id: Long,
@@ -680,6 +709,8 @@ internal fun writeSeifimAltToc(
     )
 
     var nextEntryId = queryMaxId(conn, "alt_toc_entry")
+    val nextOrdinalByParent = HashMap<Long?, Int>()
+    val pathByEntry = HashMap<Long, String>()
     val entries = mutableListOf<PendingEntry>()
     val entryById = HashMap<Long, PendingEntry>()
     val childrenByParent = LinkedHashMap<Long?, MutableList<PendingEntry>>()
@@ -692,13 +723,17 @@ internal fun writeSeifimAltToc(
     for (heading in snapshot.headings) {
         while (stack.isNotEmpty() && stack.last().first >= heading.tocLevel) stack.removeLast()
         val parent = stack.lastOrNull()?.second
+        val ordinal = (nextOrdinalByParent[parent?.id] ?: 0) + 1
+        nextOrdinalByParent[parent?.id] = ordinal
+        val path = altTocChildPath(parent?.let { pathByEntry.getValue(it.id) } ?: "", ordinal)
         val entry = PendingEntry(
-            id = ++nextEntryId,
+            id = stableIds?.altTocEntryId(structureId, path) ?: ++nextEntryId,
             parentId = parent?.id,
             text = heading.text,
             level = stack.size,
             lineId = heading.lineId,
         )
+        pathByEntry[entry.id] = path
         entries += entry
         entryById[entry.id] = entry
         childrenByParent.getOrPut(parent?.id) { mutableListOf() }.add(entry)
@@ -711,13 +746,17 @@ internal fun writeSeifimAltToc(
     for (marker in usableMarkers) {
         val parentLine = sortedHeadingLines.lastOrNull { it < marker.lineIndex } ?: continue
         val parent = headingByLine.getValue(parentLine)
+        val ordinal = (nextOrdinalByParent[parent.id] ?: 0) + 1
+        nextOrdinalByParent[parent.id] = ordinal
+        val path = altTocChildPath(pathByEntry.getValue(parent.id), ordinal)
         val entry = PendingEntry(
-            id = ++nextEntryId,
+            id = stableIds?.altTocEntryId(structureId, path) ?: ++nextEntryId,
             parentId = parent.id,
             text = marker.label,
             level = parent.level + 1,
             lineId = marker.lineId,
         )
+        pathByEntry[entry.id] = path
         entries += entry
         entryById[entry.id] = entry
         childrenByParent.getOrPut(parent.id) { mutableListOf() }.add(entry)
@@ -732,8 +771,6 @@ internal fun writeSeifimAltToc(
     }
 
     // Flush: structure row, entry batch, then the per-line owner map.
-    val structureId = stableIds?.altTocStructureId(snapshot.bookId, SEIFIM_STRUCTURE_KEY)
-        ?: (queryMaxId(conn, "alt_toc_structure") + 1)
     conn.prepareStatement(
         "INSERT INTO alt_toc_structure (id, bookId, key, title, heTitle) VALUES (?, ?, ?, ?, ?)",
     ).use { st ->

@@ -1,6 +1,8 @@
 package io.github.kdroidfilter.seforimlibrary.otzariasqlite
 
 import app.cash.sqldelight.driver.jdbc.sqlite.JdbcSqliteDriver
+import io.github.kdroidfilter.seforimlibrary.common.buildstate.BuildStateReader
+import io.github.kdroidfilter.seforimlibrary.common.ids.InMemoryIdAllocator
 import io.github.kdroidfilter.seforimlibrary.core.models.Book
 import io.github.kdroidfilter.seforimlibrary.core.models.Category
 import io.github.kdroidfilter.seforimlibrary.core.models.Line
@@ -175,6 +177,74 @@ class OtzariaAltTocTest {
         DatabaseGenerator(sourceDirectory = sourceDir, repository = repo).generateLinksOnly()
         assertTrue(repo.getAltTocStructuresForBook(1).isEmpty())
         assertTrue(!repo.getBook(1)!!.hasAltStructures)
+
+        repo.close()
+    }
+
+    /**
+     * Entry ids must come from the persistent allocator, not from the rowid the
+     * wholesale rebuild happens to free up. Reverting the `addNode` insert to
+     * `repository.insertAltTocEntry` fails this: `id_alt_toc_entry` stays empty
+     * and the second run renumbers from the squatter's rowid.
+     */
+    @Test
+    fun altTocEntryIdsAreReproducedFromTheBuildState() = runBlocking {
+        val driver = JdbcSqliteDriver(url = "jdbc:sqlite::memory:")
+        SeforimDb.Schema.create(driver)
+        val repo = SeforimRepository(":memory:", driver)
+
+        val sourceId = repo.insertSource("Tashma")
+        val catId = repo.insertCategory(Category(0, null, "Cat", level = 0, order = 1))
+        repo.insertBook(
+            Book(
+                id = 1, categoryId = catId, sourceId = sourceId, title = "Book", heRef = "Book",
+                authors = emptyList(), pubPlaces = emptyList(), pubDates = emptyList(),
+                heShortDesc = null, notesContent = null, order = 1f, topics = emptyList(),
+                isBaseBook = false, totalLines = 4, hasAltStructures = false,
+                hasTeamim = false, hasNekudot = false,
+            ),
+        )
+        repo.insertLinesBatch(
+            (0 until 4).map { idx ->
+                Line(id = 100L + idx, bookId = 1, lineIndex = idx, content = "l${idx + 1}", heRef = "l${idx + 1}")
+            },
+        )
+        // A foreign row far above the rebuild's rowid range: an implicit-rowid
+        // writer would renumber past it on the second run, the allocator will not.
+        repo.executeRawQuery(
+            "INSERT INTO alt_toc_entry (id, structureId, parentId, textId, level, lineId, isLastChild, hasChildren) " +
+                "VALUES (5000, 9999, NULL, 1, 0, 100, 0, 0)",
+        )
+
+        val sourceDir = Files.createTempDirectory("otzaria-alt-toc-ids")
+        val altTocDir = Files.createDirectories(sourceDir.resolve("alt_toc"))
+        Files.writeString(
+            altTocDir.resolve("Book_alt_toc.json"),
+            """[{"key": "Parasha", "heTitle": "P", "nodes": [
+               {"heTitle": "A", "line": 1, "children": [{"heTitle": "A1", "line": 1}, {"heTitle": "A2", "line": 2}]},
+               {"heTitle": "B", "line": 3, "children": [{"heTitle": "B1", "line": 3}]}]}]""",
+        )
+
+        val state = Files.createTempDirectory("otzaria-alt-toc-state").resolve("build_state.db")
+        fun run(): List<Pair<String, Long>> = runBlocking {
+            val allocator = InMemoryIdAllocator.load(state.takeIf { Files.exists(it) })
+            // appendOtzaria registers books through the allocator; without it the
+            // snapshot GC drops this structure's keys as orphans.
+            allocator.bookId("Tashma", "Book")
+            DatabaseGenerator(sourceDirectory = sourceDir, repository = repo, allocator = allocator)
+                .generateLinksOnly()
+            allocator.snapshotTo(state)
+            val structureId = repo.getAltTocStructuresForBook(1).single().id
+            repo.getAltTocEntriesForStructure(structureId).sortedBy { it.id }.map { it.text to it.id }
+        }
+
+        val first = run()
+        assertEquals(listOf("A", "A1", "A2", "B", "B1"), first.map { it.first })
+        assertEquals(first, run(), "alt_toc_entry ids must be reproduced from the build state")
+
+        val snapshot = BuildStateReader().read(state)
+        assertEquals(5, snapshot.altTocEntries.size)
+        assertEquals(first.map { it.second }.toSet(), snapshot.altTocEntries.values.toSet())
 
         repo.close()
     }

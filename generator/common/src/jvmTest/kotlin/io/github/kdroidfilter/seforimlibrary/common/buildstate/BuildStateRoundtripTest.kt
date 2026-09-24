@@ -49,6 +49,9 @@ class BuildStateRoundtripTest {
             ),
             altTocEntries = mapOf(
                 AltTocEntryKey(700L, "1") to 7000L,
+                AltTocEntryKey(700L, "1/1") to 7001L,
+                AltTocEntryKey(700L, "1/12/3") to 7002L,
+                AltTocEntryKey(701L, "1") to 7003L,
             ),
             links = mapOf(
                 LinkKey(5000L, 5001L, 3L) to 80_000L,

@@ -44,6 +44,9 @@ class IdAllocatorBindings(
     private val categoriesInserted = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
     private val tocTextsInserted = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
 
+    // (structureId, ancestorPath) keys handed out this build; see insertAltTocEntryStable.
+    private val altTocEntryKeysIssued = java.util.concurrent.ConcurrentHashMap.newKeySet<Pair<Long, String>>()
+
     // ─── Lookup-table helpers ──────────────────────────────────────────────────
 
     suspend fun upsertSource(name: String): Long {
@@ -180,6 +183,12 @@ class IdAllocatorBindings(
     }
 
     suspend fun insertAltTocEntryStable(entry: AltTocEntry, ancestorPath: String): Long {
+        // One id per (structure, path) is the invariant this guards: a duplicate key
+        // would silently hand two rows the same id instead of failing at the call site.
+        check(altTocEntryKeysIssued.add(entry.structureId to ancestorPath)) {
+            "alt_toc_entry natural key already used this build: " +
+                "structure=${entry.structureId} path=$ancestorPath"
+        }
         val id = allocator.altTocEntryId(entry.structureId, ancestorPath)
         val withId = if (entry.id == id) entry else entry.copy(id = id)
         repo.insertAltTocEntry(withId)

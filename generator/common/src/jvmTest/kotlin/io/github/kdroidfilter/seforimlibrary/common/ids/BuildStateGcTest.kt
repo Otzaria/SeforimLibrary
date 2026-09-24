@@ -1,5 +1,6 @@
 package io.github.kdroidfilter.seforimlibrary.common.ids
 
+import io.github.kdroidfilter.seforimlibrary.common.buildstate.AltTocEntryKey
 import io.github.kdroidfilter.seforimlibrary.common.buildstate.BookKey
 import io.github.kdroidfilter.seforimlibrary.common.buildstate.BookSourceHash
 import io.github.kdroidfilter.seforimlibrary.common.buildstate.BuildStateReader
@@ -104,6 +105,54 @@ class BuildStateGcTest {
         build.snapshotTo(statePath)
         val reloaded = BuildStateReader().read(statePath)
         assertEquals(1, reloaded.links.size, "link referencing dropped lineIds should itself be dropped")
+    }
+
+    /**
+     * alt-toc entry keys are ~200k rows once every writer allocates, and they must
+     * follow their structure exactly: over-pruning silently retires published ids.
+     */
+    @Test
+    fun `alt toc entry keys are pruned with their structure and kept with a live one`() {
+        val statePath = tmp.newFolder().toPath().resolve("build_state.db")
+        val build = InMemoryIdAllocator.load(null)
+        val bookA = build.bookId("Sefaria", "A")
+        val live = build.altTocStructureId(bookA, "Parasha")
+        val liveIds = listOf("1", "1/1", "1/2").map { build.altTocEntryId(live, it) }
+        // A structure of a book this build no longer carries.
+        val dead = build.altTocStructureId(999L, "Ghost")
+        build.altTocEntryId(dead, "1")
+        build.snapshotTo(statePath)
+
+        val reloaded = BuildStateReader().read(statePath)
+        assertEquals(1, reloaded.altTocStructures.size)
+        assertEquals(3, reloaded.altTocEntries.size)
+        assertEquals(liveIds.toSet(), reloaded.altTocEntries.values.toSet())
+        assertNull(reloaded.altTocEntries[AltTocEntryKey(dead, "1")])
+    }
+
+    /**
+     * Five pipeline stages load and re-snapshot the state after the alt-TOC
+     * writers are done. A stage that touches no alt-TOC at all must carry every
+     * key through, or the next build re-issues ids it already published.
+     */
+    @Test
+    fun `alt toc entry keys survive a stage that touches no alt toc`() {
+        val first = tmp.newFolder().toPath().resolve("build_state.db")
+        val second = tmp.newFolder().toPath().resolve("build_state.db")
+        val build1 = InMemoryIdAllocator.load(null)
+        val bookA = build1.bookId("Sefaria", "A")
+        val structureId = build1.altTocStructureId(bookA, "Parasha")
+        val ids = listOf("1", "1/1", "2").map { build1.altTocEntryId(structureId, it) }
+        build1.snapshotTo(first)
+
+        // A later stage: reads the state, writes something unrelated, snapshots.
+        val build2 = InMemoryIdAllocator.load(first)
+        build2.linkId(1L, 2L, 3L)
+        build2.snapshotTo(second)
+
+        val reloaded = BuildStateReader().read(second)
+        assertEquals(1, reloaded.altTocStructures.size)
+        assertEquals(ids.toSet(), reloaded.altTocEntries.values.toSet())
     }
 
     @Test
