@@ -1821,9 +1821,8 @@ jobs:
       # counts with ≥ semantics automatically (no --sefaria-stage — the DB has
       # also accumulated havrouta/otzaria/linker links by now).
       #
-      # --expect-snapshot is intentionally not passed here: the independent
-      # manualLinksCorpusTest has already locked the manual-link counts; these
-      # DB checks derive their expected values from this pinned build's schemas.
+      # --expect-snapshot is not passed; the drift gate below holds the snapshots. The
+      # manual-link counts are locked only by the manually dispatched manualLinksCorpusTest.
       # python3 (stdlib only) is the runtime; verify it like the deps script does
       # for sqlite3, then fail the job on any nonzero exit.
       - name: QA — run §10 checks on the full DB (required)
