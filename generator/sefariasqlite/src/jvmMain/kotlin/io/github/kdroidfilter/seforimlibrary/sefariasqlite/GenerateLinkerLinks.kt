@@ -249,6 +249,7 @@ fun main(args: Array<String>) = runBlocking {
         var targetIdentityMismatch = 0; var unmappedSource = 0; var staleSource = 0; var staleContext = 0
         var headingSource = 0
         var missingSourceHash = 0
+        var recordsParsed = 0L
 
         suspend fun flush() {
             if (linkBatch.isNotEmpty()) { repository.insertLinksBatch(linkBatch); linkBatch.clear() }
@@ -261,6 +262,7 @@ fun main(args: Array<String>) = runBlocking {
                 for (line in lines) {
                     if (line.isBlank()) continue
                     val rec = json.decodeFromString<ArtifactRecord>(line)
+                    recordsParsed++
                     check((rec.context_ref == null) == (rec.relative_direction == null)) {
                         "Malformed contextual LINKER record in ${file.path}: context_ref and " +
                             "relative_direction must be present together"
@@ -272,6 +274,11 @@ fun main(args: Array<String>) = runBlocking {
                     check(rec.start >= 0 && rec.end > rec.start) {
                         "Malformed LINKER record in ${file.path}: offsets [${rec.start}, ${rec.end}) " +
                             "must satisfy 0 <= start < end"
+                    }
+                    // line_index is 0-based by contract (artifact.schema.json: line_index_base const 0).
+                    check(rec.line_index_base == 0) {
+                        "Malformed LINKER record in ${file.path}: line_index_base=${rec.line_index_base} " +
+                            "is unsupported; the contract requires 0"
                     }
                     // Contract check FIRST, before any skip path (unresolved target,
                     // self-link) can hide a hash-less record from -PlinkerStrict.
@@ -393,6 +400,11 @@ fun main(args: Array<String>) = runBlocking {
                     "stale context=$staleContext, ambiguous target=$ambiguousTarget, " +
                     "target identity mismatch=$targetIdentityMismatch, missing source_hash=$missingSourceHash — " +
                     "artifacts/sidecar do not match this build's exact identity lineage"
+            }
+            // An empty payload passes every counter above; a strict release must ship LINKER links.
+            check(links > 0) {
+                "linkerStrict: 0 LINKER links written from $recordsParsed records parsed in " +
+                    "${artifactFiles.size} artifact files"
             }
         }
 

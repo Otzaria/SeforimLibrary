@@ -1,7 +1,19 @@
 package io.github.kdroidfilter.seforimlibrary.sefariasqlite
 
+import app.cash.sqldelight.db.QueryResult
+import app.cash.sqldelight.driver.jdbc.sqlite.JdbcSqliteDriver
 import co.touchlab.kermit.Logger
+import io.github.kdroidfilter.seforimlibrary.common.buildstate.BuildStateSnapshot
+import io.github.kdroidfilter.seforimlibrary.common.buildstate.BuildStateWriter
+import io.github.kdroidfilter.seforimlibrary.common.buildstate.IdTable
+import io.github.kdroidfilter.seforimlibrary.core.models.Book
+import io.github.kdroidfilter.seforimlibrary.core.models.Category
 import io.github.kdroidfilter.seforimlibrary.core.models.ConnectionType
+import io.github.kdroidfilter.seforimlibrary.core.models.Line
+import io.github.kdroidfilter.seforimlibrary.dao.repository.SeforimRepository
+import kotlinx.coroutines.runBlocking
+import kotlinx.serialization.SerializationException
+import java.sql.DriverManager
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
@@ -256,5 +268,147 @@ class GenerateLinkerLinksTest {
             Files.deleteIfExists(artifacts)
             Files.deleteIfExists(dir)
         }
+    }
+
+    private val sourceContent = "see Genesis 1:1 and again Genesis 1:1"
+
+    private fun record(start: Int, end: Int, base: Int?, target: String = "Genesis 1:1"): String {
+        val baseField = if (base == null) "" else "\"line_index_base\":$base,"
+        return "{\"book_key\":{\"source_name\":\"Sefaria\",\"canonical_he_title\":\"SrcBook\"}," +
+            "\"line_index\":0,$baseField\"start\":$start,\"end\":$end,\"target_ref\":\"$target\"," +
+            "\"source_hash\":\"${linkerContentHash(sourceContent)}\"}"
+    }
+
+    private class LinkerRun(val failure: Throwable?, val links: Long, val anchors: Long)
+
+    // Runs the real entry point (reflective main) on a fixture DB + build_state + sidecar.
+    private fun runLinkerMain(artifactBody: String, strict: String?): LinkerRun {
+        val dir = Files.createTempDirectory("linkerMainFixture")
+        val artifacts = Files.createDirectory(dir.resolve("artifacts"))
+        Files.writeString(artifacts.resolve("a.jsonl"), artifactBody)
+        val db = dir.resolve("seforim.db")
+        val buildState = dir.resolve("seforim.db.buildstate")
+        val sidecar = dir.resolve("sidecar.tsv")
+        val keys = listOf("seforimDb", "linkerArtifacts", "linkerSidecar", "linkerStrict", "buildStatePath")
+        val saved = keys.associateWith { System.getProperty(it) }
+        val severity = Logger.config.minSeverity
+        try {
+            val driver = JdbcSqliteDriver(url = "jdbc:sqlite:$db")
+            val repo = SeforimRepository(db.toString(), driver)
+            val linkerTypeId = runBlocking {
+                val sourceId = repo.insertSource("Sefaria")
+                val catId = repo.insertCategory(Category(0, null, "Cat", level = 0, order = 1))
+                repo.insertBook(Book(id = 1, categoryId = catId, sourceId = sourceId, title = "TgtBook", heRef = "TgtBook"))
+                repo.insertBook(Book(id = 2, categoryId = catId, sourceId = sourceId, title = "SrcBook", heRef = "SrcBook"))
+                repo.insertLinesBatch(listOf(
+                    Line(id = 10, bookId = 1, lineIndex = 0, content = "target", heRef = "TgtBook 1:1"),
+                    Line(id = 20, bookId = 2, lineIndex = 0, content = sourceContent, heRef = "SrcBook 1"),
+                ))
+                repo.executeRawQuery("INSERT INTO connection_type(name) VALUES ('${ConnectionType.LINKER.name}')")
+                var id = 0L
+                driver.executeQuery(null, "SELECT id FROM connection_type WHERE name = 'LINKER'",
+                    { c -> if (c.next().value) id = c.getLong(0)!!; QueryResult.Value(Unit) }, 0)
+                id
+            }
+            repo.close()
+            BuildStateWriter().write(
+                BuildStateSnapshot.empty().copy(
+                    lookups = mapOf(IdTable.CONNECTION_TYPE to mapOf(ConnectionType.LINKER.name to linkerTypeId)),
+                ),
+                buildState,
+            )
+            val target = RefEntry("Genesis 1:1", "TgtBook 1:1", "Tanakh/Genesis", 1)
+            writeLinkerSidecar(
+                sidecar.toString(), listOf(target), mapOf((target.path to 0) to 10L),
+                mapOf(target.path to "TgtBook"), "Sefaria",
+            )
+
+            System.setProperty("seforimDb", db.toString())
+            System.setProperty("linkerArtifacts", artifacts.toString())
+            System.setProperty("linkerSidecar", sidecar.toString())
+            System.setProperty("buildStatePath", buildState.toString())
+            if (strict == null) System.clearProperty("linkerStrict") else System.setProperty("linkerStrict", strict)
+            val facade = "io.github.kdroidfilter.seforimlibrary.sefariasqlite.GenerateLinkerLinksKt"
+            val main = Class.forName(facade).getMethod("main", Array<String>::class.java)
+            val failure = runCatching { main.invoke(null, arrayOf<String>() as Any) }.exceptionOrNull()
+                ?.let { (it as? InvocationTargetException)?.cause ?: it }
+            fun count(sql: String): Long = DriverManager.getConnection("jdbc:sqlite:$db").use { c ->
+                c.createStatement().use { st -> st.executeQuery(sql).use { rs -> rs.next(); rs.getLong(1) } }
+            }
+            val linkerLinks = "SELECT id FROM link WHERE connectionTypeId = $linkerTypeId"
+            return LinkerRun(
+                failure,
+                count("SELECT COUNT(*) FROM ($linkerLinks)"),
+                count("SELECT COUNT(*) FROM link_anchor WHERE linkId IN ($linkerLinks)"),
+            )
+        } finally {
+            keys.forEach { key ->
+                val value = saved[key]
+                if (value == null) System.clearProperty(key) else System.setProperty(key, value)
+            }
+            Logger.setMinSeverity(severity)
+            dir.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun strictRunFailsOnAnEmptyArtifactPayload() {
+        val run = runLinkerMain("", strict = "true")
+        val cause = run.failure
+        assertTrue(cause is IllegalStateException, "unexpected failure: $cause")
+        assertTrue(cause.message.orEmpty().contains("0 LINKER links written from 0 records parsed in 1 artifact files"))
+    }
+
+    @Test
+    fun nonStrictRunAcceptsAnEmptyArtifactPayload() {
+        val run = runLinkerMain("", strict = null)
+        assertEquals(null, run.failure)
+        assertEquals(0L, run.links)
+    }
+
+    @Test
+    fun oneBasedLineIndexRecordIsRejected() {
+        val run = runLinkerMain(record(4, 15, base = 1) + "\n", strict = null)
+        val cause = run.failure
+        assertTrue(cause is IllegalStateException, "unexpected failure: $cause")
+        assertTrue(cause.message.orEmpty().contains("line_index_base=1"))
+        assertTrue(cause.message.orEmpty().contains("a.jsonl"))
+    }
+
+    @Test
+    fun strictRunReportsParsedRecordsWhenNoneBecomeALink() {
+        // An unresolved target is advisory, so only the zero-links gate can fail this run.
+        val run = runLinkerMain(record(4, 15, base = 0, target = "Nowhere 9:9") + "\n", strict = "true")
+        val cause = run.failure
+        assertTrue(cause is IllegalStateException, "unexpected failure: $cause")
+        assertTrue(
+            cause.message.orEmpty().contains("0 LINKER links written from 1 records parsed in 1 artifact files"),
+            "wrong diagnostic: ${cause.message}",
+        )
+    }
+
+    @Test
+    fun nonZeroLineIndexBaseIsRejectedBeforeAnySkipPath() {
+        for (base in listOf(1, 2, -1)) {
+            val run = runLinkerMain(record(4, 15, base = base, target = "Nowhere 9:9") + "\n", strict = null)
+            val cause = run.failure
+            assertTrue(cause is IllegalStateException, "base=$base: unexpected failure: $cause")
+            assertTrue(cause.message.orEmpty().contains("line_index_base=$base "), "base=$base: ${cause.message}")
+        }
+    }
+
+    @Test
+    fun zeroBasedAndOmittedLineIndexBaseAreAccepted() {
+        val body = record(4, 15, base = null) + "\n" + record(26, 37, base = 0) + "\n"
+        val run = runLinkerMain(body, strict = "true")
+        assertEquals(null, run.failure)
+        assertEquals(1L, run.links)
+        assertEquals(2L, run.anchors)
+    }
+
+    @Test
+    fun corruptArtifactLineFailsTheRun() {
+        val run = runLinkerMain(record(4, 15, base = 0) + "\n{\"book_key\":\n", strict = null)
+        assertTrue(run.failure is SerializationException, "unexpected failure: ${run.failure}")
     }
 }
