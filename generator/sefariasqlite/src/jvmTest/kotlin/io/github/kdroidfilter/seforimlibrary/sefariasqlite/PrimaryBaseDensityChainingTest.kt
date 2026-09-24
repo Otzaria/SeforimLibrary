@@ -91,8 +91,8 @@ class PrimaryBaseDensityChainingTest {
     @Test
     fun sparsePrimaryIsNotFoundAndItsLinkIsDemoted() {
         val bookMeta = meta()
-        // Mekhilta ↔ Malbim on Exodus shape: ratio 0.25.
-        val edges = findPrimaryBaseDensityEdges(bookMeta, counts(nDP = 1200, nDS = 300), Logger.withTag("test"))
+        // Real Sefaria commentary counts: Exodus↔Malbim on Exodus 1139, Malbim↔Mekhilta 297 → ratio 0.2608.
+        val edges = findPrimaryBaseDensityEdges(bookMeta, counts(nDP = 1139, nDS = 297), Logger.withTag("test"))
         assertTrue(edges.isEmpty())
         assertEquals("RELATED", demotedType(edges))
     }
@@ -100,11 +100,19 @@ class PrimaryBaseDensityChainingTest {
     @Test
     fun linkFloorIsEnforced() {
         val bookMeta = meta()
-        // Ratio 1.2 but below LINK_DENSITY_BASE_FLOOR.
-        val edges = findPrimaryBaseDensityEdges(bookMeta, counts(nDP = 40, nDS = LINK_DENSITY_BASE_FLOOR - 1), Logger.withTag("test"))
+        // Literals, not LINK_DENSITY_BASE_FLOOR: they pin the floor at 50 instead of restating it.
+        // Both ratios (49/40, 50/40) clear the threshold, so the floor is the only rejection cause.
+        val edges = findPrimaryBaseDensityEdges(bookMeta, counts(nDP = 40, nDS = 49), Logger.withTag("test"))
         assertTrue(edges.isEmpty())
-        val atFloor = findPrimaryBaseDensityEdges(meta(), counts(nDP = 40, nDS = LINK_DENSITY_BASE_FLOOR), Logger.withTag("test"))
+        val atFloor = findPrimaryBaseDensityEdges(meta(), counts(nDP = 40, nDS = 50), Logger.withTag("test"))
         assertEquals(setOf(sifra to malbim), atFloor)
+    }
+
+    @Test
+    fun declaredBaseWithNoLinksYieldsNoEdges() {
+        // Without the nDP == 0 guard every ratio divides into Infinity and clears the threshold.
+        val edges = findPrimaryBaseDensityEdges(meta(), counts(nDP = 0, nDS = 2000), Logger.withTag("test"))
+        assertTrue(edges.isEmpty())
     }
 
     @Test
