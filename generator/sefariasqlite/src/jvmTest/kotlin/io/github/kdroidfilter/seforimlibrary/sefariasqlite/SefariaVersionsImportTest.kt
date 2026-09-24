@@ -68,6 +68,7 @@ class SefariaVersionsImportTest {
             |{
             |  "title": "Test Book",
             |  "language": "he",
+            |  "actualLanguage": "he",
             |  "versionTitle": "Vilna 1880",
             |  "versionSource": "http://vilna",
             |  "versionTitleInHebrew": "וילנא תר\"ם",
@@ -84,6 +85,7 @@ class SefariaVersionsImportTest {
             |{
             |  "title": "Test Book",
             |  "language": "he",
+            |  "actualLanguage": "he",
             |  "versionTitle": "Warsaw 1900",
             |  "priority": "1.5",
             |  "text": [["", "והארץ נוסח ורשא"], ["ויאמר נוסח ורשא"]]
@@ -302,6 +304,7 @@ class SefariaVersionsImportTest {
             |{
             |  "title": "Test Book",
             |  "language": "he",
+            |  "actualLanguage": "he",
             |  "versionTitle": "Vilna 1880",
             |  "versionTitleInHebrew": "וילנא תר\"ם",
             |  "text": ["פסקה נוסח וילנא"]
@@ -314,6 +317,7 @@ class SefariaVersionsImportTest {
             |{
             |  "title": "Test Book",
             |  "language": "he",
+            |  "actualLanguage": "he",
             |  "versionTitle": "Warsaw 1900",
             |  "text": ["פסקה נוסח ורשא"]
             |}
@@ -481,6 +485,7 @@ class SefariaVersionsImportTest {
             |  "title": "Test Book",
             |  "heTitle": "ספר בדיקה",
             |  "language": "he",
+            |  "actualLanguage": "he",
             |  "versionTitle": "Preferred 1923",
             |  "text": ["נוסח מוצהר א"]
             |}
@@ -493,6 +498,7 @@ class SefariaVersionsImportTest {
             |  "title": "Test Book",
             |  "heTitle": "ספר בדיקה",
             |  "language": "he",
+            |  "actualLanguage": "he",
             |  "versionTitle": "Other 1900",
             |  "text": ["נוסח אחר א", "נוסח אחר ב"]
             |}
@@ -547,6 +553,146 @@ class SefariaVersionsImportTest {
                 }
             }
             return stored
+        } finally {
+            repo.close()
+        }
+    }
+
+    /**
+     * שער השפה: `language` הוא "he" בכל קובץ מהדורה בייצוא, ולכן ההכרעה היא לפי
+     * actualLanguage בלבד — עברית נכנסת, כל שפה אחרת נחסמת (יידיש בכלל זה).
+     */
+    @Test
+    fun foreignLanguageVersionsAreSkippedByActualLanguage() = runBlocking {
+        val (versionTitles, lines) = importLanguageFixture(
+            listOf(
+                Triple("Hebrew Edition", "he", "נוסח עברי"),
+                Triple("Persian Edition", "fa", "נוסח פרסי"),
+                Triple("Yiddish Edition", "yi", "נוסח יידיש"),
+            )
+        )
+        // הפרסית והיידיש לא מקבלות אפילו שורת book_version.
+        assertEquals(listOf("Hebrew Edition"), versionTitles)
+        assertEquals(listOf("Hebrew Edition" to "נוסח עברי"), lines)
+    }
+
+    /** actualLanguage חסר — נפילה רועשת, בלי ניחוש שפה ובלי דילוג שקט. */
+    @Test
+    fun versionFileWithoutActualLanguageFailsLoudly() = runBlocking {
+        val error = assertFailsWith<MissingVersionLanguageException> {
+            importLanguageFixture(listOf(Triple("Unmarked Edition", null, "נוסח בלי שפה")))
+        }
+        assertTrue(error.message!!.contains("actualLanguage"), "error should name the missing field")
+        assertTrue(error.message!!.contains("Unmarked Edition"), "error should name the version file")
+    }
+
+    /** מהדורה אחת לשורה במרכז הספר; `actualLanguage=null` פירושו שדה חסר בקובץ. */
+    private suspend fun importLanguageFixture(
+        versions: List<Triple<String, String?, String>>,
+    ): Pair<List<String>, List<Pair<String, String>>> {
+        val tempDir = Files.createTempDirectory("seforim-versions-language")
+        val jsonDir = Files.createDirectories(tempDir.resolve("json"))
+        val schemaDir = Files.createDirectories(tempDir.resolve("schemas"))
+        val bookDir = Files.createDirectories(jsonDir.resolve("Test Book"))
+
+        Files.writeString(
+            schemaDir.resolve("Test_Book.json"),
+            """
+            |{
+            |  "schema": {
+            |    "title": "Test Book",
+            |    "heTitle": "ספר בדיקה",
+            |    "sectionNames": ["Paragraph"],
+            |    "heSectionNames": ["פסקה"],
+            |    "addressTypes": ["Integer"],
+            |    "depth": 1
+            |  },
+            |  "heCategories": ["תנך"]
+            |}
+            """.trimMargin()
+        )
+        Files.writeString(
+            bookDir.resolve("merged.json"),
+            """
+            |{
+            |  "title": "Test Book",
+            |  "heTitle": "ספר בדיקה",
+            |  "language": "he",
+            |  "text": ["נוסח ממוזג"],
+            |  "versions": [${versions.joinToString(", ") { "[\"${it.first}\", null]" }}]
+            |}
+            """.trimMargin()
+        )
+        versions.forEach { (title, actualLanguage, content) ->
+            val actualLanguageLine = actualLanguage?.let { "\n|  \"actualLanguage\": \"$it\"," } ?: ""
+            Files.writeString(
+                bookDir.resolve("$title.json"),
+                """
+                |{
+                |  "title": "Test Book",
+                |  "heTitle": "ספר בדיקה",
+                |  "language": "he",$actualLanguageLine
+                |  "versionTitle": "$title",
+                |  "text": ["$content"]
+                |}
+                """.trimMargin()
+            )
+        }
+
+        val json = Json { ignoreUnknownKeys = true; coerceInputValues = true }
+        val logger = Logger.withTag("SefariaVersionsImportTest")
+        val reader = SefariaBookPayloadReader(json, logger)
+        val schemaLookup = reader.buildSchemaLookup(schemaDir)
+        val payload = reader.readBooksInParallel(jsonDir, schemaDir, schemaLookup).single()
+
+        val driver = JdbcSqliteDriver(url = "jdbc:sqlite::memory:")
+        SeforimDb.Schema.create(driver)
+        val repo = SeforimRepository(":memory:", driver)
+        val sourceId = repo.insertSource("Sefaria-Test")
+        val catId = repo.insertCategory(Category(0, null, "תנך", level = 0, order = 1))
+        val bookPath = buildBookPath(payload.categoriesHe, payload.heTitle)
+        repo.insertBook(
+            Book(
+                id = 1L, categoryId = catId, sourceId = sourceId,
+                title = payload.heTitle, heRef = payload.heTitle,
+                authors = emptyList(), pubPlaces = emptyList(), pubDates = emptyList(),
+                heShortDesc = null, notesContent = null, order = 1f,
+                topics = emptyList(), isBaseBook = false, totalLines = payload.lines.size,
+                hasAltStructures = false, hasTeamim = false, hasNekudot = false,
+            )
+        )
+        val lineKeyToId = mutableMapOf<Pair<String, Int>, Long>()
+        repo.insertLinesBatch(
+            payload.lines.mapIndexed { idx, content ->
+                val lineId = 100L + idx
+                lineKeyToId[bookPath to idx] = lineId
+                Line(id = lineId, bookId = 1L, lineIndex = idx, content = content, heRef = null)
+            }
+        )
+
+        try {
+            SefariaVersionsImporter(repo, InMemoryIdAllocator.load(path = null), json, reader, logger)
+                .import(
+                    listOf(SefariaVersionsImporter.BookInput(payload, bookId = 1L, bookPath = bookPath)),
+                    lineKeyToId,
+                )
+            val conn: Connection = driver.getConnection()
+            val versionTitles = mutableListOf<String>()
+            conn.createStatement().use { st ->
+                st.executeQuery("SELECT versionTitle FROM book_version ORDER BY versionTitle").use { rs ->
+                    while (rs.next()) versionTitles += rs.getString(1)
+                }
+            }
+            val stored = mutableListOf<Pair<String, String>>()
+            conn.createStatement().use { st ->
+                st.executeQuery(
+                    "SELECT bv.versionTitle, vl.content FROM version_line vl " +
+                        "JOIN book_version bv ON bv.id = vl.versionId ORDER BY bv.versionTitle, vl.lineId"
+                ).use { rs ->
+                    while (rs.next()) stored += rs.getString(1) to rs.getString(2)
+                }
+            }
+            return versionTitles to stored
         } finally {
             repo.close()
         }

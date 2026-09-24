@@ -51,7 +51,8 @@
 # "מקרא מבואר" (תרגום/עיבוד דוד כוכב) — מוסר מכל החומשים והמגילות שבהם הוא מופיע.
 Miqra Mevoar, trans. and edited by David Kokhav, Jerusalem 2020
 
-# --- מהדורות בשפה זרה (יידיש נשארת בכוונה) ---
+# --- מהדורות בשפה זרה: השער חוסם כל actualLanguage שאינו he, יידיש בכלל זה ---
+# הערכים שמתחת נשארים כגיבוי לקבצים שהמטא-דאטה שלהם משקרת (מצהירים he על תוכן זר).
 Persian translation by Mashallah Rahman Pour Davud and Hakham Musa Zargari, Otzar haTorah, 1985 [fa]
 בראשית | Judeo-Italian Pentateuch transcribed by Robbie Kramm [itk]
 בראשית | benjamin derhambakhsh 2022 [fa]
@@ -65,6 +66,8 @@ Persian translation by Mashallah Rahman Pour Davud and Hakham Musa Zargari, Otza
 # ערבית-יהודית (המקור של מורה נבוכים והכוזרי) — נחסם כשפה זרה:
 מורה נבוכים | Judeo Arabic, Paris, 1856 [jrb]
 הכוזרי | Kitab al Khazari [jrb]
+# תוכן יידיש שמצהיר actualLanguage=he — השער עיוור לו, ולכן חסימה ידנית (ספר אחד בלבד):
+בראשית | Tanakh in Yiddish. Translated by Ch. Neuhausen, A. Hyman Charlap; NY 1914 [yi]
 
 # --- גרסאות "temp" — שאריות עבודה של ספריא ---
 אברבנאל על מלכים א | Abarbanel on I Kings temp
@@ -97,7 +100,7 @@ Persian translation by Mashallah Rahman Pour Davud and Hakham Musa Zargari, Otza
 קדמוניות היהודים | מעובד מהתרגום של צ. ה. פיליפובסקי, בתשלום יוחסין
 קדמוניות היהודים | קדמניות היהודים, תרגום קלמן שולמן
 
-# --- תרגום התנ"ך ליידיש של יהואש (משורר חילוני מודרני; לא תרגום מסורתי — חריג לכלל "יידיש נשארת") ---
+# --- תרגום התנ"ך ליידיש של יהואש (משורר חילוני מודרני; לא תרגום מסורתי) — היום גם השער חוסם יידיש ---
 # אותו versionTitle על 14 ספרי תנ"ך — חסימה גלובלית אחת:
 Yehoyesh's Yiddish Tanakh Translation [yi]
 משנה אבות | Pirkei Abot (Sayings of the Fathers) — Yiddish Translation by Yehoash (1921) [yi]
