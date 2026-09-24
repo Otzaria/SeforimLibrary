@@ -59,6 +59,9 @@ fun main(args: Array<String>) = runBlocking {
     check(artifactsRoot.isDirectory) { "linkerArtifacts is not a directory: $artifactsDir" }
     val artifactFiles = artifactsRoot.walkTopDown().filter { it.isFile && it.extension == "jsonl" }.toList()
     check(artifactFiles.isNotEmpty()) { "linkerArtifacts contains no .jsonl artifact files: $artifactsDir" }
+    // The lineage gate below is opt-in, so its flag is parsed before any destructive work:
+    // an unrecognized value must fail the build, never disable the gate in silence.
+    val linkerStrict = parseStrictFlag("linkerStrict", prop("linkerStrict", null))
 
     val driver = JdbcSqliteDriver(url = "jdbc:sqlite:$dbPath")
     val repository = SeforimRepository(dbPath, driver)
@@ -382,7 +385,7 @@ fun main(args: Array<String>) = runBlocking {
         // snapshot, so every record's source line must exist, carry a hash, and match it.
         // A violation means the artifacts came from some other snapshot — fail the build.
         // (unresolvedTarget stays advisory: refs to books outside the corpus are expected.)
-        if (prop("linkerStrict", null)?.toBoolean() == true) {
+        if (linkerStrict) {
             check(unmappedSource == 0 && staleSource == 0 && staleContext == 0 &&
                 targetIdentityMismatch == 0 && ambiguousTarget == 0 && missingSourceHash == 0
             ) {
@@ -465,3 +468,15 @@ private data class ArtifactRecord(
 
 private fun prop(name: String, fallback: String?): String? =
     System.getProperty(name) ?: System.getenv(name.uppercase()) ?: fallback
+
+// Build-gate boolean: only "true"/"false" (any case, surrounding blanks ignored) mean anything.
+// "1", "yes", a typo or a bare -Pflag (empty string) fail loudly instead of disabling the gate.
+internal fun parseStrictFlag(name: String, raw: String?): Boolean = when (raw?.trim()?.lowercase()) {
+    null -> false
+    "true" -> true
+    "false" -> false
+    else -> error(
+        "$name: unrecognized value \"$raw\" — accepted values are \"true\" or \"false\" " +
+            "(case-insensitive); pass -P$name=true / -P$name=false, or set ${name.uppercase()} in the environment"
+    )
+}

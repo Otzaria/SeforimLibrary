@@ -1,11 +1,14 @@
 package io.github.kdroidfilter.seforimlibrary.sefariasqlite
 
+import co.touchlab.kermit.Logger
 import io.github.kdroidfilter.seforimlibrary.core.models.ConnectionType
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertNotNull
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
+import java.lang.reflect.InvocationTargetException
 import java.nio.file.Files
 
 /**
@@ -189,6 +192,69 @@ class GenerateLinkerLinksTest {
         } finally {
             Files.deleteIfExists(path)
             Files.deleteIfExists(directory)
+        }
+    }
+
+    @Test
+    fun strictFlagAcceptsOnlyTrueAndFalse() {
+        assertTrue(parseStrictFlag("linkerStrict", "true"))
+        assertTrue(parseStrictFlag("linkerStrict", "TRUE"))
+        assertTrue(parseStrictFlag("linkerStrict", "  True  "))
+        assertFalse(parseStrictFlag("linkerStrict", "false"))
+        assertFalse(parseStrictFlag("linkerStrict", "FALSE"))
+    }
+
+    @Test
+    fun strictFlagIsOffOnlyWhenThePropertyIsAbsent() {
+        assertFalse(parseStrictFlag("linkerStrict", null))
+    }
+
+    @Test
+    fun strictFlagFailsLoudlyOnAnythingElse() {
+        for (raw in listOf("1", "0", "yes", "no", "on", "treu", "", "   ")) {
+            val error = assertFailsWith<IllegalStateException>("value should have failed: \"$raw\"") {
+                parseStrictFlag("linkerStrict", raw)
+            }
+            assertTrue(error.message.orEmpty().contains("linkerStrict"))
+            assertTrue(error.message.orEmpty().contains("\"$raw\""))
+        }
+    }
+
+    // Drives the real entry point (reflectively: the package holds several `main`s) to prove the
+    // strict gate is fed by the strict parser, and that a junk value stops the run before the DB.
+    @Test
+    fun mainRejectsAnInvalidStrictFlagBeforeOpeningTheDatabase() {
+        val dir = Files.createTempDirectory("linkerStrictMain")
+        val artifacts = Files.createDirectory(dir.resolve("artifacts"))
+        val artifact = Files.writeString(artifacts.resolve("a.jsonl"), "")
+        val db = dir.resolve("seforim.db")
+        val keys = listOf("seforimDb", "linkerArtifacts", "linkerSidecar", "linkerStrict")
+        val saved = keys.associateWith { System.getProperty(it) }
+        val severity = Logger.config.minSeverity
+        try {
+            System.setProperty("seforimDb", db.toString())
+            System.setProperty("linkerArtifacts", artifacts.toString())
+            System.setProperty("linkerSidecar", dir.resolve("sidecar.tsv").toString())
+            System.setProperty("linkerStrict", "banana")
+            val facade = "io.github.kdroidfilter.seforimlibrary.sefariasqlite.GenerateLinkerLinksKt"
+            val main = Class.forName(facade).getMethod("main", Array<String>::class.java)
+            val failure = assertFailsWith<InvocationTargetException> {
+                main.invoke(null, arrayOf<String>() as Any)
+            }
+            val cause = failure.cause
+            assertTrue(cause is IllegalStateException, "unexpected failure: $cause")
+            assertTrue(cause.message.orEmpty().contains("unrecognized value"))
+            // The flag is parsed before the type-replacing import, so nothing was opened.
+            assertFalse(Files.exists(db))
+        } finally {
+            keys.forEach { key ->
+                val value = saved[key]
+                if (value == null) System.clearProperty(key) else System.setProperty(key, value)
+            }
+            Logger.setMinSeverity(severity)
+            Files.deleteIfExists(artifact)
+            Files.deleteIfExists(artifacts)
+            Files.deleteIfExists(dir)
         }
     }
 }
