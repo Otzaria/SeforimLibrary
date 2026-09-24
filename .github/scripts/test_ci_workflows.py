@@ -10,7 +10,13 @@ Assertions read the parsed workflow, not its comment text, so a comment that
 quotes a warning cannot satisfy or break them.
 """
 
+import hashlib
+import json
+import os
 import re
+import shutil
+import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -21,6 +27,7 @@ except ImportError:  # pragma: no cover - only on a runner without PyYAML
 
 WORKFLOWS = Path(__file__).parents[1] / "workflows"
 RELEASE = WORKFLOWS / "manual-generate-release.yml"
+DELTA = WORKFLOWS / "delta-real-diff-test.yml"
 CI = WORKFLOWS / "ci.yml"
 CONTRACT = WORKFLOWS / "contract.yml"
 TRUNK = "otzaria"
@@ -49,8 +56,6 @@ NODE24_MAJOR = {
 # stops a new HOSTED job from quietly joining the exemption.
 SELF_HOSTED_JOBS = {
     ("manual-generate-release.yml", "build-and-release"),
-    ("delta-pipeline-dryrun.yml", "dryrun"),
-    ("delta-real-diff-arm.yml", "real-diff"),
     ("delta-real-diff-test.yml", "real-diff"),
     ("build-library-index.yml", "index"),
 }
@@ -283,7 +288,90 @@ class CiWorkflowTest(unittest.TestCase):
                 )
         self.assertGreater(checked, 0, f"no run: script found (longest {longest})")
 
+    # ─── delta-real-diff-test.yml ──────────────────────────────────────────
+
+    def lineage_pairing(self, lineage, metadata, tag, archive_sha):
+        """Run the Otzaria step's lineage block for real against fixture files."""
+        doc = yaml.safe_load(DELTA.read_text(encoding="utf-8"))
+        body = named_step(doc, "Stage the Otzaria source")["run"]
+        start = body.index('LINEAGE="${LINEAGES[0]}"\n')
+        end = body.index('OTZARIA_EXTRACT_ROOT=$(dirname "$LINEAGE")')
+        for tool in ("bash", "jq", "sha256sum"):
+            self.assertIsNotNone(shutil.which(tool), f"{tool} is required")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "lineage.json").write_text(json.dumps(lineage), encoding="utf-8")
+            (root / "meta.json").write_text(json.dumps(metadata), encoding="utf-8")
+            script = (
+                "set -euo pipefail\nLINEAGES=(\"$PWD/lineage.json\")\n"
+                + body[start:end]
+                + 'echo PAIRED\n'
+            )
+            return subprocess.run(
+                ["bash", "-c", script], cwd=root, capture_output=True, text=True,
+                env={"PATH": os.environ["PATH"],
+                     "SEFARIA_TAG": tag,
+                     "SEFARIA_METADATA": str(root / "meta.json"),
+                     "SEFARIA_VERIFIED_ARCHIVE_SHA": archive_sha},
+            )
+
+    def test_delta_pairs_the_otzaria_lineage_with_the_staged_sefaria_export(self):
+        # manual-generate-release.yml asserts this pairing; latest mode picks
+        # SefariaExport and otzaria-library independently and must fail loudly.
+        archive = {"sha256": "a" * 64, "size": 3, "parts": [{"name": "p", "size": 3, "sha256": "a" * 64}]}
+        metadata = {"tag": "t1", "run_id": 7, "run_attempt": 1, "archive": archive}
+        meta_sha = hashlib.sha256(json.dumps(metadata).encode()).hexdigest()
+        good = {"sefaria": {"tag": "t1", "release_metadata_sha256": meta_sha,
+                            "run_id": 7, "run_attempt": 1, "archive": archive}}
+        ok = self.lineage_pairing(good, metadata, "t1", "a" * 64)
+        self.assertEqual(ok.returncode, 0, ok.stderr + ok.stdout)
+        self.assertIn("PAIRED", ok.stdout)
+        cases = {
+            "tag": (good, "t2", "a" * 64, "'t1'", "'t2'"),
+            "archive digest": (good, "t1", "b" * 64, "'" + "a" * 64 + "'", "'" + "b" * 64 + "'"),
+            "metadata digest": ({"sefaria": dict(good["sefaria"], release_metadata_sha256="c" * 64)},
+                                "t1", "a" * 64, "'" + "c" * 64 + "'", "'" + meta_sha + "'"),
+            "run id": ({"sefaria": dict(good["sefaria"], run_id=8)}, "t1", "a" * 64,
+                       '"run_id":8', '"run_id":7'),
+            "run attempt": ({"sefaria": dict(good["sefaria"], run_attempt=2)}, "t1", "a" * 64,
+                            '"run_attempt":2', '"run_attempt":1'),
+            "archive object": ({"sefaria": dict(good["sefaria"], archive=dict(archive, parts=[
+                dict(archive["parts"][0], name="q")]))}, "t1", "a" * 64,
+                '"name":"q"', '"name":"p"'),
+        }
+        for what, (lineage, tag, sha, lineage_value, staged_value) in cases.items():
+            with self.subTest(what):
+                bad = self.lineage_pairing(lineage, metadata, tag, sha)
+                self.assertNotEqual(bad.returncode, 0, f"{what} mismatch passed")
+                self.assertNotIn("PAIRED", bad.stdout)
+                self.assertIn("::error::lineage", bad.stdout)
+                self.assertIn(lineage_value, bad.stdout)
+                self.assertIn(staged_value, bad.stdout)
+
+    def test_delta_sefaria_step_exports_what_it_verified(self):
+        doc = yaml.safe_load(DELTA.read_text(encoding="utf-8"))
+        body = named_step(doc, "Stage the Sefaria export")["run"]
+        self.assertIn('echo "SEFARIA_METADATA=$META"', body)
+        self.assertIn('echo "SEFARIA_VERIFIED_ARCHIVE_SHA=$EXPECTED_SHA"', body)
+        self.assertIn('echo "$EXPECTED_SHA  $INPUTS/sefaria-archive.tar.zst" | sha256sum -c -', body)
+        # The pairing runs in both inputs_from modes.
+        self.assertNotIn("if", named_step(doc, "Stage the Otzaria source"))
+
     # ─── every hosted job in the repository ────────────────────────────────
+
+    def test_self_hosted_exemptions_name_jobs_that_have_steps(self):
+        # A `uses:` caller has no steps, so its exemption would silently exempt nothing.
+        docs = dict(parsed_workflows())
+        checked = 0
+        for name, job_name in sorted(SELF_HOSTED_JOBS):
+            checked += 1
+            with self.subTest(f"{name}:{job_name}"):
+                self.assertIn(name, docs)
+                job = (docs[name].get("jobs") or {}).get(job_name)
+                self.assertIsNotNone(job, f"{name} has no job {job_name!r}")
+                self.assertTrue(job.get("steps"), f"{name}:{job_name} has no steps")
+        self.assertEqual(checked, len(SELF_HOSTED_JOBS))
+        self.assertGreater(checked, 0)
 
     def test_hosted_jobs_use_action_majors_that_run_on_node_24(self):
         checked = 0

@@ -350,7 +350,12 @@ jobs:
             test -d "$INPUTS/sefaria-extract/$d" || {
               echo "::error::staged Sefaria archive is missing root $d/"; exit 1; }
           done
-          echo "SEFARIA_EXTRACT_ROOT=$INPUTS/sefaria-extract" >> "$GITHUB_ENV"
+          {
+            echo "SEFARIA_EXTRACT_ROOT=$INPUTS/sefaria-extract"
+            # What this step verified; the Otzaria lineage must name exactly these.
+            echo "SEFARIA_METADATA=$META"
+            echo "SEFARIA_VERIFIED_ARCHIVE_SHA=$EXPECTED_SHA"
+          } >> "$GITHUB_ENV"
 
       - name: Stage the Otzaria source
         run: |
@@ -374,7 +379,24 @@ jobs:
           # same root the release build hands the generator.
           mapfile -t LINEAGES < <(find "$INPUTS/otzaria-extract" -maxdepth 2 -type f -name manual_links_lineage.json)
           test "${#LINEAGES[@]}" -eq 1
-          OTZARIA_EXTRACT_ROOT=$(dirname "${LINEAGES[0]}")
+          LINEAGE="${LINEAGES[0]}"
+          # Same Sefaria pairing the release asserts; latest mode picks the two repos independently.
+          pair() {
+            local actual
+            actual=$(jq -r "$1" "$LINEAGE")
+            [ "$actual" = "$2" ] || {
+              echo "::error::lineage $1 is '$actual' but the staged Sefaria export is '$2'"; exit 1; }
+          }
+          pair .sefaria.tag "$SEFARIA_TAG"
+          pair .sefaria.release_metadata_sha256 "$(sha256sum "$SEFARIA_METADATA" | cut -d' ' -f1)"
+          pair .sefaria.archive.sha256 "$SEFARIA_VERIFIED_ARCHIVE_SHA"
+          jq -e --slurpfile metadata "$SEFARIA_METADATA" \
+            '.sefaria.run_id == $metadata[0].run_id and
+             .sefaria.run_attempt == $metadata[0].run_attempt and
+             .sefaria.archive == $metadata[0].archive' "$LINEAGE" >/dev/null || {
+            echo "::error::lineage .sefaria $(jq -c '.sefaria | {run_id, run_attempt, archive}' "$LINEAGE") differs from release_metadata.json $(jq -c '{run_id, run_attempt, archive}' "$SEFARIA_METADATA")"
+            exit 1; }
+          OTZARIA_EXTRACT_ROOT=$(dirname "$LINEAGE")
           # The generator's phase 1 requires this exact directory.
           test -d "$OTZARIA_EXTRACT_ROOT/אוצריא" || {
             echo "::error::staged Otzaria source has no אוצריא/ directory"; exit 1; }
