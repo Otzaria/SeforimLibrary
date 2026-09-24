@@ -1,161 +1,50 @@
 name: Delta pipeline — dry run
 
-# Runs the full delta-update pipeline end-to-end WITHOUT publishing.
-# Useful to validate that:
-#   - generateSeforimDb works on the CI runner
+# Smoke test of the full delta-update pipeline on the NEWEST published sources —
+# what the next DB release will consume — WITHOUT publishing anything. It builds
+# the database twice from that one snapshot and validates that:
+#   - generateSeforimDb still works end to end on today's content
 #   - stampSchemaVersion is correctly chained (schema_meta.db_version)
-#   - the v1 buildstate properly seeds v2's IdAllocator (id stability)
-#   - producePatchAndVerify's strict invariant holds (prev + patch == new)
+#   - the v1 buildstate properly seeds v2's IdAllocator (ID stability)
+#   - producePatchAndVerify's strict `prev + patch == new` invariant holds
 #
-# All artefacts are uploaded as workflow artefacts for inspection.
-# Nothing is pushed to a GitHub Release.
+# The pipeline itself lives in delta-real-diff-test.yml; this file is the entry
+# point that runs it with inputs_from=latest. It used to carry its own copy,
+# which had no GH_TOKEN at all — every GitHub call the generator makes
+# (OptimizedHttpClient.kt:49) went out unauthenticated at 60 requests/hour per
+# runner IP — and it had never been dispatched once.
+#
+# Trigger: manual only, and deliberately so. One run is two full DB builds
+# (~6 h) on the self-hosted runner the weekly release needs, and it does not
+# hold the release's cross-repo host lease, so an unattended `schedule` could
+# take that runner out from under a release. Press it before merging anything
+# that touches the generator, the patch producer or the ForDB rules.
+#
+# All artefacts are uploaded as workflow artefacts. Nothing is pushed to a
+# GitHub Release.
 
 on:
   workflow_dispatch:
+    inputs:
+      runner_selection:
+        description: 'בחר על איזה שרת להריץ את הבדיקה'
+        required: true
+        default: 'local'
+        type: choice
+        options:
+          - 'local'
+          - 'ARM64'
+          - 'server-2'
 
 permissions:
   contents: read
 
+# The concurrency group lives on delta-real-diff-test.yml, the workflow this one
+# calls: a caller that held the same group would be waiting on its own job.
+
 jobs:
   dryrun:
-    name: Build v1 + v2 + verify delta
-    runs-on: [self-hosted, Linux, ARM64]
-    timeout-minutes: 240
-
-    steps:
-      - name: Checkout SeforimLibrary
-        uses: actions/checkout@v4
-        with:
-          submodules: recursive
-
-      - name: Disk before build
-        run: df -h
-
-      - name: Bridle daemon heaps + generator forks for the 16 GB runner
-        run: |
-          # The runner has 16 GB total. Default config blows past it:
-          #   Gradle daemon + Kotlin daemon (4g) + forked generator JVM
-          #   (-Xmx10g per task) → OOM-kill.
-          # Bridle each component:
-          #   • Gradle daemon: 3g
-          #   • Kotlin compile in-process (no separate 4g daemon)
-          #   • Generator forks: 5g per task (well under what they actually use)
-          mkdir -p ~/.gradle
-          cat >> ~/.gradle/gradle.properties <<EOF
-          org.gradle.jvmargs=-Xmx3g
-          kotlin.compiler.execution.strategy=in-process
-          generatorHeap=8g
-          EOF
-
-      - name: Disk after setup
-        run: df -h
-
-      - name: Set up Java 25
-        uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: "25"
-
-      - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@v4
-
-      - name: Grant execute permission for gradlew
-        run: chmod +x gradlew
-
-      - name: Gradle version
-        run: ./gradlew --version
-
-      - name: Install DB workflow dependencies
-        run: bash .github/scripts/install-db-workflow-deps.sh
-
-      # ─── BUILD v1 (no seed buildstate) ──────────────────────────────────────
-      - name: Build seforim.db v1 (no previous buildstate → IdAllocator starts fresh)
-        run: |
-          ./gradlew generateSeforimDb -PdbVersion=1 --no-daemon --stacktrace
-
-      - name: Verify v1 schema_meta.db_version
-        run: |
-          VERSION=$(sqlite3 build/seforim.db "SELECT value FROM schema_meta WHERE key='db_version'")
-          echo "v1 db_version = $VERSION"
-          test "$VERSION" = "1" || { echo "❌ stampSchemaVersion didn't write db_version=1"; exit 1; }
-
-      - name: Stash v1 artefacts and free disk
-        run: |
-          # Use `mv` (rename, no copy) to save disk for the 7+ GB DB.
-          mv build/seforim.db build/seforim.db.v1
-          mv build/seforim.db.buildstate build/seforim.db.buildstate.v1
-          # Drop lexical.db (~54 MB, will be re-downloaded if needed).
-          rm -f build/lexical.db
-          ls -lah build/seforim.db.v1 build/seforim.db.buildstate.v1
-          df -h
-
-      # ─── BUILD v2 (seeded by v1 buildstate) ─────────────────────────────────
-      - name: Seed allocator with v1 buildstate for the v2 build
-        run: |
-          cp build/seforim.db.buildstate.v1 build/seforim.db.buildstate
-
-      - name: Build seforim.db v2 (seeded — IDs must stay stable wrt v1)
-        run: |
-          ./gradlew generateSeforimDb -PdbVersion=2 -PtoVersion=2 --no-daemon --stacktrace
-
-      - name: Verify v2 schema_meta.db_version
-        run: |
-          VERSION=$(sqlite3 build/seforim.db "SELECT value FROM schema_meta WHERE key='db_version'")
-          echo "v2 db_version = $VERSION"
-          test "$VERSION" = "2" || { echo "❌ stampSchemaVersion didn't write db_version=2"; exit 1; }
-
-      # ─── PRODUCE + VERIFY THE PATCH ─────────────────────────────────────────
-      - name: producePatchAndVerify (strict prev + patch == new invariant)
-        run: |
-          # catalog.pb is no longer produced; drop any stale copy so it can't
-          # be auto-embedded into the patch via the default -PcatalogPb path.
-          rm -f build/catalog.pb
-          # These runs test the delta MECHANICS on toy DBs, where a patch is
-          # legitimately huge relative to the DB — the size guard must not fire.
-          ./gradlew :generator-common:producePatchAndVerify \
-            -PprevDb=$PWD/build/seforim.db.v1 \
-            -PnewDb=$PWD/build/seforim.db \
-            -Pout=$PWD/build/patch-v1-v2.db \
-            -PfromVersion=1 -PtoVersion=2 \
-            -PmaxDeltaUncompressedRatio=1000 \
-            --no-daemon --stacktrace
-
-      # ─── PATCH SIZE + MANIFEST SUMMARY ──────────────────────────────────────
-      - name: Summarise patch
-        run: |
-          echo "=== Patch artefacts ==="
-          ls -lah build/patch-v1-v2.db build/patch-v1-v2.db.manifest.json
-          echo ""
-          echo "=== Manifest ==="
-          cat build/patch-v1-v2.db.manifest.json
-          echo ""
-          echo "=== Patch.blobs ==="
-          sqlite3 build/patch-v1-v2.db "SELECT name, length(content) FROM blobs"
-          echo ""
-          echo "=== Patch upserts/deletes by table (top 5 each) ==="
-          for t in author topic tocText category book line line_toc link tocEntry; do
-            UC=$(sqlite3 build/patch-v1-v2.db "SELECT COUNT(*) FROM upsert_${t}" 2>/dev/null || echo 0)
-            DC=$(sqlite3 build/patch-v1-v2.db "SELECT COUNT(*) FROM delete_${t}" 2>/dev/null || echo 0)
-            echo "  $t: +$UC / -$DC"
-          done
-
-      # ─── ARTEFACTS ──────────────────────────────────────────────────────────
-      - name: Upload patch + manifests
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: delta-dryrun-patch
-          path: |
-            build/patch-v1-v2.db
-            build/patch-v1-v2.db.manifest.json
-          retention-days: 7
-
-      - name: Upload buildstate snapshots
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: delta-dryrun-buildstates
-          path: |
-            build/seforim.db.buildstate.v1
-            build/seforim.db.buildstate
-          retention-days: 7
+    uses: ./.github/workflows/delta-real-diff-test.yml
+    with:
+      runner_selection: ${{ inputs.runner_selection }}
+      inputs_from: latest

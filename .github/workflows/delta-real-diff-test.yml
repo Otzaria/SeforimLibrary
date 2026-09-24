@@ -1,33 +1,81 @@
 name: Delta pipeline — real diff test
 
-# Tests the full delta-update pipeline against a REAL content diff:
+# The one implementation behind all three delta buttons. It builds the database
+# TWICE from the same pinned inputs and verifies the patch between them:
 #
-#   v1 baseline ← built with the SECOND-TO-LAST GitHub releases of
-#                 Sefaria + Otzaria (= what was current "yesterday")
-#   v2 fresh    ← built with the LATEST GitHub releases of those repos
-#                 (= what's current "today")
+#   v1 ← built from `baseline_ref` (empty = this tree)
+#   v2 ← built from this tree, seeded by v1's buildstate
 #
-# Because the two builds use different source snapshots, the producer
-# computes a real, non-empty diff — exercising every code path that
-# the dry-run smoke test only mocks. producePatchAndVerify's strict
-# `prev + patch == new` invariant is the verdict.
+# `inputs_from` chooses which snapshot both builds see:
+#   released — the exact inputs of the last DB release, read at run time from
+#              its build_provenance.json (delta-real-diff-test / -arm)
+#   latest   — the newest published Sefaria/Otzaria/ForDB releases, i.e. what
+#              the next release will consume (delta-pipeline-dryrun)
 #
-# Workflow stages everything via the fetchers' own cache directories
-# so no Kotlin needs to change: the fetcher checks for an existing
-# non-empty extract and skips downloading when it finds one.
+# Both sides always get the SAME snapshot. That is what makes the patch
+# readable: with no baseline_ref it proves the build is reproducible and IDs
+# are stable, and with one it holds the code transition and nothing else.
+# producePatchAndVerify's strict `prev + patch == new` invariant is the verdict.
 #
-# Everything is uploaded as workflow artefacts. Nothing is pushed to
-# a GitHub Release.
+# It no longer diffs two content snapshots against each other. Run 34455675206
+# built v1 from the N-1 otzaria-library release and died in seedGenerations on
+# a duplicate title that exists only in that older snapshot — a baseline made
+# of historical content fails on every data regression ever shipped, which is
+# not the question these workflows ask.
+#
+# v1 is rebuilt rather than downloaded: the released DB carries the Phase-2
+# LINKER links, which generateSeforimDb alone does not produce, so a released
+# DB and a local build differ by the whole linker corpus (~83k links). Both
+# sides must be built the same way for the patch to mean anything.
+#
+# Everything is uploaded as workflow artefacts. Nothing is pushed to a release.
+#
+# Trigger: dispatched by hand, or called by the other two delta workflows —
+# deliberately nothing automatic. One run is two full DB builds (~6 h) on the
+# self-hosted runner the weekly release needs, and it does not hold the
+# release's cross-repo host lease, so an unattended `schedule` could take that
+# runner out from under a release.
 
 on:
   workflow_dispatch:
     inputs:
+      runner_selection:
+        description: 'בחר על איזה שרת להריץ את הבדיקה'
+        required: true
+        default: 'local'
+        type: choice
+        options:
+          - 'local'
+          - 'ARM64'
+          - 'server-2'
+      inputs_from:
+        description: 'Which snapshot both builds see'
+        required: true
+        default: 'released'
+        type: choice
+        options:
+          - 'released'
+          - 'latest'
       baseline_ref:
         description: >-
-          Commit/ref to build v1 from. Empty (default) = same tree as v2, so the
-          patch reflects a SOURCE diff. Set it to a pre-feature commit to isolate
-          a CODE change: both builds then use the same staged sources, and the
-          patch contains exactly what the code change alters.
+          Commit/ref to build v1 from. Empty (default) = this tree on both
+          sides, so the patch proves the build is reproducible and IDs are
+          stable. Set it to the released source_commit (the resolve step prints
+          it) to see exactly what the code since then changes in the DB.
+        required: false
+        type: string
+        default: ''
+  workflow_call:
+    inputs:
+      runner_selection:
+        required: false
+        type: string
+        default: 'local'
+      inputs_from:
+        required: false
+        type: string
+        default: 'released'
+      baseline_ref:
         required: false
         type: string
         default: ''
@@ -35,13 +83,24 @@ on:
 permissions:
   contents: read
 
+# One delta build at a time across all three delta workflows: each holds a
+# self-hosted runner for hours and shares it with the release.
+concurrency:
+  group: seforim-delta-pipeline
+  cancel-in-progress: false
+
 jobs:
   real-diff:
-    name: Build v1 (N-1 sources) + v2 (N sources) + verify patch
-    runs-on: [self-hosted, Linux, ARM64]
-    timeout-minutes: 300
+    name: Build v1 + v2 on ${{ inputs.inputs_from }} inputs + verify patch
+    runs-on: ${{ inputs.runner_selection == 'local' && fromJSON('["otzaria-db"]') || (inputs.runner_selection == 'server-2' && fromJSON('["self-hosted", "Linux", "X64", "server-2"]') || fromJSON('["self-hosted", "Linux", "ARM64"]')) }}
+    # Two full DB builds. The cancelled runs of 2026-09-10 measured >3h49m for
+    # v2 alone, so the old 300-minute ceiling could not have held a green run.
+    timeout-minutes: 600
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      # OptimizedHttpClient.kt:49 reads GITHUB_TOKEN/GH_TOKEN; without them the
+      # generator's own GitHub calls go out unauthenticated (60/h per IP).
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
     steps:
       - name: Checkout SeforimLibrary
@@ -51,123 +110,311 @@ jobs:
           # Full history so a baseline_ref older than HEAD can be checked out.
           fetch-depth: 0
 
-      - name: Disk before build
-        run: df -h
-
-      - name: Bridle daemon heaps + generator forks for the 16 GB runner
+      - name: Preflight the shared host
         run: |
-          # The runner has 16 GB total. Default config blows past it:
-          #   Gradle daemon (default unbounded) + Kotlin daemon (4g) +
-          #   forked generator JVM (-Xmx10g per task) → OOM-kill.
-          # Bridle each component:
-          #   • Gradle daemon: 3g
-          #   • Kotlin compile in-process (no separate 4g daemon)
-          #   • Generator forks: 5g per task (well under what they actually use)
+          set -euo pipefail
+          # The release build refuses to share this box for the same reason:
+          # two RAM-heavy builds at once OOM-kill both.
+          WORKERS=$(pgrep -cf 'Runner.Worker' || true)
+          if [ "${WORKERS:-0}" -gt 1 ]; then
+            echo "::error::${WORKERS} Runner.Worker processes active — another job holds this host. Rerun when it is idle."
+            exit 1
+          fi
+          # One generator fork is -Xmx8g; less than ~10 GiB free is a late OOM
+          # instead of a clean refusal.
+          AVAIL_KB=$(awk '/MemAvailable/{print $2}' /proc/meminfo)
+          echo "MemAvailable: $((AVAIL_KB/1024/1024)) GiB"
+          if [ "$AVAIL_KB" -lt $((10*1024*1024)) ]; then
+            echo "::error::only $((AVAIL_KB/1024/1024)) GiB available (<10 GiB). Aborting before work."
+            exit 1
+          fi
+          # Two ~7 GiB databases plus the extracted sources live side by side.
+          # Advisory, not a gate: the real ceiling is per-host and unmeasured.
+          FREE_KB=$(df -Pk "$GITHUB_WORKSPACE" | awk 'NR==2 {print $4}')
+          echo "workspace free: $((FREE_KB/1024/1024)) GiB"
+          if [ "$FREE_KB" -lt $((40*1024*1024)) ]; then
+            echo "::warning::only $((FREE_KB/1024/1024)) GiB free on the workspace volume; two DBs plus sources may not fit"
+          fi
+          # Bare `df -h` exits nonzero on the WSL runner when an optional
+          # Windows drive is absent; inspect what this build can actually use.
+          df -h /
+          if [ -d /mnt/c ]; then df -h /mnt/c; fi
+
+      - name: Bridle daemon heaps + generator forks
+        run: |
+          set -euo pipefail
+          # ~/.gradle is the runner's own home and survives every job, so a bare
+          # `cat >>` grows it without bound. Same values as the release build,
+          # written as ONE marked block.
           mkdir -p ~/.gradle
-          cat >> ~/.gradle/gradle.properties <<EOF
+          PROPS="$HOME/.gradle/gradle.properties"
+          MANAGED="$RUNNER_TEMP/gradle-heaps-managed.properties"
+          BEGIN='# >>> manual-generate-release managed heaps >>>'
+          END='# <<< manual-generate-release managed heaps <<<'
+          touch "$PROPS"
+          cat > "$MANAGED" <<EOF
           org.gradle.jvmargs=-Xmx3g
           kotlin.compiler.execution.strategy=in-process
           generatorHeap=8g
+          linkerHeap=12g
           EOF
+          awk -v b="$BEGIN" -v e="$END" '
+            NR == FNR { managed[$0] = 1; next }
+            $0 == b { skip = 1; next }
+            skip { if ($0 == e) skip = 0; next }
+            !($0 in managed)
+          ' "$MANAGED" "$PROPS" > "$PROPS.next"
+          { printf '%s\n' "$BEGIN"; cat "$MANAGED"; printf '%s\n' "$END"; } >> "$PROPS.next"
+          mv "$PROPS.next" "$PROPS"
 
-      - name: Disk after setup
-        run: df -h
+      # ─── Toolchain ─────────────────────────────────────────────────────────
+      # otzaria-db and server-2 carry a durable Java 25 + Gradle 9.1.0 — the
+      # release build proves it every week, and using them downloads nothing.
+      # That also removes what killed run 34461548735: setup-java fetches
+      # Temurin through Node, which does not trust the filter's CA
+      # ("unable to get local issuer certificate").
+      - name: Verify durable Java 25 toolchain
+        if: inputs.runner_selection != 'ARM64'
+        shell: bash
+        run: |
+          set -euo pipefail
+          command -v java
+          command -v javac
+          java_home="$(dirname "$(dirname "$(readlink -f "$(command -v javac)")")")"
+          java_version="$($java_home/bin/java -XshowSettings:properties -version 2>&1 \
+            | awk -F'= ' '/^[[:space:]]*java.version = / {print $2; exit}')"
+          [[ "$java_version" == 25 || "$java_version" == 25.* ]] || {
+            echo "::error::the durable runner must provide Java 25; found ${java_version:-missing}"
+            exit 1
+          }
+          echo "JAVA_HOME=$java_home" >> "$GITHUB_ENV"
+          echo "$java_home/bin" >> "$GITHUB_PATH"
+          "$java_home/bin/java" -version
 
-      - name: Set up Java 25
+      - name: Verify durable Gradle 9.1.0 toolchain
+        if: inputs.runner_selection != 'ARM64'
+        shell: bash
+        run: |
+          set -euo pipefail
+          command -v gradle
+          gradle_version="$(gradle --version | awk '/^Gradle / {print $2; exit}')"
+          [ "$gradle_version" = 9.1.0 ] || {
+            echo "::error::the durable runner must provide Gradle 9.1.0; found ${gradle_version:-missing}"
+            exit 1
+          }
+          gradle --version
+
+      # The ARM runner has no durable toolchain, so it keeps the actions. They
+      # stay on v4 by the rule the rest of the repo follows: a self-hosted
+      # runner's version is not proven here, and v4 is what ran green on it.
+      - name: Set up Java 25 (ARM runner only)
+        if: inputs.runner_selection == 'ARM64'
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: "25"
 
-      - name: Setup Gradle
+      - name: Setup Gradle (ARM runner only)
+        if: inputs.runner_selection == 'ARM64'
         uses: gradle/actions/setup-gradle@v4
 
       - name: Grant execute permission for gradlew
         run: chmod +x gradlew
 
+      - name: Resolve the Gradle entry point
+        env:
+          SELECTED_RUNNER: ${{ inputs.runner_selection }}
+        run: |
+          set -euo pipefail
+          # A value outside this set would land on the ARM runner by the
+          # runs-on fallback and then look for a toolchain that is not there.
+          case "$SELECTED_RUNNER" in
+            local|server-2|ARM64) ;;
+            *) echo "::error::runner_selection must be local, server-2 or ARM64 (got '$SELECTED_RUNNER')"; exit 1 ;;
+          esac
+          if [ "$SELECTED_RUNNER" = "ARM64" ]; then
+            echo "GRADLE=./gradlew" >> "$GITHUB_ENV"
+          else
+            echo "GRADLE=gradle" >> "$GITHUB_ENV"
+          fi
+
       - name: Install DB workflow dependencies
         run: bash .github/scripts/install-db-workflow-deps.sh
 
-      # ─── Pre-stage SECOND-TO-LAST releases into fetcher caches ─────────────
-      - name: Pre-stage Sefaria N-1 export into fetcher cache
+      # ─── Pin the inputs both builds will see ───────────────────────────────
+      - name: Resolve the pinned inputs
+        env:
+          INPUTS_FROM: ${{ inputs.inputs_from }}
         run: |
           set -euo pipefail
-          SEFARIA_CACHE=generator/sefariasqlite/build/sefaria
-          mkdir -p "$SEFARIA_CACHE"
-          # The Sefaria fetcher cache lives under build/sefaria/export and is
-          # considered "valid" iff non-empty. We extract the N-1 archive
-          # there so the fetcher uses it instead of /releases/latest.
-          # Content releases are the ones shipping a sefaria-exports-*.tar.zst.
-          # The repo also publishes downstream-intent/recovery releases, so an
-          # index into the unfiltered list picks an arbitrary one.
-          mapfile -t TAGS < <(gh api --paginate repos/Otzaria/SefariaExport/releases \
-            --jq '.[] | select([.assets[].name] | map(startswith("sefaria-exports-") and endswith(".tar.zst")) | any) | .tag_name')
-          if [ "${#TAGS[@]}" -lt 2 ]; then
-            echo "::error::need two Sefaria content releases, found ${#TAGS[@]}"; exit 1
+          case "$INPUTS_FROM" in
+            released|latest) ;;
+            *) echo "::error::inputs_from must be released or latest (got '$INPUTS_FROM')"; exit 1 ;;
+          esac
+          if [ "$INPUTS_FROM" = "released" ]; then
+            # Hard-coded tags rot — the three repos publish weekly. The newest
+            # DB release's build_provenance.json is the one place that holds a
+            # COHERENT input set: it is what actually built that DB.
+            TAG=$(gh api "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
+              --jq '[.[] | select((.draft | not) and (.prerelease | not))
+                         | select([.assets[].name] | index("build_provenance.json"))][0].tag_name')
+            if [ -z "$TAG" ] || [ "$TAG" = "null" ]; then
+              echo "::error::no published release carries build_provenance.json"; exit 1
+            fi
+            PROV_DIR="$RUNNER_TEMP/delta-provenance-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+            rm -rf "$PROV_DIR"; mkdir -p "$PROV_DIR"
+            gh release download "$TAG" -R "$GITHUB_REPOSITORY" \
+              --pattern build_provenance.json --dir "$PROV_DIR"
+            P="$PROV_DIR/build_provenance.json"
+            SEFARIA_TAG=$(jq -r .sefaria_tag "$P")
+            SEFARIA_METADATA_SHA=$(jq -r .sefaria_release_metadata_sha256 "$P")
+            SEFARIA_ARCHIVE_SHA=$(jq -r .sefaria_archive_sha256 "$P")
+            OTZARIA_TAG=$(jq -r .otzaria_tag "$P")
+            OTZARIA_ASSET_SHA=$(jq -r .otzaria_asset_sha256 "$P")
+            FORDB_TAG=$(jq -r .fordb_tag "$P")
+            echo "baseline release $TAG built from source_commit $(jq -r .source_commit "$P")"
+            echo "pass that commit as baseline_ref to diff this tree against the released code"
+          else
+            # Newest CONTENT release of each repo — what the next DB release
+            # will consume. Selection is by asset, never by list index: all
+            # three repos also publish ForDB / recovery / saga-state releases.
+            TAG=latest
+            SEFARIA_TAG=$(gh api "repos/Otzaria/SefariaExport/releases?per_page=100" \
+              --jq '[.[] | select([.assets[].name] | map(startswith("sefaria-exports-")) | any)][0].tag_name')
+            OTZARIA_TAG=$(gh api "repos/otzaria/otzaria-library/releases?per_page=100" \
+              --jq '[.[] | select([.assets[].name] | index("otzaria_latest.zip"))][0].tag_name')
+            FORDB_TAG=$(gh api "repos/otzaria/otzaria-library/releases?per_page=100" \
+              --jq '[.[] | select([.assets[].name] | index("fordb_latest.zip"))][0].tag_name')
+            # No external pin exists for a moving target; each release's own
+            # metadata carries the digests the staging steps verify against.
+            SEFARIA_METADATA_SHA=""
+            SEFARIA_ARCHIVE_SHA=""
+            OTZARIA_ASSET_SHA=""
           fi
-          TAG="${TAGS[1]}"
-          echo "Sefaria N-1 content release: $TAG"
-          URL=$(gh api "repos/Otzaria/SefariaExport/releases/tags/$TAG" \
-                  --jq '.assets[] | select(.name | startswith("sefaria-exports-") and endswith(".tar.zst")) | .browser_download_url')
-          test -n "$URL"
-          curl -fL -o /tmp/sefaria.tar.zst "$URL"
-          mkdir -p "$SEFARIA_CACHE/export"
-          tar --use-compress-program=unzstd -xf /tmp/sefaria.tar.zst -C "$SEFARIA_CACHE/export"
-          rm /tmp/sefaria.tar.zst
-          echo "Sefaria cache layout:"
-          ls "$SEFARIA_CACHE/export" | head -20
-          # Fail here, not 20 minutes later inside the generator.
-          for d in json schemas links; do
-            find "$SEFARIA_CACHE/export" -maxdepth 2 -type d -name "$d" | grep -q . || {
-              echo "::error::extracted Sefaria export has no $d/ directory"; exit 1; }
+          for t in "$SEFARIA_TAG" "$OTZARIA_TAG" "$FORDB_TAG"; do
+            if [ -z "$t" ] || [ "$t" = "null" ]; then
+              echo "::error::could not resolve one of the input releases"; exit 1
+            fi
           done
+          # The ForDB tag carries its own archive digest, by the same contract
+          # the release workflow asserts.
+          FORDB_ARCHIVE_SHA="${FORDB_TAG#fordb-sha256-}"
+          [[ "$FORDB_ARCHIVE_SHA" =~ ^[0-9a-f]{64}$ ]] || {
+            echo "::error::ForDB tag $FORDB_TAG does not carry a sha256"; exit 1; }
+          {
+            echo "BASELINE_RELEASE=$TAG"
+            echo "SEFARIA_TAG=$SEFARIA_TAG"
+            echo "SEFARIA_METADATA_SHA=$SEFARIA_METADATA_SHA"
+            echo "SEFARIA_ARCHIVE_SHA=$SEFARIA_ARCHIVE_SHA"
+            echo "OTZARIA_TAG=$OTZARIA_TAG"
+            echo "OTZARIA_ASSET_SHA=$OTZARIA_ASSET_SHA"
+            echo "FORDB_TAG=$FORDB_TAG"
+            echo "FORDB_ARCHIVE_SHA=$FORDB_ARCHIVE_SHA"
+          } >> "$GITHUB_ENV"
+          echo "inputs: sefaria=$SEFARIA_TAG otzaria=$OTZARIA_TAG fordb=$FORDB_TAG"
 
-      - name: Pre-stage Otzaria N-1 source into fetcher cache
+      - name: Stage the Sefaria export
         run: |
           set -euo pipefail
-          OTZARIA_CACHE=generator/otzariasqlite/build/otzaria
-          mkdir -p "$OTZARIA_CACHE/source"
-          # otzaria-library ships multiple .zip assets (otzaria_latest.zip +
-          # otzaria_dicta_latest.zip etc). Grab all of N-1.
-          # Content releases are the ones shipping otzaria_latest.zip. The same
-          # repo also publishes ForDB, saga-state and library-links releases, so
-          # `.[1]` picked a ForDB release and staged only ForDB/ (2026-08-29).
-          mapfile -t TAGS < <(gh api --paginate repos/otzaria/otzaria-library/releases \
-            --jq '.[] | select([.assets[].name] | index("otzaria_latest.zip")) | .tag_name')
-          if [ "${#TAGS[@]}" -lt 2 ]; then
-            echo "::error::need two Otzaria content releases, found ${#TAGS[@]}"; exit 1
+          INPUTS="$RUNNER_TEMP/delta-inputs-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          rm -rf "$INPUTS"
+          mkdir -p "$INPUTS/sefaria-assets" "$INPUTS/sefaria-extract"
+          gh release download "$SEFARIA_TAG" -R Otzaria/SefariaExport \
+            --pattern release_metadata.json --dir "$INPUTS/sefaria-assets"
+          META="$INPUTS/sefaria-assets/release_metadata.json"
+          if [ -n "$SEFARIA_METADATA_SHA" ]; then
+            echo "$SEFARIA_METADATA_SHA  $META" | sha256sum -c -
           fi
-          TAG="${TAGS[1]}"
-          echo "Otzaria N-1 content release: $TAG"
-          mapfile -t URLS < <(gh api "repos/otzaria/otzaria-library/releases/tags/$TAG" \
-            --jq '.assets[] | select(.name | endswith(".zip")) | .browser_download_url')
-          test "${#URLS[@]}" -ge 1
-          for url in "${URLS[@]}"; do
-            name=$(basename "$url")
-            echo "Downloading Otzaria N-1 asset: $name"
-            curl -fL -o "/tmp/$name" "$url"
-            unzip -q -o "/tmp/$name" -d "$OTZARIA_CACHE/source"
-            rm "/tmp/$name"
+          test "$(jq -r .tag "$META")" = "$SEFARIA_TAG"
+          # The archive ships as one or more parts described by the metadata;
+          # reassemble in its order, verifying each part and then the stream.
+          EXPECTED_SHA="${SEFARIA_ARCHIVE_SHA:-$(jq -r .archive.sha256 "$META")}"
+          : > "$INPUTS/sefaria-archive.tar.zst"
+          while IFS=$'\t' read -r name size sha; do
+            test "$(basename "$name")" = "$name"
+            gh release download "$SEFARIA_TAG" -R Otzaria/SefariaExport \
+              --pattern "$name" --dir "$INPUTS/sefaria-assets"
+            test "$(stat -c %s "$INPUTS/sefaria-assets/$name")" = "$size"
+            echo "$sha  $INPUTS/sefaria-assets/$name" | sha256sum -c -
+            cat "$INPUTS/sefaria-assets/$name" >> "$INPUTS/sefaria-archive.tar.zst"
+            rm -f "$INPUTS/sefaria-assets/$name"
+          done < <(jq -r '.archive.parts[] | [.name, (.size|tostring), .sha256] | @tsv' "$META")
+          test "$(stat -c %s "$INPUTS/sefaria-archive.tar.zst")" = "$(jq -r .archive.size "$META")"
+          echo "$EXPECTED_SHA  $INPUTS/sefaria-archive.tar.zst" | sha256sum -c -
+          tar --use-compress-program=unzstd -xf "$INPUTS/sefaria-archive.tar.zst" \
+            -C "$INPUTS/sefaria-extract"
+          rm -f "$INPUTS/sefaria-archive.tar.zst"
+          # json/ and schemas/ sit at the archive root by contract; fail here,
+          # not 20 minutes later inside the generator.
+          for d in json schemas; do
+            test -d "$INPUTS/sefaria-extract/$d" || {
+              echo "::error::staged Sefaria archive is missing root $d/"; exit 1; }
           done
-          echo "Otzaria cache layout (top of source/):"
-          ls "$OTZARIA_CACHE/source" | head -20
-          # The generator's phase 1 requires this exact directory; assert it here
-          # so a wrong release fails the staging step with a readable message.
-          test -d "$OTZARIA_CACHE/source/אוצריא" || {
-            echo "::error::staged Otzaria source has no אוצריא/ directory (got: $(ls "$OTZARIA_CACHE/source" | tr '\n' ' '))"
-            exit 1; }
+          echo "SEFARIA_EXTRACT_ROOT=$INPUTS/sefaria-extract" >> "$GITHUB_ENV"
+
+      - name: Stage the Otzaria source
+        run: |
+          set -euo pipefail
+          INPUTS="$RUNNER_TEMP/delta-inputs-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          mkdir -p "$INPUTS/otzaria-assets" "$INPUTS/otzaria-extract"
+          gh release download "$OTZARIA_TAG" -R otzaria/otzaria-library \
+            --pattern otzaria_release_provenance.json --dir "$INPUTS/otzaria-assets"
+          PROVENANCE="$INPUTS/otzaria-assets/otzaria_release_provenance.json"
+          EXPECTED_SHA="${OTZARIA_ASSET_SHA:-$(jq -r .asset.sha256 "$PROVENANCE")}"
+          test "$(jq -r .asset.sha256 "$PROVENANCE")" = "$EXPECTED_SHA"
+          ASSET_NAME=$(jq -r .asset.name "$PROVENANCE")
+          test "$(basename "$ASSET_NAME")" = "$ASSET_NAME"
+          gh release download "$OTZARIA_TAG" -R otzaria/otzaria-library \
+            --pattern "$ASSET_NAME" --dir "$INPUTS/otzaria-assets"
+          test "$(stat -c %s "$INPUTS/otzaria-assets/$ASSET_NAME")" = "$(jq -r .asset.size "$PROVENANCE")"
+          echo "$EXPECTED_SHA  $INPUTS/otzaria-assets/$ASSET_NAME" | sha256sum -c -
+          unzip -q -o "$INPUTS/otzaria-assets/$ASSET_NAME" -d "$INPUTS/otzaria-extract"
+          rm -f "$INPUTS/otzaria-assets/$ASSET_NAME"
+          # -PsourceDir is the directory holding manual_links_lineage.json, the
+          # same root the release build hands the generator.
+          mapfile -t LINEAGES < <(find "$INPUTS/otzaria-extract" -maxdepth 2 -type f -name manual_links_lineage.json)
+          test "${#LINEAGES[@]}" -eq 1
+          OTZARIA_EXTRACT_ROOT=$(dirname "${LINEAGES[0]}")
+          # The generator's phase 1 requires this exact directory.
+          test -d "$OTZARIA_EXTRACT_ROOT/אוצריא" || {
+            echo "::error::staged Otzaria source has no אוצריא/ directory"; exit 1; }
+          echo "OTZARIA_EXTRACT_ROOT=$OTZARIA_EXTRACT_ROOT" >> "$GITHUB_ENV"
+
+      - name: Stage the ForDB rules archive
+        run: |
+          set -euo pipefail
+          INPUTS="$RUNNER_TEMP/delta-inputs-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          gh release download "$FORDB_TAG" -R otzaria/otzaria-library \
+            --pattern fordb_latest.zip --dir "$INPUTS"
+          echo "$FORDB_ARCHIVE_SHA  $INPUTS/fordb_latest.zip" | sha256sum -c -
+          echo "FORDB_ARCHIVE=$INPUTS/fordb_latest.zip" >> "$GITHUB_ENV"
+          # The release build's durable image cache, shared on purpose: without
+          # it every build re-downloads ~420 textimages.sefaria.org images.
+          IMAGE_CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/seforimlibrary/textimages"
+          mkdir -p "$IMAGE_CACHE_DIR"
+          echo "IMAGE_CACHE_DIR=$IMAGE_CACHE_DIR" >> "$GITHUB_ENV"
 
       # ─── BUILD v1 BASELINE ─────────────────────────────────────────────────
       - name: Check out the baseline tree for v1
         if: inputs.baseline_ref != ''
+        env:
+          BASELINE_REF: ${{ inputs.baseline_ref }}
         run: |
           set -euo pipefail
-          git checkout --detach "${{ inputs.baseline_ref }}"
+          git checkout --detach "$BASELINE_REF"
           git submodule update --init --recursive
           echo "v1 baseline tree: $(git rev-parse HEAD)"
 
-      - name: Build v1 baseline (uses pre-staged N-1 sources)
-        run: ./gradlew generateSeforimDb -PdbVersion=1 --no-daemon --stacktrace
+      - name: Build v1 baseline with the production pipeline
+        run: >-
+          $GRADLE generateSeforimDb -PdbVersion=1
+          -PexportDir="$SEFARIA_EXTRACT_ROOT"
+          -PsourceDir="$OTZARIA_EXTRACT_ROOT"
+          -PforDbArchive="$FORDB_ARCHIVE"
+          -PforDbSha256="$FORDB_ARCHIVE_SHA"
+          -PimageCacheDir="$IMAGE_CACHE_DIR"
+          -PinMemoryDb=false
+          --no-daemon --stacktrace
 
       - name: Verify v1 stamp
         run: |
@@ -175,28 +422,19 @@ jobs:
           test "$V" = "1" || { echo "❌ db_version=$V (expected 1)"; exit 1; }
           echo "✓ v1 stamped"
 
-      - name: Stash v1 artefacts + clear v1 sources
+      - name: Stash v1 artefacts
         run: |
           set -euo pipefail
           mv build/seforim.db build/seforim.db.v1
           mv build/seforim.db.buildstate build/seforim.db.buildstate.v1
-          # Drop lexical.db; only need DB + buildstate
+          # Only the DB and its buildstate are needed from here on.
           rm -f build/lexical.db build/release_info.txt
-          # Clear cached sources so v2 re-fetches /releases/latest — but only
-          # when v2 is meant to differ by SOURCE. With a baseline_ref the point
-          # is to isolate the CODE change, so both builds must see one snapshot.
-          if [ -z "${{ inputs.baseline_ref }}" ]; then
-            rm -rf generator/sefariasqlite/build/sefaria
-            rm -rf generator/otzariasqlite/build/otzaria
-            # Also clear the acronymizer cache so it gets the current version
-            rm -rf generator/otzariasqlite/build/acronymizer
-          else
-            echo "baseline_ref set — keeping staged sources so only the code differs."
-          fi
+          # The staged sources are NOT cleared: v2 builds from the same pinned
+          # snapshot on purpose, so the patch shows the code and nothing else.
           ls -lah build/seforim.db.v1 build/seforim.db.buildstate.v1
-          df -h
+          df -h /
 
-      # ─── BUILD v2 (LATEST sources, seeded by v1 buildstate) ────────────────
+      # ─── BUILD v2 (same inputs, seeded by v1's buildstate) ─────────────────
       - name: Re-seed allocator with v1 buildstate
         run: cp build/seforim.db.buildstate.v1 build/seforim.db.buildstate
 
@@ -208,8 +446,16 @@ jobs:
           git submodule update --init --recursive
           echo "v2 tree: $(git rev-parse HEAD)"
 
-      - name: Build v2 (lets fetcher download /releases/latest)
-        run: ./gradlew generateSeforimDb -PdbVersion=2 -PtoVersion=2 --no-daemon --stacktrace
+      - name: Build v2 with the production pipeline
+        run: >-
+          $GRADLE generateSeforimDb -PdbVersion=2 -PtoVersion=2
+          -PexportDir="$SEFARIA_EXTRACT_ROOT"
+          -PsourceDir="$OTZARIA_EXTRACT_ROOT"
+          -PforDbArchive="$FORDB_ARCHIVE"
+          -PforDbSha256="$FORDB_ARCHIVE_SHA"
+          -PimageCacheDir="$IMAGE_CACHE_DIR"
+          -PinMemoryDb=false
+          --no-daemon --stacktrace
 
       - name: Verify v2 stamp
         run: |
@@ -223,9 +469,9 @@ jobs:
           # catalog.pb is no longer produced; drop any stale copy so it can't
           # be auto-embedded into the patch via the default -PcatalogPb path.
           rm -f build/catalog.pb
-          # These runs test the delta MECHANICS on toy DBs, where a patch is
-          # legitimately huge relative to the DB — the size guard must not fire.
-          ./gradlew :generator-common:producePatchAndVerify \
+          # The economic size guard stays out of the verifier: a bad migration
+          # should still yield a patch we can read, not a masked strict check.
+          $GRADLE :generator-common:producePatchAndVerify \
             -PprevDb=$PWD/build/seforim.db.v1 \
             -PnewDb=$PWD/build/seforim.db \
             -Pout=$PWD/build/patch-v1-v2.db \
@@ -236,6 +482,7 @@ jobs:
       - name: Summarise patch
         run: |
           set -euo pipefail
+          echo "=== Inputs ($BASELINE_RELEASE): sefaria $SEFARIA_TAG / otzaria $OTZARIA_TAG ==="
           echo "=== Patch artefacts ==="
           ls -lah build/patch-v1-v2.db build/patch-v1-v2.db.manifest.json
           echo ""
@@ -265,7 +512,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: delta-real-diff-patch
+          name: delta-${{ inputs.inputs_from }}-patch
           path: |
             build/patch-v1-v2.db
             build/patch-v1-v2.db.manifest.json
@@ -275,8 +522,15 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: delta-real-diff-context
+          name: delta-${{ inputs.inputs_from }}-buildstates
           path: |
             build/seforim.db.buildstate.v1
             build/seforim.db.buildstate
           retention-days: 7
+
+      - name: Clean run-scoped staged inputs
+        if: always()
+        run: |
+          rm -rf -- \
+            "$RUNNER_TEMP/delta-inputs-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
+            "$RUNNER_TEMP/delta-provenance-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
