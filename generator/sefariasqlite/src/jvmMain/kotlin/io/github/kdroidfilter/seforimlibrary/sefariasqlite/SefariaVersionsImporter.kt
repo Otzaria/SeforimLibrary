@@ -133,8 +133,8 @@ internal class SefariaVersionsImporter(
             // `language` הוא "he" בכל קובץ מהדורה בייצוא; השפה בפועל היא actualLanguage בלבד.
             val actualLanguage = doc["actualLanguage"]?.stringOrNull()?.trim()?.takeIf { it.isNotEmpty() }
                 ?: throw MissingVersionLanguageException(
-                    "actualLanguage חסר בקובץ המהדורה: $file. השדה קיים בכל קובצי המהדורה בייצוא, " +
-                        "ושפה אינה מנוחשת — לתקן את הייצוא או לחסום את המהדורה ב-black_versions.txt."
+                    "actualLanguage חסר בקובץ המהדורה, ובלעדיו אי אפשר לקבוע את שפתה: $file. " +
+                        "יש לתקן את הייצוא."
                 )
             // עברית בלבד נכנסת ל-DB; כל שפה אחרת נחסמת, יידיש בכלל זה.
             if (actualLanguage != "he") {

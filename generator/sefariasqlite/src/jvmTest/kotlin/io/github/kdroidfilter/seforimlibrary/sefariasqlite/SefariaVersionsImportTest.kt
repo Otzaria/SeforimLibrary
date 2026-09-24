@@ -15,6 +15,7 @@ import java.sql.Connection
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
+import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 
@@ -584,6 +585,8 @@ class SefariaVersionsImportTest {
         }
         assertTrue(error.message!!.contains("actualLanguage"), "error should name the missing field")
         assertTrue(error.message!!.contains("Unmarked Edition"), "error should name the version file")
+        // The throw precedes isBlacklisted, so blacklisting the version cannot be the remedy.
+        assertFalse(error.message!!.contains("black_versions"), "error must not suggest black_versions.txt")
     }
 
     /** מהדורה אחת לשורה במרכז הספר; `actualLanguage=null` פירושו שדה חסר בקובץ. */
