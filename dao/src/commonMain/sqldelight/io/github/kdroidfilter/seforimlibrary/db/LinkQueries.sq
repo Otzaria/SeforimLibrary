@@ -1,4 +1,8 @@
 -- Queries for links
+-- Visibility contract: a ranged side also surfaces on its link_coverage lines,
+-- and a side listed in link_suppressed_side is never surfaced.
+-- The anchor set is spelled `l.id IN (<indexed UNION>)`, never `OR`: the DB ships
+-- without sqlite_stat1, and the OR form makes the planner fall back to idx_link_type.
 
 selectLinkById:
 SELECT l.*, ct.name AS connectionType
@@ -15,7 +19,10 @@ FROM link l
 JOIN connection_type ct ON l.connectionTypeId = ct.id
 JOIN book b ON l.targetBookId = b.id
 JOIN line tl ON l.targetLineId = tl.id
-WHERE l.sourceLineId IN ?
+WHERE l.id IN (SELECT al.id FROM link al WHERE al.sourceLineId IN :sourceLineId
+               UNION
+               SELECT lc.linkId FROM link_coverage lc WHERE lc.side = 0 AND lc.lineId IN :sourceLineId)
+  AND NOT EXISTS (SELECT 1 FROM link_suppressed_side ss WHERE ss.linkId = l.id AND ss.side = 0)
 ORDER BY l.targetBookOrderIndex, l.targetLineIndex;
 
 selectLinksBySourceLineIdsPaged:
@@ -24,7 +31,10 @@ FROM link l
 JOIN connection_type ct ON l.connectionTypeId = ct.id
 JOIN book b ON l.targetBookId = b.id
 JOIN line tl ON l.targetLineId = tl.id
-WHERE l.sourceLineId IN ?
+WHERE l.id IN (SELECT al.id FROM link al WHERE al.sourceLineId IN :sourceLineId
+               UNION
+               SELECT lc.linkId FROM link_coverage lc WHERE lc.side = 0 AND lc.lineId IN :sourceLineId)
+  AND NOT EXISTS (SELECT 1 FROM link_suppressed_side ss WHERE ss.linkId = l.id AND ss.side = 0)
 ORDER BY l.targetBookOrderIndex, l.targetLineIndex
 LIMIT ? OFFSET ?;
 
@@ -34,7 +44,11 @@ FROM link l
 JOIN connection_type ct ON l.connectionTypeId = ct.id
 JOIN book b ON l.targetBookId = b.id
 JOIN line tl ON l.targetLineId = tl.id
-WHERE l.sourceLineId IN ? AND l.targetBookId IN ?
+WHERE l.id IN (SELECT al.id FROM link al WHERE al.sourceLineId IN :sourceLineId
+               UNION
+               SELECT lc.linkId FROM link_coverage lc WHERE lc.side = 0 AND lc.lineId IN :sourceLineId)
+  AND NOT EXISTS (SELECT 1 FROM link_suppressed_side ss WHERE ss.linkId = l.id AND ss.side = 0)
+  AND l.targetBookId IN ?
 ORDER BY l.targetBookOrderIndex, l.targetLineIndex
 LIMIT ? OFFSET ?;
 
@@ -44,7 +58,11 @@ FROM link l
 JOIN connection_type ct ON l.connectionTypeId = ct.id
 JOIN book b ON l.targetBookId = b.id
 JOIN line tl ON l.targetLineId = tl.id
-WHERE l.sourceLineId IN ? AND ct.name IN ?
+WHERE l.id IN (SELECT al.id FROM link al WHERE al.sourceLineId IN :sourceLineId
+               UNION
+               SELECT lc.linkId FROM link_coverage lc WHERE lc.side = 0 AND lc.lineId IN :sourceLineId)
+  AND NOT EXISTS (SELECT 1 FROM link_suppressed_side ss WHERE ss.linkId = l.id AND ss.side = 0)
+  AND ct.name IN ?
 ORDER BY l.targetBookOrderIndex, l.targetLineIndex
 LIMIT ? OFFSET ?;
 
@@ -54,7 +72,11 @@ FROM link l
 JOIN connection_type ct ON l.connectionTypeId = ct.id
 JOIN book b ON l.targetBookId = b.id
 JOIN line tl ON l.targetLineId = tl.id
-WHERE l.sourceLineId IN ? AND ct.name IN ?
+WHERE l.id IN (SELECT al.id FROM link al WHERE al.sourceLineId IN :sourceLineId
+               UNION
+               SELECT lc.linkId FROM link_coverage lc WHERE lc.side = 0 AND lc.lineId IN :sourceLineId)
+  AND NOT EXISTS (SELECT 1 FROM link_suppressed_side ss WHERE ss.linkId = l.id AND ss.side = 0)
+  AND ct.name IN ?
 GROUP BY l.targetLineId
 ORDER BY MIN(l.targetBookOrderIndex), MIN(l.targetLineIndex)
 LIMIT ? OFFSET ?;
@@ -65,7 +87,11 @@ FROM link l
 JOIN connection_type ct ON l.connectionTypeId = ct.id
 JOIN book b ON l.targetBookId = b.id
 JOIN line tl ON l.targetLineId = tl.id
-WHERE l.sourceLineId IN ? AND l.targetBookId IN ? AND ct.name IN ?
+WHERE l.id IN (SELECT al.id FROM link al WHERE al.sourceLineId IN :sourceLineId
+               UNION
+               SELECT lc.linkId FROM link_coverage lc WHERE lc.side = 0 AND lc.lineId IN :sourceLineId)
+  AND NOT EXISTS (SELECT 1 FROM link_suppressed_side ss WHERE ss.linkId = l.id AND ss.side = 0)
+  AND l.targetBookId IN ? AND ct.name IN ?
 ORDER BY l.targetBookOrderIndex, l.targetLineIndex
 LIMIT ? OFFSET ?;
 
@@ -75,7 +101,11 @@ FROM link l
 JOIN connection_type ct ON l.connectionTypeId = ct.id
 JOIN book b ON l.targetBookId = b.id
 JOIN line tl ON l.targetLineId = tl.id
-WHERE l.sourceLineId IN ? AND l.targetBookId IN ? AND ct.name IN ?
+WHERE l.id IN (SELECT al.id FROM link al WHERE al.sourceLineId IN :sourceLineId
+               UNION
+               SELECT lc.linkId FROM link_coverage lc WHERE lc.side = 0 AND lc.lineId IN :sourceLineId)
+  AND NOT EXISTS (SELECT 1 FROM link_suppressed_side ss WHERE ss.linkId = l.id AND ss.side = 0)
+  AND l.targetBookId IN ? AND ct.name IN ?
 GROUP BY l.targetLineId
 ORDER BY MIN(l.targetBookOrderIndex), MIN(l.targetLineIndex)
 LIMIT ? OFFSET ?;
@@ -89,7 +119,11 @@ SELECT tl.charCount FROM link l
 JOIN connection_type ct ON l.connectionTypeId = ct.id
 JOIN book b ON l.targetBookId = b.id
 JOIN line tl ON l.targetLineId = tl.id
-WHERE l.sourceLineId IN ? AND ct.name IN ?
+WHERE l.id IN (SELECT al.id FROM link al WHERE al.sourceLineId IN :sourceLineId
+               UNION
+               SELECT lc.linkId FROM link_coverage lc WHERE lc.side = 0 AND lc.lineId IN :sourceLineId)
+  AND NOT EXISTS (SELECT 1 FROM link_suppressed_side ss WHERE ss.linkId = l.id AND ss.side = 0)
+  AND ct.name IN ?
 ORDER BY l.targetBookOrderIndex, l.targetLineIndex;
 
 -- Same ordered vector with the commentator-book filter applied.
@@ -98,7 +132,11 @@ SELECT tl.charCount FROM link l
 JOIN connection_type ct ON l.connectionTypeId = ct.id
 JOIN book b ON l.targetBookId = b.id
 JOIN line tl ON l.targetLineId = tl.id
-WHERE l.sourceLineId IN ? AND l.targetBookId IN ? AND ct.name IN ?
+WHERE l.id IN (SELECT al.id FROM link al WHERE al.sourceLineId IN :sourceLineId
+               UNION
+               SELECT lc.linkId FROM link_coverage lc WHERE lc.side = 0 AND lc.lineId IN :sourceLineId)
+  AND NOT EXISTS (SELECT 1 FROM link_suppressed_side ss WHERE ss.linkId = l.id AND ss.side = 0)
+  AND l.targetBookId IN ? AND ct.name IN ?
 ORDER BY l.targetBookOrderIndex, l.targetLineIndex;
 
 selectLinkSummariesBySourceLineIds:
@@ -106,7 +144,10 @@ SELECT l.*, ct.name AS connectionType, b.title AS targetBookTitle
 FROM link l
 JOIN connection_type ct ON l.connectionTypeId = ct.id
 JOIN book b ON l.targetBookId = b.id
-WHERE l.sourceLineId IN ?
+WHERE l.id IN (SELECT al.id FROM link al WHERE al.sourceLineId IN :sourceLineId
+               UNION
+               SELECT lc.linkId FROM link_coverage lc WHERE lc.side = 0 AND lc.lineId IN :sourceLineId)
+  AND NOT EXISTS (SELECT 1 FROM link_suppressed_side ss WHERE ss.linkId = l.id AND ss.side = 0)
 ORDER BY l.targetBookOrderIndex, l.targetLineIndex;
 
 selectLinksBySourceBook:
@@ -213,7 +254,10 @@ FROM link l
 JOIN connection_type ct ON l.connectionTypeId = ct.id
 JOIN line sl ON sl.id = l.sourceLineId
 JOIN book b ON l.sourceBookId = b.id
-WHERE l.targetLineId IN ?
+WHERE l.id IN (SELECT al.id FROM link al WHERE al.targetLineId IN :targetLineId
+               UNION
+               SELECT lc.linkId FROM link_coverage lc WHERE lc.side = 1 AND lc.lineId IN :targetLineId)
+  AND NOT EXISTS (SELECT 1 FROM link_suppressed_side ss WHERE ss.linkId = l.id AND ss.side = 1)
   AND ct.name IN ('COMMENTARY','SUPER_COMMENTARY','TARGUM','MIDRASH','PARSHANUT','DIBUR_HAMATCHIL','EIN_MISHPAT','ELUCIDATION','FOOTNOTES')
   AND l.sourceBookId != l.targetBookId
 ORDER BY l.baseProvenance DESC, b.isBaseBook DESC, b.orderIndex, sl.lineIndex;
@@ -232,7 +276,10 @@ FROM link l
 JOIN connection_type ct ON l.connectionTypeId = ct.id
 JOIN line sl ON sl.id = l.sourceLineId
 JOIN book b ON l.sourceBookId = b.id
-WHERE l.targetLineId IN ?
+WHERE l.id IN (SELECT al.id FROM link al WHERE al.targetLineId IN :targetLineId
+               UNION
+               SELECT lc.linkId FROM link_coverage lc WHERE lc.side = 1 AND lc.lineId IN :targetLineId)
+  AND NOT EXISTS (SELECT 1 FROM link_suppressed_side ss WHERE ss.linkId = l.id AND ss.side = 1)
   AND ct.name IN ('COMMENTARY','SUPER_COMMENTARY','TARGUM','MIDRASH','PARSHANUT','DIBUR_HAMATCHIL','EIN_MISHPAT','ELUCIDATION','FOOTNOTES')
   AND l.sourceBookId != l.targetBookId
 ORDER BY l.baseProvenance DESC, b.isBaseBook DESC, b.orderIndex, sl.lineIndex;
@@ -252,7 +299,10 @@ FROM link l
 JOIN connection_type ct ON l.connectionTypeId = ct.id
 JOIN line sl ON sl.id = l.sourceLineId
 JOIN book b ON l.sourceBookId = b.id
-WHERE l.targetLineId IN ?
+WHERE l.id IN (SELECT al.id FROM link al WHERE al.targetLineId IN :targetLineId
+               UNION
+               SELECT lc.linkId FROM link_coverage lc WHERE lc.side = 1 AND lc.lineId IN :targetLineId)
+  AND NOT EXISTS (SELECT 1 FROM link_suppressed_side ss WHERE ss.linkId = l.id AND ss.side = 1)
   AND ct.name IN ('COMMENTARY','SUPER_COMMENTARY','TARGUM','MIDRASH','PARSHANUT','DIBUR_HAMATCHIL','EIN_MISHPAT','ELUCIDATION','FOOTNOTES')
   AND l.sourceBookId != l.targetBookId
 ORDER BY l.baseProvenance DESC, b.isBaseBook DESC, b.orderIndex, sl.lineIndex
@@ -273,7 +323,11 @@ FROM link l
 JOIN connection_type ct ON l.connectionTypeId = ct.id
 JOIN line sl ON sl.id = l.sourceLineId
 JOIN book b ON l.sourceBookId = b.id
-WHERE l.targetLineId IN ? AND l.sourceBookId IN ?
+WHERE l.id IN (SELECT al.id FROM link al WHERE al.targetLineId IN :targetLineId
+               UNION
+               SELECT lc.linkId FROM link_coverage lc WHERE lc.side = 1 AND lc.lineId IN :targetLineId)
+  AND NOT EXISTS (SELECT 1 FROM link_suppressed_side ss WHERE ss.linkId = l.id AND ss.side = 1)
+  AND l.sourceBookId IN ?
   AND ct.name IN ('COMMENTARY','SUPER_COMMENTARY','TARGUM','MIDRASH','PARSHANUT','DIBUR_HAMATCHIL','EIN_MISHPAT','ELUCIDATION','FOOTNOTES')
   AND l.sourceBookId != l.targetBookId
 ORDER BY l.baseProvenance DESC, b.isBaseBook DESC, b.orderIndex, sl.lineIndex
@@ -294,7 +348,11 @@ FROM link l
 JOIN connection_type ct ON l.connectionTypeId = ct.id
 JOIN line sl ON sl.id = l.sourceLineId
 JOIN book b ON l.sourceBookId = b.id
-WHERE l.targetLineId IN ? AND l.sourceBookId IN ?
+WHERE l.id IN (SELECT al.id FROM link al WHERE al.targetLineId IN :targetLineId
+               UNION
+               SELECT lc.linkId FROM link_coverage lc WHERE lc.side = 1 AND lc.lineId IN :targetLineId)
+  AND NOT EXISTS (SELECT 1 FROM link_suppressed_side ss WHERE ss.linkId = l.id AND ss.side = 1)
+  AND l.sourceBookId IN ?
   AND ct.name IN ('COMMENTARY','SUPER_COMMENTARY','TARGUM','MIDRASH','PARSHANUT','DIBUR_HAMATCHIL','EIN_MISHPAT','ELUCIDATION','FOOTNOTES')
   AND l.sourceBookId != l.targetBookId
 GROUP BY l.sourceLineId
@@ -316,7 +374,10 @@ FROM link l
 JOIN connection_type ct ON l.connectionTypeId = ct.id
 JOIN line sl ON sl.id = l.sourceLineId
 JOIN book b ON l.sourceBookId = b.id
-WHERE l.targetLineId IN ?
+WHERE l.id IN (SELECT al.id FROM link al WHERE al.targetLineId IN :targetLineId
+               UNION
+               SELECT lc.linkId FROM link_coverage lc WHERE lc.side = 1 AND lc.lineId IN :targetLineId)
+  AND NOT EXISTS (SELECT 1 FROM link_suppressed_side ss WHERE ss.linkId = l.id AND ss.side = 1)
   AND ct.name IN ('COMMENTARY','SUPER_COMMENTARY','TARGUM','MIDRASH','PARSHANUT','DIBUR_HAMATCHIL','EIN_MISHPAT','ELUCIDATION','FOOTNOTES')
   AND l.sourceBookId != l.targetBookId
 GROUP BY l.sourceLineId
@@ -328,7 +389,10 @@ SELECT sl.charCount FROM link l
 JOIN connection_type ct ON l.connectionTypeId = ct.id
 JOIN line sl ON sl.id = l.sourceLineId
 JOIN book b ON l.sourceBookId = b.id
-WHERE l.targetLineId IN ?
+WHERE l.id IN (SELECT al.id FROM link al WHERE al.targetLineId IN :targetLineId
+               UNION
+               SELECT lc.linkId FROM link_coverage lc WHERE lc.side = 1 AND lc.lineId IN :targetLineId)
+  AND NOT EXISTS (SELECT 1 FROM link_suppressed_side ss WHERE ss.linkId = l.id AND ss.side = 1)
   AND ct.name IN ('COMMENTARY','SUPER_COMMENTARY','TARGUM','MIDRASH','PARSHANUT','DIBUR_HAMATCHIL','EIN_MISHPAT','ELUCIDATION','FOOTNOTES')
   AND l.sourceBookId != l.targetBookId
 ORDER BY l.baseProvenance DESC, b.isBaseBook DESC, b.orderIndex, sl.lineIndex;
@@ -338,7 +402,11 @@ SELECT sl.charCount FROM link l
 JOIN connection_type ct ON l.connectionTypeId = ct.id
 JOIN line sl ON sl.id = l.sourceLineId
 JOIN book b ON l.sourceBookId = b.id
-WHERE l.targetLineId IN ? AND l.sourceBookId IN ?
+WHERE l.id IN (SELECT al.id FROM link al WHERE al.targetLineId IN :targetLineId
+               UNION
+               SELECT lc.linkId FROM link_coverage lc WHERE lc.side = 1 AND lc.lineId IN :targetLineId)
+  AND NOT EXISTS (SELECT 1 FROM link_suppressed_side ss WHERE ss.linkId = l.id AND ss.side = 1)
+  AND l.sourceBookId IN ?
   AND ct.name IN ('COMMENTARY','SUPER_COMMENTARY','TARGUM','MIDRASH','PARSHANUT','DIBUR_HAMATCHIL','EIN_MISHPAT','ELUCIDATION','FOOTNOTES')
   AND l.sourceBookId != l.targetBookId
 ORDER BY l.baseProvenance DESC, b.isBaseBook DESC, b.orderIndex, sl.lineIndex;

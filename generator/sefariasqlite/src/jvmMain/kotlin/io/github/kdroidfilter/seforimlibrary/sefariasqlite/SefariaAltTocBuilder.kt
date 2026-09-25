@@ -1,20 +1,17 @@
 package io.github.kdroidfilter.seforimlibrary.sefariasqlite
 
 import io.github.kdroidfilter.seforimlibrary.common.ids.IdAllocatorBindings
+import io.github.kdroidfilter.seforimlibrary.common.ids.altTocChildPath
 import io.github.kdroidfilter.seforimlibrary.core.models.AltTocEntry
 import io.github.kdroidfilter.seforimlibrary.core.models.AltTocStructure
 import io.github.kdroidfilter.seforimlibrary.dao.repository.SeforimRepository
 
 internal class SefariaAltTocBuilder(
     private val repository: SeforimRepository,
-    @Suppress("unused") private val bindings: IdAllocatorBindings,
+    private val bindings: IdAllocatorBindings,
 ) {
-    // NOTE: alt_toc_entry ids are still auto-allocated here. Their natural-key
-    // wiring (DELTA_UPDATE_PLAN.md §3.3, `(structure_id, ancestor_path)`)
-    // requires threading a deterministic path through the recursive traversal
-    // (createContainerEntry / traverseAltNode / addEntry). Deferred to Phase 1.5
-    // — alt-toc rows are rebuilt wholesale per book so unstable ids cost an
-    // extra DELETE+INSERT batch but don't affect cross-book stability.
+    // alt_toc_entry ids come from the allocator, keyed on (structure_id, ancestor_path)
+    // where the path is the chain of per-parent emitted ordinals built below.
     suspend fun buildAltTocStructuresForBook(
         payload: BookPayload,
         bookId: Long,
@@ -119,6 +116,14 @@ internal class SefariaAltTocBuilder(
 
             val headingLineToToc = mutableMapOf<Int, Long>()
             val entriesByParent = mutableMapOf<Long?, MutableList<Long>>()
+            // Emitted-children counter per parent; drives the ancestor path. Never
+            // derive it from entriesByParent — that list takes a tocId twice.
+            val nextOrdinalByParent = mutableMapOf<Long?, Int>()
+            fun nextOrdinal(parent: Long?): Int {
+                val ordinal = (nextOrdinalByParent[parent] ?: 0) + 1
+                nextOrdinalByParent[parent] = ordinal
+                return ordinal
+            }
             val entryLineInfo = mutableMapOf<Long, Pair<Long?, Int?>>()
             val usedLineIdsByParent = mutableMapOf<Long?, MutableSet<Long>>()
 
@@ -317,7 +322,13 @@ internal class SefariaAltTocBuilder(
                 return base?.let { "$it $suffix" } ?: "פרק $suffix"
             }
 
-            suspend fun addEntry(node: AltNodePayload, level: Int, parentId: Long?, position: Int?): Long {
+            suspend fun addEntry(
+                node: AltNodePayload,
+                level: Int,
+                parentId: Long?,
+                position: Int?,
+                parentPath: String,
+            ): Pair<Long, String> {
                 val isChapterOrSimanLevel = node.addressTypes.any {
                     it.equals("Siman", ignoreCase = true) ||
                             it.equals("Perek", ignoreCase = true) ||
@@ -348,14 +359,15 @@ internal class SefariaAltTocBuilder(
                         break
                     }
                 }
-                if (lineId == null || lineIndex == null) return 0L
+                if (lineId == null || lineIndex == null) return NO_ENTRY
                 val text = nodeLabel(node, position)
 
                 val used = usedLineIdsByParent.getOrPut(parentId) { mutableSetOf() }
-                if (lineId in used) return 0L
+                if (lineId in used) return NO_ENTRY
                 used += lineId
 
-                val tocId = repository.insertAltTocEntry(
+                val path = altTocChildPath(parentPath, nextOrdinal(parentId))
+                val tocId = bindings.insertAltTocEntryStable(
                     AltTocEntry(
                         structureId = structureId,
                         parentId = parentId,
@@ -369,7 +381,8 @@ internal class SefariaAltTocBuilder(
                         lineId = lineId,
                         isLastChild = false,
                         hasChildren = false
-                    )
+                    ),
+                    ancestorPath = path,
                 )
                 hasGeneratedAltStructures = true
                 entryLineInfo[tocId] = lineId to lineIndex
@@ -393,7 +406,8 @@ internal class SefariaAltTocBuilder(
 
                         val addressValue = computeAddressValue(node, idx)
                         val label = buildChildLabel(node.childLabel, idx, addressValue, node.addressTypes.firstOrNull())
-                        val childTocId = repository.insertAltTocEntry(
+                        val childPath = altTocChildPath(path, nextOrdinal(tocId))
+                        val childTocId = bindings.insertAltTocEntryStable(
                             AltTocEntry(
                                 structureId = structureId,
                                 parentId = tocId,
@@ -405,7 +419,8 @@ internal class SefariaAltTocBuilder(
                                 lineId = childLineId,
                                 isLastChild = false,
                                 hasChildren = false
-                            )
+                            ),
+                            ancestorPath = childPath,
                         )
                         hasGeneratedAltStructures = true
                         hasChild = true
@@ -419,10 +434,16 @@ internal class SefariaAltTocBuilder(
                     repository.updateAltTocEntryHasChildren(tocId, true)
                 }
 
-                return tocId
+                return tocId to path
             }
 
-            suspend fun createContainerEntry(node: AltNodePayload, level: Int, parentId: Long?, position: Int?): Long {
+            suspend fun createContainerEntry(
+                node: AltNodePayload,
+                level: Int,
+                parentId: Long?,
+                position: Int?,
+                parentPath: String,
+            ): Pair<Long, String> {
                 val text = when {
                     !node.heTitle.isNullOrBlank() -> node.heTitle
                     position != null -> "פרק ${toGematria(position + 1)}"
@@ -431,7 +452,8 @@ internal class SefariaAltTocBuilder(
                     !structure.title.isNullOrBlank() -> structure.title
                     else -> structure.key
                 }
-                val tocId = repository.insertAltTocEntry(
+                val path = altTocChildPath(parentPath, nextOrdinal(parentId))
+                val tocId = bindings.insertAltTocEntryStable(
                     AltTocEntry(
                         structureId = structureId,
                         parentId = parentId,
@@ -445,25 +467,35 @@ internal class SefariaAltTocBuilder(
                         lineId = null,
                         isLastChild = false,
                         hasChildren = false
-                    )
+                    ),
+                    ancestorPath = path,
                 )
                 entryLineInfo[tocId] = null to null
                 entriesByParent.getOrPut(parentId) { mutableListOf() }.add(tocId)
-                return tocId
+                return tocId to path
             }
 
-            suspend fun traverseAltNode(node: AltNodePayload, level: Int, parentId: Long?, position: Int?): Boolean {
+            suspend fun traverseAltNode(
+                node: AltNodePayload,
+                level: Int,
+                parentId: Long?,
+                position: Int?,
+                parentPath: String,
+            ): Boolean {
                 val hasOwnRefs = node.wholeRef != null || node.refs.isNotEmpty()
                 val hasTitle = !node.heTitle.isNullOrBlank() || !node.title.isNullOrBlank()
                 val isDafNode = node.addressTypes.any { it.equals("Talmud", ignoreCase = true) }
                 val inlineChildrenOnly = isDafNode && node.refs.isNotEmpty() && !hasTitle
                 var currentParent = parentId
+                var currentPath = parentPath
                 var containerId: Long? = null
                 var inserted = false
 
                 if (!hasOwnRefs && node.children.isNotEmpty() && hasTitle) {
-                    containerId = createContainerEntry(node, level, parentId, position)
-                    currentParent = containerId
+                    val (id, path) = createContainerEntry(node, level, parentId, position, parentPath)
+                    containerId = id
+                    currentParent = id
+                    currentPath = path
                 }
 
                 if (inlineChildrenOnly) {
@@ -480,7 +512,8 @@ internal class SefariaAltTocBuilder(
                         if (childLineId in usedLineIdsByParent.getOrPut(currentParent) { mutableSetOf() }) return@forEachIndexed
                         usedLineIdsByParent.getOrPut(currentParent) { mutableSetOf() } += childLineId
 
-                        val childId = repository.insertAltTocEntry(
+                        val childPath = altTocChildPath(currentPath, nextOrdinal(currentParent))
+                        val childId = bindings.insertAltTocEntryStable(
                             AltTocEntry(
                                 structureId = structureId,
                                 parentId = currentParent,
@@ -492,7 +525,8 @@ internal class SefariaAltTocBuilder(
                                 lineId = childLineId,
                                 isLastChild = false,
                                 hasChildren = false
-                            )
+                            ),
+                            ancestorPath = childPath,
                         )
                         hasGeneratedAltStructures = true
                         inserted = true
@@ -501,12 +535,13 @@ internal class SefariaAltTocBuilder(
                         headingLineToToc[childLineIndex] = childId
                     }
                 } else if (hasOwnRefs) {
-                    val tocId = addEntry(node, level, parentId, position)
+                    val (tocId, tocPath) = addEntry(node, level, parentId, position, parentPath)
                     if (tocId != 0L) {
                         entriesByParent.getOrPut(parentId) { mutableListOf() }.add(tocId)
                         inserted = true
                         if (node.children.isNotEmpty()) {
                             currentParent = tocId
+                            currentPath = tocPath
                         }
                     }
                 }
@@ -515,7 +550,7 @@ internal class SefariaAltTocBuilder(
                 if (node.children.isNotEmpty()) {
                     val childLevel = level + if (currentParent != null && currentParent != parentId) 1 else 0
                     node.children.forEachIndexed { idx, child ->
-                        if (traverseAltNode(child, childLevel, currentParent, idx)) {
+                        if (traverseAltNode(child, childLevel, currentParent, idx, currentPath)) {
                             childInserted = true
                         }
                     }
@@ -546,7 +581,7 @@ internal class SefariaAltTocBuilder(
             }
 
             structure.nodes.forEachIndexed { idx, node ->
-                traverseAltNode(node, level = 0, parentId = null, position = idx)
+                traverseAltNode(node, level = 0, parentId = null, position = idx, parentPath = "")
             }
 
             for ((_, children) in entriesByParent) {
@@ -620,6 +655,8 @@ internal class SefariaAltTocBuilder(
 
         val headingByLine = HashMap<Int, Pair<Long, Int>>()          // headingLine -> (tocId, altLevel)
         val childrenByParent = LinkedHashMap<Long?, MutableList<Long>>()
+        val nextOrdinalByParent = HashMap<Long?, Int>()               // emitted children per parent
+        val pathByEntry = HashMap<Long, String>()                     // tocId -> its ancestor path
         val lineToTocId = HashMap<Int, Long>()                       // any owning line -> its tocId
         val stack = ArrayDeque<Triple<Int, Long, Int>>()             // (headingLevel, tocId, altLevel)
 
@@ -628,7 +665,10 @@ internal class SefariaAltTocBuilder(
             while (stack.isNotEmpty() && stack.last().first >= h.level) stack.removeLast()
             val parentId = stack.lastOrNull()?.second
             val altLevel = stack.size
-            val tocId = repository.insertAltTocEntry(
+            val ordinal = (nextOrdinalByParent[parentId] ?: 0) + 1
+            nextOrdinalByParent[parentId] = ordinal
+            val path = altTocChildPath(parentId?.let { pathByEntry.getValue(it) } ?: "", ordinal)
+            val tocId = bindings.insertAltTocEntryStable(
                 AltTocEntry(
                     structureId = structureId,
                     parentId = parentId,
@@ -638,8 +678,10 @@ internal class SefariaAltTocBuilder(
                     lineId = lineId,
                     isLastChild = false,
                     hasChildren = false
-                )
+                ),
+                ancestorPath = path,
             )
+            pathByEntry[tocId] = path
             stack.addLast(Triple(h.level, tocId, altLevel))
             headingByLine[h.lineIndex] = tocId to altLevel
             childrenByParent.getOrPut(parentId) { mutableListOf() }.add(tocId)
@@ -653,7 +695,9 @@ internal class SefariaAltTocBuilder(
             val ordinal = (simanOrdinalByParent[parentTocId] ?: 0) + 1
             simanOrdinalByParent[parentTocId] = ordinal
             val label = toGematria(ordinal)
-            val childTocId = repository.insertAltTocEntry(
+            val pathOrdinal = (nextOrdinalByParent[parentTocId] ?: 0) + 1
+            nextOrdinalByParent[parentTocId] = pathOrdinal
+            val childTocId = bindings.insertAltTocEntryStable(
                 AltTocEntry(
                     structureId = structureId,
                     parentId = parentTocId,
@@ -663,7 +707,8 @@ internal class SefariaAltTocBuilder(
                     lineId = lineId,
                     isLastChild = false,
                     hasChildren = false
-                )
+                ),
+                ancestorPath = altTocChildPath(pathByEntry.getValue(parentTocId), pathOrdinal),
             )
             childrenByParent.getOrPut(parentTocId) { mutableListOf() }.add(childTocId)
             lineToTocId[lineIndex0] = childTocId
@@ -693,6 +738,9 @@ internal class SefariaAltTocBuilder(
     }
 
     companion object {
+        /** addEntry's "nothing emitted" result; no id and no ancestor path consumed. */
+        private val NO_ENTRY: Pair<Long, String> = 0L to ""
+
         // Lift these out of the hot loop — regex compile is non-trivial and
         // these were being created per call to parseDafIndex / per key
         // replace (called millions of times for the alt-TOC builder).

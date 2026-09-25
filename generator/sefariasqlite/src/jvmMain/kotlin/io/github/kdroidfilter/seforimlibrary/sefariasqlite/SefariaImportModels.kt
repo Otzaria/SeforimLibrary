@@ -125,6 +125,9 @@ internal data class BookPayload(
     // live) and the resolved schema file — inputs for the versions pass.
     val sourceDirPath: String? = null,
     val schemaFilePath: String? = null,
+    // שם קובץ הגרסה המוצהר ב-preferred_versions.txt שממנו נקרא הטקסט הראשי.
+    // null = הטקסט הוא merged.json, ורק אז refEntries הם איחוד המהדורות.
+    val preferredVersionFileName: String? = null,
     // Raw English `categories` from the index record. Only the whole-unit ref
     // sets need them (Sefaria's own gate is English-category based).
     val categoriesEn: List<String> = emptyList(),

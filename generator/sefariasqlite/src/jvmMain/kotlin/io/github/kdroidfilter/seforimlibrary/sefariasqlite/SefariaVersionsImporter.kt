@@ -13,6 +13,9 @@ import java.nio.file.Path
 import kotlin.io.path.name
 import kotlin.io.path.readText
 
+/** קובץ מהדורה בלי actualLanguage — נפילה רועשת, בלי ניחוש שפה. */
+internal class MissingVersionLanguageException(message: String) : IllegalStateException(message)
+
 /**
  * Imports alternative book editions into book_version / version_line.
  *
@@ -25,7 +28,8 @@ import kotlin.io.path.readText
  *    (single-version books — the book's own lines ARE the edition).
  *
  * Runs after all book lines are inserted, so every joined lineId exists.
- * Versions listed in black_versions.txt are skipped entirely (no row at all).
+ * Versions listed in black_versions.txt are skipped entirely (no row at all),
+ * and so are version files whose actualLanguage isn't Hebrew.
  */
 internal class SefariaVersionsImporter(
     private val repository: SeforimRepository,
@@ -49,6 +53,7 @@ internal class SefariaVersionsImporter(
     private var emptyWalks = 0
     private var filesSkipped = 0
     private var versionsBlacklisted = 0
+    private var versionsForeignLanguage = 0
 
     private val versionBatch = mutableListOf<BookVersion>()
     private val lineBatch = mutableListOf<VersionLine>()
@@ -68,10 +73,12 @@ internal class SefariaVersionsImporter(
             "Versions import: withContent=$versionsWithContent, metadataOnly=$metadataOnlyVersions, " +
                 "versionLines=$versionLineRows, segmentsUnmatched=$segmentsUnmatched, " +
                 "duplicateRefs=$duplicateRefs, emptyWalks=$emptyWalks, filesSkipped=$filesSkipped, " +
-                "blacklisted=$versionsBlacklisted"
+                "blacklisted=$versionsBlacklisted, foreignLanguage=$versionsForeignLanguage"
         }
     }
 
+    // merged.json's `versions` pairs carry no language field at all, so these rows
+    // are not language-gated; they are metadata-only (hasContent=0, no foreign text).
     private fun importMetadataOnly(input: BookInput) {
         input.payload.versionsMeta.distinctBy { it.title }.forEach { meta ->
             if (isBlacklisted(input.payload, meta.title, heVersionTitle = null)) return@forEach
@@ -118,10 +125,21 @@ internal class SefariaVersionsImporter(
             }
             val versionTitle = doc["versionTitle"]?.stringOrNull()?.trim()?.takeIf { it.isNotEmpty() }
             val textElement = doc["text"]
-            val language = doc["language"]?.stringOrNull()
-            if (versionTitle == null || textElement == null || (language != null && language != "he")) {
-                logger.w { "Version file missing versionTitle/text or non-Hebrew, skipped: $file" }
+            if (versionTitle == null || textElement == null) {
+                logger.w { "Version file missing versionTitle/text, skipped: $file" }
                 filesSkipped++
+                continue
+            }
+            // `language` הוא "he" בכל קובץ מהדורה בייצוא; השפה בפועל היא actualLanguage בלבד.
+            val actualLanguage = doc["actualLanguage"]?.stringOrNull()?.trim()?.takeIf { it.isNotEmpty() }
+                ?: throw MissingVersionLanguageException(
+                    "actualLanguage חסר בקובץ המהדורה, ובלעדיו אי אפשר לקבוע את שפתה: $file. " +
+                        "יש לתקן את הייצוא."
+                )
+            // עברית בלבד נכנסת ל-DB; כל שפה אחרת נחסמת, יידיש בכלל זה.
+            if (actualLanguage != "he") {
+                versionsForeignLanguage++
+                logger.i { "Version skipped, actualLanguage=$actualLanguage: ${payload.heTitle} / $versionTitle" }
                 continue
             }
             val heVersionTitle =
@@ -145,8 +163,16 @@ internal class SefariaVersionsImporter(
                 }
                 val lineId = mergedLineIdByRef[ref.ref]
                 if (lineId == null) {
-                    // A version segment whose address has no merged line. Should be
-                    // impossible (merged = union of versions); counted, never guessed.
+                    // טקסט ראשי ממהדורה מוצהרת אינו איחוד המהדורות — כתובת שאין לה
+                    // שורה נופלת בקול, כי אין לאן לשמור אותה.
+                    val preferredFile = payload.preferredVersionFileName
+                    if (preferredFile != null) throw PreferredVersionRefGapException(
+                        "preferred_versions.txt: ${payload.heTitle} נקרא מ-$preferredFile, " +
+                            "ולמהדורה \"$versionTitle\" יש כתובת ללא שורה מקבילה: ${ref.ref}. " +
+                            "לחסום את המהדורה ב-black_versions.txt או לתקן את המיפוי."
+                    )
+                    // A merged-based book keeps the original invariant (merged = union
+                    // of versions); an unmatched address is counted, never guessed.
                     segmentsUnmatched++
                     return@forEach
                 }

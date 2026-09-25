@@ -21,11 +21,22 @@
 # options would be a no-op for the one caller and would silently impose them
 # on anyone else who sources this.
 #
-# Read at SOURCE time: RUNNER_TEMP, GITHUB_RUN_ID, GITHUB_RUN_ATTEMPT and the
-# optional PATCH_FAN_HEARTBEAT_SECONDS (the heartbeat's cadence and paths).
+# Read at SOURCE time: RUNNER_TEMP, GITHUB_RUN_ID, GITHUB_RUN_ATTEMPT, the
+# optional PATCH_FAN_HEARTBEAT_SECONDS (the heartbeat's cadence and paths) and
+# the release credential preflight (RELEASE_TOKEN_KIND and what release_draft.sh
+# reads for it).
 # Read at CALL time, from the driver's globals: THIS_VER, THIS_SCHEMA,
 # PREFETCH_DIR, PREFETCH_WAIT_SECONDS, PATCH_MAIN_CLASS, PATCH_JVM_ARGS,
 # PATCH_CLASSPATH and the BATCH_* arrays.
+
+# This step runs after the relink wait, which can outlive the job's automatic
+# GITHUB_TOKEN; every `gh` below uses the preflighted release credential instead.
+# shellcheck source=release_draft.sh
+. "$(dirname "${BASH_SOURCE[0]}")/release_draft.sh"
+use_token "${RELEASE_TOKEN_KIND:-}" || {
+  echo "::error::patch fan: release credential preflight result is missing or invalid" >&2
+  return 1
+}
 
 # קורא db_schema_version מ-DB; טבלה/שורה חסרה → ERROR (release DB חייב מוטבע).
 # sqlite3 זמין ברנרים ה-self-hosted (בשימוש גם בוורקפלואי delta-real-diff-*).

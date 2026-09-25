@@ -7,6 +7,9 @@ import kotlin.io.path.exists
 /** קובץ הגרסה המוצהר חסר בייצוא — נפילה רועשת, בלי נסיגה שקטה ל-merged.json. */
 internal class MissingPreferredVersionException(message: String) : IllegalStateException(message)
 
+/** כתובת של מהדורה אחרת שאין לה שורה בטקסט המוצהר — נפילה רועשת, בלי נשירה שקטה. */
+internal class PreferredVersionRefGapException(message: String) : IllegalStateException(message)
+
 /**
  * מיפוי מוצהר: כותרת ספר → קובץ הגרסה שממנו הוא מיובא במקום merged.json.
  * Format rules: see preferred_versions.txt.

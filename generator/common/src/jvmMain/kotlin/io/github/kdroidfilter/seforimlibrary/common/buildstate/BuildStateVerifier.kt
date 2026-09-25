@@ -33,24 +33,9 @@ import java.sql.DriverManager
  */
 object BuildStateVerifier {
 
-    /**
-     * Allocator tables whose row ids the generator deliberately does NOT take
-     * from the allocator, so `next_id > MAX(id)` does not hold for them and must
-     * not be asserted.
-     *
-     * `alt_toc_entry` is the only one: both builders insert its rows with an
-     * implicit rowid — the Sefaria one via `repository.insertAltTocEntry(...)`
-     * (`SefariaAltTocBuilder`, six call sites, all with `id = 0`) and the Otzaria
-     * one at `Generator.kt` ("Entry ids stay auto-allocated, matching the Sefaria
-     * builder's Phase 1.5 deferral"). `IdAllocatorBindings.insertAltTocEntryStable`
-     * exists but has no call site, so `IdTable.ALT_TOC_ENTRY`'s counter never
-     * leaves 1 while the shipped DB holds tens of thousands of rows: measured on
-     * a real `generateSefariaSqlite` output, `next_id=1` against `MAX(id)=71602`.
-     * Asserting here would fail every stage of every release.
-     *
-     * Delete the entry the moment those inserts start going through the allocator.
-     */
-    private val NOT_ALLOCATOR_ISSUED: Set<IdTable> = setOf(IdTable.ALT_TOC_ENTRY)
+    // Allocator tables whose row ids the generator does NOT take from the allocator.
+    // All three alt_toc_entry writers now route through it, so nothing is exempt.
+    private val NOT_ALLOCATOR_ISSUED: Set<IdTable> = emptySet()
 
     /** The cheap half of [BuildStateSnapshot]: `meta` + `id_counters`, nothing else. */
     data class Header(val meta: Map<String, String>, val counters: Map<IdTable, Long>)

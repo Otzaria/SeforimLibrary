@@ -1,6 +1,10 @@
 # רשימה שחורה של גרסאות (מהדורות ספרים, book_version) — גרסה שמופיעה כאן לא תיכנס
 # ל-DB כלל: לא הטקסט שלה ולא המטא-דאטה שלה.
 #
+# סייג: החסימה חלה על טבלאות הגרסאות (book_version/version_line) בלבד. גרסה שהיא
+# המקור של הטקסט הראשי (line) — חסימתה מסירה את הייחוס בלבד, התוכן נשאר ב-DB ומיוחס
+# למהדורה אחרת; אין לחסום גרסה כזאת.
+#
 # כללי רישום:
 #   שורות ריקות ושורות שמתחילות ב-# — מתעלמים מהן.
 #
@@ -22,7 +26,6 @@
 אסתר | Emoji Megillah
 רש"י על בראשית | test
 אברבנאל על שופטים | nhhu
-רש"ר הירש על התורה | try hebrew
 חידושי אגדות על בבא מציעא | 1
 אבן עזרא על זכריה | 1
 רש"י על שבת | rashi
@@ -52,7 +55,8 @@
 # "מקרא מבואר" (תרגום/עיבוד דוד כוכב) — מוסר מכל החומשים והמגילות שבהם הוא מופיע.
 Miqra Mevoar, trans. and edited by David Kokhav, Jerusalem 2020
 
-# --- מהדורות בשפה זרה (יידיש נשארת בכוונה) ---
+# --- מהדורות בשפה זרה: השער חוסם כל actualLanguage שאינו he, יידיש בכלל זה ---
+# הערכים שמתחת נשארים כגיבוי לקבצים שהמטא-דאטה שלהם משקרת (מצהירים he על תוכן זר).
 Persian translation by Mashallah Rahman Pour Davud and Hakham Musa Zargari, Otzar haTorah, 1985 [fa]
 בראשית | Judeo-Italian Pentateuch transcribed by Robbie Kramm [itk]
 בראשית | benjamin derhambakhsh 2022 [fa]
@@ -66,6 +70,8 @@ Persian translation by Mashallah Rahman Pour Davud and Hakham Musa Zargari, Otza
 # ערבית-יהודית (המקור של מורה נבוכים והכוזרי) — נחסם כשפה זרה:
 מורה נבוכים | Judeo Arabic, Paris, 1856 [jrb]
 הכוזרי | Kitab al Khazari [jrb]
+# תוכן יידיש שמצהיר actualLanguage=he — השער עיוור לו, ולכן חסימה ידנית (ספר אחד בלבד):
+בראשית | Tanakh in Yiddish. Translated by Ch. Neuhausen, A. Hyman Charlap; NY 1914 [yi]
 
 # --- גרסאות "temp" — שאריות עבודה של ספריא ---
 אברבנאל על מלכים א | Abarbanel on I Kings temp
@@ -87,10 +93,8 @@ Persian translation by Mashallah Rahman Pour Davud and Hakham Musa Zargari, Otza
 # גרסאות זבל שונות
 סידור ספרד | Modeh Anu
 
-# --- ספרים חיצוניים (מדיניות; ההסרה בגלל סוג החיבור) ---
-בן סירא | Ben Sira, David Kahana ed. -- Wikisource
+# --- ספרים חיצוניים: המהדורה הבסיסית נשמרת; נחסמות רק מהדורות נוספות ---
 בן סירא | The Wisdom of Ben Sira, Cambridge University Press, 1899
-ספר יהודית | Ketuvim Achronim, Seckel Isaac Frankel. Warsaw, 1885
 ספר יהודית | תרגום מיוונית יצחק זעקיל פרענקיל,  ווארשא  1885, אתר דעת
 
 # --- "קדמוניות היהודים": תרגומי AI ותרגומים משכיליים/לא-מדויקים ---
@@ -100,7 +104,7 @@ Persian translation by Mashallah Rahman Pour Davud and Hakham Musa Zargari, Otza
 קדמוניות היהודים | מעובד מהתרגום של צ. ה. פיליפובסקי, בתשלום יוחסין
 קדמוניות היהודים | קדמניות היהודים, תרגום קלמן שולמן
 
-# --- תרגום התנ"ך ליידיש של יהואש (משורר חילוני מודרני; לא תרגום מסורתי — חריג לכלל "יידיש נשארת") ---
+# --- תרגום התנ"ך ליידיש של יהואש (משורר חילוני מודרני; לא תרגום מסורתי) — היום גם השער חוסם יידיש ---
 # אותו versionTitle על 14 ספרי תנ"ך — חסימה גלובלית אחת:
 Yehoyesh's Yiddish Tanakh Translation [yi]
 משנה אבות | Pirkei Abot (Sayings of the Fathers) — Yiddish Translation by Yehoash (1921) [yi]
@@ -116,8 +120,14 @@ Yehoyesh's Yiddish Tanakh Translation [yi]
 תקוני הזהר | Hebrew Wikipedia
 
 # --- תלמוד בבלי: מהדורת ויליאם דוידסון (37 מסכתות כל אחת) ---
+# המנוקדת (Vocalized Aramaic) אינה נחסמת: היא הטקסט הראשי עצמו של 37 המסכתות, וחסימתה
+# הסירה את הייחוס בלי להסיר את התוכן — כלומר הפצה של CC-BY-NC בייחוס שגוי.
+# הלא-מנוקדת נשארת חסומה: אותו טקסט בלי ניקוד, מיותרת לייחוס.
 William Davidson Edition - Aramaic
-William Davidson Edition - Vocalized Aramaic
 
 # --- תלמוד ירושלמי שקלים: מהדורת ויליאם דוידסון ---
 תלמוד ירושלמי שקלים | William Davidson Edition - Hebrew
+
+# --- כתר מלכות: חלוקה שאינה תואמת את הטקסט המוצהר ב-preferred_versions.txt ---
+# Mahberet מחולקת לפסוקים ו-Tikkun לפרקים מוזזים ב-3 — אין ולו כתובת אחת משותפת.
+כתר מלכות | Tikkun Midot HaNefesh, Jerusalem 1996

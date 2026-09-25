@@ -18,6 +18,11 @@ fun main() {
         require(records.requiredInt("target_sefaria_relevant") == expected("expectedTargetSefariaRecords"))
         require(records.requiredInt("source_sefaria_relevant") == expected("expectedSourceSefariaRecords"))
         require(anchors.requiredInt("checked") == expected("expectedAnchors"))
+        // Drift the tool absorbed never fails it; the pinned corpus must still declare its exact count.
+        require(anchors.requiredInt("unrelocatable") == expected("expectedUnrelocatableAnchors")) {
+            "anchors.unrelocatable=${anchors.requiredInt("unrelocatable")} " +
+                "but expectedUnrelocatableAnchors=${expected("expectedUnrelocatableAnchors")}"
+        }
         require(report.requiredInt("packaging_collisions") == 0)
         println("manual-links corpus gate passed: ${result.reportPath}")
     }.onFailure { error ->

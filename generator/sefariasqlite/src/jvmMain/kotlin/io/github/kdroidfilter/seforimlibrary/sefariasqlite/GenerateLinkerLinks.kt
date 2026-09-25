@@ -53,6 +53,15 @@ fun main(args: Array<String>) = runBlocking {
         ?: error("linkerArtifacts (unpacked artifacts/ dir) is required")
     val sidecarPath = prop("linkerSidecar", null)
         ?: error("linkerSidecar (TSV from the Sefaria import) is required")
+    // Phase-2 REPLACES LINKER by type, so the inputs are validated before any destructive
+    // work: a missing/empty artifacts dir must fail loudly, not rebuild the type to zero.
+    val artifactsRoot = File(artifactsDir)
+    check(artifactsRoot.isDirectory) { "linkerArtifacts is not a directory: $artifactsDir" }
+    val artifactFiles = artifactsRoot.walkTopDown().filter { it.isFile && it.extension == "jsonl" }.toList()
+    check(artifactFiles.isNotEmpty()) { "linkerArtifacts contains no .jsonl artifact files: $artifactsDir" }
+    // The lineage gate below is opt-in, so its flag is parsed before any destructive work:
+    // an unrecognized value must fail the build, never disable the gate in silence.
+    val linkerStrict = parseStrictFlag("linkerStrict", prop("linkerStrict", null))
 
     val driver = JdbcSqliteDriver(url = "jdbc:sqlite:$dbPath")
     val repository = SeforimRepository(dbPath, driver)
@@ -92,28 +101,6 @@ fun main(args: Array<String>) = runBlocking {
         repository.executeRawQuery("PRAGMA synchronous = OFF")
         repository.executeRawQuery("PRAGMA journal_mode = OFF")
 
-        // LINKER is a generated, type-owned projection. Replace it by type so
-        // links that the engine intentionally stopped emitting (especially old
-        // heading links) cannot survive forever through upserts.
-        var replacedLinks = 0L
-        driver.executeQuery(
-            null,
-            "SELECT COUNT(*) FROM link WHERE connectionTypeId = ?",
-            { cursor ->
-                if (cursor.next().value) replacedLinks = cursor.getLong(0) ?: 0L
-                QueryResult.Value(Unit)
-            },
-            1,
-        ) { bindLong(0, linkerTypeId) }
-        if (replacedLinks > 0) {
-            val linkerIds = "SELECT id FROM link WHERE connectionTypeId = $linkerTypeId"
-            repository.executeRawQuery("DELETE FROM link_anchor WHERE linkId IN ($linkerIds)")
-            repository.executeRawQuery("DELETE FROM link_range WHERE linkId IN ($linkerIds)")
-            repository.executeRawQuery("DELETE FROM link_coverage WHERE linkId IN ($linkerIds)")
-            repository.executeRawQuery("DELETE FROM link WHERE connectionTypeId = $linkerTypeId")
-            logger.i { "Removed $replacedLinks existing LINKER links before deterministic rebuild" }
-        }
-
         // ── sidecar → refsByCanonical / refsByBase + exact target identity ──
         logger.i { "Loading sidecar…" }
         val allRefs = ArrayList<RefEntry>()
@@ -148,6 +135,28 @@ fun main(args: Array<String>) = runBlocking {
             if (existingLast == null || e.lineIndex > existingLast.lineIndex) lastByBase[base] = e
         }
         logger.i { "Sidecar: ${allRefs.size} refs, ${refsByCanonical.size} canonical keys" }
+
+        // LINKER is a generated, type-owned projection. Replace it by type so
+        // links that the engine intentionally stopped emitting (especially old
+        // heading links) cannot survive forever through upserts.
+        var replacedLinks = 0L
+        driver.executeQuery(
+            null,
+            "SELECT COUNT(*) FROM link WHERE connectionTypeId = ?",
+            { cursor ->
+                if (cursor.next().value) replacedLinks = cursor.getLong(0) ?: 0L
+                QueryResult.Value(Unit)
+            },
+            1,
+        ) { bindLong(0, linkerTypeId) }
+        if (replacedLinks > 0) {
+            val linkerIds = "SELECT id FROM link WHERE connectionTypeId = $linkerTypeId"
+            repository.executeRawQuery("DELETE FROM link_anchor WHERE linkId IN ($linkerIds)")
+            repository.executeRawQuery("DELETE FROM link_range WHERE linkId IN ($linkerIds)")
+            repository.executeRawQuery("DELETE FROM link_coverage WHERE linkId IN ($linkerIds)")
+            repository.executeRawQuery("DELETE FROM link WHERE connectionTypeId = $linkerTypeId")
+            logger.i { "Removed $replacedLinks existing LINKER links before deterministic rebuild" }
+        }
 
         // ── DB identity maps: BookKey→bookId and (bookId,lineIndex)→lineId ──
         val bookIdByKey = HashMap<Pair<String, String>, Long>()
@@ -240,25 +249,36 @@ fun main(args: Array<String>) = runBlocking {
         var targetIdentityMismatch = 0; var unmappedSource = 0; var staleSource = 0; var staleContext = 0
         var headingSource = 0
         var missingSourceHash = 0
+        var recordsParsed = 0L
 
         suspend fun flush() {
             if (linkBatch.isNotEmpty()) { repository.insertLinksBatch(linkBatch); linkBatch.clear() }
             if (anchorBatch.isNotEmpty()) { repository.insertLinkAnchorsBatch(anchorBatch); anchorBatch.clear() }
         }
 
-        val files = File(artifactsDir).walkTopDown().filter { it.isFile && it.extension == "jsonl" }.toList()
-        logger.i { "Processing ${files.size} artifact files…" }
-        for (file in files) {
+        logger.i { "Processing ${artifactFiles.size} artifact files…" }
+        for (file in artifactFiles) {
             file.bufferedReader(Charsets.UTF_8).useLines { lines ->
                 for (line in lines) {
                     if (line.isBlank()) continue
                     val rec = json.decodeFromString<ArtifactRecord>(line)
+                    recordsParsed++
                     check((rec.context_ref == null) == (rec.relative_direction == null)) {
                         "Malformed contextual LINKER record in ${file.path}: context_ref and " +
                             "relative_direction must be present together"
                     }
                     check(rec.relative_direction == null || rec.relative_direction in setOf("above", "below")) {
                         "Malformed contextual LINKER record in ${file.path}: invalid relative_direction"
+                    }
+                    // Anchor offsets are a producer contract (artifact.schema.json): 0 <= start < end.
+                    check(rec.start >= 0 && rec.end > rec.start) {
+                        "Malformed LINKER record in ${file.path}: offsets [${rec.start}, ${rec.end}) " +
+                            "must satisfy 0 <= start < end"
+                    }
+                    // line_index is 0-based by contract (artifact.schema.json: line_index_base const 0).
+                    check(rec.line_index_base == 0) {
+                        "Malformed LINKER record in ${file.path}: line_index_base=${rec.line_index_base} " +
+                            "is unsupported; the contract requires 0"
                     }
                     // Contract check FIRST, before any skip path (unresolved target,
                     // self-link) can hide a hash-less record from -PlinkerStrict.
@@ -293,6 +313,12 @@ fun main(args: Array<String>) = runBlocking {
                     if (isHeadingContent(content)) { headingSource++; continue }
                     if (rec.source_hash != null && linkerContentHash(content) != rec.source_hash) { staleSource++; continue }
                     if (rec.context_ref != null && srcLine.contextRef != rec.context_ref) { staleContext++; continue }
+                    // Content is now hash-verified, so the offsets must index it exactly.
+                    check(rec.end <= content.length) {
+                        "Out-of-range LINKER offsets in ${file.path}: [${rec.start}, ${rec.end}) " +
+                            "exceeds source line length ${content.length} for " +
+                            "${rec.book_key.canonical_he_title} line ${rec.line_index}"
+                    }
 
                     // The allocator returns the same stable id for repeated (source,target,type)
                     // citations; INSERT OR IGNORE performs the dedup without an unbounded map.
@@ -366,7 +392,7 @@ fun main(args: Array<String>) = runBlocking {
         // snapshot, so every record's source line must exist, carry a hash, and match it.
         // A violation means the artifacts came from some other snapshot — fail the build.
         // (unresolvedTarget stays advisory: refs to books outside the corpus are expected.)
-        if (prop("linkerStrict", null)?.toBoolean() == true) {
+        if (linkerStrict) {
             check(unmappedSource == 0 && staleSource == 0 && staleContext == 0 &&
                 targetIdentityMismatch == 0 && ambiguousTarget == 0 && missingSourceHash == 0
             ) {
@@ -374,6 +400,11 @@ fun main(args: Array<String>) = runBlocking {
                     "stale context=$staleContext, ambiguous target=$ambiguousTarget, " +
                     "target identity mismatch=$targetIdentityMismatch, missing source_hash=$missingSourceHash — " +
                     "artifacts/sidecar do not match this build's exact identity lineage"
+            }
+            // An empty payload passes every counter above; a strict release must ship LINKER links.
+            check(links > 0) {
+                "linkerStrict: 0 LINKER links written from $recordsParsed records parsed in " +
+                    "${artifactFiles.size} artifact files"
             }
         }
 
@@ -449,3 +480,15 @@ private data class ArtifactRecord(
 
 private fun prop(name: String, fallback: String?): String? =
     System.getProperty(name) ?: System.getenv(name.uppercase()) ?: fallback
+
+// Build-gate boolean: only "true"/"false" (any case, surrounding blanks ignored) mean anything.
+// "1", "yes", a typo or a bare -Pflag (empty string) fail loudly instead of disabling the gate.
+internal fun parseStrictFlag(name: String, raw: String?): Boolean = when (raw?.trim()?.lowercase()) {
+    null -> false
+    "true" -> true
+    "false" -> false
+    else -> error(
+        "$name: unrecognized value \"$raw\" — accepted values are \"true\" or \"false\" " +
+            "(case-insensitive); pass -P$name=true / -P$name=false, or set ${name.uppercase()} in the environment"
+    )
+}

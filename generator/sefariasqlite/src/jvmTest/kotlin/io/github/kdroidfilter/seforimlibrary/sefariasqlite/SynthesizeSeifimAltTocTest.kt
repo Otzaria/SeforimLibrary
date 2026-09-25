@@ -4,6 +4,7 @@ import app.cash.sqldelight.driver.jdbc.sqlite.JdbcSqliteDriver
 import io.github.kdroidfilter.seforimlibrary.common.buildstate.AltTocStructureKey
 import io.github.kdroidfilter.seforimlibrary.common.buildstate.BuildStateReader
 import io.github.kdroidfilter.seforimlibrary.common.buildstate.BuildStateSnapshot
+import io.github.kdroidfilter.seforimlibrary.common.buildstate.BuildStateVerifier
 import io.github.kdroidfilter.seforimlibrary.common.buildstate.BuildStateWriter
 import io.github.kdroidfilter.seforimlibrary.common.buildstate.IdTable
 import io.github.kdroidfilter.seforimlibrary.core.models.Book
@@ -313,6 +314,169 @@ class SynthesizeSeifimAltTocIntegrationTest {
             assertEquals(structureId, snapshot.altTocStructures[AltTocStructureKey(mbId, SEIFIM_STRUCTURE_KEY)])
             val tocTextIds = snapshot.lookups[IdTable.TOC_TEXT].orEmpty()
             assertTrue(tocTextIds.keys.containsAll(listOf("סעיף א", "סעיף ג")))
+        } finally {
+            Files.deleteIfExists(state)
+        }
+    }
+
+    /**
+     * Entry ids must come from `seifim_state.id_alt_toc_entry`, not from
+     * `MAX(alt_toc_entry.id) + 1`. Reverting the two `stableIds?.altTocEntryId(...)`
+     * assignments to `++nextEntryId` fails this: the squatter row planted between
+     * the runs pushes every id of the second run past it.
+     */
+    @Test
+    fun `entry ids are reproduced from the attached buildstate`() = runBlocking {
+        val (_, mbId) = seedMiniDb()
+
+        val state = DriverManager.getConnection("jdbc:sqlite:$dbFile").use { conn ->
+            val state = attachEmptyBuildState(conn)
+            synthesizeSeifimAltTocs(conn, readLinkedSeifimCandidateSnapshots(conn), AttachedBuildStateIds(conn))
+            state
+        }
+        try {
+            val structureId = repo.getAltTocStructuresForBook(mbId).single().id
+            val first = repo.getAltTocEntriesForStructure(structureId)
+                .sortedBy { it.id }.map { it.text to it.id }
+            assertEquals(4, first.size)
+
+            // Drop the structure so the book qualifies again — the production stage
+            // always runs against a DB rebuilt from scratch — and plant a foreign row
+            // far above the ids just issued.
+            DriverManager.getConnection("jdbc:sqlite:$dbFile").use { conn ->
+                conn.createStatement().use { st ->
+                    st.executeUpdate("DELETE FROM line_alt_toc WHERE structureId = $structureId")
+                    st.executeUpdate("DELETE FROM alt_toc_entry WHERE structureId = $structureId")
+                    st.executeUpdate("DELETE FROM alt_toc_structure WHERE id = $structureId")
+                    st.executeUpdate(
+                        "INSERT INTO alt_toc_entry " +
+                            "(id, structureId, parentId, textId, level, lineId, isLastChild, hasChildren) " +
+                            "VALUES (9000, 8888, NULL, 1, 0, 1, 0, 0)",
+                    )
+                }
+            }
+            repo.updateHasAltStructures(mbId, false)
+
+            DriverManager.getConnection("jdbc:sqlite:$dbFile").use { conn ->
+                conn.prepareStatement("ATTACH DATABASE ? AS seifim_state").use { st ->
+                    st.setString(1, state.toString())
+                    st.execute()
+                }
+                synthesizeSeifimAltTocs(conn, readLinkedSeifimCandidateSnapshots(conn), AttachedBuildStateIds(conn))
+            }
+
+            val rebuiltStructureId = repo.getAltTocStructuresForBook(mbId).single().id
+            assertEquals(structureId, rebuiltStructureId)
+            val second = repo.getAltTocEntriesForStructure(rebuiltStructureId)
+                .sortedBy { it.id }.map { it.text to it.id }
+            assertEquals(first, second, "entry ids must be reproduced from the attached build state")
+
+            val snapshot = BuildStateReader().read(state)
+            assertEquals(4, snapshot.altTocEntries.size)
+            assertEquals(first.map { it.second }.toSet(), snapshot.altTocEntries.values.toSet())
+        } finally {
+            Files.deleteIfExists(state)
+        }
+    }
+
+    /**
+     * The invariant every stage's publish asserts once `alt_toc_entry` is no
+     * longer exempt from [BuildStateVerifier]: this stage must leave the counter
+     * strictly ahead of the ids it just wrote, on the allocate path and on the
+     * reuse path alike.
+     */
+    @Test
+    fun `the entry counter stays ahead of the db across an allocate and a reuse run`() = runBlocking {
+        val (_, mbId) = seedMiniDb()
+
+        val state = DriverManager.getConnection("jdbc:sqlite:$dbFile").use { conn ->
+            val state = attachEmptyBuildState(conn)
+            synthesizeSeifimAltTocs(conn, readLinkedSeifimCandidateSnapshots(conn), AttachedBuildStateIds(conn))
+            state
+        }
+        try {
+            assertCounterAheadOfDb(state)
+
+            val structureId = repo.getAltTocStructuresForBook(mbId).single().id
+            DriverManager.getConnection("jdbc:sqlite:$dbFile").use { conn ->
+                conn.createStatement().use { st ->
+                    st.executeUpdate("DELETE FROM line_alt_toc WHERE structureId = $structureId")
+                    st.executeUpdate("DELETE FROM alt_toc_entry WHERE structureId = $structureId")
+                    st.executeUpdate("DELETE FROM alt_toc_structure WHERE id = $structureId")
+                }
+            }
+            repo.updateHasAltStructures(mbId, false)
+
+            DriverManager.getConnection("jdbc:sqlite:$dbFile").use { conn ->
+                conn.prepareStatement("ATTACH DATABASE ? AS seifim_state").use { st ->
+                    st.setString(1, state.toString())
+                    st.execute()
+                }
+                synthesizeSeifimAltTocs(conn, readLinkedSeifimCandidateSnapshots(conn), AttachedBuildStateIds(conn))
+            }
+            assertCounterAheadOfDb(state)
+        } finally {
+            Files.deleteIfExists(state)
+        }
+    }
+
+    /** `next_id > MAX(id)` for the two id spaces this stage writes. */
+    private fun assertCounterAheadOfDb(state: java.nio.file.Path) {
+        val counters = BuildStateVerifier.readHeader(state).counters
+        DriverManager.getConnection("jdbc:sqlite:$dbFile").use { conn ->
+            for (table in listOf(IdTable.ALT_TOC_ENTRY, IdTable.ALT_TOC_STRUCTURE)) {
+                conn.createStatement().use { st ->
+                    st.executeQuery("SELECT COALESCE(MAX(id), 0) FROM ${table.tableName}").use { rs ->
+                        rs.next()
+                        val maxId = rs.getLong(1)
+                        val nextId = counters[table] ?: 0L
+                        assertTrue(nextId > maxId, "${table.tableName}: next_id=$nextId <= MAX(id)=$maxId")
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * One heading owning BOTH a sub-heading and its own se'if markers: the heading
+     * loop and the leaf loop must draw from a single per-parent ordinal sequence,
+     * or the two children resolve to one `(structure_id, ancestor_path)` key and
+     * one id. Splitting the counters makes the batch INSERT hit the primary key.
+     */
+    @Test
+    fun `sub-headings and leaves of one parent share the ordinal sequence`() = runBlocking {
+        val (_, mbId) = seedMiniDb()
+
+        val state = DriverManager.getConnection("jdbc:sqlite:$dbFile").use { conn ->
+            val state = attachEmptyBuildState(conn)
+            val snapshot = SeifimBookSnapshot(
+                bookId = mbId,
+                title = "book",
+                headings = listOf(
+                    SeifimHeading(tocLevel = 1, text = "outer", lineId = 901, lineIndex = 1),
+                    SeifimHeading(tocLevel = 2, text = "inner", lineId = 903, lineIndex = 3),
+                ),
+                markers = listOf(
+                    SeifMarker(lineId = 902, lineIndex = 2, label = "outer leaf"),
+                    SeifMarker(lineId = 904, lineIndex = 4, label = "inner leaf"),
+                ),
+                lines = (1L..4L).map { (900L + it) to it },
+                tocNodes = emptyList(),
+            )
+            assertEquals(2, writeSeifimAltToc(conn, snapshot, AttachedBuildStateIds(conn)))
+            state
+        }
+        try {
+            val structureId = repo.getAltTocStructuresForBook(mbId).single().id
+            val entries = repo.getAltTocEntriesForStructure(structureId)
+            assertEquals(4, entries.size)
+            assertEquals(4, entries.map { it.id }.toSet().size, "one id per entry")
+            val outer = entries.single { it.text == "outer" }
+            assertEquals(
+                setOf("inner", "outer leaf"),
+                entries.filter { it.parentId == outer.id }.map { it.text }.toSet(),
+                "the sub-heading and the se'if are siblings under one parent",
+            )
         } finally {
             Files.deleteIfExists(state)
         }

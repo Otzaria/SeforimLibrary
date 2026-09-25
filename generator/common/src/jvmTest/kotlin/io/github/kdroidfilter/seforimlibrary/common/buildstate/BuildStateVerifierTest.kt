@@ -11,7 +11,6 @@ import java.sql.DriverManager
 import kotlin.test.assertContains
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
-import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 /**
@@ -170,16 +169,18 @@ class BuildStateVerifierTest {
     }
 
     /**
-     * `alt_toc_entry` rows are inserted with an implicit rowid by both alt-TOC
-     * builders and its counter therefore never leaves 1. Measured on a real
-     * `generateSefariaSqlite` output: next_id=1 against MAX(id)=71602. Asserting
-     * the counter there would have failed every stage of every release.
+     * All three `alt_toc_entry` writers now allocate their ids, so the table has
+     * no exemption left: a counter behind the DB is a real "the next build
+     * re-issues a published id" defect and must fail here. Re-adding
+     * `IdTable.ALT_TOC_ENTRY` to `NOT_ALLOCATOR_ISSUED` makes this test fail.
      */
     @Test
-    fun `alt_toc_entry ids are not allocator-issued and do not fail the check`() {
+    fun `alt_toc_entry counters behind the db are rejected like every other table`() {
         val state = tmp.newFolder().toPath().resolve("seforim.db.buildstate")
         val expected = meta("2026-09-08T10:00:00Z")
         snapshot(state, expected)
+        // The allocator never issued an alt_toc_entry id, so its counter is absent
+        // while the DB carries the ids the old implicit-rowid path produced.
         val db = miniDb(
             "seforim.db",
             mapOf(
@@ -189,27 +190,36 @@ class BuildStateVerifierTest {
             ),
         )
 
-        BuildStateVerifier.verifyFreshSnapshot(state, db, expected)
-    }
-
-    @Test
-    fun `an unrelated table is still checked when alt_toc_entry carries rows`() {
-        val state = tmp.newFolder().toPath().resolve("seforim.db.buildstate")
-        val expected = meta("2026-09-08T10:00:00Z")
-        snapshot(state, expected)
-        val db = miniDb(
-            "seforim.db",
-            mapOf(
-                "book" to listOf(1L, 2L, 9L),
-                "alt_toc_entry" to listOf(71602L),
-            ),
-        )
-
         val failure = assertFailsWith<IllegalStateException> {
             BuildStateVerifier.verifyFreshSnapshot(state, db, expected)
         }
-        assertContains(failure.message!!, "book: next_id=3 <= MAX(id)=9")
-        assertFalse(failure.message!!.contains("alt_toc_entry"))
+        assertContains(failure.message!!, "alt_toc_entry")
+        assertContains(failure.message!!, "MAX(id)=71602")
+    }
+
+    @Test
+    fun `an allocator-issued alt_toc_entry counter ahead of the db passes`() {
+        val state = tmp.newFolder().toPath().resolve("seforim.db.buildstate")
+        val expected = meta("2026-09-08T10:00:00Z")
+        val allocator = InMemoryIdAllocator.load(null)
+        val bookA = allocator.bookId("Otzaria", "A")
+        allocator.bookId("Otzaria", "B")
+        repeat(3) { i -> allocator.lineId(bookA, lineHash(i), 0) }
+        val structureId = allocator.altTocStructureId(bookA, "Parasha")
+        val entryIds = (1..3).map { allocator.altTocEntryId(structureId, "$it") }
+        assertEquals(listOf(1L, 2L, 3L), entryIds)
+        allocator.snapshotTo(state, expected)
+
+        val db = miniDb(
+            "seforim.db",
+            mapOf(
+                "book" to listOf(1L, 2L),
+                "line" to listOf(1L, 2L, 3L),
+                "alt_toc_entry" to entryIds,
+            ),
+        )
+
+        BuildStateVerifier.verifyFreshSnapshot(state, db, expected)
     }
 
     @Test

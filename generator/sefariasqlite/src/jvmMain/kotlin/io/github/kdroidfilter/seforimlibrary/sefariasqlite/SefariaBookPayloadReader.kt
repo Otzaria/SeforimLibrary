@@ -283,6 +283,7 @@ internal class SefariaBookPayloadReader(
                 versionsMeta = versionsMeta,
                 sourceDirPath = textPath.parent?.toString(),
                 schemaFilePath = schemaPath.toString(),
+                preferredVersionFileName = preferredPath?.fileName?.name,
                 categoriesEn = categoriesEn,
             )
         }.onFailure { e ->

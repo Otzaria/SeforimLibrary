@@ -8,6 +8,7 @@ import io.github.kdroidfilter.seforimlibrary.common.changes.TouchedBookDetector
 import io.github.kdroidfilter.seforimlibrary.common.countVisibleChars
 import io.github.kdroidfilter.seforimlibrary.common.ids.IdAllocator
 import io.github.kdroidfilter.seforimlibrary.common.ids.IdAllocatorBindings
+import io.github.kdroidfilter.seforimlibrary.common.ids.altTocChildPath
 import io.github.kdroidfilter.seforimlibrary.common.ids.InMemoryIdAllocator
 import io.github.kdroidfilter.seforimlibrary.common.reports.GeneratorReport
 import io.github.kdroidfilter.seforimlibrary.core.models.*
@@ -2249,8 +2250,7 @@ class DatabaseGenerator(
         // Wholesale rebuild — including the structure row itself, since the repo
         // upsert dedups on (bookId, key) without refreshing title/heTitle. The id
         // is allocator-stable per (bookId, key), so the fresh row keeps its id.
-        // (Entry ids stay auto-allocated, matching the Sefaria builder's
-        // Phase 1.5 deferral.)
+        // Entry ids are allocator-stable too, keyed on the per-parent ordinal chain.
         val structureId = allocator.altTocStructureId(book.id, data.key)
         deleteAltTocStructure(structureId)
         if (data.nodes.isEmpty()) {
@@ -2262,12 +2262,13 @@ class DatabaseGenerator(
         )
 
         val entriesByParent = mutableMapOf<Long?, MutableList<Long>>()
+        val nextOrdinalByParent = mutableMapOf<Long?, Int>()
         val usedLinesByParent = mutableMapOf<Long?, MutableSet<Long>>()
         // lineIndex -> entryId; children insert after their parent, so the deepest
         // entry starting on a shared line wins (same rule as the Sefaria builder).
         val anchorByLineIndex = mutableMapOf<Int, Long>()
 
-        suspend fun addNode(node: AltTocNodeData, level: Int, parentId: Long?): Boolean {
+        suspend fun addNode(node: AltTocNodeData, level: Int, parentId: Long?, parentPath: String): Boolean {
             val lineIndex = node.line.toInt() - 1
             val lineId = getLineIdCached(book.id, lineIndex)
             if (lineId == null) {
@@ -2279,22 +2280,26 @@ class DatabaseGenerator(
                 return false
             }
             val textId = bindings.upsertTocText(node.heTitle)
-            val entryId = repository.insertAltTocEntry(
+            val ordinal = (nextOrdinalByParent[parentId] ?: 0) + 1
+            nextOrdinalByParent[parentId] = ordinal
+            val path = altTocChildPath(parentPath, ordinal)
+            val entryId = bindings.insertAltTocEntryStable(
                 AltTocEntry(
                     structureId = structureId, parentId = parentId, textId = textId,
                     text = node.heTitle, level = level, lineId = lineId,
-                )
+                ),
+                ancestorPath = path,
             )
             entriesByParent.getOrPut(parentId) { mutableListOf() } += entryId
             anchorByLineIndex[lineIndex] = entryId
             var hasChild = false
-            for (child in node.children) if (addNode(child, level + 1, entryId)) hasChild = true
+            for (child in node.children) if (addNode(child, level + 1, entryId, path)) hasChild = true
             if (hasChild) repository.updateAltTocEntryHasChildren(entryId, true)
             return true
         }
 
         var any = false
-        for (node in data.nodes) if (addNode(node, 0, null)) any = true
+        for (node in data.nodes) if (addNode(node, 0, null, "")) any = true
         if (!any) {
             deleteAltTocStructure(structureId)
             logger.w { "All nodes of alt-toc structure '${data.key}' in ${book.title} were dropped — structure removed" }

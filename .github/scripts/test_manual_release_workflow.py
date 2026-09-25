@@ -331,6 +331,21 @@ class ManualReleaseWorkflowContractTest(unittest.TestCase):
             self.step("Stage release assets"),
         )
 
+    def test_the_fan_downloads_anchors_with_the_preflighted_release_credential(self):
+        # The fan runs after the relink wait, which may outlive the job's
+        # automatic GITHUB_TOKEN: a 401 there would lose the whole expensive
+        # build at `gh release download` of the anchor's seforim.db.zst.
+        lib = self.fan_lib
+        use_at = lib.index('use_token "${RELEASE_TOKEN_KIND:-}"')
+        self.assertLess(
+            lib.index('. "$(dirname "${BASH_SOURCE[0]}")/release_draft.sh"'), use_at
+        )
+        self.assertLess(use_at, lib.index("gh release download"))
+        # The preflighted credentials themselves reach the step from its env.
+        patch_fan = self.step("Produce + verify patch fan")
+        self.assertIn("AUTOMATIC_TOKEN: ${{ secrets.GITHUB_TOKEN }}", patch_fan)
+        self.assertIn("CROSS_REPO_TOKEN: ${{ secrets.PIPELINE_TOKEN }}", patch_fan)
+
     def test_patch_fan_decides_unpatchable_anchors_before_downloading_them(self):
         # An anchor the producer will reject costs 110–135 s of download plus a
         # decompress before anyone learns that (run 33865604251, anchor v10).

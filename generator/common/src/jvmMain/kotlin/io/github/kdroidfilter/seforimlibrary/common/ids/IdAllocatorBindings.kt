@@ -44,6 +44,9 @@ class IdAllocatorBindings(
     private val categoriesInserted = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
     private val tocTextsInserted = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
 
+    // (structureId, ancestorPath) keys handed out this build; see insertAltTocEntryStable.
+    private val altTocEntryKeysIssued = java.util.concurrent.ConcurrentHashMap.newKeySet<Pair<Long, String>>()
+
     // ─── Lookup-table helpers ──────────────────────────────────────────────────
 
     suspend fun upsertSource(name: String): Long {
@@ -66,13 +69,30 @@ class IdAllocatorBindings(
 
     suspend fun upsertPubPlace(name: String): Long {
         val id = allocator.pubPlaceId(name)
-        if (pubPlacesInserted.add(name)) repo.insertPubPlaceWithId(id, name)
+        if (pubPlacesInserted.add(name)) {
+            repo.insertPubPlaceWithId(id, name)
+            // INSERT OR IGNORE: a foreign row on this id, or this name under another id,
+            // is dropped silently and books would be linked to that foreign row.
+            val stored = repo.getPubPlaceByName(name)
+            check(stored != null && stored.id == id) {
+                "pub_place '$name' was allocated id $id but the DB holds ${stored?.id} for it; " +
+                    "the build_state does not describe this DB"
+            }
+        }
         return id
     }
 
     suspend fun upsertPubDate(date: String): Long {
         val id = allocator.pubDateId(date)
-        if (pubDatesInserted.add(date)) repo.insertPubDateWithId(id, date)
+        if (pubDatesInserted.add(date)) {
+            repo.insertPubDateWithId(id, date)
+            // Same INSERT OR IGNORE hazard as upsertPubPlace.
+            val stored = repo.getPubDateByDate(date)
+            check(stored != null && stored.id == id) {
+                "pub_date '$date' was allocated id $id but the DB holds ${stored?.id} for it; " +
+                    "the build_state does not describe this DB"
+            }
+        }
         return id
     }
 
@@ -163,6 +183,12 @@ class IdAllocatorBindings(
     }
 
     suspend fun insertAltTocEntryStable(entry: AltTocEntry, ancestorPath: String): Long {
+        // One id per (structure, path) is the invariant this guards: a duplicate key
+        // would silently hand two rows the same id instead of failing at the call site.
+        check(altTocEntryKeysIssued.add(entry.structureId to ancestorPath)) {
+            "alt_toc_entry natural key already used this build: " +
+                "structure=${entry.structureId} path=$ancestorPath"
+        }
         val id = allocator.altTocEntryId(entry.structureId, ancestorPath)
         val withId = if (entry.id == id) entry else entry.copy(id = id)
         repo.insertAltTocEntry(withId)

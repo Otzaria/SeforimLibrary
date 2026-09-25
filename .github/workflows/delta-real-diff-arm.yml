@@ -1,33 +1,32 @@
 name: Delta pipeline — real diff test (ARM)
 
-# Tests the full delta-update pipeline against a REAL content diff:
+# delta-real-diff-test.yml on the 16 GB ARM runner.
 #
-#   v1 baseline ← built with the SECOND-TO-LAST GitHub releases of
-#                 Sefaria + Otzaria (= what was current "yesterday")
-#   v2 fresh    ← built with the LATEST GitHub releases of those repos
-#                 (= what's current "today")
+# This file used to be a byte-for-byte copy of that workflow apart from its
+# name — same `runs-on: [self-hosted, Linux, ARM64]` and all — so there was
+# never a reason to dispatch it, and it never ran once. It now calls the same
+# workflow with runner_selection=ARM64, so the two cannot drift apart again.
 #
-# Because the two builds use different source snapshots, the producer
-# computes a real, non-empty diff — exercising every code path that
-# the dry-run smoke test only mocks. producePatchAndVerify's strict
-# `prev + patch == new` invariant is the verdict.
-#
-# Workflow stages everything via the fetchers' own cache directories
-# so no Kotlin needs to change: the fetcher checks for an existing
-# non-empty extract and skips downloading when it finds one.
-#
-# Everything is uploaded as workflow artefacts. Nothing is pushed to
-# a GitHub Release.
+# The ARM runner has no durable Java/Gradle installation, so this route is the
+# one that still sets the toolchain up through actions/setup-java. Prefer the
+# `local` runner in delta-real-diff-test.yml; use this one when that host is
+# busy with a release.
 
 on:
   workflow_dispatch:
     inputs:
+      inputs_from:
+        description: 'Which snapshot both builds see'
+        required: true
+        default: 'released'
+        type: choice
+        options:
+          - 'released'
+          - 'latest'
       baseline_ref:
         description: >-
-          Commit/ref to build v1 from. Empty (default) = same tree as v2, so the
-          patch reflects a SOURCE diff. Set it to a pre-feature commit to isolate
-          a CODE change: both builds then use the same staged sources, and the
-          patch contains exactly what the code change alters.
+          Commit/ref to build v1 from. Empty (default) = this tree on both
+          sides. See delta-real-diff-test.yml for what each mode measures.
         required: false
         type: string
         default: ''
@@ -35,248 +34,13 @@ on:
 permissions:
   contents: read
 
+# The concurrency group lives on delta-real-diff-test.yml, the workflow this one
+# calls: a caller that held the same group would be waiting on its own job.
+
 jobs:
   real-diff:
-    name: Build v1 (N-1 sources) + v2 (N sources) + verify patch
-    runs-on: [self-hosted, Linux, ARM64]
-    timeout-minutes: 300
-    env:
-      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-    steps:
-      - name: Checkout SeforimLibrary
-        uses: actions/checkout@v4
-        with:
-          submodules: recursive
-          # Full history so a baseline_ref older than HEAD can be checked out.
-          fetch-depth: 0
-
-      - name: Disk before build
-        run: df -h
-
-      - name: Bridle daemon heaps + generator forks for the 16 GB runner
-        run: |
-          # The runner has 16 GB total. Default config blows past it:
-          #   Gradle daemon (default unbounded) + Kotlin daemon (4g) +
-          #   forked generator JVM (-Xmx10g per task) → OOM-kill.
-          # Bridle each component:
-          #   • Gradle daemon: 3g
-          #   • Kotlin compile in-process (no separate 4g daemon)
-          #   • Generator forks: 5g per task (well under what they actually use)
-          mkdir -p ~/.gradle
-          cat >> ~/.gradle/gradle.properties <<EOF
-          org.gradle.jvmargs=-Xmx3g
-          kotlin.compiler.execution.strategy=in-process
-          generatorHeap=8g
-          EOF
-
-      - name: Disk after setup
-        run: df -h
-
-      - name: Set up Java 25
-        uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: "25"
-
-      - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@v4
-
-      - name: Grant execute permission for gradlew
-        run: chmod +x gradlew
-
-      - name: Install DB workflow dependencies
-        run: bash .github/scripts/install-db-workflow-deps.sh
-
-      # ─── Pre-stage SECOND-TO-LAST releases into fetcher caches ─────────────
-      - name: Pre-stage Sefaria N-1 export into fetcher cache
-        run: |
-          set -euo pipefail
-          SEFARIA_CACHE=generator/sefariasqlite/build/sefaria
-          mkdir -p "$SEFARIA_CACHE"
-          # The Sefaria fetcher cache lives under build/sefaria/export and is
-          # considered "valid" iff non-empty. We extract the N-1 archive
-          # there so the fetcher uses it instead of /releases/latest.
-          # Content releases are the ones shipping a sefaria-exports-*.tar.zst.
-          # The repo also publishes downstream-intent/recovery releases, so an
-          # index into the unfiltered list picks an arbitrary one.
-          mapfile -t TAGS < <(gh api --paginate repos/Otzaria/SefariaExport/releases \
-            --jq '.[] | select([.assets[].name] | map(startswith("sefaria-exports-") and endswith(".tar.zst")) | any) | .tag_name')
-          if [ "${#TAGS[@]}" -lt 2 ]; then
-            echo "::error::need two Sefaria content releases, found ${#TAGS[@]}"; exit 1
-          fi
-          TAG="${TAGS[1]}"
-          echo "Sefaria N-1 content release: $TAG"
-          URL=$(gh api "repos/Otzaria/SefariaExport/releases/tags/$TAG" \
-                  --jq '.assets[] | select(.name | startswith("sefaria-exports-") and endswith(".tar.zst")) | .browser_download_url')
-          test -n "$URL"
-          curl -fL -o /tmp/sefaria.tar.zst "$URL"
-          mkdir -p "$SEFARIA_CACHE/export"
-          tar --use-compress-program=unzstd -xf /tmp/sefaria.tar.zst -C "$SEFARIA_CACHE/export"
-          rm /tmp/sefaria.tar.zst
-          echo "Sefaria cache layout:"
-          ls "$SEFARIA_CACHE/export" | head -20
-          # Fail here, not 20 minutes later inside the generator.
-          for d in json schemas links; do
-            find "$SEFARIA_CACHE/export" -maxdepth 2 -type d -name "$d" | grep -q . || {
-              echo "::error::extracted Sefaria export has no $d/ directory"; exit 1; }
-          done
-
-      - name: Pre-stage Otzaria N-1 source into fetcher cache
-        run: |
-          set -euo pipefail
-          OTZARIA_CACHE=generator/otzariasqlite/build/otzaria
-          mkdir -p "$OTZARIA_CACHE/source"
-          # otzaria-library ships multiple .zip assets (otzaria_latest.zip +
-          # otzaria_dicta_latest.zip etc). Grab all of N-1.
-          # Content releases are the ones shipping otzaria_latest.zip. The same
-          # repo also publishes ForDB, saga-state and library-links releases, so
-          # `.[1]` picked a ForDB release and staged only ForDB/ (2026-08-29).
-          mapfile -t TAGS < <(gh api --paginate repos/otzaria/otzaria-library/releases \
-            --jq '.[] | select([.assets[].name] | index("otzaria_latest.zip")) | .tag_name')
-          if [ "${#TAGS[@]}" -lt 2 ]; then
-            echo "::error::need two Otzaria content releases, found ${#TAGS[@]}"; exit 1
-          fi
-          TAG="${TAGS[1]}"
-          echo "Otzaria N-1 content release: $TAG"
-          mapfile -t URLS < <(gh api "repos/otzaria/otzaria-library/releases/tags/$TAG" \
-            --jq '.assets[] | select(.name | endswith(".zip")) | .browser_download_url')
-          test "${#URLS[@]}" -ge 1
-          for url in "${URLS[@]}"; do
-            name=$(basename "$url")
-            echo "Downloading Otzaria N-1 asset: $name"
-            curl -fL -o "/tmp/$name" "$url"
-            unzip -q -o "/tmp/$name" -d "$OTZARIA_CACHE/source"
-            rm "/tmp/$name"
-          done
-          echo "Otzaria cache layout (top of source/):"
-          ls "$OTZARIA_CACHE/source" | head -20
-          # The generator's phase 1 requires this exact directory; assert it here
-          # so a wrong release fails the staging step with a readable message.
-          test -d "$OTZARIA_CACHE/source/אוצריא" || {
-            echo "::error::staged Otzaria source has no אוצריא/ directory (got: $(ls "$OTZARIA_CACHE/source" | tr '\n' ' '))"
-            exit 1; }
-
-      # ─── BUILD v1 BASELINE ─────────────────────────────────────────────────
-      - name: Check out the baseline tree for v1
-        if: inputs.baseline_ref != ''
-        run: |
-          set -euo pipefail
-          git checkout --detach "${{ inputs.baseline_ref }}"
-          git submodule update --init --recursive
-          echo "v1 baseline tree: $(git rev-parse HEAD)"
-
-      - name: Build v1 baseline (uses pre-staged N-1 sources)
-        run: ./gradlew generateSeforimDb -PdbVersion=1 --no-daemon --stacktrace
-
-      - name: Verify v1 stamp
-        run: |
-          V=$(sqlite3 build/seforim.db "SELECT value FROM schema_meta WHERE key='db_version'")
-          test "$V" = "1" || { echo "❌ db_version=$V (expected 1)"; exit 1; }
-          echo "✓ v1 stamped"
-
-      - name: Stash v1 artefacts + clear v1 sources
-        run: |
-          set -euo pipefail
-          mv build/seforim.db build/seforim.db.v1
-          mv build/seforim.db.buildstate build/seforim.db.buildstate.v1
-          # Drop lexical.db; only need DB + buildstate
-          rm -f build/lexical.db build/release_info.txt
-          # Clear cached sources so v2 re-fetches /releases/latest — but only
-          # when v2 is meant to differ by SOURCE. With a baseline_ref the point
-          # is to isolate the CODE change, so both builds must see one snapshot.
-          if [ -z "${{ inputs.baseline_ref }}" ]; then
-            rm -rf generator/sefariasqlite/build/sefaria
-            rm -rf generator/otzariasqlite/build/otzaria
-            # Also clear the acronymizer cache so it gets the current version
-            rm -rf generator/otzariasqlite/build/acronymizer
-          else
-            echo "baseline_ref set — keeping staged sources so only the code differs."
-          fi
-          ls -lah build/seforim.db.v1 build/seforim.db.buildstate.v1
-          df -h
-
-      # ─── BUILD v2 (LATEST sources, seeded by v1 buildstate) ────────────────
-      - name: Re-seed allocator with v1 buildstate
-        run: cp build/seforim.db.buildstate.v1 build/seforim.db.buildstate
-
-      - name: Restore the current tree for v2
-        if: inputs.baseline_ref != ''
-        run: |
-          set -euo pipefail
-          git checkout --detach "$GITHUB_SHA"
-          git submodule update --init --recursive
-          echo "v2 tree: $(git rev-parse HEAD)"
-
-      - name: Build v2 (lets fetcher download /releases/latest)
-        run: ./gradlew generateSeforimDb -PdbVersion=2 -PtoVersion=2 --no-daemon --stacktrace
-
-      - name: Verify v2 stamp
-        run: |
-          V=$(sqlite3 build/seforim.db "SELECT value FROM schema_meta WHERE key='db_version'")
-          test "$V" = "2" || { echo "❌ db_version=$V (expected 2)"; exit 1; }
-          echo "✓ v2 stamped"
-
-      # ─── PRODUCE + VERIFY PATCH ────────────────────────────────────────────
-      - name: producePatchAndVerify (strict invariant)
-        run: |
-          # catalog.pb is no longer produced; drop any stale copy so it can't
-          # be auto-embedded into the patch via the default -PcatalogPb path.
-          rm -f build/catalog.pb
-          # These runs test the delta MECHANICS on toy DBs, where a patch is
-          # legitimately huge relative to the DB — the size guard must not fire.
-          ./gradlew :generator-common:producePatchAndVerify \
-            -PprevDb=$PWD/build/seforim.db.v1 \
-            -PnewDb=$PWD/build/seforim.db \
-            -Pout=$PWD/build/patch-v1-v2.db \
-            -PfromVersion=1 -PtoVersion=2 \
-            -PmaxDeltaUncompressedRatio=1000 \
-            --no-daemon --stacktrace
-
-      - name: Summarise patch
-        run: |
-          set -euo pipefail
-          echo "=== Patch artefacts ==="
-          ls -lah build/patch-v1-v2.db build/patch-v1-v2.db.manifest.json
-          echo ""
-          echo "=== Manifest ==="
-          cat build/patch-v1-v2.db.manifest.json
-          echo ""
-          echo "=== Patch.blobs ==="
-          sqlite3 build/patch-v1-v2.db "SELECT name, length(content) FROM blobs"
-          echo ""
-          echo "=== Patch upserts/deletes per table (non-zero only) ==="
-          for t in source author topic pub_place pub_date connection_type tocText \
-                   generation category category_closure book book_author book_base_text \
-                   book_topic book_pub_place book_pub_date book_acronym book_generation \
-                   tocEntry line line_toc link link_anchor link_range link_coverage \
-                   book_has_links book_version version_line alt_toc_structure \
-                   alt_toc_entry line_alt_toc default_commentator default_targum \
-                   schema_meta; do
-            UC=$(sqlite3 build/patch-v1-v2.db "SELECT COUNT(*) FROM upsert_${t}" 2>/dev/null || echo 0)
-            DC=$(sqlite3 build/patch-v1-v2.db "SELECT COUNT(*) FROM delete_${t}" 2>/dev/null || echo 0)
-            if [ "$UC" != "0" ] || [ "$DC" != "0" ]; then
-              echo "  $t: +$UC / -$DC"
-            fi
-          done
-
-      # ─── ARTEFACTS ─────────────────────────────────────────────────────────
-      - name: Upload patch + manifest
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: delta-real-diff-patch
-          path: |
-            build/patch-v1-v2.db
-            build/patch-v1-v2.db.manifest.json
-          retention-days: 7
-
-      - name: Upload v1 + v2 buildstates
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: delta-real-diff-context
-          path: |
-            build/seforim.db.buildstate.v1
-            build/seforim.db.buildstate
-          retention-days: 7
+    uses: ./.github/workflows/delta-real-diff-test.yml
+    with:
+      runner_selection: ARM64
+      inputs_from: ${{ inputs.inputs_from }}
+      baseline_ref: ${{ inputs.baseline_ref }}

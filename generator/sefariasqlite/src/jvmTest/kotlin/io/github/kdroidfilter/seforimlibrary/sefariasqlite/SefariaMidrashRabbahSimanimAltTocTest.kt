@@ -89,6 +89,12 @@ class SefariaMidrashRabbahSimanimAltTocTest {
             refEntries = refEntries,
         )
 
+        // A foreign row above the allocator's counter: an entry still taking an
+        // implicit rowid would land above it instead of at 1..n.
+        repository.executeRawQuery(
+            "INSERT INTO alt_toc_entry (id, structureId, parentId, textId, level, lineId, " +
+                "isLastChild, hasChildren) VALUES (5000, 9999, NULL, 1, 0, NULL, 0, 0)",
+        )
         val bindings = IdAllocatorBindings(InMemoryIdAllocator.load(path = null), repository)
         val builder = SefariaAltTocBuilder(repository, bindings)
         val result = builder.buildAltTocStructuresForBook(
@@ -106,6 +112,10 @@ class SefariaMidrashRabbahSimanimAltTocTest {
         assertEquals("סימנים", structures.first().heTitle)
 
         val entries = repository.getAltTocEntriesForStructure(structures.first().id)
+        assertTrue(
+            entries.all { it.id < 5000 },
+            "every synthesized siman entry must take an allocator id, not an implicit rowid",
+        )
 
         // Level-0: the two parashot, pointing at their heading lines.
         val parashaA = entries.single { it.text == "פרק א" }
@@ -195,6 +205,12 @@ class SefariaMidrashRabbahSimanimAltTocTest {
             refEntries = refEntries,
         )
 
+        // A foreign row above the allocator's counter: an entry still taking an
+        // implicit rowid would land above it instead of at 1..n.
+        repository.executeRawQuery(
+            "INSERT INTO alt_toc_entry (id, structureId, parentId, textId, level, lineId, " +
+                "isLastChild, hasChildren) VALUES (5000, 9999, NULL, 1, 0, NULL, 0, 0)",
+        )
         val bindings = IdAllocatorBindings(InMemoryIdAllocator.load(path = null), repository)
         val builder = SefariaAltTocBuilder(repository, bindings)
         val result = builder.buildAltTocStructuresForBook(
