@@ -3,6 +3,7 @@ package io.github.kdroidfilter.seforimlibrary.sefariasqlite.manuallinks
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
+import kotlin.test.assertFalse
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
@@ -110,5 +111,36 @@ class ManualLinksBootstrapTest {
                 second.lineIndex2,
             )
         }
+    }
+
+    @Test
+    fun missingPostStateOverrideIsNullButTwoMatchesStayFatal() {
+        val base = BootstrapRecordOverride(
+            path = "MoreBooks/links/book_links.json",
+            recordSha256 = "0".repeat(64),
+            postRecordSha256 = "1".repeat(64),
+            requireHeRef2 = "heRef",
+            ref2 = "Shulchan Arukh, Orach Chayim 270:1",
+            lineIndex2 = 1875,
+        )
+        assertNull(
+            ManualLinksRefresh.postStateOverrideOrNull(
+                listOf(base), base.path, "9".repeat(64), base.requireHeRef2, base.ref2, base.lineIndex2,
+            ),
+        )
+        assertFailsWith<IllegalStateException> {
+            ManualLinksRefresh.postStateOverrideOrNull(
+                listOf(base, base.copy(recordSha256 = "2".repeat(64))),
+                base.path, base.postRecordSha256, base.requireHeRef2, base.ref2, base.lineIndex2,
+            )
+        }
+    }
+
+    @Test
+    fun storedEnrichmentHoldsOnlyOnTheExactStoredRefAndLine() {
+        val ref = "Shulchan Arukh, Orach Chayim 270:1"
+        assertTrue(ManualLinksRefresh.storedEnrichmentStillHolds(ref, 1875, ref, 1875))
+        assertFalse(ManualLinksRefresh.storedEnrichmentStillHolds(ref, 1876, ref, 1875))
+        assertFalse(ManualLinksRefresh.storedEnrichmentStillHolds("Shulchan Arukh, Orach Chayim 270:2", 1875, ref, 1875))
     }
 }

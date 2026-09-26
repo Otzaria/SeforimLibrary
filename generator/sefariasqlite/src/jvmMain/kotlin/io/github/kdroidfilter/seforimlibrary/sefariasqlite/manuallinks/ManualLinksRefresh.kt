@@ -634,14 +634,23 @@ internal class ManualLinksRefresh(
             ?: run {
                 val storedRef = record.get("ref_2").textValue()
                 val lineIndex = ManualLinksDocument.exactInt(record.get("line_index_2"), "line_index_2")
-                val override = exactPostStateOverride(
+                val override = postStateOverrideOrNull(
                     overrides = config.bootstrapRecordOverrides,
                     path = path,
                     stableRecordHash = document.stableRecordHash(recordIndex),
                     heRef2 = record.get("heRef_2").textValue(),
                     ref2 = storedRef,
                     lineIndex2 = lineIndex,
-                )
+                ) ?: run {
+                    // An already-enriched record whose heRef_2 Sefaria spells differently (e.g. siman
+                    // 270 as ער, not רע): its stored ref_2 is authoritative, as in refresh mode, but only
+                    // while it still lands on exactly the stored line. Anything else stays fatal.
+                    val stored = index.resolveRef(book, storedRef)
+                    require(storedEnrichmentStillHolds(stored.ref, stored.lineIndex, storedRef, lineIndex)) {
+                        "$path[$recordIndex]: zero-ref record's stored ref_2 no longer resolves to its line_index_2"
+                    }
+                    return stored
+                }
                 require(usedOverrides.add(path to override.recordSha256)) {
                     "Bootstrap post-state override was used twice: $path/${override.postRecordSha256}"
                 }
@@ -1024,7 +1033,7 @@ internal class ManualLinksRefresh(
                 else -> error("Tashma vector mismatch at physical line $position")
             }
         }
-        require(identity == 732 && stripped == 17_378) { "Tashma vector classification changed: identity=$identity stripped=$stripped" }
+        require(identity == 732 && stripped == 17_368) { "Tashma vector classification changed: identity=$identity stripped=$stripped" }
         book.releaseFullProofLines()
         return TashmaProof(book)
     }
@@ -1046,6 +1055,20 @@ internal class ManualLinksRefresh(
             11277 to ("bfd9aaac809853bd6811c61abcecdb4144a25f00d095681f786db4829c5cee63" to "8f7d9f4b3986fa8e281bff1c0f7c371b53c3aeb4c5a43b1f228f3354fbc58a43"),
             15130 to ("5c4808b7b5aa061b60dae188874a13d646c3ef40236aaad09c4ea0a12392b75a" to "205f9cb7deff294507d1107cfb5d5ce33278649652e9177d29470b1b76d289b9"),
             15162 to ("bffce9c82d51455f8f75a64705749f8fd55e814e040e7a3ba2d82cd091160809" to "0ae824929f27fb60bc1054b58fb220a2eef064c71a0737596294a6afacc72f69"),
+            // Tool-side, not Sefaria: since d9373bcf (keep inline <br>, 2026-09-22) these lines keep a
+            // <br> the snapshot has as a space or nothing. Text and line alignment are otherwise unchanged.
+            1237 to ("9f03273dd1db4b003eb8d6fafeda110ff7da78f5a110c37513799a87c217c896" to "b2c51ec5317a4cf50bbd60d51d3a2bf8c81a41082012a17484f773c38da69eda"),
+            1727 to ("9a9432f76b4ffdebe52690d072083ec276b2e5dd3a430992a722861ce23a55b2" to "8c8c9a7710e91b83158691f8ae701bc8dceebfa80bb62b4ca606dad605293a24"),
+            3152 to ("e108294c93ceed70a2635898f38f2ae4c2a5e4f52ed48fafdd3fb08a927194ce" to "987d56169109addac1780354daa0575ee1eb4db9027bc96dc732d3627652687a"),
+            4477 to ("fe1973eca1ddba706096b9869690c04d85eb645ff0f5a21bccea23cd037f797f" to "8aa7e70206d3ddbf3a58a58b06212fdd10e39240f744ff28e2e5c1fae5dda885"),
+            8623 to ("6dc7b3f174321574e24f281d107d7957af8a155edee82e60d92a4d07d5d786ea" to "ee12efce16ff8daad85f69441061c3dd48822a54a9f486b1e408330662da2471"),
+            14061 to ("45599e675028a9acca8cef4e26cb54bd1390a530503540f6809391e10ff525fe" to "fa397b0c10ee351375dea4569e8f5a896db9c14baa30222efe874ab7652aa448"),
+            14168 to ("d000da0fc493d44dfe9e1f68e10f999a57b178fb8ad0b87a071a64cb8d346ffd" to "73372d9d32882b3ca4f0ce7f2c925884ff5d4b850a946fa7e7be3babea56d7e4"),
+            14377 to ("0b0331f65e77292148ccd1933bb190c751c55ca979abd064727789eddb4ebe00" to "2a7a1765e679dea58f6fe799339d90d5f1d966a18109ed1f42fd8edbc5b2a16f"),
+            15880 to ("9486cea2b2cf99316b2ed9e57b65902d1113f00a5ae08888ee7c1730ed2c2f70" to "83b5418e6a098e0737abc0b9ec45ca0fc284df923b206a7213af671788bbe6c5"),
+            // Content drift since the last migrate (2026-09-02), unrelated to <br>: one standalone
+            // two-letter word is gone; alignment unchanged.
+            15960 to ("78f03ceba306f987f9eb58a7e49d08a8dcf8da30f1e85f89e6a20f28e4806c62" to "16304a6188f252dab72ca95510e58cafb761e3069436c43935feb1c483251792"),
         )
 
         internal fun stripOneLeadingMarker(value: String): String = LEADING_MARKER.replaceFirst(value, "")
@@ -1075,12 +1098,34 @@ internal class ManualLinksRefresh(
             heRef2: String,
             ref2: String,
             lineIndex2: Int,
-        ): BootstrapRecordOverride = overrides.singleOrNull {
-            it.path == path &&
-                it.postRecordSha256 == stableRecordHash &&
-                it.requireHeRef2 == heRef2 &&
-                it.ref2 == ref2 &&
-                it.lineIndex2 == lineIndex2
-        } ?: error("$path: zero-ref adapter result lacks exactly one post-state override")
+        ): BootstrapRecordOverride = postStateOverrideOrNull(overrides, path, stableRecordHash, heRef2, ref2, lineIndex2)
+            ?: error("$path: zero-ref adapter result lacks exactly one post-state override")
+
+        /** The single override pinned to this exact post-state, or null when none is; two matches stay fatal. */
+        internal fun postStateOverrideOrNull(
+            overrides: List<BootstrapRecordOverride>,
+            path: String,
+            stableRecordHash: String,
+            heRef2: String,
+            ref2: String,
+            lineIndex2: Int,
+        ): BootstrapRecordOverride? {
+            val matches = overrides.filter {
+                it.path == path &&
+                    it.postRecordSha256 == stableRecordHash &&
+                    it.requireHeRef2 == heRef2 &&
+                    it.ref2 == ref2 &&
+                    it.lineIndex2 == lineIndex2
+            }
+            check(matches.size <= 1) { "$path: ${matches.size} post-state overrides match one record" }
+            return matches.singleOrNull()
+        }
+
+        internal fun storedEnrichmentStillHolds(
+            resolvedRef: String,
+            resolvedLineIndex: Int,
+            storedRef: String,
+            storedLineIndex: Int,
+        ): Boolean = resolvedRef == storedRef && resolvedLineIndex == storedLineIndex
     }
 }
