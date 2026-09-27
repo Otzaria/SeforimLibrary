@@ -351,7 +351,10 @@ internal suspend fun applyMetadata(
     descriptions: Map<String, Description>,
     logger: Logger,
 ): MetadataResult {
-    val bookIdsByTitle = repository.getAllBookTitleIds().groupBy({ it.second }, { it.first })
+    // Keys on both sides are trimmed: the CSV/JSON parsers trim every title, but a
+    // Sefaria heTitle can arrive with a trailing space (one v28 book did), and an
+    // untrimmed DB key could then never match its own ForDB row.
+    val bookIdsByTitle = repository.getAllBookTitleIds().groupBy({ it.second.trim() }, { it.first })
 
     var updated = 0
     // Names, not just a count: `unmatched=1116` (24.5% of the ForDB metadata

@@ -65,4 +65,33 @@ class SeedAllMetadataSourceTest {
         assertEquals(listOf("אבן הראשה", "קול התור"), result.unmatchedTitles)
         assertEquals(result.unmatched, result.unmatchedTitles.size, "the count must be the list's size")
     }
+
+    /** A DB title with surrounding whitespace must still match its (trimmed) ForDB row. */
+    @Test
+    fun applyMetadata_matchesDbTitleWithTrailingSpace() = runBlocking {
+        val driver = JdbcSqliteDriver(url = "jdbc:sqlite::memory:")
+        SeforimDb.Schema.create(driver)
+        val repo = SeforimRepository(":memory:", driver)
+
+        val sourceId = repo.insertSource("Sefaria")
+        val catId = repo.insertCategory(Category(0, null, "Cat", level = 0, order = 1))
+        val bookId = repo.insertBook(
+            Book(categoryId = catId, sourceId = sourceId, title = "Haggadah Table ", heRef = "Haggadah Table "),
+        )
+        val descriptions = parseDescriptionOverrides(
+            listOf(
+                "categoryPath,title,author,heShortDesc,heDesc,heDescNew",
+                "\"Cat\",\"Haggadah Table \",\"\",\"short\",\"\",\"long\"",
+            ),
+        )
+        val bindings = IdAllocatorBindings(InMemoryIdAllocator.load(path = null), repo)
+
+        val result = applyMetadata(repo, bindings, emptyMap(), descriptions, Logger.withTag("test"))
+
+        assertEquals(1, result.updated)
+        assertEquals(0, result.unmatched)
+        val book = repo.getBook(bookId)
+        assertEquals("short", book?.heShortDesc)
+        assertEquals("long", book?.heDesc)
+    }
 }
