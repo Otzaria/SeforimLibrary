@@ -15,10 +15,16 @@ bounded_run() {
   local rc=0
   rm -f "$cid"
   timeout --kill-after=60 "$bound" docker run --cidfile "$cid" "$@" || rc=$?
-  if [ "$rc" -ne 0 ] && [ -s "$cid" ]; then
-    echo "::warning::the bound expired; removing the container it left behind ($(cat "$cid"))"
-    docker rm -f "$(cat "$cid")" > /dev/null 2>&1 \
-      || echo "::warning::that container could not be removed — it may still be running"
+  [ "$rc" -ne 0 ] && [ -s "$cid" ] || return "$rc"
+  # timeout exits 124 (TERM) or 137 (KILL) when the bound fired; any other failure is the container's own.
+  if [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; then
+    echo "::warning::the bound of $bound expired; removing the container it left behind ($(cat "$cid"))"
+  elif docker inspect "$(cat "$cid")" > /dev/null 2>&1; then
+    echo "::warning::container $(cat "$cid") outlived its failed run; removing it"
+  else
+    return "$rc"
   fi
+  docker rm -f "$(cat "$cid")" > /dev/null 2>&1 \
+    || echo "::warning::that container could not be removed — it may still be running"
   return "$rc"
 }

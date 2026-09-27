@@ -51,11 +51,16 @@ on:
         description: 'Library release tag to index (v<dbVersion>-<utcTimestamp>)'
         type: string
         required: true
-      otzaria_ref:
-        description: 'Branch of Otzaria/otzaria, or a full commit SHA, to build the indexing application from'
+      otzaria_run_id:
+        description: 'Otzaria/otzaria build run whose exact commit (head_sha) to build. With otzaria_ref, the run must be of that branch or commit.'
         type: string
         required: false
-        default: 'dev'
+        default: ''
+      otzaria_ref:
+        description: 'Branch of Otzaria/otzaria, or a full commit SHA, to build. Empty = the current dev HEAD, which is what every release-triggered run builds.'
+        type: string
+        required: false
+        default: ''
       runner_selection:
         description: 'Which server runs the index build'
         type: choice
@@ -139,17 +144,21 @@ jobs:
     # Measured, not estimated: in run 34779834547 the indexing itself took
     # 4m35s for 7,405 books — the 104 minutes of that job's "Create Linux FULL
     # portable bundle" step were its two zstd -19 passes over ~19 GiB, not the
-    # index. What is left here is the database download (~5 min), one zstd -19
-    # pass and the upload. 180 is generous against that and deliberately not
-    # more: this holds the very runner the database build needs, so a job
-    # wedged at its ceiling delays the NEXT weekly release, not this one.
+    # index. What is left here is the application build (9 min on a hosted
+    # runner in run 35842760972, plus the builder image on its first run), the
+    # database download (~5 min), one zstd -19 pass and the upload. 180 is
+    # generous against that and deliberately not more: this holds the very
+    # runner the database build needs, so a job wedged at its ceiling delays
+    # the NEXT weekly release, not this one.
     timeout-minutes: 180
     env:
       # Resolves the Otzaria/otzaria ref and writes this repository's release.
       GH_TOKEN: ${{ secrets.PIPELINE_TOKEN }}
       RELEASE_TAG: ${{ needs.gate.outputs.release_tag }}
       OTZARIA_REPO: Otzaria/otzaria
-      OTZARIA_REF: ${{ inputs.otzaria_ref || 'dev' }}
+      # Both empty on a release-triggered run, which therefore builds the current dev HEAD.
+      OTZARIA_REF_INPUT: ${{ inputs.otzaria_ref }}
+      OTZARIA_RUN_ID: ${{ inputs.otzaria_run_id }}
       # The tar the parts are cut from, and the name every consumer resolves
       # through https://github.com/Otzaria/SeforimLibrary/releases/latest/download/.
       INDEX_ARCHIVE: otzaria-library-index.tar.zst
@@ -158,6 +167,8 @@ jobs:
       # application's own split assets.
       PART_SIZE: '1992294400'
       BUILDER_IMAGE: otzaria-index-builder:bookworm-2
+      # The runner's trust store; on the database runner it carries NetFree's root.
+      HOST_CA_BUNDLE: /etc/ssl/certs/ca-certificates.crt
       # The builder image's toolchain. Flutter and WPE are checked against the
       # application's own build_linux; Rust is what its `stable` resolved in run 35842760972.
       FLUTTER_VERSION: '3.47.2'
@@ -237,23 +248,53 @@ jobs:
         id: otzaria
         run: |
           set -euo pipefail
-          # A full commit SHA is built as is; anything else must be a branch name.
-          if printf '%s' "$OTZARIA_REF" | grep -Eq '^[0-9a-f]{40}$'; then
-            SHA=$(timeout --kill-after=30 5m gh api "repos/$OTZARIA_REPO/commits/$OTZARIA_REF" --jq '.sha') || {
-              echo "::error::$OTZARIA_REPO has no commit $OTZARIA_REF"; exit 1; }
-            [ "$SHA" = "$OTZARIA_REF" ] || {
-              echo "::error::$OTZARIA_REPO resolved commit $OTZARIA_REF to $SHA"; exit 1; }
-          elif printf '%s' "$OTZARIA_REF" | grep -Eq '^[A-Za-z0-9._/-]+$'; then
-            SHA=$(timeout --kill-after=30 5m gh api "repos/$OTZARIA_REPO/branches/$OTZARIA_REF" --jq '.commit.sha') || {
-              echo "::error::$OTZARIA_REPO has no branch '$OTZARIA_REF'"; exit 1; }
+          is_sha() { printf '%s' "$1" | grep -Eq '^[0-9a-f]{40}$'; }
+          REF="$OTZARIA_REF_INPUT"
+          if [ -n "$OTZARIA_RUN_ID" ]; then
+            # Exactly the commit that run built; a given otzaria_ref must agree with it.
+            printf '%s' "$OTZARIA_RUN_ID" | grep -Eq '^[0-9]+$' || {
+              echo "::error::otzaria_run_id '$OTZARIA_RUN_ID' is not a run id"; exit 1; }
+            timeout --kill-after=30 5m gh api "repos/$OTZARIA_REPO/actions/runs/$OTZARIA_RUN_ID" \
+              > "$WORK/otzaria-run.json" || {
+              echo "::error::cannot read run $OTZARIA_RUN_ID of $OTZARIA_REPO"; exit 1; }
+            SHA=$(jq -r '.head_sha // ""' "$WORK/otzaria-run.json")
+            RUN_BRANCH=$(jq -r '.head_branch // ""' "$WORK/otzaria-run.json")
+            RUN_REPO=$(jq -r '.head_repository.full_name // ""' "$WORK/otzaria-run.json")
+            [ "$RUN_REPO" = "$OTZARIA_REPO" ] || {
+              echo "::error::run $OTZARIA_RUN_ID built '$RUN_REPO', not $OTZARIA_REPO"; exit 1; }
+            if [ -z "$REF" ]; then
+              REF="$RUN_BRANCH"
+            elif is_sha "$REF"; then
+              [ "$SHA" = "$REF" ] || {
+                echo "::error::run $OTZARIA_RUN_ID built $SHA, not otzaria_ref $REF"; exit 1; }
+            else
+              [ "$RUN_BRANCH" = "$REF" ] || {
+                echo "::error::run $OTZARIA_RUN_ID built branch '$RUN_BRANCH', not otzaria_ref '$REF'"; exit 1; }
+            fi
+            [ -n "$REF" ] || {
+              echo "::error::run $OTZARIA_RUN_ID has no head branch; pass otzaria_ref explicitly"; exit 1; }
           else
-            echo "::error::otzaria_ref '$OTZARIA_REF' is neither a full commit SHA nor a branch name"
-            exit 1
+            REF="${REF:-dev}"
+            if is_sha "$REF"; then
+              SHA=$(timeout --kill-after=30 5m gh api "repos/$OTZARIA_REPO/commits/$REF" --jq '.sha') || {
+                echo "::error::$OTZARIA_REPO has no commit $REF"; exit 1; }
+              [ "$SHA" = "$REF" ] || {
+                echo "::error::$OTZARIA_REPO resolved commit $REF to $SHA"; exit 1; }
+            elif printf '%s' "$REF" | grep -Eq '^[A-Za-z0-9._/-]+$'; then
+              SHA=$(timeout --kill-after=30 5m gh api "repos/$OTZARIA_REPO/branches/$REF" --jq '.commit.sha') || {
+                echo "::error::$OTZARIA_REPO has no branch '$REF'"; exit 1; }
+            else
+              echo "::error::otzaria_ref '$REF' is neither a full commit SHA nor a branch name"
+              exit 1
+            fi
           fi
-          printf '%s' "$SHA" | grep -Eq '^[0-9a-f]{40}$' || {
-            echo "::error::$OTZARIA_REPO returned '$SHA' for $OTZARIA_REF, not a commit SHA"; exit 1; }
-          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
-          echo "Building $OTZARIA_REPO $OTZARIA_REF @ $SHA"
+          is_sha "$SHA" || {
+            echo "::error::$OTZARIA_REPO returned '$SHA' for $REF, not a commit SHA"; exit 1; }
+          {
+            echo "sha=$SHA"
+            echo "ref=$REF"
+          } >> "$GITHUB_OUTPUT"
+          echo "Building $OTZARIA_REPO $REF @ $SHA${OTZARIA_RUN_ID:+ (run $OTZARIA_RUN_ID)}"
 
       - name: Build the builder image
         run: |
@@ -273,6 +314,17 @@ jobs:
             echo "WPE_SHA256=$WPE_SHA256"
           } >> "$GITHUB_ENV"
 
+          # Every HTTPS client in the image trusts what the runner trusts, so a
+          # TLS-intercepting filter (NetFree on the database runner) works unchanged.
+          grep -q 'BEGIN CERTIFICATE' "$HOST_CA_BUNDLE" 2>/dev/null || {
+            echo "::error::$HOST_CA_BUNDLE is missing or holds no certificate — the builder image takes its trust store from the runner"
+            exit 1
+          }
+          CONTEXT="$WORK/builder-context"
+          rm -rf "$CONTEXT"
+          mkdir -p "$CONTEXT"
+          cp "$HOST_CA_BUNDLE" "$CONTEXT/host-ca-bundle.crt"
+
           # Not an invented package list: this is verbatim the "Prepare
           # container base tools" and "Install Linux build dependencies" steps
           # of build_linux in Otzaria/otzaria (python3-yaml added to replay its
@@ -285,8 +337,9 @@ jobs:
           # package above pulls it in. Xvfb is required because the Linux
           # embedder brings up a GTK window before Dart main() runs, even for a
           # command-line invocation.
-          cat > "$WORK/Dockerfile" <<'DOCKERFILE'
+          cat > "$CONTEXT/Dockerfile" <<'DOCKERFILE'
           FROM debian:bookworm-slim
+          LABEL org.otzaria.image=index-builder
           SHELL ["/bin/bash", "-euo", "pipefail", "-c"]
           ENV DEBIAN_FRONTEND=noninteractive
           RUN apt-get update -y \
@@ -303,6 +356,22 @@ jobs:
            && update-alternatives --install /usr/bin/clang clang /usr/bin/clang-14 100 \
            && update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-14 100 \
            && git config --system --add safe.directory '*'
+
+          # Merged into the system store before the first HTTPS download; a changed bundle rebuilds from here.
+          COPY host-ca-bundle.crt /tmp/host-ca-bundle.crt
+          RUN mkdir /usr/local/share/ca-certificates/runner \
+           && awk '/-----BEGIN CERTIFICATE-----/ { n++; f = sprintf("/usr/local/share/ca-certificates/runner/%04d.crt", n) } \
+                   f { print > f } \
+                   /-----END CERTIFICATE-----/ { close(f); f = "" }' /tmp/host-ca-bundle.crt \
+           && ls /usr/local/share/ca-certificates/runner/0001.crt > /dev/null \
+           && update-ca-certificates \
+           && rm /tmp/host-ca-bundle.crt
+          ENV SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt \
+              CURL_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt \
+              GIT_SSL_CAINFO=/etc/ssl/certs/ca-certificates.crt \
+              REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt \
+              NODE_EXTRA_CA_CERTS=/etc/ssl/certs/ca-certificates.crt \
+              PIP_CERT=/etc/ssl/certs/ca-certificates.crt
 
           ARG APP_ARCH
           ARG FLUTTER_VERSION
@@ -356,8 +425,8 @@ jobs:
            && PKG_CONFIG_PATH=/opt/wpe-sdk/lib/pkgconfig pkg-config --print-errors --exists \
                 wpe-webkit-2.0 wpe-platform-2.0 wpe-platform-headless-2.0 wpe-1.0
           DOCKERFILE
-          # Built from stdin: the work directory holds a 7 GiB database and
-          # must never be shipped to the daemon as a build context.
+          # The context holds only the Dockerfile and the CA bundle: the work
+          # directory holds a 7 GiB database and must never be shipped to the daemon.
           # --pull so the base is re-resolved instead of the tag freezing on
           # whatever the first build cached, runner by runner.
           # Bounded like everything else in this job: it resolves a base image
@@ -373,7 +442,15 @@ jobs:
               --build-arg RUSTUP_SHA256="$RUSTUP_SHA256" \
               --build-arg WPE_VERSION --build-arg WPE_TAG \
               --build-arg WPE_SHA256="$WPE_SHA256" \
-              -t "$BUILDER_IMAGE" - < "$WORK/Dockerfile"
+              -t "$BUILDER_IMAGE" "$CONTEXT"
+
+          # Cleanup only: a failure here warns and never fails the job.
+          if docker image inspect otzaria-index-builder:bookworm-1 > /dev/null 2>&1; then
+            timeout --kill-after=30 5m docker rmi otzaria-index-builder:bookworm-1 > /dev/null \
+              || echo "::warning::could not remove the superseded otzaria-index-builder:bookworm-1"
+          fi
+          timeout --kill-after=30 5m docker image prune -f --filter label=org.otzaria.image=index-builder > /dev/null \
+            || echo "::warning::could not prune the superseded builder images"
 
       - name: Build the application from that revision
         env:
@@ -790,7 +867,7 @@ jobs:
       - name: Pack, describe and split the index
         env:
           # Through the environment, never interpolated into the command line:
-          # OTZARIA_REF is a dispatch input, which on this runner would be a
+          # the ref is a dispatch input, which on this runner would be a
           # shell injection next to PIPELINE_TOKEN.
           SEFORIM_DB_ZST_SHA256: ${{ steps.database.outputs.seforim_db_zst_sha256 }}
           TALMUD_BAVLI_SHA256: ${{ steps.talmud.outputs.talmud_bavli_sha256 }}
@@ -798,6 +875,7 @@ jobs:
           TALMUD_VOLUMES: ${{ steps.talmud.outputs.talmud_volumes }}
           SEARCH_ENGINE_VERSION: ${{ steps.engine.outputs.version }}
           OTZARIA_SHA: ${{ steps.otzaria.outputs.sha }}
+          OTZARIA_REF: ${{ steps.otzaria.outputs.ref }}
         run: |
           set -euo pipefail
           # shellcheck source=/dev/null
@@ -828,6 +906,7 @@ jobs:
             --arg otzariaRepository "$OTZARIA_REPO" \
             --arg otzariaRef "$OTZARIA_REF" \
             --arg otzariaSha "$OTZARIA_SHA" \
+            --arg otzariaRunId "$OTZARIA_RUN_ID" \
             --arg builderRunId "$GITHUB_RUN_ID" \
             --arg builtAt "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
             '{
@@ -847,7 +926,8 @@ jobs:
               otzaria: {
                 repository: $otzariaRepository,
                 ref: $otzariaRef,
-                sha: $otzariaSha
+                sha: $otzariaSha,
+                runId: (if $otzariaRunId == "" then null else $otzariaRunId end)
               },
               builtBy: {repository: "Otzaria/SeforimLibrary", runId: $builderRunId},
               builtAt: $builtAt

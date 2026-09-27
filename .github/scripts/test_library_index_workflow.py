@@ -20,8 +20,13 @@ pinned here:
 Assertions read the parsed workflow, not its comment text.
 """
 
+import contextlib
+import importlib.util
+import io
+import json
 import os
 import re
+import stat
 import subprocess
 import sys
 import tempfile
@@ -233,7 +238,7 @@ class LibraryIndexWorkflowTest(unittest.TestCase):
         # Every container goes through the one helper that bounds it.
         self.assertIn('timeout --kill-after=60 "$bound" docker run', self.bounded)
         self.assertNotRegex(run, r"(?m)^\s*docker run")
-        self.assertEqual(run.count('timeout --kill-after=30 5m gh api "repos/$OTZARIA_REPO/'), 2)
+        self.assertEqual(run.count('timeout --kill-after=30 5m gh api "repos/$OTZARIA_REPO/'), 3)
         # curl's --retry does not fire for a connection that stays open and
         # stops transferring; only a speed floor ends that.
         self.assertIn("--speed-limit", run)
@@ -337,20 +342,76 @@ class LibraryIndexWorkflowTest(unittest.TestCase):
         self.assertNotIn("RAW_ARTIFACT", self.text)
 
     def test_the_application_is_built_from_an_exact_revision(self):
-        # No dependency on the application's CI runs: its source is built here.
+        # No dependency on the application's CI artifacts: its source is built here.
         inputs = self.doc[True]["workflow_dispatch"]["inputs"]
-        self.assertNotIn("otzaria_run_id", inputs)
-        self.assertEqual(inputs["otzaria_ref"]["default"], "dev")
+        # Kept for the application's own auto-dispatch, which sends it (a 422 otherwise).
+        self.assertEqual(inputs["otzaria_run_id"]["default"], "")
+        self.assertEqual(inputs["otzaria_ref"]["default"], "")
+        self.assertIn("release-triggered run builds", inputs["otzaria_ref"]["description"])
         run = executed(self.index)
         self.assertNotIn("gh run download", run)
-        self.assertNotIn("actions/runs", run)
-        self.assertIn('branches/$OTZARIA_REF', run)
-        self.assertIn('commits/$OTZARIA_REF', run)
+        self.assertIn('REF="${REF:-dev}"', run)
         self.assertIn('fetch --depth 1 --no-tags', run)
         self.assertIn('rev-parse HEAD)" = "$OTZARIA_SHA"', run)
         # The build replays the checked-out workflow's own steps.
         self.assertIn("/scripts/extract_app_build_steps.py", run)
         self.assertIn(".github/workflows/build-and-announce.yml", run)
+
+    def resolve(self, ref="", run_id="", run=None, branches=None, commits=None):
+        """Run the resolve step against a fake `gh`; returns (rc, outputs, stderr)."""
+        step = [s for s in steps_of(self.index)
+                if s.get("name") == "Resolve the application revision to build"][0]
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            (tmp / "fixtures.json").write_text(json.dumps(
+                {"run": run, "branches": branches or {}, "commits": commits or {}}))
+            fake = tmp / "gh"
+            fake.write_text(f"""#!{sys.executable}
+import json, sys
+f = json.load(open({str(tmp / "fixtures.json")!r}))
+path = sys.argv[2]
+if "/actions/runs/" in path and f["run"] is not None:
+    print(json.dumps(f["run"])); sys.exit(0)
+for kind, key in (("/branches/", "branches"), ("/commits/", "commits")):
+    if kind in path and path.split(kind, 1)[1] in f[key]:
+        print(f[key][path.split(kind, 1)[1]]); sys.exit(0)
+sys.exit(1)
+""")
+            fake.chmod(fake.stat().st_mode | stat.S_IEXEC)
+            out = tmp / "out"
+            out.write_text("")
+            env = dict(os.environ, PATH=f"{tmp}:{os.environ['PATH']}", WORK=str(tmp),
+                       GITHUB_OUTPUT=str(out), OTZARIA_REPO="Otzaria/otzaria",
+                       OTZARIA_REF_INPUT=ref, OTZARIA_RUN_ID=run_id)
+            done = subprocess.run(["bash", "-c", step["run"]], env=env,
+                                  capture_output=True, text=True)
+            outputs = dict(line.split("=", 1) for line in out.read_text().splitlines())
+            return done.returncode, outputs, done.stdout + done.stderr
+
+    def test_a_pinned_run_builds_exactly_its_commit_or_fails(self):
+        sha, other = "a" * 40, "b" * 40
+        run = {"head_sha": sha, "head_branch": "dev",
+               "head_repository": {"full_name": "Otzaria/otzaria"}}
+        # The application's own dispatch: run id plus its branch.
+        rc, out, _ = self.resolve(ref="dev", run_id="42", run=run)
+        self.assertEqual((rc, out), (0, {"sha": sha, "ref": "dev"}))
+        self.assertEqual(self.resolve(run_id="42", run=run)[1], {"sha": sha, "ref": "dev"})
+        self.assertEqual(self.resolve(ref=sha, run_id="42", run=run)[1]["sha"], sha)
+        for ref in ("main", other):
+            rc, _, log = self.resolve(ref=ref, run_id="42", run=run)
+            self.assertEqual(rc, 1, ref)
+            self.assertIn("::error::run 42 built", log)
+        fork = dict(run, head_repository={"full_name": "someone/otzaria"})
+        self.assertIn("not Otzaria/otzaria", self.resolve(run_id="42", run=fork)[2])
+        self.assertEqual(self.resolve(run_id="4x2", run=run)[0], 1)
+        self.assertEqual(self.resolve(run_id="42")[0], 1)
+
+    def test_without_a_run_the_ref_is_resolved_exactly(self):
+        sha = "c" * 40
+        self.assertEqual(self.resolve(branches={"dev": sha})[1], {"sha": sha, "ref": "dev"})
+        self.assertEqual(self.resolve(ref=sha, commits={sha: sha})[1]["sha"], sha)
+        self.assertEqual(self.resolve(ref="nope", branches={"dev": sha})[0], 1)
+        self.assertEqual(self.resolve(ref="bad ref$")[0], 1)
 
     def test_the_builder_image_pins_its_toolchain(self):
         env = self.index["env"]
@@ -371,37 +432,158 @@ class LibraryIndexWorkflowTest(unittest.TestCase):
         self.assertIn('"$RUSTUP_HOME/toolchains/stable-$APP_ARCH-unknown-linux-gnu"', run)
         self.assertEqual(run.count("sha256sum -c -"), 3)
 
+    def extractor(self):
+        spec = importlib.util.spec_from_file_location("extract_app_build_steps", EXTRACT)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+    def synthetic_job(self, x):
+        """A build_linux job exactly as the extractor expects it, from its own tables."""
+        steps = []
+        for name, role in x.STEPS:
+            if name in x.MIRRORED_USES:
+                steps.append(dict(x.MIRRORED_USES[name], name=name))
+            elif name == x.FLUTTER_BUILD:
+                steps.append({"name": name, "shell": "bash", "env": dict(x.FLUTTER_BUILD_ENV),
+                              "run": x.FLUTTER_BUILD_RUN + "\n"})
+            elif name == x.WPE_DOWNLOAD:
+                steps.append({"name": name, "shell": "bash", "run": 'tag="wpe-tag"\n', "env": {
+                    "WPE_RUNTIME_VERSION": "9.9.9",
+                    "WPE_RUNTIME_SHA256":
+                        "${{ matrix.arch == 'aarch64' && '" + "1" * 64 + "' || '" + "2" * 64 + "' }}"}})
+            elif name == "Set up Flutter (aarch64, from git)":
+                steps.append({"name": name, "shell": "bash",
+                              "run": "git clone --depth 1 --branch 3.47.2 x\n"})
+            else:
+                steps.append({"name": name, "shell": "bash", "run": f"echo {role}\n"})
+        x.MIRRORED_RUN = {n: x.fingerprint(next(s for s in steps if s["name"] == n)["run"])
+                          for n in x.MIRRORED_RUN}
+        return {"env": dict(x.JOB_ENV), "container": dict(x.CONTAINER), "steps": steps}
+
+    def check(self, x, job, arch="x86_64"):
+        env = dict(os.environ, FLUTTER_VERSION="3.47.2", WPE_VERSION="9.9.9", WPE_TAG="wpe-tag",
+                   WPE_SHA256=("1" if arch == "aarch64" else "2") * 64)
+        saved = dict(os.environ)
+        os.environ.update(env)
+        try:
+            with tempfile.TemporaryDirectory() as tmp, contextlib.redirect_stdout(io.StringIO()), \
+                    contextlib.redirect_stderr(io.StringIO()):
+                x.check_structure(job)
+                steps = {step["name"]: step for step in job["steps"]}
+                x.check_mirrored(steps, arch)
+                x.extract(steps, str(Path(tmp) / "out"))
+            return 0
+        except SystemExit as exit_:
+            return exit_.code
+        finally:
+            os.environ.clear()
+            os.environ.update(saved)
+
+    def test_every_application_step_is_classified(self):
+        x = self.extractor()
+        roles = [role for _, role in x.STEPS]
+        self.assertEqual(roles.count("R"), len(x.REPLAYED))
+        self.assertEqual(
+            [n for n, r in x.STEPS if r == "M"],
+            [n for n, _ in x.STEPS if n in x.MIRRORED_RUN or n in x.MIRRORED_USES
+             or n == x.FLUTTER_BUILD],
+        )
+        job = self.synthetic_job(x)
+        self.assertEqual(self.check(x, job), 0)
+        self.assertEqual(self.check(x, job, "aarch64"), 0)
+
     def test_the_replay_refuses_a_step_that_drifted(self):
-        steps = [
-            {"name": "Set up Flutter", "uses": "x", "with": {"flutter-version": "1.2.3"}},
-            {"name": "Download prebuilt WPE runtime SDK", "shell": "bash",
-             "env": {"WPE_RUNTIME_VERSION": "9.9.9", "WPE_RUNTIME_SHA256": "'abc'"},
-             "run": 'tag="wpe-tag"\n'},
-        ]
-        names = re.findall(r'^    "[a-z-]+": "([^"]+)",$',
-                           EXTRACT.read_text(encoding="utf-8"), re.M)
-        self.assertEqual(len(names), 8)
-        steps += [{"name": n, "shell": "bash", "run": "true\n"} for n in names]
-        env = dict(os.environ, FLUTTER_VERSION="1.2.3", WPE_VERSION="9.9.9",
-                   WPE_TAG="wpe-tag", WPE_SHA256="abc")
+        x = self.extractor()
+        job = self.synthetic_job(x)
 
-        def extract(workflow_steps):
+        def drifted(mutate):
+            copy = json.loads(json.dumps(job))
+            mutate(copy)
+            return self.check(x, copy)
+
+        def step(copy, name):
+            return next(s for s in copy["steps"] if s["name"] == name)
+
+        replayed = next(iter(x.REPLAYED.values()))
+        cases = {
+            "a new step": lambda c: c["steps"].insert(3, {"name": "New", "run": "x"}),
+            "a reordered step": lambda c: c["steps"].reverse(),
+            "a job env value": lambda c: c["env"].update(LIBRARY_PATH="/elsewhere"),
+            "a job env key": lambda c: c["env"].update(NEW="1"),
+            "the container": lambda c: c.update(container={"image": "debian:trixie-slim"}),
+            "a replayed step with if": lambda c: step(c, replayed).update({"if": "always()"}),
+            "a replayed step with env": lambda c: step(c, replayed).update(env={"A": "1"}),
+            "a replayed step with an expression": lambda c: step(c, replayed).update(run="${{ x }}"),
+            "a mirrored run": lambda c: step(c, "Install Linux build dependencies").update(run="apt"),
+            "a new dart-define": lambda c: step(c, x.FLUTTER_BUILD).update(
+                run=x.FLUTTER_BUILD_RUN.replace("--verbose", "--verbose --dart-define=X=1")),
+            "a new build env var": lambda c: step(c, x.FLUTTER_BUILD)["env"].update(RUSTFLAGS="-x"),
+            "another Flutter": lambda c: step(c, "Set up Flutter")["with"].update(
+                {"flutter-version": "3.48.0"}),
+            "a swapped WPE digest": lambda c: step(c, x.WPE_DOWNLOAD)["env"].update(
+                WPE_RUNTIME_SHA256="${{ matrix.arch == 'aarch64' && '" + "2" * 64
+                                   + "' || '" + "1" * 64 + "' }}"),
+        }
+        for label, mutate in cases.items():
+            self.assertEqual(drifted(mutate), 1, label)
+
+    def test_the_container_env_mirrors_the_application_job_env(self):
+        x = self.extractor()
+        run = body(self.index)
+        for key in ("PKG_CONFIG_PATH", "LD_LIBRARY_PATH", "LIBRARY_PATH"):
+            self.assertIn(f"-e {key}={x.JOB_ENV[key]} ", run)
+        self.assertIn('-e FLUTTER_BUILD_DIR="build/linux/$FLUTTER_ARCH/release"', run)
+        self.assertIn('-e JAVA_HOME="/usr/lib/jvm/java-17-openjdk-$JDK_ARCH"', run)
+        self.assertIn("x86_64) FLUTTER_ARCH=x64; JDK_ARCH=amd64 ;;", run)
+        self.assertIn("aarch64) FLUTTER_ARCH=arm64; JDK_ARCH=arm64 ;;", run)
+        for key, value in x.FLUTTER_BUILD_ENV.items():
+            self.assertIn(f"{key}={value}", run)
+
+    def test_the_image_trusts_what_the_runner_trusts(self):
+        # NetFree intercepts TLS on the database runner; its root is in the host store.
+        self.assertEqual(self.index["env"]["HOST_CA_BUNDLE"], "/etc/ssl/certs/ca-certificates.crt")
+        run = body(self.index)
+        dockerfile = run.split("<<'DOCKERFILE'\n", 1)[1].split("\nDOCKERFILE", 1)[0]
+        copy = dockerfile.index("COPY host-ca-bundle.crt")
+        self.assertLess(dockerfile.index("ca-certificates curl"), copy)
+        self.assertLess(copy, dockerfile.index("https://"))
+        self.assertLess(copy, dockerfile.index("update-ca-certificates"))
+        for var in ("SSL_CERT_FILE", "CURL_CA_BUNDLE", "GIT_SSL_CAINFO",
+                    "REQUESTS_CA_BUNDLE", "NODE_EXTRA_CA_CERTS", "PIP_CERT"):
+            self.assertIn(f"{var}=/etc/ssl/certs/ca-certificates.crt", dockerfile)
+        # A dedicated context: never the work directory with the database in it.
+        self.assertIn('CONTEXT="$WORK/builder-context"', run)
+        self.assertIn('-t "$BUILDER_IMAGE" "$CONTEXT"', run)
+        self.assertNotIn('- < "$WORK/Dockerfile"', run)
+        self.assertIn("is missing or holds no certificate", run)
+
+    def test_only_a_fired_bound_is_reported_as_one(self):
+        def bounded(docker_rc, present):
             with tempfile.TemporaryDirectory() as tmp:
-                path = Path(tmp) / "w.yml"
-                path.write_text(yaml.safe_dump(
-                    {"jobs": {"build_linux": {"steps": workflow_steps}}}))
-                return subprocess.run(
-                    [sys.executable, str(EXTRACT), str(path), str(Path(tmp) / "out"), "x86_64"],
-                    env=env, capture_output=True, text=True,
-                )
+                tmp = Path(tmp)
+                fake = tmp / "docker"
+                fake.write_text(f"""#!/usr/bin/env bash
+if [ "$1" = run ]; then echo cid123 > "$3"; exit {docker_rc}; fi
+if [ "$1" = inspect ]; then exit {0 if present else 1}; fi
+exit 0
+""")
+                fake.chmod(fake.stat().st_mode | stat.S_IEXEC)
+                env = dict(os.environ, PATH=f"{tmp}:{os.environ['PATH']}", WORK=str(tmp))
+                done = subprocess.run(
+                    ["bash", "-c", f". {BOUNDED}; bounded_run 60 t --rm img"],
+                    env=env, capture_output=True, text=True)
+                return done.returncode, done.stdout
 
-        self.assertEqual(extract(steps).returncode, 0, extract(steps).stderr)
-        for drift in ({"if": "always()"}, {"env": {"A": "1"}}, {"run": "${{ secrets.X }}"}):
-            drifted = [dict(s, **drift) if s["name"] == names[0] else s for s in steps]
-            self.assertEqual(extract(drifted).returncode, 1, drift)
-        repinned = [dict(s, **{"with": {"flutter-version": "1.2.4"}})
-                    if s["name"] == "Set up Flutter" else s for s in steps]
-        self.assertIn("Flutter 1.2.4", extract(repinned).stderr)
+        self.assertEqual(bounded(0, False), (0, ""))
+        self.assertEqual(bounded(3, False), (3, ""))
+        rc, out = bounded(124, False)
+        self.assertEqual(rc, 124)
+        self.assertIn("the bound of 60 expired", out)
+        rc, out = bounded(3, True)
+        self.assertEqual(rc, 3)
+        self.assertIn("outlived its failed run", out)
+        self.assertNotIn("expired", out)
 
     def test_the_index_is_built_from_the_exact_published_database(self):
         run = body(self.index)
@@ -420,6 +602,7 @@ class LibraryIndexWorkflowTest(unittest.TestCase):
         # The lockfile this build's own pub get resolved; the app commits none.
         self.assertIn('LOCK="$WORK/otzaria-src/pubspec.lock"', run)
         self.assertIn("sha: $otzariaSha", run)
+        self.assertIn('runId: (if $otzariaRunId == "" then null else $otzariaRunId end)', run)
 
     def test_nothing_caps_the_memory_the_build_may_use(self):
         # Comments are stripped first: this asserts on what is executed, and
@@ -519,6 +702,7 @@ class LibraryIndexWorkflowTest(unittest.TestCase):
         for step in steps_of(self.index):
             self.assertNotIn("${{", step.get("run", ""), step.get("name"))
         self.assertIn("OTZARIA_SHA", packing["env"])
+        self.assertIn("OTZARIA_REF", packing["env"])
 
     def test_the_cross_repository_read_uses_the_pipeline_token(self):
         self.assertEqual(
