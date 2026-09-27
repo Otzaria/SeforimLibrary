@@ -459,7 +459,12 @@ sys.exit(1)
                 steps.append({"name": name, "shell": "bash", "run": f"echo {role}\n"})
         x.MIRRORED_RUN = {n: x.fingerprint(next(s for s in steps if s["name"] == n)["run"])
                           for n in x.MIRRORED_RUN}
-        return {"env": dict(x.JOB_ENV), "container": dict(x.CONTAINER), "steps": steps}
+        # Not pinned: a step no successful raw build runs, and everything after the raw bundle.
+        steps.insert(5, {"name": "FULL only", "if": "matrix.target == 'full'", "run": "x"})
+        steps.insert(6, {"name": "On failure", "if": "failure()", "run": "x"})
+        steps.append({"name": "Upload", "if": "github.event_name != 'pull_request'", "run": "x"})
+        return {"env": dict(x.JOB_ENV), "container": dict(x.CONTAINER), "steps": steps,
+                "strategy": {"matrix": {"target": ["deb", "raw"], "arch": ["x86_64", "aarch64"]}}}
 
     def check(self, x, job, arch="x86_64"):
         env = dict(os.environ, FLUTTER_VERSION="3.47.2", WPE_VERSION="9.9.9", WPE_TAG="wpe-tag",
@@ -508,6 +513,15 @@ sys.exit(1)
         replayed = next(iter(x.REPLAYED.values()))
         cases = {
             "a new step": lambda c: c["steps"].insert(3, {"name": "New", "run": "x"}),
+            "a new raw-only step": lambda c: c["steps"].insert(
+                3, {"name": "New", "if": "matrix.target == 'raw'", "run": "x"}),
+            "a new aarch64 step": lambda c: c["steps"].insert(
+                3, {"name": "New", "if": "matrix.arch == 'aarch64'", "run": "x"}),
+            "a step that now runs for raw": lambda c: step(c, "FULL only").update(
+                {"if": "matrix.target != 'deb'"}),
+            "an unclassifiable condition": lambda c: step(c, "FULL only").update(
+                {"if": "github.event_name == 'push'"}),
+            "raw dropped from the matrix": lambda c: c["strategy"]["matrix"].update(target=["deb"]),
             "a reordered step": lambda c: c["steps"].reverse(),
             "a job env value": lambda c: c["env"].update(LIBRARY_PATH="/elsewhere"),
             "a job env key": lambda c: c["env"].update(NEW="1"),
@@ -527,6 +541,41 @@ sys.exit(1)
         }
         for label, mutate in cases.items():
             self.assertEqual(drifted(mutate), 1, label)
+        # Steps that cannot touch the raw bundle stay free to change.
+        free = {
+            "a new FULL-only step": lambda c: c["steps"].insert(
+                3, {"name": "New", "if": "matrix.target == 'full' && matrix.arch == 'x86_64'",
+                    "run": "x"}),
+            "a new deb/rpm step": lambda c: c["steps"].insert(
+                3, {"name": "New", "if": "matrix.target == 'deb' || matrix.target == 'rpm'",
+                    "run": "x"}),
+            "a removed FULL-only step": lambda c: c["steps"].remove(step(c, "FULL only")),
+            "anything after the raw bundle": lambda c: c["steps"].extend(
+                [{"name": "Later", "if": "steps.a.outputs.b == 'x'", "run": "x"},
+                 {"name": "Later 2", "run": "x"}]),
+        }
+        for label, mutate in free.items():
+            self.assertEqual(drifted(mutate), 0, label)
+
+    def test_step_conditions_are_evaluated_exactly(self):
+        x = self.extractor()
+        table = {
+            None: [True, True],
+            "matrix.arch != 'aarch64'": [True, False],
+            "matrix.arch == 'aarch64'": [False, True],
+            "matrix.target == 'full'": [False, False],
+            "matrix.target == 'deb' || matrix.target == 'rpm'": [False, False],
+            "matrix.target == 'raw' && matrix.arch == 'x86_64'": [True, False],
+            "${{ !(matrix.target == 'full') }}": [True, True],
+            "failure()": [False, False],
+            "always()": [True, True],
+        }
+        for condition, expected in table.items():
+            self.assertEqual([x.runs_for_raw(condition, a) for a in x.ARCHES], expected, condition)
+        for condition in ("github.event_name != 'pull_request'", "steps.a.outputs.b == 'x'",
+                          "contains(matrix.target, 'raw')", "matrix.target ==", "matrix.target"):
+            with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
+                x.runs_for_raw(condition, "x86_64")
 
     def test_the_container_env_mirrors_the_application_job_env(self):
         x = self.extractor()

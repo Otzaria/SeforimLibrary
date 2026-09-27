@@ -1,6 +1,6 @@
 """Write out, verbatim, the build_linux steps of Otzaria/otzaria that the index build replays.
 
-Every build_linux step must be one this script knows as replayed, mirrored or skipped; any drift fails.
+Every step of a raw build must be one this script knows as replayed, mirrored or skipped; any drift fails.
 
     extract_app_build_steps.py <workflow> <out-dir> <arch>
     extract_app_build_steps.py --fingerprints <workflow>
@@ -87,8 +87,11 @@ JOB_ENV = {
 }
 CONTAINER = {"image": "debian:bookworm-slim"}
 
-# Every build_linux step, in order. R = replayed, M = mirrored, S = skipped (packaging,
-# uploads, secrets, caches and FULL-only work the raw bundle does not contain).
+# The raw bundle is complete once this step has copied it; nothing after it is pinned.
+RAW_BUNDLE_STEP = "Find and prepare Linux packages"
+
+# Every step up to RAW_BUNDLE_STEP that runs in a successful raw build, in order.
+# R = replayed, M = mirrored, S = skipped (secrets, caches, data the index never reads).
 STEPS = [
     ("Prepare container base tools", "M"),
     ("Clone repository", "M"),
@@ -102,9 +105,7 @@ STEPS = [
     ("Install Linux build dependencies", "M"),
     (WPE_DOWNLOAD, "M"),
     ("Prepare WPE bundling script (shared)", "R"),
-    ("Download library assets for Linux FULL bundle", "S"),
     ("Download bundled plugins for Linux packages", "S"),
-    ("Install flutter_distributor (with retry)", "S"),
     ("Fetch biographies data", "S"),
     ("Prepare Flutter dependencies for Linux release", "R"),
     ("Build the search engine inside the compatibility container", "R"),
@@ -112,28 +113,87 @@ STEPS = [
     (FLUTTER_BUILD, "M"),
     ("Verify WPE SDK (WPEPlatform) was used, not FDO/system", "R"),
     ("Verify search engine glibc compatibility", "R"),
-    ("Dump CMake error log on failure", "S"),
-    ("Build and Patch Linux DEB package", "S"),
-    ("Build and Patch Linux RPM package", "S"),
     ("Bundle WPE runtime into main bundle (raw + FULL)", "R"),
     ("Verify WPE runtime in packaged artifacts", "R"),
-    ("Find and prepare Linux packages", "M"),
-    ("Upload Linux DEB package", "S"),
-    ("Upload Linux RPM package", "S"),
-    ("Upload linux build (raw)", "S"),
-    ("Upload index build inputs", "S"),
-    ("Build bundled zstd (Linux FULL)", "S"),
-    ("Build atomic updater (Linux FULL)", "S"),
-    ("Stamp installed release (Linux FULL)", "S"),
-    ("Create Linux FULL portable bundle", "S"),
-    ("Generate application file manifest (Linux)", "S"),
-    ("Upload application file manifest (Linux)", "S"),
-    ("Upload Linux FULL bundle", "S"),
-    ("Upload indexed FULL library parts", "S"),
-    ("Upload indexed FULL manifest for installer build", "S"),
-    ("Build Linux Download Assistant (non-fatal helper tool)", "S"),
-    ("Upload Linux Download Assistant", "S"),
+    (RAW_BUNDLE_STEP, "M"),
 ]
+
+ARCHES = ("x86_64", "aarch64")
+_TOKEN = re.compile(r"\s*(?:(\|\||&&|==|!=|!|\(|\))|'([^']*)'|(matrix\.target|matrix\.arch)"
+                    r"|(success|failure|always|cancelled)\(\))")
+# A successful run: the only one that leaves a raw bundle behind.
+_STATUS = {"success": True, "failure": False, "always": True, "cancelled": False}
+
+
+def runs_for_raw(condition, arch):
+    """Evaluate a step `if:` for target raw on `arch` in a successful run; refuse anything else."""
+    if condition is None:
+        return True
+    if isinstance(condition, bool):
+        return condition
+    text = str(condition).strip()
+    if text.startswith("${{") and text.endswith("}}"):
+        text = text[3:-2].strip()
+    tokens, pos = [], 0
+    while pos < len(text):
+        match = _TOKEN.match(text, pos)
+        if not match or match.end() == pos:
+            fail(f"cannot classify the step condition '{condition}' for the raw build")
+        op, literal, variable, status = match.groups()
+        if op:
+            tokens.append(("op", op))
+        elif literal is not None:
+            tokens.append(("val", literal))
+        elif variable:
+            tokens.append(("val", "raw" if variable == "matrix.target" else arch))
+        else:
+            tokens.append(("val", _STATUS[status]))
+        pos = match.end()
+
+    def parse(i, level):
+        # level 0: ||, 1: &&, 2: == !=, 3: unary
+        if level == 3:
+            kind, value = tokens[i] if i < len(tokens) else (None, None)
+            if (kind, value) == ("op", "!"):
+                operand, i = parse(i + 1, 3)
+                return not operand, i
+            if (kind, value) == ("op", "("):
+                inner, i = parse(i + 1, 0)
+                if i >= len(tokens) or tokens[i] != ("op", ")"):
+                    fail(f"cannot classify the step condition '{condition}' for the raw build")
+                return inner, i + 1
+            if kind != "val":
+                fail(f"cannot classify the step condition '{condition}' for the raw build")
+            return value, i + 1
+        left, i = parse(i, level + 1)
+        ops = {0: ("||",), 1: ("&&",), 2: ("==", "!=")}[level]
+        while i < len(tokens) and tokens[i][0] == "op" and tokens[i][1] in ops:
+            op = tokens[i][1]
+            right, i = parse(i + 1, level + 1)
+            if op == "||":
+                left = bool(left) or bool(right)
+            elif op == "&&":
+                left = bool(left) and bool(right)
+            elif not (isinstance(left, str) and isinstance(right, str)):
+                fail(f"cannot classify the step condition '{condition}' for the raw build")
+            else:
+                left = (left == right) if op == "==" else (left != right)
+        return left, i
+
+    value, end = parse(0, 0)
+    if end != len(tokens) or not isinstance(value, bool):
+        fail(f"cannot classify the step condition '{condition}' for the raw build")
+    return value
+
+
+def raw_steps(job):
+    """The steps of a successful raw build, up to and including RAW_BUNDLE_STEP."""
+    names = [step.get("name") for step in job["steps"]]
+    if names.count(RAW_BUNDLE_STEP) != 1:
+        fail(f"build_linux has {names.count(RAW_BUNDLE_STEP)} steps named '{RAW_BUNDLE_STEP}', expected 1")
+    region = job["steps"][: names.index(RAW_BUNDLE_STEP) + 1]
+    return [s.get("name") for s in region if any(runs_for_raw(s.get("if"), a) for a in ARCHES)]
+
 
 WPE_SHA_EXPR = re.compile(
     r"^\$\{\{ matrix\.arch == 'aarch64' && '([0-9a-f]{64})' \|\| '([0-9a-f]{64})' \}\}$"
@@ -171,13 +231,16 @@ def build_linux(workflow):
 
 
 def check_structure(job):
-    names = [step.get("name") for step in job["steps"]]
+    names = raw_steps(job)
     expected = [name for name, _ in STEPS]
     if names != expected:
         added = [n for n in names if n not in expected]
         removed = [n for n in expected if n not in names]
-        fail(f"build_linux steps changed (added {added}, removed {removed}, or reordered); "
+        fail(f"the steps of a raw build changed (added {added}, removed {removed}, or reordered); "
              "classify them in extract_app_build_steps.py")
+    matrix = (job.get("strategy") or {}).get("matrix") or {}
+    if "raw" not in (matrix.get("target") or []) or not set(ARCHES) <= set(matrix.get("arch") or []):
+        fail(f"build_linux no longer builds raw for {ARCHES}: {matrix}")
     if job.get("env") != JOB_ENV:
         fail(f"build_linux job environment changed: {job.get('env')}")
     if job.get("container") != CONTAINER:
