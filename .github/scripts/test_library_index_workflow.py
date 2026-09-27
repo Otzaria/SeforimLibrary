@@ -20,7 +20,11 @@ pinned here:
 Assertions read the parsed workflow, not its comment text.
 """
 
+import os
 import re
+import subprocess
+import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -34,6 +38,8 @@ WORKFLOWS = SCRIPTS.parent / "workflows"
 INDEX = WORKFLOWS / "build-library-index.yml"
 RELEASE = WORKFLOWS / "manual-generate-release.yml"
 SPLIT = SCRIPTS / "split_release_asset.sh"
+BOUNDED = SCRIPTS / "bounded_docker_run.sh"
+EXTRACT = SCRIPTS / "extract_app_build_steps.py"
 
 # manual-generate-release.yml composes the tag as v<dbVersion>-<utcTimestamp>
 # ("Compute release tag"); the snapshot and hand-off releases it also publishes
@@ -81,6 +87,7 @@ class LibraryIndexWorkflowTest(unittest.TestCase):
         cls.gate = cls.doc["jobs"]["gate"]
         cls.index = cls.doc["jobs"]["index"]
         cls.release = yaml.safe_load(RELEASE.read_text(encoding="utf-8"))
+        cls.bounded = BOUNDED.read_text(encoding="utf-8")
 
     # ─── when it runs ──────────────────────────────────────────────────────
 
@@ -214,7 +221,6 @@ class LibraryIndexWorkflowTest(unittest.TestCase):
         stallers = (
             "docker build",
             "docker run",
-            "gh run download",
             "gh release download",
             "gh release upload",
         )
@@ -223,7 +229,11 @@ class LibraryIndexWorkflowTest(unittest.TestCase):
                 if command.startswith(staller):
                     self.fail(f"unbounded: {command}")
         for staller in stallers:
-            self.assertIn(staller, run, f"{staller} vanished from the job")
+            self.assertIn(staller, run + self.bounded, f"{staller} vanished from the job")
+        # Every container goes through the one helper that bounds it.
+        self.assertIn('timeout --kill-after=60 "$bound" docker run', self.bounded)
+        self.assertNotRegex(run, r"(?m)^\s*docker run")
+        self.assertEqual(run.count('timeout --kill-after=30 5m gh api "repos/$OTZARIA_REPO/'), 2)
         # curl's --retry does not fire for a connection that stays open and
         # stops transferring; only a speed floor ends that.
         self.assertIn("--speed-limit", run)
@@ -289,15 +299,19 @@ class LibraryIndexWorkflowTest(unittest.TestCase):
         # run 34871116986 did exactly that and never fired; with --kill-after
         # the same preflight failed loudly at 150s in run 34886226177.
         run = executed(self.index)
-        bounds = re.findall(r"^\s*timeout([^\n]*?) (?:docker|gh|bash|grep)", run, re.M)
+        bounds = re.findall(
+            r"^\s*(?:\w+=\$\()?timeout([^\n]*?) (?:docker|gh|bash|grep)",
+            run + "\n" + self.bounded, re.M,
+        )
         self.assertTrue(bounds, "nothing is bounded any more")
         for bound in bounds:
             self.assertIn("--kill-after", bound, f"unbounded: timeout{bound}")
         # And the bound must reach the container, not only the client that
         # spoke to it: SIGTERM is swallowed by PID 1 and the SIGKILL that
         # follows cannot be proxied, so the container outlives the step.
-        self.assertIn("--cidfile", run)
-        self.assertIn("docker rm -f", run)
+        self.assertIn("--cidfile", self.bounded)
+        self.assertIn("docker rm -f", self.bounded)
+        self.assertEqual(run.count(". .github/scripts/bounded_docker_run.sh"), 2)
         self.assertIn("build-release-index --help", run)
         self.assertLessEqual(self.index["timeout-minutes"], 180)
 
@@ -314,26 +328,80 @@ class LibraryIndexWorkflowTest(unittest.TestCase):
         # The external catalogue is a separate screen and no part of the tree.
         self.assertNotIn("otzar-HB_catalog", run)
 
-    def test_the_bundle_matches_the_runner_architecture(self):
-        gate = body(self.gate)
-        # An x86_64 bundle on the ARM host is an exec format error two hours in.
-        self.assertIn("raw_artifact=$RAW", gate)
-        self.assertIn("RAW=otzaria-linux-raw-arm64", gate)
-        self.assertEqual(
-            self.index["env"]["RAW_ARTIFACT"],
-            "${{ needs.gate.outputs.raw_artifact }}",
-        )
-        self.assertIn('-n "$RAW_ARTIFACT"', body(self.index))
+    def test_the_application_is_built_for_the_runner_architecture(self):
+        # An x86_64 build on the ARM host is an exec format error; it is built
+        # natively, so the gate has no architecture left to choose.
+        run = body(self.index)
+        self.assertIn('case "$(uname -m)" in', run)
+        self.assertNotIn("raw_artifact", self.text)
+        self.assertNotIn("RAW_ARTIFACT", self.text)
 
-    def test_the_bootstrap_path_is_written_down(self):
-        # The first application build after this change finds no stored index
-        # and fails; its own run is what must then be pinned here. Nothing in
-        # the code says a failed run is admissible unless the input does.
-        description = self.doc[True]["workflow_dispatch"]["inputs"][
-            "otzaria_run_id"
-        ]["description"]
-        self.assertIn("conclusion is not checked", description)
-        self.assertIn("bootstrap", description)
+    def test_the_application_is_built_from_an_exact_revision(self):
+        # No dependency on the application's CI runs: its source is built here.
+        inputs = self.doc[True]["workflow_dispatch"]["inputs"]
+        self.assertNotIn("otzaria_run_id", inputs)
+        self.assertEqual(inputs["otzaria_ref"]["default"], "dev")
+        run = executed(self.index)
+        self.assertNotIn("gh run download", run)
+        self.assertNotIn("actions/runs", run)
+        self.assertIn('branches/$OTZARIA_REF', run)
+        self.assertIn('commits/$OTZARIA_REF', run)
+        self.assertIn('fetch --depth 1 --no-tags', run)
+        self.assertIn('rev-parse HEAD)" = "$OTZARIA_SHA"', run)
+        # The build replays the checked-out workflow's own steps.
+        self.assertIn("/scripts/extract_app_build_steps.py", run)
+        self.assertIn(".github/workflows/build-and-announce.yml", run)
+
+    def test_the_builder_image_pins_its_toolchain(self):
+        env = self.index["env"]
+        self.assertRegex(env["FLUTTER_COMMIT"], r"^[0-9a-f]{40}$")
+        for key in (
+            "FLUTTER_SHA256_X86_64",
+            "RUSTUP_SHA256_X86_64",
+            "RUSTUP_SHA256_AARCH64",
+            "WPE_SHA256_X86_64",
+            "WPE_SHA256_AARCH64",
+        ):
+            self.assertRegex(env[key], r"^[0-9a-f]{64}$", key)
+        for key in ("FLUTTER_VERSION", "RUST_VERSION", "RUSTUP_VERSION", "WPE_VERSION"):
+            self.assertRegex(env[key], r"^[0-9]+\.[0-9]+\.[0-9]+$", key)
+        run = body(self.index)
+        # cargokit runs `rustup run stable`; anything but the pinned toolchain
+        # under that name would make it download whatever stable is today.
+        self.assertIn('"$RUSTUP_HOME/toolchains/stable-$APP_ARCH-unknown-linux-gnu"', run)
+        self.assertEqual(run.count("sha256sum -c -"), 3)
+
+    def test_the_replay_refuses_a_step_that_drifted(self):
+        steps = [
+            {"name": "Set up Flutter", "uses": "x", "with": {"flutter-version": "1.2.3"}},
+            {"name": "Download prebuilt WPE runtime SDK", "shell": "bash",
+             "env": {"WPE_RUNTIME_VERSION": "9.9.9", "WPE_RUNTIME_SHA256": "'abc'"},
+             "run": 'tag="wpe-tag"\n'},
+        ]
+        names = re.findall(r'^    "[a-z-]+": "([^"]+)",$',
+                           EXTRACT.read_text(encoding="utf-8"), re.M)
+        self.assertEqual(len(names), 8)
+        steps += [{"name": n, "shell": "bash", "run": "true\n"} for n in names]
+        env = dict(os.environ, FLUTTER_VERSION="1.2.3", WPE_VERSION="9.9.9",
+                   WPE_TAG="wpe-tag", WPE_SHA256="abc")
+
+        def extract(workflow_steps):
+            with tempfile.TemporaryDirectory() as tmp:
+                path = Path(tmp) / "w.yml"
+                path.write_text(yaml.safe_dump(
+                    {"jobs": {"build_linux": {"steps": workflow_steps}}}))
+                return subprocess.run(
+                    [sys.executable, str(EXTRACT), str(path), str(Path(tmp) / "out"), "x86_64"],
+                    env=env, capture_output=True, text=True,
+                )
+
+        self.assertEqual(extract(steps).returncode, 0, extract(steps).stderr)
+        for drift in ({"if": "always()"}, {"env": {"A": "1"}}, {"run": "${{ secrets.X }}"}):
+            drifted = [dict(s, **drift) if s["name"] == names[0] else s for s in steps]
+            self.assertEqual(extract(drifted).returncode, 1, drift)
+        repinned = [dict(s, **{"with": {"flutter-version": "1.2.4"}})
+                    if s["name"] == "Set up Flutter" else s for s in steps]
+        self.assertIn("Flutter 1.2.4", extract(repinned).stderr)
 
     def test_the_index_is_built_from_the_exact_published_database(self):
         run = body(self.index)
@@ -349,7 +417,9 @@ class LibraryIndexWorkflowTest(unittest.TestCase):
         # engine reaches the user as one the application rejects and rebuilds.
         self.assertIn("otzaria_search_engine:", run)
         self.assertIn("searchEngineVersion: $searchEngineVersion", run)
-        self.assertIn("otzaria-index-inputs", run)
+        # The lockfile this build's own pub get resolved; the app commits none.
+        self.assertIn('LOCK="$WORK/otzaria-src/pubspec.lock"', run)
+        self.assertIn("sha: $otzariaSha", run)
 
     def test_nothing_caps_the_memory_the_build_may_use(self):
         # Comments are stripped first: this asserts on what is executed, and
@@ -439,15 +509,16 @@ class LibraryIndexWorkflowTest(unittest.TestCase):
         self.assertNotIn("CATALOGUE_BOOKS=${CATALOGUE:-null}", run)
 
     def test_untrusted_values_never_reach_the_shell_as_expressions(self):
-        # head_branch comes from the Otzaria/otzaria API and git permits `"`
-        # and `$` in a ref name. Interpolated into a command line on a runner
-        # whose environment holds PIPELINE_TOKEN, that is a shell injection.
+        # otzaria_ref is a dispatch input and git permits `"` and `$` in a ref
+        # name. Interpolated into a command line on a runner whose environment
+        # holds PIPELINE_TOKEN, that is a shell injection.
         packing = [
             s for s in steps_of(self.index)
             if s.get("name", "").startswith("Pack, describe and split")
         ][0]
-        self.assertNotIn("${{", packing["run"])
-        self.assertIn("OTZARIA_HEAD_BRANCH", packing["env"])
+        for step in steps_of(self.index):
+            self.assertNotIn("${{", step.get("run", ""), step.get("name"))
+        self.assertIn("OTZARIA_SHA", packing["env"])
 
     def test_the_cross_repository_read_uses_the_pipeline_token(self):
         self.assertEqual(

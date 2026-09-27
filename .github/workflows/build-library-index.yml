@@ -51,25 +51,8 @@ on:
         description: 'Library release tag to index (v<dbVersion>-<utcTimestamp>)'
         type: string
         required: true
-      otzaria_run_id:
-        description: |
-          Exact Otzaria/otzaria build run whose otzaria-linux-raw artifact builds
-          the index. Empty = the newest SUCCESSFUL run of build-and-announce.yml
-          on `otzaria_ref` that still carries both required artifacts.
-
-          Pinned explicitly, the run's conclusion is not checked — only that it
-          still carries the artifacts. That is the bootstrap and the recovery
-          path, and both need it: the first application build after this change
-          finds no stored index and fails, and so does every build after
-          otzaria_search_engine is bumped. In BOTH cases the failing run has
-          already produced otzaria-linux-raw and otzaria-index-inputs (the raw
-          leg finishes long before the full leg), so dispatch this workflow with
-          that run's id, then rerun the application build.
-        type: string
-        required: false
-        default: ''
       otzaria_ref:
-        description: 'Branch of Otzaria/otzaria to take the build from'
+        description: 'Branch of Otzaria/otzaria, or a full commit SHA, to build the indexing application from'
         type: string
         required: false
         default: 'dev'
@@ -112,7 +95,6 @@ jobs:
       proceed: ${{ steps.classify.outputs.proceed }}
       release_tag: ${{ steps.classify.outputs.release_tag }}
       runner_labels: ${{ steps.classify.outputs.runner_labels }}
-      raw_artifact: ${{ steps.classify.outputs.raw_artifact }}
     steps:
       - name: Classify the triggering tag and pick the runner
         id: classify
@@ -141,16 +123,13 @@ jobs:
           fi
           echo "release_tag=$TAG" >> "$GITHUB_OUTPUT"
 
-          # The bundle must match the runner's architecture — an x86_64 bundle on
-          # the ARM host is an exec format error two hours into the job.
           case "${RUNNER_SELECTION:-local}" in
-            local|'') LABELS='["otzaria-db"]'; RAW=otzaria-linux-raw ;;
-            ARM64)    LABELS='["self-hosted","Linux","ARM64"]'; RAW=otzaria-linux-raw-arm64 ;;
-            server-2) LABELS='["self-hosted","Linux","X64","server-2"]'; RAW=otzaria-linux-raw ;;
+            local|'') LABELS='["otzaria-db"]' ;;
+            ARM64)    LABELS='["self-hosted","Linux","ARM64"]' ;;
+            server-2) LABELS='["self-hosted","Linux","X64","server-2"]' ;;
             *) echo "::error::unknown runner_selection '${RUNNER_SELECTION}'"; exit 1 ;;
           esac
           echo "runner_labels=$LABELS" >> "$GITHUB_OUTPUT"
-          echo "raw_artifact=$RAW" >> "$GITHUB_OUTPUT"
 
   index:
     name: Build the index and attach it to the release
@@ -166,15 +145,11 @@ jobs:
     # wedged at its ceiling delays the NEXT weekly release, not this one.
     timeout-minutes: 180
     env:
-      # Cross-repository by necessity: the application binary that builds the
-      # index lives in Otzaria/otzaria, and GITHUB_TOKEN is scoped to this
-      # repository alone.
+      # Resolves the Otzaria/otzaria ref and writes this repository's release.
       GH_TOKEN: ${{ secrets.PIPELINE_TOKEN }}
       RELEASE_TAG: ${{ needs.gate.outputs.release_tag }}
       OTZARIA_REPO: Otzaria/otzaria
       OTZARIA_REF: ${{ inputs.otzaria_ref || 'dev' }}
-      OTZARIA_RUN_ID: ${{ inputs.otzaria_run_id }}
-      RAW_ARTIFACT: ${{ needs.gate.outputs.raw_artifact }}
       # The tar the parts are cut from, and the name every consumer resolves
       # through https://github.com/Otzaria/SeforimLibrary/releases/latest/download/.
       INDEX_ARCHIVE: otzaria-library-index.tar.zst
@@ -182,7 +157,20 @@ jobs:
       # GitHub refuses an asset of 2 GiB or more; same part size as the
       # application's own split assets.
       PART_SIZE: '1992294400'
-      BUILDER_IMAGE: otzaria-index-builder:bookworm-1
+      BUILDER_IMAGE: otzaria-index-builder:bookworm-2
+      # The builder image's toolchain. Flutter and WPE are checked against the
+      # application's own build_linux; Rust is what its `stable` resolved in run 35842760972.
+      FLUTTER_VERSION: '3.47.2'
+      FLUTTER_COMMIT: d3b14c876900e553bc736ca19295fc09e3853e8e
+      FLUTTER_SHA256_X86_64: 447878859d01ca9bfdb99a85f245af07ed8a15fedcd9d189c4749e8e92d1f185
+      RUST_VERSION: '1.98.1'
+      RUSTUP_VERSION: '1.29.1'
+      RUSTUP_SHA256_X86_64: dda7234360b7f578ca8b0ddcb80145646fa61a67c1720a5abc7051b35c9fcb71
+      RUSTUP_SHA256_AARCH64: 15f6e4ce9f583b929c996c91562bad6d4454f3281de858b02cdfdef615fac433
+      WPE_VERSION: '2.48.7'
+      WPE_TAG: wpe-2.48.7-print-to-pdf
+      WPE_SHA256_X86_64: ca7e706c0ec2f66623fede2c369e3e13339448843e125f2ccd1553f4a3c4bcaf
+      WPE_SHA256_AARCH64: d59f7c7a00d2d15370afc805dfa3a2e017c04833320805f5299989865913dc3d
 
     steps:
       - name: Checkout SeforimLibrary
@@ -198,11 +186,11 @@ jobs:
           set -euo pipefail
           # Why a container and not the runner itself: the database runner is a
           # minimal Ubuntu 24.04 WSL image (its provisioning installs no GTK, no
-          # GL and no X11 at all), while the application binary is built in
+          # GL and no X11 at all), while the application is built in
           # debian:bookworm-slim and needs that whole host-side stack — the one
           # half bundle_wpe.sh deliberately does not bundle. Recreating it by
           # hand would also mean tracking noble's t64 library renames. The image
-          # the binary was compiled in already has it, exactly.
+          # the binary is compiled in already has it, exactly.
           #
           # docker is provisioned on this runner on purpose: bootstrap-ubuntu.sh
           # installs docker.io and puts the runner user in the docker group, and
@@ -245,91 +233,232 @@ jobs:
           mkdir -p "$WORK/books" "$WORK/data" "$WORK/app" "$WORK/parts"
           echo "WORK=$WORK" >> "$GITHUB_ENV"
 
-      - name: Resolve the application build that will index the library
+      - name: Resolve the application revision to build
         id: otzaria
         run: |
           set -euo pipefail
-          # Downloading an artifact needs the `actions: read` scope, which a
-          # plain repository read does not prove — probe the exact endpoint.
-          gh api "repos/$OTZARIA_REPO/actions/workflows/build-and-announce.yml" \
-            --jq '.id' > /dev/null || {
-            echo "::error::PIPELINE_TOKEN cannot read Actions on $OTZARIA_REPO (needs the actions:read scope) — the application bundle that builds the index lives there"
-            exit 1
-          }
-          # Both artifacts must be present on the SAME run: the bundle that
-          # builds the index and the lockfile that says which search engine
-          # produced it. A run whose artifacts have expired is skipped.
-          pick_run() {
-            local run_id="$1"
-            gh api "repos/$OTZARIA_REPO/actions/runs/$run_id/artifacts?per_page=100" \
-              --jq '[.artifacts[] | select(.expired | not) | .name]' > "$WORK/artifacts.json"
-            jq -e --arg raw "$RAW_ARTIFACT" \
-              'index($raw) and index("otzaria-index-inputs")' \
-              "$WORK/artifacts.json" > /dev/null
-          }
-
-          if [ -n "${OTZARIA_RUN_ID:-}" ]; then
-            RUN_ID="$OTZARIA_RUN_ID"
-            pick_run "$RUN_ID" || {
-              echo "::error::run $RUN_ID of $OTZARIA_REPO does not carry both $RAW_ARTIFACT and otzaria-index-inputs (expired, or built before the index handoff landed)"
-              exit 1
-            }
+          # A full commit SHA is built as is; anything else must be a branch name.
+          if printf '%s' "$OTZARIA_REF" | grep -Eq '^[0-9a-f]{40}$'; then
+            SHA=$(timeout --kill-after=30 5m gh api "repos/$OTZARIA_REPO/commits/$OTZARIA_REF" --jq '.sha') || {
+              echo "::error::$OTZARIA_REPO has no commit $OTZARIA_REF"; exit 1; }
+            [ "$SHA" = "$OTZARIA_REF" ] || {
+              echo "::error::$OTZARIA_REPO resolved commit $OTZARIA_REF to $SHA"; exit 1; }
+          elif printf '%s' "$OTZARIA_REF" | grep -Eq '^[A-Za-z0-9._/-]+$'; then
+            SHA=$(timeout --kill-after=30 5m gh api "repos/$OTZARIA_REPO/branches/$OTZARIA_REF" --jq '.commit.sha') || {
+              echo "::error::$OTZARIA_REPO has no branch '$OTZARIA_REF'"; exit 1; }
           else
-            gh api \
-              "repos/$OTZARIA_REPO/actions/workflows/build-and-announce.yml/runs?branch=$OTZARIA_REF&status=success&per_page=30" \
-              --jq '.workflow_runs[] | .id' > "$WORK/candidate-runs.txt"
-            RUN_ID=""
-            while IFS= read -r candidate; do
-              [ -n "$candidate" ] || continue
-              if pick_run "$candidate"; then RUN_ID="$candidate"; break; fi
-              echo "run $candidate lacks the required artifacts — trying the one before it"
-            done < "$WORK/candidate-runs.txt"
-            [ -n "$RUN_ID" ] || {
-              echo "::error::no successful build-and-announce run on $OTZARIA_REF still carries $RAW_ARTIFACT and otzaria-index-inputs"
-              exit 1
-            }
+            echo "::error::otzaria_ref '$OTZARIA_REF' is neither a full commit SHA nor a branch name"
+            exit 1
           fi
+          printf '%s' "$SHA" | grep -Eq '^[0-9a-f]{40}$' || {
+            echo "::error::$OTZARIA_REPO returned '$SHA' for $OTZARIA_REF, not a commit SHA"; exit 1; }
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+          echo "Building $OTZARIA_REPO $OTZARIA_REF @ $SHA"
 
-          gh api "repos/$OTZARIA_REPO/actions/runs/$RUN_ID" > "$WORK/otzaria-run.json"
-          {
-            echo "run_id=$RUN_ID"
-            echo "head_sha=$(jq -er '.head_sha' "$WORK/otzaria-run.json")"
-            echo "head_branch=$(jq -er '.head_branch' "$WORK/otzaria-run.json")"
-            echo "run_attempt=$(jq -er '.run_attempt' "$WORK/otzaria-run.json")"
-          } >> "$GITHUB_OUTPUT"
-          echo "Indexing with $OTZARIA_REPO run $RUN_ID ($(jq -r '.head_branch' "$WORK/otzaria-run.json") @ $(jq -r '.head_sha' "$WORK/otzaria-run.json"))"
-
-      - name: Download the application bundle and its lockfile
+      - name: Build the builder image
         run: |
           set -euo pipefail
-          timeout --kill-after=60 45m \
-            gh run download "${{ steps.otzaria.outputs.run_id }}" --repo "$OTZARIA_REPO" \
-              -n "$RAW_ARTIFACT" -D "$WORK/app"
-          timeout --kill-after=60 10m \
-            gh run download "${{ steps.otzaria.outputs.run_id }}" --repo "$OTZARIA_REPO" \
-              -n otzaria-index-inputs -D "$WORK/lock"
-          # A GitHub artifact is a zip and carries no POSIX mode bits, so every
-          # executable arrives as 0644. Restore exactly the files the launcher
-          # and the WPE helper processes need (see bundle_wpe.sh in the
-          # application's build workflow).
-          for required in app/otzaria app/otzaria.bin app/lib/libWPEInjectedBundle.so; do
-            [ -f "$WORK/$required" ] || {
-              echo "::error::$RAW_ARTIFACT of run ${{ steps.otzaria.outputs.run_id }} has no $required — this is not a WPE-bundled Linux build"
+          # Native to the runner: an x86_64 build on the ARM host would not even start.
+          case "$(uname -m)" in
+            x86_64)
+              APP_ARCH=x86_64; FLUTTER_SHA256="$FLUTTER_SHA256_X86_64"
+              RUSTUP_SHA256="$RUSTUP_SHA256_X86_64"; WPE_SHA256="$WPE_SHA256_X86_64" ;;
+            aarch64)
+              APP_ARCH=aarch64; FLUTTER_SHA256=''
+              RUSTUP_SHA256="$RUSTUP_SHA256_AARCH64"; WPE_SHA256="$WPE_SHA256_AARCH64" ;;
+            *) echo "::error::no Linux application build for runner architecture $(uname -m)"; exit 1 ;;
+          esac
+          {
+            echo "APP_ARCH=$APP_ARCH"
+            echo "WPE_SHA256=$WPE_SHA256"
+          } >> "$GITHUB_ENV"
+
+          # Not an invented package list: this is verbatim the "Prepare
+          # container base tools" and "Install Linux build dependencies" steps
+          # of build_linux in Otzaria/otzaria (python3-yaml added to replay its
+          # steps), and the same image then runs the index. Guessing
+          # a smaller runtime-only set is how you discover that bundle_wpe.sh
+          # bundles only the transitive closure of the WPE libraries — the
+          # application's own libsecret, libcurl and libharfbuzz-icu come from
+          # the host and are not in it. libharfbuzz-icu0 is appended because the
+          # deb declares it (linux/packaging/deb/make_config.yaml) and no -dev
+          # package above pulls it in. Xvfb is required because the Linux
+          # embedder brings up a GTK window before Dart main() runs, even for a
+          # command-line invocation.
+          cat > "$WORK/Dockerfile" <<'DOCKERFILE'
+          FROM debian:bookworm-slim
+          SHELL ["/bin/bash", "-euo", "pipefail", "-c"]
+          ENV DEBIAN_FRONTEND=noninteractive
+          RUN apt-get update -y \
+           && apt-get install -y \
+                ca-certificates curl git unzip zip xz-utils zstd jq \
+                build-essential ninja-build libgtk-3-dev libblkid1 liblzma5 \
+                clang-14 lld-14 cmake git pkg-config liblzma-dev rpm cpio patchelf curl xz-utils zstd \
+                libcurl4-openssl-dev \
+                libsecret-1-dev \
+                libglib2.0-dev libsoup-3.0-dev libxkbcommon-dev openjdk-17-jdk-headless \
+                libwebkit2gtk-4.1-dev xvfb xauth \
+                libharfbuzz-icu0 python3-yaml \
+           && rm -rf /var/lib/apt/lists/* \
+           && update-alternatives --install /usr/bin/clang clang /usr/bin/clang-14 100 \
+           && update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-14 100 \
+           && git config --system --add safe.directory '*'
+
+          ARG APP_ARCH
+          ARG FLUTTER_VERSION
+          ARG FLUTTER_COMMIT
+          ARG FLUTTER_SHA256
+          # x86_64 takes the release archive (as flutter-action does), aarch64 a clone of the tag.
+          RUN case "$APP_ARCH" in \
+                x86_64) \
+                  curl -fsSL --retry 3 --connect-timeout 30 --speed-limit 1024 --speed-time 120 \
+                    -o /tmp/flutter.tar.xz \
+                    "https://storage.googleapis.com/flutter_infra_release/releases/stable/linux/flutter_linux_${FLUTTER_VERSION}-stable.tar.xz" \
+                  && echo "$FLUTTER_SHA256  /tmp/flutter.tar.xz" | sha256sum -c - \
+                  && tar -C /opt -xJf /tmp/flutter.tar.xz \
+                  && rm /tmp/flutter.tar.xz ;; \
+                aarch64) \
+                  git clone --depth 1 --branch "$FLUTTER_VERSION" https://github.com/flutter/flutter.git /opt/flutter ;; \
+                *) echo "unsupported APP_ARCH '$APP_ARCH'"; exit 1 ;; \
+              esac \
+           && [ "$(git -C /opt/flutter rev-parse HEAD)" = "$FLUTTER_COMMIT" ] \
+           && /opt/flutter/bin/flutter --version \
+           && /opt/flutter/bin/flutter precache --linux --no-android --no-ios --no-web
+
+          ARG RUSTUP_VERSION
+          ARG RUSTUP_SHA256
+          ARG RUST_VERSION
+          ENV RUSTUP_HOME=/opt/rustup CARGO_HOME=/opt/cargo
+          ENV PATH=/opt/cargo/bin:/opt/flutter/bin:$PATH
+          # cargokit only ever runs `rustup run stable`, so the pinned toolchain is installed under that name.
+          RUN curl -fsSL --retry 3 --connect-timeout 30 --speed-limit 1024 --speed-time 120 \
+                -o /tmp/rustup-init \
+                "https://static.rust-lang.org/rustup/archive/${RUSTUP_VERSION}/${APP_ARCH}-unknown-linux-gnu/rustup-init" \
+           && echo "$RUSTUP_SHA256  /tmp/rustup-init" | sha256sum -c - \
+           && chmod 755 /tmp/rustup-init \
+           && /tmp/rustup-init -y --no-modify-path --profile minimal --default-toolchain "$RUST_VERSION" \
+           && rm /tmp/rustup-init \
+           && mv "$RUSTUP_HOME/toolchains/$RUST_VERSION-$APP_ARCH-unknown-linux-gnu" \
+                 "$RUSTUP_HOME/toolchains/stable-$APP_ARCH-unknown-linux-gnu" \
+           && rustup default stable \
+           && [ "$(rustup run stable rustc --version | cut -d' ' -f2)" = "$RUST_VERSION" ]
+
+          ARG WPE_VERSION
+          ARG WPE_TAG
+          ARG WPE_SHA256
+          RUN asset="wpe-runtime-${WPE_VERSION}-linux-${APP_ARCH}.tar.zst" \
+           && curl -fsSL --retry 3 --connect-timeout 30 --speed-limit 1024 --speed-time 120 \
+                -o "/tmp/$asset" \
+                "https://github.com/Otzaria/otzaria-wpe-runtime/releases/download/${WPE_TAG}/${asset}" \
+           && echo "$WPE_SHA256  /tmp/$asset" | sha256sum -c - \
+           && tar -C /opt -I zstd -xf "/tmp/$asset" \
+           && rm "/tmp/$asset" \
+           && PKG_CONFIG_PATH=/opt/wpe-sdk/lib/pkgconfig pkg-config --print-errors --exists \
+                wpe-webkit-2.0 wpe-platform-2.0 wpe-platform-headless-2.0 wpe-1.0
+          DOCKERFILE
+          # Built from stdin: the work directory holds a 7 GiB database and
+          # must never be shipped to the daemon as a build context.
+          # --pull so the base is re-resolved instead of the tag freezing on
+          # whatever the first build cached, runner by runner.
+          # Bounded like everything else in this job: it resolves a base image
+          # and downloads ~40 packages and the toolchains, so a socket that
+          # stays open without transferring is the same two-hour silence the
+          # index step exists to make impossible.
+          timeout --kill-after=60 60m \
+            docker build --pull \
+              --build-arg APP_ARCH="$APP_ARCH" \
+              --build-arg FLUTTER_VERSION --build-arg FLUTTER_COMMIT \
+              --build-arg FLUTTER_SHA256="$FLUTTER_SHA256" \
+              --build-arg RUSTUP_VERSION --build-arg RUST_VERSION \
+              --build-arg RUSTUP_SHA256="$RUSTUP_SHA256" \
+              --build-arg WPE_VERSION --build-arg WPE_TAG \
+              --build-arg WPE_SHA256="$WPE_SHA256" \
+              -t "$BUILDER_IMAGE" - < "$WORK/Dockerfile"
+
+      - name: Build the application from that revision
+        env:
+          OTZARIA_SHA: ${{ steps.otzaria.outputs.sha }}
+        run: |
+          set -euo pipefail
+          # shellcheck source=.github/scripts/bounded_docker_run.sh
+          . .github/scripts/bounded_docker_run.sh
+          # git comes from the image, so the runner needs none of its own.
+          bounded_run 15m checkout --rm \
+            -e OTZARIA_REPO -e OTZARIA_SHA \
+            -v "$WORK":/work \
+            "$BUILDER_IMAGE" \
+            bash -euo pipefail -c '
+            git init -q /work/otzaria-src
+            git -C /work/otzaria-src fetch --depth 1 --no-tags "https://github.com/$OTZARIA_REPO.git" "$OTZARIA_SHA"
+            git -C /work/otzaria-src checkout -q --detach FETCH_HEAD
+            [ "$(git -C /work/otzaria-src rev-parse HEAD)" = "$OTZARIA_SHA" ]
+            ' || {
+            echo "::error::could not check out $OTZARIA_REPO at $OTZARIA_SHA"
+            exit 1
+          }
+
+          case "$APP_ARCH" in
+            x86_64) FLUTTER_ARCH=x64; JDK_ARCH=amd64 ;;
+            aarch64) FLUTTER_ARCH=arm64; JDK_ARCH=arm64 ;;
+            *) echo "::error::unexpected APP_ARCH '$APP_ARCH'"; exit 1 ;;
+          esac
+          # The raw target of build_linux: its job environment, its secret-free steps
+          # replayed from the checked-out workflow, and its flutter build without retries.
+          # Measured at 9 minutes on a hosted runner (run 35842760972); the bound only catches a hang.
+          bounded_run 120m app --rm \
+            -e APP_ARCH -e FLUTTER_VERSION -e WPE_VERSION -e WPE_TAG -e WPE_SHA256 \
+            -e GITHUB_WORKSPACE=/work/otzaria-src \
+            -e FLUTTER_BUILD_DIR="build/linux/$FLUTTER_ARCH/release" \
+            -e PKG_CONFIG_PATH=/opt/wpe-sdk/lib/pkgconfig \
+            -e LD_LIBRARY_PATH=/opt/wpe-sdk/lib \
+            -e LIBRARY_PATH=/opt/wpe-sdk/lib \
+            -e JAVA_HOME="/usr/lib/jvm/java-17-openjdk-$JDK_ARCH" \
+            -v "$WORK":/work \
+            -v "$GITHUB_WORKSPACE/.github/scripts":/scripts:ro \
+            -w /work/otzaria-src \
+            "$BUILDER_IMAGE" \
+            bash -euo pipefail -c '
+            python3 /scripts/extract_app_build_steps.py \
+              .github/workflows/build-and-announce.yml /work/app-steps "$APP_ARCH"
+            replay() {
+              echo "::group::$1 (replayed from build-and-announce.yml)"
+              bash --noprofile --norc -eo pipefail "/work/app-steps/$1.sh"
+              echo "::endgroup::"
+            }
+            replay wpe-script
+            replay pub-deps
+            replay cargokit-options
+            replay patch-inappwebview
+            echo "::group::flutter build linux"
+            CC=clang CXX=clang++ \
+            CFLAGS=-Wno-error=unknown-warning-option \
+            CXXFLAGS=-Wno-error=unknown-warning-option \
+              flutter build linux --verbose 2>&1 | tee -a "$GITHUB_WORKSPACE/build_linux.log"
+            echo "::endgroup::"
+            replay verify-wpe-platform
+            replay verify-glibc
+            replay bundle-wpe
+            replay verify-wpe-runtime
+            cp -r "$FLUTTER_BUILD_DIR"/bundle/* /work/app/
+            touch /work/app/portable.marker
+            ' || {
+            echo "::error::the application did not build from $OTZARIA_REPO@$OTZARIA_SHA — see the output above"
+            exit 1
+          }
+          for required in otzaria otzaria.bin lib/libWPEInjectedBundle.so portable.marker; do
+            [ -f "$WORK/app/$required" ] || {
+              echo "::error::the application build left no app/$required — this is not the WPE-bundled layout the index is built with"
               exit 1
             }
-          done
-          chmod 755 "$WORK/app/otzaria" "$WORK/app/otzaria.bin"
-          for helper in "$WORK/app"/lib/WPE*Process; do
-            [ -e "$helper" ] || continue
-            chmod 755 "$helper"
           done
 
       - name: Read the search engine version the index will be built with
         id: engine
         run: |
           set -euo pipefail
-          LOCK="$WORK/lock/pubspec.lock"
-          [ -f "$LOCK" ] || { echo "::error::otzaria-index-inputs carries no pubspec.lock"; exit 1; }
+          # The application commits no lockfile: this is what the build's own pub get resolved.
+          LOCK="$WORK/otzaria-src/pubspec.lock"
+          [ -f "$LOCK" ] || { echo "::error::the application build resolved no pubspec.lock"; exit 1; }
           VERSION=$(awk '
             $1 == "otzaria_search_engine:" { found = 1; next }
             found && $1 == "version:" { gsub(/"/, "", $2); print $2; exit }
@@ -476,42 +605,6 @@ jobs:
       - name: Build the index inside the image the binary was compiled in
         run: |
           set -euo pipefail
-          # Not an invented package list: this is verbatim the "Install Linux
-          # build dependencies" step of build_linux in Otzaria/otzaria, which is
-          # the container `otzaria build-release-index` runs in today. Guessing
-          # a smaller runtime-only set is how you discover that bundle_wpe.sh
-          # bundles only the transitive closure of the WPE libraries — the
-          # application's own libsecret, libcurl and libharfbuzz-icu come from
-          # the host and are not in it. libharfbuzz-icu0 is appended because the
-          # deb declares it (linux/packaging/deb/make_config.yaml) and no -dev
-          # package above pulls it in. Xvfb is required because the Linux
-          # embedder brings up a GTK window before Dart main() runs, even for a
-          # command-line invocation.
-          cat > "$WORK/Dockerfile" <<'DOCKERFILE'
-          FROM debian:bookworm-slim
-          ENV DEBIAN_FRONTEND=noninteractive
-          RUN apt-get update -y \
-           && apt-get install -y \
-                build-essential ninja-build libgtk-3-dev libblkid1 liblzma5 \
-                clang-14 lld-14 cmake git pkg-config liblzma-dev rpm cpio patchelf curl xz-utils zstd \
-                libcurl4-openssl-dev \
-                libsecret-1-dev \
-                libglib2.0-dev libsoup-3.0-dev libxkbcommon-dev openjdk-17-jdk-headless \
-                libwebkit2gtk-4.1-dev xvfb xauth \
-                libharfbuzz-icu0 \
-           && rm -rf /var/lib/apt/lists/*
-          DOCKERFILE
-          # Built from stdin: the work directory holds a 7 GiB database and
-          # must never be shipped to the daemon as a build context.
-          # --pull so the base is re-resolved instead of the tag freezing on
-          # whatever the first build cached, runner by runner.
-          # Bounded like everything else on this step: it resolves a base
-          # image over the network and installs ~40 packages, so a socket that
-          # stays open without transferring is the same two-hour silence this
-          # step exists to make impossible.
-          timeout --kill-after=60 45m \
-            docker build --pull -t "$BUILDER_IMAGE" - < "$WORK/Dockerfile"
-
           # What the library tree must look like for the index to be both
           # complete and portable: the database, and the bundled volumes that
           # only shape the catalogue order.
@@ -520,6 +613,9 @@ jobs:
           [ -d "$WORK/books/תלמוד בבלי" ] || {
             echo "::error::books/תלמוד בבלי is missing — catalogue order would drift"; exit 1; }
           rm -rf "$WORK/index"
+
+          # shellcheck source=.github/scripts/bounded_docker_run.sh
+          . .github/scripts/bounded_docker_run.sh
 
           # xvfb-run is not used, on purpose. It brings the display up by
           # forking Xvfb and blocking in `wait` until Xvfb raises SIGUSR1 at it
@@ -539,28 +635,6 @@ jobs:
           # — its socket — with Xvfb's own log printed if it does not appear.
           # Nothing is retried and nothing is guessed: either /tmp/.X11-unix/X99
           # exists within 20 seconds or the step fails and says why.
-          # A bound that reaches only the docker CLIENT is half a bound. SIGTERM
-          # is forwarded to PID 1 of the container — a non-interactive bash,
-          # which installs no handler and, as PID 1, is not killed by default
-          # action — and the SIGKILL that --kill-after sends afterwards goes to
-          # the client and cannot be proxied. The step would fail loudly while
-          # the container kept running, kept holding -v "$WORK":/work, and kept
-          # writing into an index the job had already given up on. So every run
-          # records its id and the bound disposes of it explicitly.
-          bounded_run() {
-            local bound="$1" tag="$2"; shift 2
-            local cid="$WORK/cid-$tag"
-            local rc=0
-            rm -f "$cid"
-            timeout --kill-after=60 "$bound" docker run --cidfile "$cid" "$@" || rc=$?
-            if [ "$rc" -ne 0 ] && [ -s "$cid" ]; then
-              echo "::warning::the bound expired; removing the container it left behind ($(cat "$cid"))"
-              docker rm -f "$(cat "$cid")" > /dev/null 2>&1 \
-                || echo "::warning::that container could not be removed — it may still be running"
-            fi
-            return "$rc"
-          }
-
           XVFB='
           Xvfb :99 -screen 0 1280x1024x24 -nolisten tcp >/tmp/xvfb.log 2>&1 &
           xvfb=$!
@@ -716,18 +790,14 @@ jobs:
       - name: Pack, describe and split the index
         env:
           # Through the environment, never interpolated into the command line:
-          # head_branch is a git ref name and git permits `"` and `$` inside
-          # one, which on this runner would be a shell injection next to
-          # PIPELINE_TOKEN.
+          # OTZARIA_REF is a dispatch input, which on this runner would be a
+          # shell injection next to PIPELINE_TOKEN.
           SEFORIM_DB_ZST_SHA256: ${{ steps.database.outputs.seforim_db_zst_sha256 }}
           TALMUD_BAVLI_SHA256: ${{ steps.talmud.outputs.talmud_bavli_sha256 }}
           TALMUD_VOLUMES_DIGEST: ${{ steps.talmud.outputs.talmud_volumes_digest }}
           TALMUD_VOLUMES: ${{ steps.talmud.outputs.talmud_volumes }}
           SEARCH_ENGINE_VERSION: ${{ steps.engine.outputs.version }}
-          OTZARIA_RUN_ID_USED: ${{ steps.otzaria.outputs.run_id }}
-          OTZARIA_RUN_ATTEMPT: ${{ steps.otzaria.outputs.run_attempt }}
-          OTZARIA_HEAD_SHA: ${{ steps.otzaria.outputs.head_sha }}
-          OTZARIA_HEAD_BRANCH: ${{ steps.otzaria.outputs.head_branch }}
+          OTZARIA_SHA: ${{ steps.otzaria.outputs.sha }}
         run: |
           set -euo pipefail
           # shellcheck source=/dev/null
@@ -755,10 +825,9 @@ jobs:
             --arg talmudVolumesDigest "$TALMUD_VOLUMES_DIGEST" \
             --argjson talmudVolumes "$TALMUD_VOLUMES" \
             --arg searchEngineVersion "$SEARCH_ENGINE_VERSION" \
-            --arg otzariaRunId "$OTZARIA_RUN_ID_USED" \
-            --arg otzariaRunAttempt "$OTZARIA_RUN_ATTEMPT" \
-            --arg otzariaHeadSha "$OTZARIA_HEAD_SHA" \
-            --arg otzariaHeadBranch "$OTZARIA_HEAD_BRANCH" \
+            --arg otzariaRepository "$OTZARIA_REPO" \
+            --arg otzariaRef "$OTZARIA_REF" \
+            --arg otzariaSha "$OTZARIA_SHA" \
             --arg builderRunId "$GITHUB_RUN_ID" \
             --arg builtAt "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
             '{
@@ -776,11 +845,9 @@ jobs:
               includesPdfBooks: false,
               searchEngineVersion: $searchEngineVersion,
               otzaria: {
-                repository: "Otzaria/otzaria",
-                runId: $otzariaRunId,
-                runAttempt: $otzariaRunAttempt,
-                headSha: $otzariaHeadSha,
-                headBranch: $otzariaHeadBranch
+                repository: $otzariaRepository,
+                ref: $otzariaRef,
+                sha: $otzariaSha
               },
               builtBy: {repository: "Otzaria/SeforimLibrary", runId: $builderRunId},
               builtAt: $builtAt
