@@ -2653,6 +2653,20 @@ class SeforimRepository(databasePath: String, private val driver: SqlDriver) : L
         logger.d { "Raw SQL query executed successfully" }
     }
 
+    /** Recomputes hasSourceConnection: 1 iff target of a SOURCE_VIEW_TYPES link. */
+    suspend fun recomputeHasSourceConnection(): Unit = withContext(Dispatchers.IO) {
+        val types = ConnectionType.SOURCE_VIEW_TYPES.joinToString(",") { "'${it.name}'" }
+        driver.execute(
+            null,
+            "UPDATE book SET hasSourceConnection = (id IN (" +
+                "SELECT l.targetBookId FROM link l " +
+                "JOIN connection_type ct ON ct.id = l.connectionTypeId " +
+                "WHERE ct.name IN ($types) AND l.sourceBookId != l.targetBookId" +
+                "))",
+            0,
+        )
+    }
+
     // FTS rebuild removed (Lucene managed externally by generator).
 
     /**

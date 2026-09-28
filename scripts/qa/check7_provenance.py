@@ -17,7 +17,7 @@ SNAPSHOT_INFERRED_PAIRS = 20       # זוגות ספרים מוסקים
 
 # סוגי הקישור של ה-mirror query (LinkQueries.sq:selectInverseLinksByTargetLineIds).
 _MIRROR_TYPES = ("COMMENTARY", "SUPER_COMMENTARY", "TARGUM", "MIDRASH",
-                 "PARSHANUT", "DIBUR_HAMATCHIL", "EIN_MISHPAT", "ELUCIDATION")
+                 "PARSHANUT", "DIBUR_HAMATCHIL", "EIN_MISHPAT", "ELUCIDATION", "FOOTNOTES")
 _MIRROR_TYPES_SQL = "(" + ",".join("'%s'" % t for t in _MIRROR_TYPES) + ")"
 _MIRROR_SAMPLE = 25                # ספרי-מקור לדגימת הרכב דרגות ה-provenance
 

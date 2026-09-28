@@ -98,6 +98,19 @@ enum class ConnectionType {
     ;
 
     companion object {
+        /** Types the SOURCE view mirrors; must match LinkQueries.sq. */
+        val SOURCE_VIEW_TYPES: Set<ConnectionType> = setOf(
+            COMMENTARY,
+            SUPER_COMMENTARY,
+            TARGUM,
+            MIDRASH,
+            PARSHANUT,
+            DIBUR_HAMATCHIL,
+            EIN_MISHPAT,
+            ELUCIDATION,
+            FOOTNOTES,
+        )
+
         /**
          * Creates a ConnectionType from a string value.
          *

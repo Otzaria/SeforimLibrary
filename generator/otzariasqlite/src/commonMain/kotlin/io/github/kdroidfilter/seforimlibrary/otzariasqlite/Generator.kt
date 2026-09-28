@@ -68,17 +68,7 @@ private const val MAX_NAMES_PER_SUMMARY_LINE = 20
 private fun String.oneLine(): String = replace(Regex("\\s+"), " ").trim()
 
 /** Persisted dependant types exposed by the repository's virtual SOURCE view. */
-private val ORIENTED_DEPENDANT_TYPES = setOf(
-    ConnectionType.COMMENTARY,
-    ConnectionType.SUPER_COMMENTARY,
-    ConnectionType.TARGUM,
-    ConnectionType.MIDRASH,
-    ConnectionType.PARSHANUT,
-    ConnectionType.DIBUR_HAMATCHIL,
-    ConnectionType.EIN_MISHPAT,
-    ConnectionType.ELUCIDATION,
-    ConnectionType.FOOTNOTES,
-)
+private val ORIENTED_DEPENDANT_TYPES = ConnectionType.SOURCE_VIEW_TYPES
 
 private val DEPENDENCY_TITLE_PREFIXES = listOf(
     "תלמוד בבלי ",
@@ -2533,26 +2523,8 @@ class DatabaseGenerator(
         runCatching { setConnFlag("COMMENTARY", "hasCommentaryConnection") }
         runCatching { setConnFlag("OTHER", "hasOtherConnection") }
 
-        // hasSourceConnection: virtual flag — set when this book is the *target*
-        // of an *oriented* dependant link. Lateral types (QUOTATION,
-        // MISHNAH_IN_TALMUD, MESORAT_HASHAS, RELATED) are NOT sources.
-        // EIN_MISHPAT is included — it is the halakhic-index pointer from a
-        // Talmud sugya to the matching halakhah in Mishneh Torah / Tur / SA
-        // (the code derives FROM the Talmud). Keep in sync with the mirror
-        // SOURCE queries in LinkQueries.sq.
-        runCatching {
-            val dependantTypes = listOf(
-                "COMMENTARY", "SUPER_COMMENTARY", "TARGUM", "MIDRASH",
-                "PARSHANUT", "DIBUR_HAMATCHIL", "EIN_MISHPAT", "ELUCIDATION",
-            ).joinToString(",") { "'$it'" }
-            repository.executeRawQuery(
-                "UPDATE book SET hasSourceConnection=1 WHERE id IN (" +
-                    "SELECT DISTINCT l.targetBookId FROM link l " +
-                    "JOIN connection_type ct ON ct.id = l.connectionTypeId " +
-                    "WHERE ct.name IN ($dependantTypes) AND l.sourceBookId != l.targetBookId" +
-                    ")"
-            )
-        }
+        // hasSourceConnection: target side of a SOURCE_VIEW_TYPES link.
+        runCatching { repository.recomputeHasSourceConnection() }
 
         // Quick summary counts (single queries)
         val totalBooks = repository.getAllBooks().size
