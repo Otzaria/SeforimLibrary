@@ -16,6 +16,7 @@ import kotlinx.coroutines.runBlocking
 import java.nio.file.Files
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
@@ -286,5 +287,36 @@ class OtzariaSourceLinksTest {
         val link = repo.getLink(repo.getLinkIdsBetweenLines(200, 100).single())!!
         assertEquals(ConnectionType.OTHER, link.connectionType)
         assertTrue(repo.getLinkIdsBetweenLines(100, 200).isEmpty())
+    }
+
+    @Test
+    fun footnotesOnlyTargetGetsHasSourceConnection() = runBlocking {
+        val driver = JdbcSqliteDriver(url = "jdbc:sqlite::memory:")
+        SeforimDb.Schema.create(driver)
+        val repo = SeforimRepository(":memory:", driver)
+        val sourceId = repo.insertSource("NationalLibrary")
+        val catId = repo.insertCategory(Category(0, null, "מוסר", level = 0, order = 1))
+        fun book(id: Long, title: String) = Book(
+            id = id, categoryId = catId, sourceId = sourceId, title = title, heRef = title,
+            order = id.toFloat(), totalLines = 1,
+        )
+        repo.insertBook(book(1, "בסיס"))
+        repo.insertBook(book(2, "הערות"))
+        repo.insertBook(book(3, "מצטט"))
+        repo.insertLinesBatch(listOf(Line(100, 1, 0, "ב", "ב"), Line(200, 2, 0, "ה", "ה"), Line(300, 3, 0, "מ", "מ")))
+        val sourceDir = Files.createTempDirectory("otzaria-footnotes-flag")
+        val linksDir = Files.createDirectories(sourceDir.resolve("links"))
+        Files.writeString(
+            linksDir.resolve("בסיס_links.json"),
+            """[{"line_index_1":1,"heRef_2":"ה","path_2":"הערות.txt","line_index_2":1,"Conection Type":"footnotes"},""" +
+                """{"line_index_1":1,"heRef_2":"מ","path_2":"מצטט.txt","line_index_2":1,"Conection Type":"quotation"}]""",
+        )
+
+        DatabaseGenerator(sourceDirectory = sourceDir, repository = repo).generateLinksOnly()
+
+        assertEquals(ConnectionType.FOOTNOTES, repo.getLink(repo.getLinkIdsBetweenLines(100, 200).single())!!.connectionType)
+        assertTrue(repo.getBookCore(2)!!.hasSourceConnection)
+        assertFalse(repo.getBookCore(1)!!.hasSourceConnection)
+        assertFalse(repo.getBookCore(3)!!.hasSourceConnection)
     }
 }

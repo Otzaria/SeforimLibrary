@@ -14,6 +14,7 @@ import kotlin.test.AfterTest
 import kotlin.test.BeforeTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertFailsWith
 import kotlin.test.assertNotEquals
 import kotlin.test.assertNotNull
@@ -811,6 +812,43 @@ class SeforimRepositoryIntegrationTest {
         assertEquals(depBookId, sources.first().link.sourceBookId)
         assertEquals(baseBookId, sources.first().link.targetBookId)
         assertEquals("Genesis 1:1", sources.first().targetText)
+    }
+
+    @Test
+    fun `recomputeHasSourceConnection flags FOOTNOTES targets and clears stale flags`() = runBlocking {
+        val sourceId = repository.insertSource("Test")
+        val catId = repository.insertCategory(Category(parentId = null, title = "C", level = 0, order = 1))
+        fun book(title: String, order: Float) =
+            Book(categoryId = catId, sourceId = sourceId, title = title, order = order)
+        val baseId = repository.insertBook(book("Base", 1f))
+        val notesId = repository.insertBook(book("Notes on Base", 2f))
+        val quotingId = repository.insertBook(book("Quoting", 3f))
+        val staleId = repository.insertBook(book("Stale", 4f))
+        val baseLine = repository.insertLine(Line(bookId = baseId, lineIndex = 0, content = "b"))
+        val notesLine = repository.insertLine(Line(bookId = notesId, lineIndex = 0, content = "n"))
+        val quotingLine = repository.insertLine(Line(bookId = quotingId, lineIndex = 0, content = "q"))
+        fun link(target: Long, targetLine: Long, type: ConnectionType) = Link(
+            sourceBookId = baseId, targetBookId = target, sourceLineId = baseLine,
+            targetLineId = targetLine, targetLineIndex = 0, connectionType = type,
+        )
+        repository.insertLink(link(notesId, notesLine, ConnectionType.FOOTNOTES))
+        repository.insertLink(link(quotingId, quotingLine, ConnectionType.QUOTATION))
+        repository.executeRawQuery("UPDATE book SET hasSourceConnection=1 WHERE id=$staleId")
+
+        repository.recomputeHasSourceConnection()
+
+        assertTrue(repository.getBookCore(notesId)!!.hasSourceConnection)
+        assertFalse(repository.getBookCore(baseId)!!.hasSourceConnection)
+        assertFalse(repository.getBookCore(quotingId)!!.hasSourceConnection)
+        assertFalse(repository.getBookCore(staleId)!!.hasSourceConnection)
+        // The flag must agree with the SOURCE view it advertises.
+        val sources = repository.getCommentariesForLineRange(
+            lineIds = listOf(notesLine),
+            connectionTypes = setOf(ConnectionType.SOURCE),
+            offset = 0,
+            limit = 10,
+        )
+        assertEquals(listOf(baseId), sources.map { it.link.targetBookId })
     }
 
     @Test

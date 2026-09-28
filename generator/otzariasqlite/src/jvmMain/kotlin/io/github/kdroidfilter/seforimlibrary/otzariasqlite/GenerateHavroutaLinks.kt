@@ -74,6 +74,9 @@ fun main(args: Array<String>) = runBlocking {
         val hearotLinksCreated = generateHavroutaHearotLinks(repository, bindings, logger, sourceDir)
         logger.i { "Havrouta-Hearot link generation completed. Created $hearotLinksCreated links." }
 
+        // After both steps, so flags include Hearot FOOTNOTES links.
+        updateBookHasLinks(repository, logger)
+
         logger.i { "Setting Hearot as default commentators for their base books..." }
         setHearotAsDefaultCommentators(repository, driver, logger)
 
@@ -266,9 +269,6 @@ internal suspend fun generateHavroutaLinks(
                 "${unmatched.size} skipped with no matching Talmud tractate: ${unmatched.joinToString()}"
         }
     }
-
-    // Update book_has_links table
-    updateBookHasLinks(repository, logger)
 
     return totalLinksCreated
 }
@@ -483,7 +483,7 @@ private fun hasSignificantOverlap(text1: String, text2: String, minLen: Int = 6)
 /**
  * Updates the book_has_links table after generating links.
  */
-private suspend fun updateBookHasLinks(repository: SeforimRepository, logger: Logger) {
+internal suspend fun updateBookHasLinks(repository: SeforimRepository, logger: Logger) {
     logger.i { "Updating book_has_links table..." }
 
     repository.executeRawQuery(
@@ -509,13 +509,7 @@ private suspend fun updateBookHasLinks(repository: SeforimRepository, logger: Lo
             ")"
     )
 
-    repository.executeRawQuery(
-        "UPDATE book SET hasSourceConnection=1 WHERE id IN (" +
-            "SELECT DISTINCT sourceBookId FROM link l " +
-            "JOIN connection_type ct ON ct.id = l.connectionTypeId " +
-            "WHERE ct.name='SOURCE'" +
-            ")"
-    )
+    repository.recomputeHasSourceConnection()
 
     logger.i { "book_has_links table updated" }
 }
