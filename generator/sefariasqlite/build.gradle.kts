@@ -228,6 +228,8 @@ tasks.register<JavaExec>("generateLinkerLinks") {
     // budget while other generator forks remain unchanged; the stable-ID
     // lineage is disk-backed and no longer consumes this heap.
     jvmArgs = listOf("-Xmx$linkerHeap", "-XX:+UseG1GC")
+    // Phase-2 rewrites every LINKER link, so the planner statistics are rebuilt after it.
+    finalizedBy(":generator-common:analyzeSeforimDb")
 }
 
 // Post-processing step to rename categories after all generation is complete

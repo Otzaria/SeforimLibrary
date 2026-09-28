@@ -211,6 +211,19 @@ tasks.register<JavaExec>("stampSchemaVersion") {
     jvmArgs = listOf("-Xmx512m")
 }
 
+tasks.register<JavaExec>("analyzeSeforimDb") {
+    group = "application"
+    description = "Runs ANALYZE on the finished seforim.db so the app's query planner has sqlite_stat1."
+    dependsOn("jvmJar")
+    mainClass.set("io.github.kdroidfilter.seforimlibrary.common.patch.AnalyzeDbCliKt")
+    classpath = files(tasks.named("jvmJar")) + configurations.getByName("jvmRuntimeClasspath")
+    val dbPath = (project.findProperty("dbPath") ?: project.findProperty("seforimDb")) as String?
+        ?: System.getenv("SEFORIM_DB")
+        ?: rootProject.layout.buildDirectory.file("seforim.db").get().asFile.absolutePath
+    systemProperty("dbPath", dbPath)
+    jvmArgs = listOf("-Xmx512m")
+}
+
 tasks.register<JavaExec>("buildLineRefIndex") {
     group = "application"
     description = "Rebuild line_ref — the canonical (bookId, refKeyHash) -> lineIndex reference index."
