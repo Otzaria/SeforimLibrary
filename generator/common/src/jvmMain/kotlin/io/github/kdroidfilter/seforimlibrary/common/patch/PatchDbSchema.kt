@@ -12,6 +12,7 @@ import java.sql.Connection
  *  - `upsert_<table>` one row per upserted row of the target table, with the
  *                     SAME columns + the target table's PK
  *  - `delete_<table>` one row per row to remove, with the target table's PK
+ *  - `stat1_snapshot` the target DB's `sqlite_stat1` (optional, see [writeStat1Snapshot])
  *
  * The upsert / delete table shapes are derived dynamically from the target
  * seforim.db schema attached as `prev` (or `new`) at producer time — that way
@@ -20,6 +21,12 @@ import java.sql.Connection
 internal object PatchDbSchema {
 
     const val CURRENT_VERSION: Int = 4
+
+    /**
+     * Planner statistics travel here, not in a format bump: released appliers only
+     * read `patch_meta`, `migrations` and the `upsert_`/`delete_` tables they know.
+     */
+    const val STAT1_SNAPSHOT_TABLE: String = "stat1_snapshot"
 
     /** Fixed-shape tables (metadata + auxiliaries). */
     val baseStatements: List<String> = listOf(
@@ -94,6 +101,24 @@ internal object PatchDbSchema {
                     $pkClause
                 )
             """.trimIndent())
+        }
+    }
+
+    /**
+     * Copies `sqlite_stat1` of [sourceSchemaAlias] into [STAT1_SNAPSHOT_TABLE] and returns
+     * the row count; 0 without creating the table when the source was never analyzed.
+     */
+    fun writeStat1Snapshot(conn: Connection, sourceSchemaAlias: String): Int {
+        val analyzed = conn.prepareStatement(
+            "SELECT 1 FROM $sourceSchemaAlias.sqlite_master WHERE type='table' AND name='sqlite_stat1'",
+        ).use { ps -> ps.executeQuery().use { it.next() } }
+        if (!analyzed) return 0
+        return conn.createStatement().use { st ->
+            st.execute("CREATE TABLE $STAT1_SNAPSHOT_TABLE (tbl TEXT NOT NULL, idx TEXT, stat TEXT NOT NULL)")
+            st.executeUpdate(
+                "INSERT INTO $STAT1_SNAPSHOT_TABLE (tbl, idx, stat) " +
+                    "SELECT tbl, idx, stat FROM $sourceSchemaAlias.sqlite_stat1",
+            )
         }
     }
 

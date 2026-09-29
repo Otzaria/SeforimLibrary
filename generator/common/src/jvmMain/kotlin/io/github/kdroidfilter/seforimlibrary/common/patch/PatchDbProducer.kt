@@ -160,6 +160,11 @@ class PatchDbProducer(
                 missingInPrev = columnPlans.mapValues { (_, plan) -> plan.missingColumns.toSet() },
             )
 
+            // Delta clients would otherwise never get the statistics a full
+            // download carries (AnalyzeDbCli), and some app queries run ~10x slower.
+            val statRows = PatchDbSchema.writeStat1Snapshot(conn, "new")
+            if (statRows > 0) logger.i { "Shipping $statRows sqlite_stat1 row(s) as ${PatchDbSchema.STAT1_SNAPSHOT_TABLE}" }
+
             // Commit BEFORE detach so SQLite isn't holding locks on the
             // attached DBs through an open transaction.
             conn.commit()
