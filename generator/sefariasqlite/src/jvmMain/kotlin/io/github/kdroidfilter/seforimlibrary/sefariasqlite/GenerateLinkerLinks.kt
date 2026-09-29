@@ -187,6 +187,28 @@ fun main(args: Array<String>) = runBlocking {
         // Resolve and cache exactly ONE source line. Artifact records are written per book in line
         // order, so consecutive citations hit this cache. This replaces both the corpus-sized
         // source map and the old second lookup by line id while preserving exact row identity.
+        // Inline, not LineContentShape: the recovery path overlays this one file onto an
+        // older payload whose generator-common may predate that helper.
+        var lineContentSplit = false
+        driver.executeQuery(null,
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='line_content') " +
+                "AND NOT EXISTS(SELECT 1 FROM pragma_table_info('line') WHERE name='content')",
+            { c -> if (c.next().value) lineContentSplit = c.getLong(0) == 1L; QueryResult.Value(Unit) }, 0)
+        val sourceLineSql = if (lineContentSplit) {
+            """
+            SELECT l.id, lc.content,
+                   COALESCE(NULLIF(TRIM(l.heRef), ''), COALESCE(b.heRef, b.title))
+            FROM line l JOIN book b ON l.bookId = b.id JOIN line_content lc ON lc.id = l.id
+            WHERE l.bookId = ? AND l.lineIndex = ?
+            """.trimIndent()
+        } else {
+            """
+            SELECT l.id, l.content,
+                   COALESCE(NULLIF(TRIM(l.heRef), ''), COALESCE(b.heRef, b.title))
+            FROM line l JOIN book b ON l.bookId = b.id
+            WHERE l.bookId = ? AND l.lineIndex = ?
+            """.trimIndent()
+        }
         data class SourceLine(val id: Long, val content: String, val contextRef: String)
         var cachedSourceBookId = Long.MIN_VALUE
         var cachedSourceLineIndex = Int.MIN_VALUE
@@ -194,13 +216,8 @@ fun main(args: Array<String>) = runBlocking {
         fun sourceLineFor(bookId: Long, lineIndex: Int): SourceLine? {
             if (bookId != cachedSourceBookId || lineIndex != cachedSourceLineIndex) {
                 var found: SourceLine? = null
-                driver.executeQuery(1001,
-                    """
-                    SELECT l.id, l.content,
-                           COALESCE(NULLIF(TRIM(l.heRef), ''), COALESCE(b.heRef, b.title))
-                    FROM line l JOIN book b ON l.bookId = b.id
-                    WHERE l.bookId = ? AND l.lineIndex = ?
-                    """.trimIndent(),
+                driver.executeQuery(if (lineContentSplit) 1002 else 1001,
+                    sourceLineSql,
                     { c ->
                         if (c.next().value) {
                             found = SourceLine(

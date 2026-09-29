@@ -282,7 +282,7 @@ class GenerateLinkerLinksTest {
     private class LinkerRun(val failure: Throwable?, val links: Long, val anchors: Long)
 
     // Runs the real entry point (reflective main) on a fixture DB + build_state + sidecar.
-    private fun runLinkerMain(artifactBody: String, strict: String?): LinkerRun {
+    private fun runLinkerMain(artifactBody: String, strict: String?, splitLineContent: Boolean = false): LinkerRun {
         val dir = Files.createTempDirectory("linkerMainFixture")
         val artifacts = Files.createDirectory(dir.resolve("artifacts"))
         Files.writeString(artifacts.resolve("a.jsonl"), artifactBody)
@@ -311,6 +311,16 @@ class GenerateLinkerLinksTest {
                 id
             }
             repo.close()
+            if (splitLineContent) {
+                // The schema-6 shape SplitLineContentCli leaves behind.
+                DriverManager.getConnection("jdbc:sqlite:$db").use { c ->
+                    c.createStatement().use { st ->
+                        st.execute("CREATE TABLE line_content (id INTEGER PRIMARY KEY NOT NULL, content TEXT NOT NULL)")
+                        st.execute("INSERT INTO line_content SELECT id, content FROM line")
+                        st.execute("ALTER TABLE line DROP COLUMN content")
+                    }
+                }
+            }
             BuildStateWriter().write(
                 BuildStateSnapshot.empty().copy(
                     lookups = mapOf(IdTable.CONNECTION_TYPE to mapOf(ConnectionType.LINKER.name to linkerTypeId)),
@@ -401,6 +411,15 @@ class GenerateLinkerLinksTest {
     fun zeroBasedAndOmittedLineIndexBaseAreAccepted() {
         val body = record(4, 15, base = null) + "\n" + record(26, 37, base = 0) + "\n"
         val run = runLinkerMain(body, strict = "true")
+        assertEquals(null, run.failure)
+        assertEquals(1L, run.links)
+        assertEquals(2L, run.anchors)
+    }
+
+    @Test
+    fun sourceLinesAreReadFromLineContentOnASchema6Db() {
+        val body = record(4, 15, base = null) + "\n" + record(26, 37, base = 0) + "\n"
+        val run = runLinkerMain(body, strict = "true", splitLineContent = true)
         assertEquals(null, run.failure)
         assertEquals(1L, run.links)
         assertEquals(2L, run.anchors)

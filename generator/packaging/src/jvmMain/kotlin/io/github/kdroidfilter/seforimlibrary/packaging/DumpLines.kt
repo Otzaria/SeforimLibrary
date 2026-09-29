@@ -2,6 +2,7 @@ package io.github.kdroidfilter.seforimlibrary.packaging
 
 import co.touchlab.kermit.Logger
 import co.touchlab.kermit.Severity
+import io.github.kdroidfilter.seforimlibrary.common.db.LineContentShape
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.Paths
@@ -14,8 +15,9 @@ import kotlin.system.exitProcess
  *
  * Why a snapshot instead of feeding the linker raw `merged.json`/`.txt`:
  * citation offsets are only valid against the *exact* cleaned line text the
- * build stored — the same bytes anchors later index into. `line.content` in a
- * built DB is precisely that post-cleaning text, so copying it verbatim removes
+ * build stored — the same bytes anchors later index into. The line text in a
+ * built DB (`line.content`, or `line_content` from schema 6) is precisely that
+ * post-cleaning text, so copying it verbatim removes
  * the silent-offset-skew failure mode entirely.
  *
  * The snapshot's `(source_name, canonical_he_title)` is the exact allocator
@@ -115,6 +117,7 @@ fun main(args: Array<String>) {
 
             // Stream forward-only; ordering by (book, lineIndex) keeps per-book lines contiguous
             // and in index order — the linker relies on this to slice books cheaply.
+            val split = LineContentShape.isSplit(src)
             var books = 0L
             var lines = 0L
             var lastKey: Pair<String, String>? = null
@@ -125,11 +128,12 @@ fun main(args: Array<String>) {
                     SELECT s.name AS source_name,
                            COALESCE(b.heRef, b.title) AS canonical_he_title,
                            l.lineIndex AS line_index,
-                           l.content   AS content,
+                           ${LineContentShape.contentExpr(split)} AS content,
                            COALESCE(NULLIF(TRIM(l.heRef), ''), COALESCE(b.heRef, b.title)) AS context_ref
                     FROM line l
                     JOIN book b   ON l.bookId = b.id
                     JOIN source s ON b.sourceId = s.id
+                    ${LineContentShape.contentJoin(split)}
                     $bookFilter
                     ORDER BY b.id, l.lineIndex
                     """.trimIndent(),
