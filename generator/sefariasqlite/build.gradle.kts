@@ -229,6 +229,36 @@ tasks.register<JavaExec>("synthesizeSimanNamesAltToc") {
     jvmArgs = listOf("-Xmx1g")
 }
 
+// Chapters alt-TOC inheritance — runs after synthesizeSeifimAltToc so every
+// book-, link- and alt-TOC-writing stage is done before it picks candidates.
+// Usage:
+//   ./gradlew :sefariasqlite:inheritChaptersAltToc -PseforimDb=/path/to/seforim.db
+tasks.register<JavaExec>("inheritChaptersAltToc") {
+    group = "application"
+    description = "Give commentaries without an alt-TOC the Chapters structure of their base book."
+
+    dependsOn("jvmJar")
+    mainClass.set("io.github.kdroidfilter.seforimlibrary.sefariasqlite.InheritChaptersAltTocPostProcessKt")
+    // Both post-processes write seforim.db and the attached build-state counters; with
+    // org.gradle.parallel they must not overlap. Matched by name: the task may not exist.
+    mustRunAfter(tasks.matching { it.name == "synthesizeSimanNamesAltToc" })
+    classpath = files(tasks.named("jvmJar")) + configurations.getByName("jvmRuntimeClasspath")
+
+    if (project.hasProperty("seforimDb")) {
+        systemProperty("seforimDb", project.property("seforimDb") as String)
+    } else if (System.getenv("SEFORIM_DB") != null) {
+        systemProperty("seforimDb", System.getenv("SEFORIM_DB"))
+    } else {
+        val defaultDbPath = rootProject.layout.buildDirectory.file("seforim.db").get().asFile.absolutePath
+        systemProperty("seforimDb", defaultDbPath)
+    }
+    if (project.hasProperty("buildStatePath")) {
+        systemProperty("buildStatePath", project.property("buildStatePath") as String)
+    }
+
+    jvmArgs = listOf("-Xmx1g")
+}
+
 // Phase-2 LINKER importer: resolve ref-based artifacts (LinkerToOtzaria) into clickable links.
 // Usage:
 //   ./gradlew :sefariasqlite:generateLinkerLinks -PseforimDb=/path/seforim.db \
