@@ -180,7 +180,7 @@ internal class SefariaVersionsImporter(
                 rows += VersionLine(
                     versionId = versionId,
                     lineId = lineId,
-                    content = content,
+                    content = if (payload.boldDashDibburim) SefariaTalmudDibburBold.bold(content) else content,
                     charCount = countVisibleChars(content),
                 )
             }

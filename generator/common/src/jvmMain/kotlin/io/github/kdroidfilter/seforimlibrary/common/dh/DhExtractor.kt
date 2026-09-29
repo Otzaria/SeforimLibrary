@@ -153,19 +153,28 @@ object DhExtractor {
         return leadDh.takeIf { it.display.length > boldDh.display.length }
     }
 
-    private fun extractDash(line: String): Dh? {
+    /**
+     * End (exclusive) of the [Format.DASH] dibbur in [line] — the exact span
+     * [extract] reads in that format — or `null` when the line has none.
+     */
+    fun dashDibburEnd(line: String): Int? =
+        dashCut(line)?.takeIf { accept(line.substring(0, it)) != null }
+
+    private fun extractDash(line: String): Dh? = dashCut(line)?.let { accept(line.substring(0, it)) }
+
+    private fun dashCut(line: String): Int? {
         if (isHeadingLine(line)) return null
         val m = SPACED_DASH.find(line) ?: return null
-        var dh = line.substring(0, m.range.first)
-        if ('<' in dh || dh.length > MAX_DH_LENGTH) return null
+        var end = m.range.first
+        if (end > MAX_DH_LENGTH || line.lastIndexOf('<', end - 1) >= 0) return null
         if (line.substring(m.range.last + 1).isBlank()) return null
         // A daf's first comment ends its dibbur with a sentence break instead
         // of a dash; when the dash-cut is implausibly long, re-cut there.
-        if (dh.length > LONG_DASH_DH) {
-            val cut = dh.indexOf(SENTENCE_BREAK)
-            if (cut > 0) dh = dh.substring(0, cut)
+        if (end > LONG_DASH_DH) {
+            val cut = line.indexOf(SENTENCE_BREAK)
+            if (cut > 0 && cut + SENTENCE_BREAK.length <= end) end = cut
         }
-        return accept(dh)
+        return end
     }
 
     private fun accept(rawDh: String): Dh? {

@@ -285,6 +285,7 @@ internal class SefariaBookPayloadReader(
                 schemaFilePath = schemaPath.toString(),
                 preferredVersionFileName = preferredPath?.fileName?.name,
                 categoriesEn = categoriesEn,
+                boldDashDibburim = SefariaTalmudDibburBold.appliesTo(categoriesEn, dependence, lines),
             )
         }.onFailure { e ->
             // גרסה מוצהרת שחסרה בייצוא היא שגיאת קלט — לא בולעים אותה.
