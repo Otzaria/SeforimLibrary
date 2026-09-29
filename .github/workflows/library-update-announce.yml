@@ -56,7 +56,7 @@ jobs:
         run: python3 -m pip install --quiet --disable-pip-version-check requests pyluach tzdata pyyaml
 
       - name: Validate the announcer before using it
-        run: python3 .github/scripts/test_library_update_announce.py
+        run: python3 .github/scripts/library_announce/test_library_update_announce.py
 
       - name: Resolve the previous published release
         id: previous

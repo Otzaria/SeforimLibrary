@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Tests for library_announce/library_update_announce.py and its workflow."""
+"""Tests for library_update_announce.py and its workflow."""
 import io
 import json
 import sqlite3
@@ -15,8 +15,8 @@ try:
 except ImportError:  # pragma: no cover - CI installs PyYAML explicitly
     yaml = None
 
-ROOT = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(ROOT / ".github" / "scripts" / "library_announce"))
+ROOT = Path(__file__).resolve().parents[3]
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 import library_update_announce as lua  # noqa: E402
 
 WORKFLOW = ROOT / ".github" / "workflows" / "library-update-announce.yml"
