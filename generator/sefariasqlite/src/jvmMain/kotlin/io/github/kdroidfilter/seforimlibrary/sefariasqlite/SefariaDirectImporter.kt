@@ -218,7 +218,6 @@ class SefariaDirectImporter(
         val allRefsWithPath = mutableListOf<RefEntry>()
         val canonicalTitleByBookPath = ConcurrentHashMap<String, String>()
         val bookMetaById = ConcurrentHashMap<Long, BookMeta>()
-        val continuationPrefixesByBookId = HashMap<Long, Set<String>>()
         val normalizedTitleToBookId = ConcurrentHashMap<String, Long>()
         // Collected in priority order during the book loop; the title→bookId
         // index is built from it in two global phases AFTER the loop so a
@@ -328,9 +327,6 @@ class SefariaDirectImporter(
                 hasNekudot = hasNekudot
             )
             repository.insertBook(book)
-            if (payload.dependence == Dependence.COMMENTARY && payload.continuationRefPrefixes.isNotEmpty()) {
-                continuationPrefixesByBookId[bookId] = payload.continuationRefPrefixes
-            }
 
             // Track normalized titles (Hebrew/English) + Sefaria-known aliases
             // (titleVariants / heTitleVariants) for later default-commentator mapping
@@ -650,16 +646,6 @@ class SefariaDirectImporter(
         // See [SefariaLinksImporter.demoteCrossCorpusDependantLinks].
         logger.i { "Demoting cross-corpus dependant links per Sefaria categorisation..." }
         linksImporter.demoteCrossCorpusDependantLinks(densityPrimaryBaseEdges)
-        // After demotion: only links still typed as commentary may be extended.
-        if (linksDir.exists()) {
-            SefariaContinuationParagraphs(repository, logger).generate(
-                refsByPath = refsByPath,
-                lineKeyToId = lineKeyToId,
-                headingLineIds = headingLineIds,
-                eligibleRefPrefixesByBookId = continuationPrefixesByBookId,
-                lineIdToBookId = lineIdToBookId,
-            )
-        }
         linksImporter.updateBookHasLinks()
 
         // Capture the authoritative post-demotion per-type split. Demotion only

@@ -93,8 +93,6 @@ internal data class BookPayload(
     val dependence: Dependence? = null,
     // Raw `dependence` value (trim + lowercase), persisted to book.dependenceType.
     val rawDependence: String? = null,
-    // Curated schema branches whose final address denotes paragraphs of one comment.
-    val continuationRefPrefixes: Set<String> = emptySet(),
     // From schema `base_text_titles` — provenance SEFARIA_DECLARED.
     val declaredBaseTextTitleKeys: List<String> = emptyList(),
     // Recovered from the "X on Y" title pattern — provenance INFERRED_TITLE.

@@ -272,7 +272,6 @@ internal class SefariaBookPayloadReader(
                 altStructures = altStructures,
                 dependence = dependence,
                 rawDependence = rawDependence,
-                continuationRefPrefixes = continuationRefPrefixes(englishTitle, schemaObj),
                 declaredBaseTextTitleKeys = declaredBaseTextTitleKeys,
                 inferredBaseTextTitleKeys = inferredBaseTextTitleKeys,
                 collectiveTitleHe = collectiveTitleHe,
