@@ -201,6 +201,34 @@ tasks.register<JavaExec>("synthesizeSeifimAltToc") {
     jvmArgs = listOf("-Xmx1g")
 }
 
+// Siman names in the Topic alt-TOC ("כותרות") — reads the Topic structures
+// written by generateSefariaSqlite and the COMMENTARY links, so it runs with
+// the other alt-TOC post-processes.
+// Usage:
+//   ./gradlew :sefariasqlite:synthesizeSimanNamesAltToc -PseforimDb=/path/to/seforim.db
+tasks.register<JavaExec>("synthesizeSimanNamesAltToc") {
+    group = "application"
+    description = "Add Shulchan Aruch siman names under the Topic alt-TOC entries."
+
+    dependsOn("jvmJar")
+    mainClass.set("io.github.kdroidfilter.seforimlibrary.sefariasqlite.SynthesizeSimanNamesAltTocPostProcessKt")
+    classpath = files(tasks.named("jvmJar")) + configurations.getByName("jvmRuntimeClasspath")
+
+    if (project.hasProperty("seforimDb")) {
+        systemProperty("seforimDb", project.property("seforimDb") as String)
+    } else if (System.getenv("SEFORIM_DB") != null) {
+        systemProperty("seforimDb", System.getenv("SEFORIM_DB"))
+    } else {
+        val defaultDbPath = rootProject.layout.buildDirectory.file("seforim.db").get().asFile.absolutePath
+        systemProperty("seforimDb", defaultDbPath)
+    }
+    if (project.hasProperty("buildStatePath")) {
+        systemProperty("buildStatePath", project.property("buildStatePath") as String)
+    }
+
+    jvmArgs = listOf("-Xmx1g")
+}
+
 // Phase-2 LINKER importer: resolve ref-based artifacts (LinkerToOtzaria) into clickable links.
 // Usage:
 //   ./gradlew :sefariasqlite:generateLinkerLinks -PseforimDb=/path/seforim.db \
