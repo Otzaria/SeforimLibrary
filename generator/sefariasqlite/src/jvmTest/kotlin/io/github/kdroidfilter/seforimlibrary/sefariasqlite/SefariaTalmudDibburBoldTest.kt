@@ -78,4 +78,30 @@ class SefariaTalmudDibburBoldTest {
         )
         assertFalse(SefariaTalmudDibburBold.appliesTo(listOf("Talmud", "Bavli", "Seder Nezikin"), null, gemara))
     }
+    @Test
+    fun `coverage includes every declared dependant kind but excludes independent text`() {
+        for (dependence in Dependence.entries) {
+            assertTrue(SefariaTalmudDibburBold.appliesTo(bavliRashi, dependence, listOf(plain)), dependence.name)
+        }
+        assertFalse(SefariaTalmudDibburBold.appliesTo(bavliRashi, null, listOf(plain)))
+    }
+
+    @Test
+    fun `coverage threshold excludes headings and blanks and includes exactly forty percent`() {
+        val content = listOf(plain, firstComment, "אחת", "שתיים", "שלוש")
+        assertTrue(SefariaTalmudDibburBold.appliesTo(bavliRashi, Dependence.COMMENTARY, content + listOf("", "<h2>דף א</h2>")))
+        assertFalse(SefariaTalmudDibburBold.appliesTo(bavliRashi, Dependence.COMMENTARY, content + "ארבע"))
+    }
+
+    @Test
+    fun `sentence recut cannot cross the dash or rescue an overlong raw dibbur`() {
+        val before = "דיבור ".repeat(7).trim()
+        val sentenceAfterDash = "$before – פירוש. המשך"
+        val bold = SefariaTalmudDibburBold.bold(sentenceAfterDash)
+        assertEquals("<b>$before</b> – פירוש. המשך", bold)
+        assertEquals(DhExtractor.extract(sentenceAfterDash, DhExtractor.Format.DASH), DhExtractor.extract(bold, DhExtractor.Format.BOLD))
+        val overlong = "דיבור ראשון. " + "מילה ".repeat(25) + "– פירוש"
+        assertEquals(overlong, SefariaTalmudDibburBold.bold(overlong))
+    }
+
 }
