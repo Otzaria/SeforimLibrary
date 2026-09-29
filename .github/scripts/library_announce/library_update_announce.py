@@ -87,23 +87,27 @@ def category_paths(conn):
     return paths
 
 
-def book_editions(conn):
+def book_editions(conn, split=False):
     """bookId -> (versionTitle, display title) of the edition the book's own lines are.
 
     A book with only metadata rows (hasContent=0) has one version, and its lines
     ARE that edition. Otherwise the edition is the one version whose every
     version_line row equals the book's line and that covers every line any of the
     book's editions covers. A mosaic of editions, or a tie, has no one edition: None.
+    In the split shape, a present version_line with NULL content inherits base text.
     """
     covered = dict(conn.execute(
         "SELECT bv.bookId, COUNT(DISTINCT vl.lineId) FROM book_version bv"
         " JOIN version_line vl ON vl.versionId = bv.id GROUP BY bv.bookId"))
+    content = "lc.content" if split else "l.content"
+    version_content = f"COALESCE(vl.content, {content})" if split else "vl.content"
+    content_join = " LEFT JOIN line_content lc ON lc.id = l.id" if split else ""
     versions = {}
     for book_id, title, he_title, has_content, rows, equal in conn.execute(
             "SELECT bv.bookId, bv.versionTitle, bv.heVersionTitle, bv.hasContent,"
-            " COUNT(vl.lineId), COALESCE(SUM(vl.content = l.content), 0)"
+            f" COUNT(vl.lineId), COALESCE(SUM({version_content} = {content}), 0)"
             " FROM book_version bv LEFT JOIN version_line vl ON vl.versionId = bv.id"
-            " LEFT JOIN line l ON l.id = vl.lineId GROUP BY bv.id"):
+            " LEFT JOIN line l ON l.id = vl.lineId" + content_join + " GROUP BY bv.id"):
         versions.setdefault(book_id, []).append((title, he_title, has_content, rows, equal))
     editions = {}
     for book_id, rows in versions.items():
@@ -121,9 +125,13 @@ def book_editions(conn):
 def build_catalog(db_path):
     conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
     try:
+        split = bool(conn.execute(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='line_content')"
+            " AND NOT EXISTS(SELECT 1 FROM pragma_table_info('line') WHERE name='content')"
+        ).fetchone()[0])
         paths = category_paths(conn)
         sources = dict(conn.execute("SELECT id, name FROM source"))
-        editions = book_editions(conn)
+        editions = book_editions(conn, split)
         books = {}
         for book_id, title, category_id, source_id in conn.execute(
                 "SELECT id, title, categoryId, sourceId FROM book"):
@@ -137,7 +145,10 @@ def build_catalog(db_path):
         def flush():
             books[current]["hash"] = digest.hexdigest()
 
-        for book_id, content in conn.execute("SELECT bookId, content FROM line ORDER BY bookId, lineIndex"):
+        content_sql = "lc.content" if split else "l.content"
+        content_join = " JOIN line_content lc ON lc.id = l.id" if split else ""
+        for book_id, content in conn.execute(
+                f"SELECT l.bookId, {content_sql} FROM line l" + content_join + " ORDER BY l.bookId, l.lineIndex"):
             if book_id != current:
                 if current is not None:
                     flush()

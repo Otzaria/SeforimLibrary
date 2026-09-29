@@ -10,7 +10,7 @@ import sqlite3
 import sys
 import tempfile
 import unittest
-from contextlib import redirect_stdout
+from contextlib import closing, redirect_stdout
 from pathlib import Path
 from unittest import mock
 
@@ -29,7 +29,7 @@ RELEASE = ROOT / ".github" / "workflows" / "manual-generate-release.yml"
 CI = ROOT / ".github" / "workflows" / "ci.yml"
 
 
-def make_db(path, books, lines, versions=()):
+def make_db(path, books, lines, versions=(), split=False):
     conn = sqlite3.connect(path)
     conn.executescript("""
         CREATE TABLE category (id INTEGER PRIMARY KEY, parentId INTEGER, title TEXT NOT NULL);
@@ -53,6 +53,19 @@ def make_db(path, books, lines, versions=()):
         for index, content in (texts or {}).items():
             [(line_id,)] = conn.execute("SELECT id FROM line WHERE bookId = ? AND lineIndex = ?", (book_id, index))
             conn.execute("INSERT INTO version_line VALUES (?, ?, ?)", (version_id, line_id, content))
+    if split:
+        conn.executescript("""
+            CREATE TABLE line_content (id INTEGER PRIMARY KEY, content TEXT NOT NULL);
+            INSERT INTO line_content SELECT id, content FROM line;
+            ALTER TABLE line DROP COLUMN content;
+            ALTER TABLE version_line RENAME TO old_version_line;
+            CREATE TABLE version_line (versionId INTEGER NOT NULL, lineId INTEGER NOT NULL, content TEXT);
+            INSERT INTO version_line
+                SELECT v.versionId, v.lineId,
+                    CASE WHEN CAST(v.content AS BLOB) = CAST(lc.content AS BLOB) THEN NULL ELSE v.content END
+                FROM old_version_line v JOIN line_content lc ON lc.id = v.lineId;
+            DROP TABLE old_version_line;
+        """)
     conn.commit()
     conn.close()
 
@@ -94,6 +107,27 @@ class PlainTextTest(unittest.TestCase):
 
 
 class CatalogTest(unittest.TestCase):
+    def test_schema_split_preserves_catalog_with_inherited_different_and_missing_edition_rows(self):
+        books = [(i, 2, 1, f"book {i}") for i in range(1, 6)]
+        lines = [(i, j, text) for i in range(1, 6) for j, text in ((0, "alpha"), (1, "beta"))]
+        versions = [(1, "Read", None, {0: "alpha", 1: "beta"}),
+                    (1, "Other", None, {0: "alpha", 1: "different"}),
+                    (2, "Part A", None, {0: "alpha"}), (2, "Part B", None, {1: "beta"}),
+                    (3, "Twin A", None, {0: "alpha", 1: "beta"}),
+                    (3, "Twin B", None, {0: "alpha", 1: "beta"}),
+                    (4, "Metadata", None, None), (5, "Empty", None, {})]
+        with tempfile.TemporaryDirectory() as tmp:
+            legacy, split = Path(tmp) / "legacy.db", Path(tmp) / "split.db"
+            make_db(legacy, books, lines, versions)
+            make_db(split, books, lines, versions, split=True)
+            with closing(sqlite3.connect(split)) as conn:
+                self.assertGreater(conn.execute("SELECT COUNT(*) FROM version_line WHERE content IS NULL").fetchone()[0], 0)
+                self.assertEqual(1, conn.execute("SELECT COUNT(*) FROM version_line WHERE content IS NOT NULL").fetchone()[0])
+            before, after = lua.build_catalog(legacy), lua.build_catalog(split)
+        self.assertEqual(before, after)
+        self.assertEqual(["Read", None, None, "Metadata", None], [b["edition"] for b in after["books"]])
+        self.assertFalse(any(lua.diff_catalogs(before, after).values()))
+
     def test_paths_walk_up_to_a_null_parent_root(self):
         value = catalog([(10, 2, 1, "בראשית")], [(10, 0, "א")])
         self.assertEqual("תנך/תורה", value["books"][0]["path"])
@@ -824,6 +858,56 @@ class WorkflowContractTest(unittest.TestCase):
         run = next(s["run"] for s in self.doc["jobs"]["prepare"]["steps"] if s.get("name") == "Build both catalogs")
         self.assertIn("-O - | zstd -d -q --long=31 --memory=2048MB", run)
         self.assertIn('rm -f "$db"', run)
+
+    @unittest.skipUnless(shutil.which("bash") and shutil.which("jq"), "bash and jq are required")
+    def test_catalog_workflow_downloads_the_full_asset_for_each_release_schema(self):
+        run = next(s["run"] for s in self.doc["jobs"]["prepare"]["steps"] if s.get("name") == "Build both catalogs")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            binaries = root / "bin"
+            binaries.mkdir()
+            for tag, name, split in (("v5", "seforim.db.zst", False), ("v6", "seforim-schema6.db.zst", True)):
+                release = root / tag
+                release.mkdir()
+                make_db(release / name, [(1, 2, 1, "book")], [(1, 0, "text")], split=split)
+                assets = [{"name": name}, {"name": "patch-v4-v6.db.zst"}]
+                if split:
+                    assets.append({"name": "seforim.db.zst"})
+                (release / "release.json").write_text(json.dumps({"assets": assets}), encoding="utf-8")
+            gh = binaries / "gh"
+            gh.write_text(f"#!{sys.executable}\n" + """
+import json, os, subprocess, sys
+from pathlib import Path
+args = sys.argv[1:]
+root = Path(os.environ['FIXTURES'])
+if args[0] == 'api':
+    tag = args[1].rsplit('/', 1)[-1]
+    query = args[args.index('--jq') + 1]
+    result = subprocess.run(['jq', '-r', query], input=(root / tag / 'release.json').read_text(), text=True)
+    sys.exit(result.returncode)
+tag = args[2]
+name = args[args.index('-p') + 1]
+with (root / 'downloads.log').open('a') as log:
+    log.write(f'{tag}/{name}\\n')
+sys.stdout.buffer.write((root / tag / name).read_bytes())
+""", encoding="utf-8")
+            zstd = binaries / "zstd"
+            zstd.write_text("#!/bin/sh\nwhile [ $# -gt 0 ]; do\n"
+                            "  if [ \"$1\" = -o ]; then out=$2; shift; fi\n  shift\ndone\ncat > \"$out\"\n", encoding="utf-8")
+            python = binaries / "python"
+            python.write_text(f"#!/bin/sh\nexec '{sys.executable}' \"$@\"\n", encoding="utf-8")
+            for path in (gh, zstd, python):
+                path.chmod(0o755)
+            result = subprocess.run([shutil.which("bash"), "-c", run], cwd=ROOT,
+                                    env=dict(os.environ, PATH=f"{binaries}{os.pathsep}{os.environ['PATH']}",
+                                             RUNNER_TEMP=tmp, PREVIOUS="v5", TAG="v6",
+                                             GITHUB_REPOSITORY="Otzaria/SeforimLibrary", FIXTURES=tmp),
+                                    capture_output=True, text=True)
+            self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+            self.assertEqual(["v5/seforim.db.zst", "v6/seforim-schema6.db.zst"],
+                             (root / "downloads.log").read_text().splitlines())
+            self.assertEqual(json.loads((root / "announce/previous.json").read_text()),
+                             json.loads((root / "announce/current.json").read_text()))
 
     def test_hosted_python_is_set_up_before_pip(self):
         checked = 0
