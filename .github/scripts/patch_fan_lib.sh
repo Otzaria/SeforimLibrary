@@ -37,6 +37,48 @@ use_token "${RELEASE_TOKEN_KIND:-}" || {
   echo "::error::patch fan: release credential preflight result is missing or invalid" >&2
   return 1
 }
+# shellcheck source=db_asset_names.sh
+. "$(dirname "${BASH_SOURCE[0]}")/db_asset_names.sh"
+
+# Mirrors PatchTables.kt requiresFullRebase: no delta crosses the line_content
+# split (schema 6), because it would have to drop line.content.
+requires_full_rebase() {  # <anchor-schema> <this-schema>
+  [ "$1" -lt 6 ] && [ "$2" -ge 6 ]
+}
+
+# The schema barrier for an anchor no delta can leave: a placeholder patch every
+# applier refuses plus a "fullRebase" manifest, so that anchor's clients are sent
+# to the full DB (or told to update the app) instead of finding no edge at all.
+write_barrier() {  # <target-version> <anchor-schema> <tag>
+  local TARGET_VER="$1" ANCHOR_SCHEMA="$2" TAG="$3" OUT BARRIER_MAIN_CLASS RC=0
+  OUT="$PWD/patches/patch-v${TARGET_VER}-v${THIS_VER}.db"
+  BARRIER_MAIN_CLASS=$(sed -n 's/^barrierMainClass=//p' \
+    generator/common/build/patch-pipeline-launcher.properties 2>/dev/null || true)
+  if [ -n "$PATCH_MAIN_CLASS" ] && [ -n "$BARRIER_MAIN_CLASS" ]; then
+    java $PATCH_JVM_ARGS -cp "$PATCH_CLASSPATH" \
+      -Dout="$OUT" \
+      -DfromVersion="$TARGET_VER" -DtoVersion="$THIS_VER" \
+      -DfromSchemaVersion="$ANCHOR_SCHEMA" -DtoSchemaVersion="$THIS_SCHEMA" \
+      "$BARRIER_MAIN_CLASS" || RC=$?
+  else
+    gradle :generator-common:writeSchemaBarrier \
+      -Pout="$OUT" \
+      -PfromVersion="$TARGET_VER" -PtoVersion="$THIS_VER" \
+      -PfromSchemaVersion="$ANCHOR_SCHEMA" -PtoSchemaVersion="$THIS_SCHEMA" \
+      --no-daemon --stacktrace || RC=$?
+  fi
+  if [ "$RC" -ne 0 ] || [ ! -s "$OUT.zst" ] || [ ! -s "$OUT.zst.manifest.json" ]; then
+    echo "::error::anchor v${TARGET_VER} ($TAG): could not write the schema $ANCHOR_SCHEMA → $THIS_SCHEMA barrier (exit $RC)"
+    rm -f "$OUT" "$OUT.zst" "$OUT.zst.manifest.json"
+    return 1
+  fi
+  echo "anchor v${TARGET_VER} ($TAG): schema $ANCHOR_SCHEMA → $THIS_SCHEMA is a full rebase — published the schema barrier $(basename "$OUT.zst")"
+}
+announce_barriers() {  # the driver's summary of the barriers staged in patches/
+  local n
+  n=$({ grep -l '"fullRebase": true' patches/*.manifest.json 2>/dev/null || true; } | wc -l | tr -d ' ')
+  [ "$n" -eq 0 ] || echo "::notice::patch fan: $n anchor(s) get the schema $THIS_SCHEMA full-rebase barrier instead of a delta"
+}
 
 # קורא db_schema_version מ-DB; טבלה/שורה חסרה → ERROR (release DB חייב מוטבע).
 # sqlite3 זמין ברנרים ה-self-hosted (בשימוש גם בוורקפלואי delta-real-diff-*).
@@ -74,7 +116,7 @@ produce_anchor() {  # <offset> <target-version> <tag>
   local PREV_DB="$ANCHOR_DIR/seforim.db"
   local PATCH_OUT="$PWD/patches/patch-v${TARGET_VER}-v${THIS_VER}.db"
   local PRECHECK WAIT_BUDGET PREFETCH_STATE PREFETCH_WAITED
-  local PREV_SCHEMA PRODUCE_RC REASON SKIP_KIND
+  local PREV_SCHEMA PRODUCE_RC REASON SKIP_KIND ANCHOR_SCHEMA DB_ASSETS DB_ASSET CANDIDATE
   local T_START T_DOWNLOADED T_EXTRACTED T_DONE
   echo "=== Producing patch v${TARGET_VER} → v${THIS_VER} (offset $OFFSET, tag=$TAG) ==="
 
@@ -114,6 +156,11 @@ produce_anchor() {  # <offset> <target-version> <tag>
     || PRECHECK="PROCEED pre-check did not run — deferring to the producer"
   rm -rf "$META_DIR"
   echo "pre-check: $PRECHECK"
+  if [ "${PRECHECK%% *}" = BARRIER ]; then
+    ANCHOR_SCHEMA="${PRECHECK#BARRIER }"
+    write_barrier "$TARGET_VER" "${ANCHOR_SCHEMA%% *}" "$TAG"
+    return
+  fi
   if [ "${PRECHECK%% *}" = UNPATCHABLE ]; then
     echo "::warning::anchor v${TARGET_VER} ($TAG): ${PRECHECK#* } — pre-download schema check declared the anchor unpatchable; skip anchor"
     record_skip structural "$TARGET_VER" "${PRECHECK#* }"
@@ -162,29 +209,48 @@ produce_anchor() {  # <offset> <target-version> <tag>
     # Under `set -e` a failed download used to end this subshell with
     # nothing but gh's own bare stderr, and the driver could only say
     # "exit code 1". Name the release, the asset and gh's reason.
-    if ! gh release download "$TAG" \
-         --pattern 'seforim.db.zst' \
-         --dir "$ANCHOR_DIR" 2>"$ANCHOR_DIR/gh.err"; then
-      echo "::error::anchor v${TARGET_VER} ($TAG): could not download seforim.db.zst from that release ($(tr -d '\r' < "$ANCHOR_DIR/gh.err" | head -n1)) — no patch can be produced against this anchor"
+    # This build's own schema name first (a delta needs an equal schema),
+    # then the legacy name every schema <= 5 release carries.
+    DB_ASSETS=$(full_db_asset_name "$THIS_SCHEMA") || return 1
+    [ "$DB_ASSETS" = "$LEGACY_FULL_DB_ASSET" ] || DB_ASSETS="$DB_ASSETS $LEGACY_FULL_DB_ASSET"
+    DB_ASSET=""
+    for CANDIDATE in $DB_ASSETS; do
+      if gh release download "$TAG" \
+           --pattern "$CANDIDATE" \
+           --dir "$ANCHOR_DIR" 2>"$ANCHOR_DIR/gh.err"; then
+        DB_ASSET="$CANDIDATE"
+        break
+      fi
+    done
+    if [ -z "$DB_ASSET" ]; then
+      echo "::error::anchor v${TARGET_VER} ($TAG): could not download ${DB_ASSETS// / or } from that release ($(tr -d '\r' < "$ANCHOR_DIR/gh.err" | head -n1)) — no patch can be produced against this anchor"
       rm -rf "$ANCHOR_DIR"
       return 1
     fi
     rm -f "$ANCHOR_DIR/gh.err"
+    [ "$DB_ASSET" = seforim.db.zst ] || mv "$ANCHOR_DIR/$DB_ASSET" "$ANCHOR_DIR/seforim.db.zst"
   fi
   T_DOWNLOADED=$(date +%s)
   if ! unzstd -c "$ANCHOR_DIR/seforim.db.zst" > "$PREV_DB"; then
-    echo "::error::anchor v${TARGET_VER} ($TAG): seforim.db.zst from that release could not be decompressed — no patch can be produced against this anchor"
+    echo "::error::anchor v${TARGET_VER} ($TAG): the full DB from that release could not be decompressed — no patch can be produced against this anchor"
     rm -rf "$ANCHOR_DIR"
     return 1
   fi
   T_EXTRACTED=$(date +%s)
-  test -s "$PREV_DB" || { echo "::error::seforim.db.zst not found in release $TAG"; return 1; }
+  test -s "$PREV_DB" || { echo "::error::the full DB of release $TAG is empty"; return 1; }
+
+  PREV_SCHEMA=$(read_schema "$PREV_DB") || return 1
+  # Reached for an anchor whose provenance does not state its schema.
+  if requires_full_rebase "$PREV_SCHEMA" "$THIS_SCHEMA"; then
+    rm -rf "$ANCHOR_DIR"
+    write_barrier "$TARGET_VER" "$PREV_SCHEMA" "$TAG"
+    return
+  fi
 
   # Explicitly supported schema transitions. The producer derives
   # contract promotions from both signed schema versions, rebuilds
   # newly tracked tables from a full snapshot, and verifies a real
   # apply. Unknown transitions remain fail-closed per anchor.
-  PREV_SCHEMA=$(read_schema "$PREV_DB") || return 1
   if [ "$PREV_SCHEMA" != "$THIS_SCHEMA" ]; then
     if { [ "$PREV_SCHEMA" = 2 ] && [ "$THIS_SCHEMA" = 3 ]; } || \
        { [ "$PREV_SCHEMA" = 1 ] && [ "$THIS_SCHEMA" = 4 ]; } || \
@@ -359,6 +425,7 @@ drain_batch() {
     fi
     verify=not-reported
     grep -q 'Patch apply verified' "${BATCH_LOGS[$i]}" && verify=ok
+    grep -q 'published the schema barrier' "${BATCH_LOGS[$i]}" && verify=barrier
     # The producer repeats one Info line per anchor, every cycle, for
     # the same standing condition (a column added since that anchor,
     # e.g. line_dh.dhDisplay in v27): it is what explains a 454 MB

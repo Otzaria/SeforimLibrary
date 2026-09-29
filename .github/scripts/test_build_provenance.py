@@ -246,5 +246,44 @@ class BuildProvenanceContractTest(unittest.TestCase):
                 contract.validate(contract.load(self.write(tmp, value)))
 
 
+    def test_a_schema_6_release_ships_the_schema_named_full_db_only(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            value = self.value()
+            value["db_schema"]["db_schema_version"] = 6
+            # The legacy name is what every released updater matches: never schema 6.
+            with self.assertRaises(ValueError):
+                contract.validate(contract.load(self.write(tmp, value)))
+
+            value["assets"] = [
+                {"name": "seforim-schema6.db.zst", "size": 1, "sha256": "a" * 64},
+                {"name": "seforim.db.buildstate.zst", "size": 1, "sha256": "9" * 64},
+            ]
+            contract.validate(contract.load(self.write(tmp, value)))
+
+            value["assets"] = sorted(
+                value["assets"] + [{"name": "seforim.db.zst", "size": 1, "sha256": "8" * 64}],
+                key=lambda asset: asset["name"].encode("utf-8"),
+            )
+            with self.assertRaises(ValueError):
+                contract.validate(contract.load(self.write(tmp, value)))
+
+    def test_the_full_db_name_has_one_definition_in_shell_and_python(self):
+        import shutil
+
+        bash = shutil.which("bash")
+        if bash is None:  # pragma: no cover - every CI image has bash
+            self.skipTest("no bash")
+        names = Path(__file__).with_name("db_asset_names.sh")
+        for schema in (1, 4, 5, 6, 7, 12):
+            shell = subprocess.run(
+                [bash, "-c", '. "$1" && full_db_asset_name "$2"', "sh", names.as_posix(), str(schema)],
+                capture_output=True, text=True,
+            )
+            self.assertEqual(shell.returncode, 0, shell.stderr)
+            self.assertEqual(shell.stdout, contract.full_db_asset_name(schema), schema)
+        self.assertEqual(contract.full_db_asset_name(5), "seforim.db.zst")
+        self.assertEqual(contract.full_db_asset_name(6), "seforim-schema6.db.zst")
+
+
 if __name__ == "__main__":
     unittest.main()

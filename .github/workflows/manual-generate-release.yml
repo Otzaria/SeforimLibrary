@@ -1776,6 +1776,25 @@ jobs:
             -PlinkerStrict=true \
             --no-daemon --stacktrace
 
+      # ─── Compact the finished DB ───────────────────────────────────────────
+      # splitLineContent (schema 6) leaves the pages it freed on the freelist
+      # (18% of the file on a 70-book subset). They are zeroed, so the .zst
+      # hardly grows, but every user would install them. Runs after Phase-2 and
+      # its ANALYZE, the last writers.
+      # Disk: VACUUM INTO writes the compact copy (~one DB, ~7 GiB) to
+      # $RUNNER_TEMP on the workspace disk (~850 GB free), then the original is
+      # deleted before the copy moves back, so the 20 GiB tmpfs never holds two
+      # DBs. A no-op when the freelist is empty.
+      - name: Compact Seforim Database (VACUUM INTO)
+        run: |
+          set -euo pipefail
+          ls -l build/seforim.db
+          gradle :generator-common:compactSeforimDb \
+            -PdbPath=$PWD/build/seforim.db \
+            -PscratchDir="$RUNNER_TEMP" \
+            --no-daemon --stacktrace
+          ls -l build/seforim.db
+
       # ─── E1: ship the buildstate compressed ────────────────────────────────
       # seforim.db.buildstate is a ~990 MB SQLite file that every run uploads and
       # every NEXT run downloads ("Seed allocator from offset-1 release" — 128 s
@@ -2075,6 +2094,8 @@ jobs:
             wait buildstate 3600
           echo "=== Final patch artefacts ==="
           ls -lh patches/ || true
+          # Barriers are patch-*.db.zst too: a barrier-only fan is a publishable full-only release.
+          announce_barriers
           # Skipped anchors are warnings. No delta AT ALL is only acceptable
           # when the size guard is what removed them: a corpus-wide churn build
           # legitimately ships full-only (seforim.db.zst + buildstate). Every
@@ -2105,7 +2126,12 @@ jobs:
           # byte-neutral (see "Dump lines snapshot for the linker" above); it
           # only stops `-T0` from parking on 8 of the runner's 16 vCPUs.
           . .pipeline-control/.github/scripts/zstd_workers.sh
-          zstd -T"$(zstd_workers)" -19 -f -o build/seforim.db.zst build/seforim.db
+          # seforim.db.zst names a schema <= 5 DB forever (old updaters match it);
+          # schema 6+ ships as seforim-schema<N>.db.zst. db_schema.json is this DB's dump.
+          . .pipeline-control/.github/scripts/db_asset_names.sh
+          FULL_DB_ASSET=$(full_db_asset_name "$(jq -er .db_schema_version build/db_schema.json)")
+          zstd -T"$(zstd_workers)" -19 -f -o "build/$FULL_DB_ASSET" build/seforim.db
+          echo "FULL_DB_ASSET=$FULL_DB_ASSET" >> "$GITHUB_ENV"
 
       # ─── Library stats (advisory) ──────────────────────────────────────────
       # One line of JSON — {"schema_version":1,"db_version":N,"books":…,
@@ -2181,7 +2207,7 @@ jobs:
           mkdir -p "$STAGE"
           # Full DB, compressed — canonical source of the DB.
           # Future releases reconstitute the prev DB from this.
-          cp build/seforim.db.zst "$STAGE/"
+          cp "build/$FULL_DB_ASSET" "$STAGE/"
           # E1: the IdAllocator seed for the NEXT build, compressed (~2x).
           cp build/seforim.db.buildstate.zst "$STAGE/"
           # E2: lines_snapshot.db.zst is deliberately NOT staged. The identical

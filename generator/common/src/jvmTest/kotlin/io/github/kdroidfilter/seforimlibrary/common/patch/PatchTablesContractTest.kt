@@ -28,7 +28,11 @@ class PatchTablesContractTest {
             PATCH_TABLES_SCHEMA_3,
         )
         assertEquals(
-            PATCH_TABLES_IN_FK_ORDER.map { table ->
+            PATCH_TABLES_IN_FK_ORDER.filterNot { it.name == "line_content" },
+            PATCH_TABLES_SCHEMA_5,
+        )
+        assertEquals(
+            PATCH_TABLES_SCHEMA_5.map { table ->
                 if (table.name == "line_dh") table.copy(updatable = false) else table
             },
             PATCH_TABLES_SCHEMA_4,
@@ -70,6 +74,14 @@ class PatchTablesContractTest {
             LogicalContentHasher.TABLES_SCHEMA_4,
         )
         assertEquals(LogicalContentHasher.TABLES_SCHEMA_4, LogicalContentHasher.TABLES_SCHEMA_5)
+        assertEquals(
+            LogicalContentHasher.TABLES_SCHEMA_5.toMutableList().apply {
+                add(indexOf("line") + 1, "line_content")
+            },
+            LogicalContentHasher.TABLES_SCHEMA_6,
+        )
+        assertEquals(PATCH_TABLES_IN_FK_ORDER, patchTablesForSchemaVersion(6))
+        assertEquals(PATCH_TABLES_SCHEMA_5, patchTablesForSchemaVersion(5))
     }
 
     private fun canonicalContract(
@@ -108,6 +120,17 @@ class PatchTablesContractTest {
             PATCH_TABLES_IN_FK_ORDER,
             LogicalContentHasher.DEFAULT_TABLES,
             CURRENT_DB_SCHEMA_VERSION,
+        )
+        assertEquals(expected, actual)
+    }
+
+    @Test
+    fun `schema 5 canonical contract remains byte frozen`() {
+        val expected = fixture("/patch_tables_contract_schema_5.json")
+        val actual = canonicalContract(
+            PATCH_TABLES_SCHEMA_5,
+            LogicalContentHasher.TABLES_SCHEMA_5,
+            schemaVersion = 5,
         )
         assertEquals(expected, actual)
     }

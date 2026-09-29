@@ -19,7 +19,17 @@ internal data class PatchTable(
 )
 
 /** Current `seforim.db` schema produced by this revision. */
-internal const val CURRENT_DB_SCHEMA_VERSION: Int = 5
+internal const val CURRENT_DB_SCHEMA_VERSION: Int = 6
+
+/** First schema that keeps line text in `line_content` (see SplitLineContentCli). */
+internal const val LINE_CONTENT_SPLIT_SCHEMA_VERSION: Int = 6
+
+/**
+ * A delta cannot carry a DB across the line_content split: it would have to drop
+ * `line.content`. Such a transition is a full rebase, announced by a schema barrier.
+ */
+internal fun requiresFullRebase(fromSchemaVersion: Int, toSchemaVersion: Int): Boolean =
+    fromSchemaVersion < LINE_CONTENT_SPLIT_SCHEMA_VERSION && toSchemaVersion >= LINE_CONTENT_SPLIT_SCHEMA_VERSION
 
 /**
  * Canonical table order — parents (referenced) come before children
@@ -61,6 +71,8 @@ internal val PATCH_TABLES_IN_FK_ORDER: List<PatchTable> = listOf(
     // form a cycle, broken at apply time with PRAGMA defer_foreign_keys = ON.
     PatchTable("tocEntry",           listOf("id"),       updatable = true),
     PatchTable("line",               listOf("id"),       updatable = true),
+    // Schema 6. The text of each line, split out of `line`.
+    PatchTable("line_content",       listOf("id"),       updatable = true),
     PatchTable("line_toc",           listOf("lineId"),   updatable = true),
     // Schema 4. Canonical line-reference index — pure key table (PK == all
     // columns), so there is nothing to update on conflict.
@@ -94,9 +106,13 @@ internal val PATCH_TABLES_IN_FK_ORDER: List<PatchTable> = listOf(
     PatchTable("schema_meta",        listOf("key"),      updatable = true),
 )
 
+/** Schema-5 contract, frozen: line text still lived in `line.content`. */
+internal val PATCH_TABLES_SCHEMA_5: List<PatchTable> =
+    PATCH_TABLES_IN_FK_ORDER.filterNot { it.name == "line_content" }
+
 /** Schema-4 contract shipped in v26, before line_dh gained dhDisplay. */
 internal val PATCH_TABLES_SCHEMA_4: List<PatchTable> =
-    PATCH_TABLES_IN_FK_ORDER.map { table ->
+    PATCH_TABLES_SCHEMA_5.map { table ->
         if (table.name == "line_dh") table.copy(updatable = false) else table
     }
 
@@ -118,6 +134,7 @@ internal fun patchTablesForSchemaVersion(schemaVersion: Int): List<PatchTable> =
     2 -> PATCH_TABLES_SCHEMA_2
     3 -> PATCH_TABLES_SCHEMA_3
     4 -> PATCH_TABLES_SCHEMA_4
-    5 -> PATCH_TABLES_IN_FK_ORDER
+    5 -> PATCH_TABLES_SCHEMA_5
+    6 -> PATCH_TABLES_IN_FK_ORDER
     else -> error("Unsupported patch-table schema version $schemaVersion")
 }

@@ -123,11 +123,15 @@ jobs:
           set -euo pipefail
           work="$RUNNER_TEMP/announce"
           mkdir -p "$work"
+          . .github/scripts/db_asset_names.sh
           # One DB on disk at a time (v28 is 10.9 GB unpacked), streamed with no .zst copy.
           # --long=31 --memory=2048MB: the limits the app expands this asset with.
           for side in previous:"$PREVIOUS" current:"$TAG"; do
             name="${side%%:*}" tag="${side#*:}" db="$work/$name.db"
-            gh release download "$tag" -R "$GITHUB_REPOSITORY" -p seforim.db.zst -O - | zstd -d -q --long=31 --memory=2048MB -o "$db"
+            asset="$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$tag" \
+              --jq "$FULL_DB_ASSET_JQ | .name // empty")"
+            [ -n "$asset" ] || { echo "::error::release $tag has no full DB asset"; exit 1; }
+            gh release download "$tag" -R "$GITHUB_REPOSITORY" -p "$asset" -O - | zstd -d -q --long=31 --memory=2048MB -o "$db"
             df -h "$work" | tail -n1
             python .github/scripts/library_announce/library_update_announce.py \
               catalog "$db" "$work/$name.json"

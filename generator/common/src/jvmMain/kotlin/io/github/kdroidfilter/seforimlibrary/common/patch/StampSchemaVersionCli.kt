@@ -55,6 +55,7 @@ internal fun stampSchemaVersion(conn: Connection, dbVersion: Int, dbSchemaVersio
 
     val requiredTables = when (dbSchemaVersion) {
         4, 5 -> setOf("line_ref", "line_dh")
+        6 -> setOf("line_ref", "line_dh", "line_content", "version_line")
         else -> emptySet()
     }
     val existingTables = if (requiredTables.isEmpty()) {
@@ -84,6 +85,16 @@ internal fun stampSchemaVersion(conn: Connection, dbVersion: Int, dbSchemaVersio
         ) {
             "Cannot stamp DB as schema $dbSchemaVersion; " +
                 "line_dh.dhDisplay must exist as TEXT NOT NULL"
+        }
+    }
+
+    if (dbSchemaVersion >= LINE_CONTENT_SPLIT_SCHEMA_VERSION) {
+        require(PatchDbSchema.readTableInfo(conn, "main", "line").none { it.name == "content" }) {
+            "Cannot stamp DB as schema $dbSchemaVersion; line.content must be split into line_content"
+        }
+        val versionContent = PatchDbSchema.readTableInfo(conn, "main", "version_line").find { it.name == "content" }
+        require(versionContent != null && !versionContent.notNull) {
+            "Cannot stamp DB as schema $dbSchemaVersion; version_line.content must be nullable"
         }
     }
 

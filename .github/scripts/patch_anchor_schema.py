@@ -78,6 +78,12 @@ LEGACY_UNPATCHABLE_DB_VERSIONS = frozenset(range(9, 14))
 
 PROCEED = "PROCEED"
 UNPATCHABLE = "UNPATCHABLE"
+# Not a patch at all: the fan publishes the full-rebase barrier for the anchor.
+# The line is "BARRIER <anchor db schema> <reason>".
+BARRIER = "BARRIER"
+
+# Mirrors PatchTables.kt LINE_CONTENT_SPLIT_SCHEMA_VERSION: no delta crosses it.
+LINE_CONTENT_SPLIT_SCHEMA = 6
 
 
 def _one_line(text: str) -> str:
@@ -151,6 +157,15 @@ def _anchor_db_schema(provenance_path: Path) -> tuple[dict | None, str]:
     return schema, ""
 
 
+def _this_schema_version(path: Path) -> int | None:
+    """This build's db_schema_version from its dump, or None while it does not exist yet."""
+    try:
+        version = json.loads(path.read_text(encoding="utf-8")).get("db_schema_version")
+    except (OSError, UnicodeDecodeError, ValueError, AttributeError):
+        return None
+    return version if type(version) is int else None
+
+
 def _contract(path: Path) -> tuple[list, int]:
     """(table names in FK order, schemaVersion) from a patch-table contract fixture.
 
@@ -216,9 +231,25 @@ def check(
 
     The documented list is consulted before anything is read from disk, so a
     known-unpatchable anchor is skipped even if this build's own schema dump is
-    unreadable for some reason.
+    unreadable for some reason.  A build past the line_content split asks first
+    whether the anchor is on the other side of it: then no delta exists at all.
     """
-    if anchor_version in LEGACY_UNPATCHABLE_DB_VERSIONS:
+    this_version = _this_schema_version(this_schema_path)
+    if this_version is not None and this_version >= LINE_CONTENT_SPLIT_SCHEMA:
+        anchor_schema, why = _anchor_db_schema(provenance_path)
+        anchor_db_schema = anchor_schema.get("db_schema_version") if anchor_schema else None
+        if type(anchor_db_schema) is not int:
+            return PROCEED, (
+                f"the anchor's db schema is unknown ({why or 'no db_schema_version'}) - the fan "
+                "reads it from the downloaded DB"
+            )
+        if anchor_db_schema < LINE_CONTENT_SPLIT_SCHEMA:
+            return BARRIER, (
+                f"{anchor_db_schema} the anchor is db schema {anchor_db_schema}; schema "
+                f"{this_version} keeps line text in line_content, so no delta reaches it - "
+                "publishing the full-rebase barrier"
+            )
+    elif anchor_version in LEGACY_UNPATCHABLE_DB_VERSIONS:
         return UNPATCHABLE, (
             f"db_version {anchor_version} predates the db_schema provenance block and is on "
             "the documented unpatchable list (link.isDeclaredBase was dropped without a "

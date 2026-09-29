@@ -68,6 +68,14 @@ class PatchDbProducer(
         require(fromSchemaVersion <= toSchemaVersion) {
             "Schema downgrade $fromSchemaVersion -> $toSchemaVersion is not supported"
         }
+        if (requiresFullRebase(fromSchemaVersion, toSchemaVersion)) {
+            throw UnpatchableAnchorException(
+                table = "line",
+                columns = listOf("content"),
+                message = "schema $fromSchemaVersion -> $toSchemaVersion moves line text into line_content; " +
+                    "a delta cannot drop line.content, so this transition is a full rebase only",
+            )
+        }
         val fromTables = patchTablesForSchemaVersion(fromSchemaVersion)
         val targetTables = patchTablesForSchemaVersion(toSchemaVersion)
         val fromTableNames = fromTables.mapTo(HashSet()) { it.name }

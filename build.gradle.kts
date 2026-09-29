@@ -62,26 +62,47 @@ tasks.register("generateSeforimDb") {
     // delta client can read it. Without this, every client reads
     // db_version=0 (default) and the path chooser always picks FullBundle
     // instead of the incremental chain.
+    // Every stage writes the schema-5 working shape; the split converts the
+    // finished DB to schema 6 before the stamp asserts that shape.
+    finalizedBy(":generator-common:splitLineContent")
     finalizedBy(":generator-common:stampSchemaVersion")
     finalizedBy(":generator-common:analyzeSeforimDb")
+}
+// Every stage that writes seforim.db in the working shape; the split and the
+// stamp follow all of them.
+val lineContentWriters = listOf(
+    ":packaging:writeReleaseInfo",
+    ":catalog:buildCatalog",
+    ":sefariasqlite:seedGenerations",
+    ":sefariasqlite:seedAllMetadata",
+    ":sefariasqlite:synthesizeSeifimAltToc",
+    ":generator-common:buildLineRefIndex",
+    ":generator-common:buildLineDhIndex",
+)
+project(":generator-common").tasks.matching { it.name == "splitLineContent" }.configureEach {
+    lineContentWriters.forEach { mustRunAfter(it) }
 }
 // Force stamp ordering after every step that writes to seforim.db, so the
 // stamp runs at the very end of the pipeline (not concurrently with content
 // inserts).
 project(":generator-common").tasks.matching { it.name == "stampSchemaVersion" }.configureEach {
-    mustRunAfter(":packaging:writeReleaseInfo")
-    mustRunAfter(":catalog:buildCatalog")
-    mustRunAfter(":sefariasqlite:seedGenerations")
-    mustRunAfter(":sefariasqlite:seedAllMetadata")
-    mustRunAfter(":sefariasqlite:synthesizeSeifimAltToc")
-    mustRunAfter(":generator-common:buildLineRefIndex")
-    mustRunAfter(":generator-common:buildLineDhIndex")
+    lineContentWriters.forEach { mustRunAfter(it) }
+    mustRunAfter(":generator-common:splitLineContent")
 }
-// sqlite_stat1 must describe the final rows, so ANALYZE follows the stamp and
-// Phase-2 (generateLinkerLinks), the last writer in the release workflow.
+// sqlite_stat1 must describe the final rows, so ANALYZE follows the split, the
+// stamp and Phase-2 (generateLinkerLinks), the last writer in the release workflow.
 project(":generator-common").tasks.matching { it.name == "analyzeSeforimDb" }.configureEach {
+    mustRunAfter(":generator-common:splitLineContent")
     mustRunAfter(":generator-common:stampSchemaVersion")
     mustRunAfter(":sefariasqlite:generateLinkerLinks")
+}
+// VACUUM INTO carries sqlite_stat1 over, so compaction comes after every writer
+// including ANALYZE; the producer then reads the compacted DB's stat1.
+project(":generator-common").tasks.matching { it.name == "compactSeforimDb" }.configureEach {
+    mustRunAfter(":generator-common:splitLineContent")
+    mustRunAfter(":generator-common:stampSchemaVersion")
+    mustRunAfter(":sefariasqlite:generateLinkerLinks")
+    mustRunAfter(":generator-common:analyzeSeforimDb")
 }
 
 // Generator diagnostics side-channel (see GeneratorReport). Findings that are
@@ -271,8 +292,10 @@ project(":generator-common").tasks.matching { it.name == "producePatchAndVerify"
     mustRunAfter(rootProject.tasks.named("generateSeforimDb"))
     // The stamp writes schema_meta.db_schema_version, which resolveSchemaVersion
     // reads — must land before the producer runs in a single-invocation build.
+    mustRunAfter(project(":generator-common").tasks.matching { it.name == "splitLineContent" })
     mustRunAfter(project(":generator-common").tasks.matching { it.name == "stampSchemaVersion" })
     mustRunAfter(project(":generator-common").tasks.matching { it.name == "analyzeSeforimDb" })
+    mustRunAfter(project(":generator-common").tasks.matching { it.name == "compactSeforimDb" })
     // Map the umbrella task's -P props onto the CLI's gradle props.
     val prev = providers.gradleProperty("prevReleaseDb").orNull
     val from = providers.gradleProperty("fromVersion").orNull

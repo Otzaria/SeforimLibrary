@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+# The one definition of the full-DB release asset name. Sourced, not run.
+#
+# `seforim.db.zst` is reserved for DB schema <= 5 forever: released updaters, the
+# first-install path and old app builds match that exact name, so a schema they
+# cannot open must never appear under it. From schema 6 on the full DB ships as
+# `seforim-schema<N>.db.zst`, which those clients never see.
+# validate_build_provenance.py:full_db_asset_name mirrors this (a test pins both).
+
+LEGACY_FULL_DB_ASSET=seforim.db.zst
+
+full_db_asset_name() {  # <db_schema_version> -> the release asset name of that full DB
+  local schema="$1"
+  case "$schema" in
+    ''|*[!0-9]*|0*)
+      echo "::error::full_db_asset_name: db schema '$schema' is not a positive integer" >&2
+      return 1
+      ;;
+  esac
+  if [ "$schema" -ge 6 ]; then
+    printf 'seforim-schema%s.db.zst' "$schema"
+  else
+    printf '%s' "$LEGACY_FULL_DB_ASSET"
+  fi
+}
+
+# jq over a release's JSON (`.assets[]`): the full-DB asset with the highest
+# schema, the legacy name counting as schema 0; null when the release has none.
+FULL_DB_ASSET_JQ='[.assets[] | select(.name == "seforim.db.zst" or (.name | test("^seforim-schema[1-9][0-9]*\\.db\\.zst$")))]
+  | sort_by(if .name == "seforim.db.zst" then 0 else (.name | ltrimstr("seforim-schema") | rtrimstr(".db.zst") | tonumber) end)
+  | last'
