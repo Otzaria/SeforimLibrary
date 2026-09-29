@@ -1,21 +1,21 @@
 name: Announce a published library update
 
-run-name: announce ${{ github.event.release.tag_name || inputs.tag || format('after release run {0}:{1}', github.event.workflow_run.id, github.event.workflow_run.run_attempt) }}${{ github.event_name == 'workflow_dispatch' && inputs.dry_run && ' (dry run)' || '' }}
+run-name: announce ${{ inputs.tag || format('after release run {0}:{1}', github.event.workflow_run.id, github.event.workflow_run.run_attempt) }}${{ github.event_name == 'workflow_dispatch' && inputs.dry_run && ' (dry run)' || '' }}
 
 # Posts what a published Seforim DB release changed to the Otzaria forum and
 # Yemot. A pre-release never reaches users, so it never announces; the
 # comparison is always against the previous PUBLISHED release, which skips any
 # pre-releases built in between.
 #
-# Triggers, all of which may fire for one release:
+# Triggers:
 #  - workflow_run of the release workflow, whatever its conclusion: the run's own
 #    pipeline-result-run-<id>-<attempt> handoff names the tag it published (a
 #    GITHUB_TOKEN publish fires no release event, and the release run must never
 #    turn red over a notification);
-#  - `released`: a PAT publish, or a manual pre-release promotion;
-#  - workflow_dispatch, for a manual resend or a dry run.
-# The gate skips every channel some run already sent for the tag, before anything
-# is downloaded; each channel job re-checks under a per-tag lock before sending.
+#  - workflow_dispatch: a dry run, a resend, or a pre-release promoted by hand.
+# The gate drops every channel some run already sent for the tag, before anything
+# is downloaded, and fails if another run left it half sent (resume that run with
+# "Re-run failed jobs"); each channel job re-checks under a per-tag lock.
 #
 # Nothing is uploaded back to either release: the reuse scan in
 # manual-generate-release.yml requires a release's asset count to match its
@@ -26,8 +26,6 @@ on:
     workflows:
       - Weekly 5–6/6 · Build, link, validate and publish Seforim DB
     types: [completed]
-  release:
-    types: [released]
   workflow_dispatch:
     inputs:
       tag:
@@ -50,7 +48,6 @@ permissions:
 
 jobs:
   gate:
-    if: github.event_name != 'release' || (github.event.release.prerelease == false && startsWith(github.event.release.tag_name, 'v'))
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -72,7 +69,6 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           EVENT_NAME: ${{ github.event_name }}
-          RELEASE_TAG: ${{ github.event.release.tag_name }}
           INPUT_TAG: ${{ inputs.tag }}
           DRY_RUN: ${{ inputs.dry_run }}
           INPUT_CHANNELS: ${{ inputs.channels }}
@@ -182,7 +178,14 @@ jobs:
 
       - name: Skip if this tag was already announced here
         id: dedup
-        run: echo "sent=$(bash .github/scripts/library_announce/already_sent.sh)" >> "$GITHUB_OUTPUT"
+        run: |
+          set -euo pipefail
+          decision="$(bash .github/scripts/library_announce/channel_decision.sh)"
+          case "$decision" in
+            skip) echo "sent=true" >> "$GITHUB_OUTPUT" ;;
+            proceed) echo "sent=false" >> "$GITHUB_OUTPUT" ;;
+            *) echo "::error::channel_decision.sh printed '$decision'"; exit 1 ;;
+          esac
 
       - uses: actions/setup-python@v6
         if: steps.dedup.outputs.sent != 'true'
@@ -255,7 +258,14 @@ jobs:
 
       - name: Skip if this tag was already announced here
         id: dedup
-        run: echo "sent=$(bash .github/scripts/library_announce/already_sent.sh)" >> "$GITHUB_OUTPUT"
+        run: |
+          set -euo pipefail
+          decision="$(bash .github/scripts/library_announce/channel_decision.sh)"
+          case "$decision" in
+            skip) echo "sent=true" >> "$GITHUB_OUTPUT" ;;
+            proceed) echo "sent=false" >> "$GITHUB_OUTPUT" ;;
+            *) echo "::error::channel_decision.sh printed '$decision'"; exit 1 ;;
+          esac
 
       - uses: actions/setup-python@v6
         if: steps.dedup.outputs.sent != 'true'

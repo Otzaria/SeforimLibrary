@@ -2,7 +2,7 @@
 # Decides, before anything is downloaded, which tag this run announces and on which
 # channels. Writes tag, proceed, send and channels (JSON) to $GITHUB_OUTPUT.
 set -euo pipefail
-: "${EVENT_NAME:?}" "${GITHUB_REPOSITORY:?}" "${GITHUB_OUTPUT:?}"
+: "${EVENT_NAME:?}" "${GITHUB_REPOSITORY:?}" "${GITHUB_OUTPUT:?}" "${GITHUB_RUN_ID:?}"
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 tag_re='^v[1-9][0-9]*-[0-9]{14}$'
 
@@ -36,7 +36,6 @@ set_tag_published_by_run() {
 }
 
 case "$EVENT_NAME" in
-  release) tag="${RELEASE_TAG:?}" send=true ;;
   workflow_dispatch)
     tag="${INPUT_TAG:?}" send=true
     if [ "${DRY_RUN:?}" = true ]; then send=false; fi ;;
@@ -58,8 +57,14 @@ for channel in "${requested[@]}"; do
   channel="$(tr -d '[:space:]' <<<"$channel")"
   [ -n "$channel" ] || continue
   case "$channel" in forum|yemot) ;; *) echo "::error::unknown channel '$channel' (allowed: forum,yemot)"; exit 1 ;; esac
-  if [ "$send" = true ] && [ "$(TAG="$tag" CHANNEL="$channel" bash "$here/already_sent.sh")" = true ]; then
-    continue
+  if [ "$send" = true ]; then
+    # A plain assignment, so a failing check stops the gate instead of reading as "not sent".
+    decision="$(TAG="$tag" CHANNEL="$channel" bash "$here/channel_decision.sh")"
+    case "$decision" in
+      skip) continue ;;
+      proceed) ;;
+      *) echo "::error::channel_decision.sh printed '$decision' for $channel"; exit 1 ;;
+    esac
   fi
   channels+=("$channel")
 done

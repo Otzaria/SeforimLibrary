@@ -552,6 +552,8 @@ if m := re.fullmatch(r"repos/[^/]+/[^/]+/releases/tags/(.+)", path):
         sys.stderr.write("gh: Not Found (HTTP 404)\n"); sys.exit(1)
     value = fixture["releases"][m.group(1)]
 elif path.endswith("/actions/workflows/library-update-announce.yml/runs"):
+    if fixture.get("runs_fail"):
+        sys.stderr.write("gh: Server Error (HTTP 502)\n"); sys.exit(1)
     value = {"workflow_runs": [{"id": run} for run in fixture["jobs"]]}
 elif m := re.fullmatch(r"repos/[^/]+/[^/]+/actions/runs/([0-9]+)/jobs", path):
     value = {"jobs": fixture["jobs"][m.group(1)]}
@@ -598,7 +600,7 @@ class GateTest(unittest.TestCase):
         output.write_text("", encoding="utf-8")
         values = {"PATH": f"{self.dir / 'bin'}{os.pathsep}{os.environ['PATH']}", "FAKE_GH": str(fixture),
                   "EVENT_NAME": event, "GITHUB_REPOSITORY": "Otzaria/SeforimLibrary", "GITHUB_OUTPUT": str(output),
-                  "WORKFLOW_RUN_ID": "100", "WORKFLOW_RUN_ATTEMPT": "1", **env}
+                  "WORKFLOW_RUN_ID": "100", "WORKFLOW_RUN_ATTEMPT": "1", "GITHUB_RUN_ID": "500", **env}
         result = subprocess.run(["bash", str(self.GATE)], env=values, capture_output=True, text=True)
         outputs = dict(line.split("=", 1) for line in output.read_text(encoding="utf-8").splitlines())
         log = Path(str(fixture) + ".log")
@@ -643,20 +645,80 @@ class GateTest(unittest.TestCase):
                 self.assertNotEqual(0, result.returncode)
                 self.assertNotIn("proceed", out)
 
+    @staticmethod
+    def job(channel, conclusion, status="completed", tag=TAG):
+        return {"name": f"{channel} {tag}", "status": status, "conclusion": conclusion, "html_url": "u"}
+
+    def send_gate(self):
+        return self.gate("workflow_dispatch", INPUT_TAG=TAG, DRY_RUN="false", INPUT_CHANNELS="forum,yemot")
+
     def test_channels_some_run_already_sent_are_dropped(self):
-        self.fixture["jobs"] = {"7": [{"name": f"forum {TAG}", "conclusion": "success", "html_url": "u"},
-                                      {"name": f"yemot {TAG}", "conclusion": "failure", "html_url": "v"}],
-                                "8": [{"name": "forum v28-20260910220310", "conclusion": "success", "html_url": "w"}]}
-        result, out, _ = self.gate("release", RELEASE_TAG=TAG)
+        self.fixture["jobs"] = {"7": [self.job("forum", "failure"), self.job("forum", "success")],
+                                "8": [self.job("yemot", "success", tag="v28-20260910220310"),
+                                      self.job("yemot", "skipped")]}
+        result, out, _ = self.send_gate()
         self.assertEqual(0, result.returncode, result.stderr)
         self.assertEqual('["yemot"]', out["channels"])
-        self.fixture["jobs"]["9"] = [{"name": f"yemot {TAG}", "conclusion": "success", "html_url": "x"}]
-        result, out, _ = self.gate("release", RELEASE_TAG=TAG)
+        self.fixture["jobs"]["9"] = [self.job("yemot", "success")]
+        result, out, _ = self.send_gate()
         self.assertEqual((0, "false"), (result.returncode, out["proceed"]))
         self.assertIn("already announced", result.stdout)
 
+    def test_a_channel_another_run_left_half_sent_fails_the_gate(self):
+        for job in (self.job("yemot", "failure"), self.job("yemot", "cancelled"),
+                    self.job("yemot", None, status="in_progress")):
+            with self.subTest(job=job):
+                self.fixture["jobs"] = {"7": [job]}
+                result, out, _ = self.send_gate()
+                self.assertNotEqual(0, result.returncode)
+                self.assertNotIn("proceed", out)
+                self.assertIn("actions/runs/7", result.stderr)
+                self.assertIn('"Re-run failed jobs"', result.stderr)
+
+    def test_a_rerun_of_the_run_that_left_it_half_sent_resumes(self):
+        self.fixture["jobs"] = {"500": [self.job("yemot", "failure")]}
+        result, out, _ = self.send_gate()
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual('["forum","yemot"]', out["channels"])
+
+    def test_a_failing_history_check_fails_the_gate(self):
+        self.fixture["runs_fail"] = True
+        result, out, _ = self.send_gate()
+        self.assertNotEqual(0, result.returncode)
+        self.assertNotIn("proceed", out)
+
+    def channel_step(self, **env):
+        doc = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
+        run = next(s["run"] for s in doc["jobs"]["forum"]["steps"] if s.get("id") == "dedup")
+        fixture = self.dir / "fixture.json"
+        fixture.write_text(json.dumps(self.fixture), encoding="utf-8")
+        output = self.dir / "step_out"
+        output.write_text("", encoding="utf-8")
+        values = {"PATH": f"{self.dir / 'bin'}{os.pathsep}{os.environ['PATH']}", "FAKE_GH": str(fixture),
+                  "GITHUB_REPOSITORY": "Otzaria/SeforimLibrary", "GITHUB_OUTPUT": str(output), "GITHUB_RUN_ID": "500",
+                  "TAG": TAG, "CHANNEL": "forum", **env}
+        # GitHub runs a step as `bash -e {0}`.
+        result = subprocess.run(["bash", "-e", "-c", run], cwd=ROOT, env=values, capture_output=True, text=True)
+        return result, output.read_text(encoding="utf-8")
+
+    @unittest.skipIf(yaml is None, "PyYAML is required to parse the workflow")
+    def test_the_channel_step_skips_resumes_or_fails(self):
+        self.fixture["jobs"] = {"7": [self.job("forum", "success")]}
+        self.assertEqual((0, "sent=true\n"), (self.channel_step()[0].returncode, self.channel_step()[1]))
+        self.fixture["jobs"] = {"500": [self.job("forum", None, status="in_progress")]}
+        result, out = self.channel_step()
+        self.assertEqual((0, "sent=false\n"), (result.returncode, out), result.stderr)
+        self.fixture["jobs"] = {"7": [self.job("forum", "failure")], "500": [self.job("forum", None, "in_progress")]}
+        result, out = self.channel_step()
+        self.assertNotEqual(0, result.returncode)
+        self.assertEqual("", out)
+        self.fixture["jobs"], self.fixture["runs_fail"] = {}, True
+        result, out = self.channel_step()
+        self.assertNotEqual(0, result.returncode)
+        self.assertEqual("", out)
+
     def test_a_dry_run_checks_no_history_and_sends_nothing(self):
-        self.fixture["jobs"] = {"7": [{"name": f"forum {TAG}", "conclusion": "success", "html_url": "u"}]}
+        self.fixture["jobs"] = {"7": [self.job("forum", "success")]}
         result, out, log = self.gate("workflow_dispatch", INPUT_TAG=TAG, DRY_RUN="true", INPUT_CHANNELS="yemot, forum")
         self.assertEqual(0, result.returncode, result.stderr)
         self.assertEqual({"proceed": "true", "tag": TAG, "send": "false", "channels": '["yemot","forum"]'}, out)
@@ -688,9 +750,10 @@ class WorkflowContractTest(unittest.TestCase):
         # Whatever the run's conclusion: a publish followed by a failed step still announces.
         self.assertNotIn("workflow_run.conclusion", self.text)
 
-    def test_runs_for_final_releases_including_a_promoted_prerelease(self):
-        self.assertEqual(["released"], self.on["release"]["types"])
-        self.assertIn("github.event.release.prerelease == false", self.doc["jobs"]["gate"]["if"])
+    def test_only_the_release_run_and_a_manual_dispatch_trigger_it(self):
+        # No `release` event: it would fire beside workflow_run every week and download twice.
+        self.assertEqual({"workflow_run", "workflow_dispatch"}, set(self.on))
+        self.assertNotIn("github.event.release", self.text)
 
     def test_the_release_workflow_does_not_depend_on_the_announcement(self):
         text = RELEASE.read_text(encoding="utf-8")
@@ -726,7 +789,9 @@ class WorkflowContractTest(unittest.TestCase):
                              job["concurrency"]["group"])
             self.assertIs(False, job["concurrency"]["cancel-in-progress"])
             steps = {step.get("name") or step.get("uses"): step for step in job["steps"]}
-            self.assertIn("already_sent.sh", steps["Skip if this tag was already announced here"]["run"])
+            dedup_step = steps["Skip if this tag was already announced here"]["run"]
+            self.assertIn('decision="$(bash .github/scripts/library_announce/channel_decision.sh)"', dedup_step)
+            self.assertNotIn("echo \"sent=$(", dedup_step)
             self.assertIn("steps.dedup.outputs.sent != 'true'", steps["Announce"]["if"])
             self.assertIn(f"-n {channel}-progress", steps["Restore progress from an earlier attempt"]["run"])
             self.assertIn("--progress", steps["Announce"]["run"])
@@ -734,7 +799,6 @@ class WorkflowContractTest(unittest.TestCase):
             self.assertTrue(upload["if"].startswith("always()"))
             self.assertEqual(f"{channel}-progress", upload["with"]["name"])
         dedup = (Path(__file__).resolve().parent / "already_sent.sh").read_text(encoding="utf-8")
-        self.assertIn('.conclusion == "success"', dedup)
         self.assertIn("filter=all", dedup)
         self.assertIn('JOB_NAME="$CHANNEL $TAG"', dedup)
 
