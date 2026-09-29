@@ -760,6 +760,19 @@ class WorkflowContractTest(unittest.TestCase):
         self.assertNotIn("library-update-announce", text)
         self.assertNotIn("announce", yaml.safe_load(text)["jobs"])
 
+    def test_nothing_ties_the_release_run_to_the_announcement(self):
+        # workflow_run fires after the release run ends; hosted runners and own lock names only.
+        release = yaml.safe_load(RELEASE.read_text(encoding="utf-8"))
+        release_groups = {str((job.get("concurrency") or {}).get("group")) for job in release["jobs"].values()}
+        release_groups.add(str((release.get("concurrency") or {}).get("group")))
+        for name, job in self.doc["jobs"].items():
+            self.assertEqual("ubuntu-latest", job["runs-on"], name)
+            group = (job.get("concurrency") or {}).get("group")
+            if group:
+                self.assertTrue(group.startswith("library-update-announce-"), name)
+                self.assertNotIn(group, release_groups)
+        self.assertNotIn("concurrency", self.doc)
+
     def test_manual_run_is_a_dry_run_by_default(self):
         inputs = self.on["workflow_dispatch"]["inputs"]
         self.assertTrue(inputs["tag"]["required"])
