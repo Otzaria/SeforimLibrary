@@ -211,6 +211,20 @@ tasks.register<JavaExec>("splitLineContent") {
     jvmArgs = listOf("-Xmx1g")
 }
 
+tasks.register<JavaExec>("compactSeforimDb") {
+    group = "application"
+    description = "Drops the freelist of the finished seforim.db via VACUUM INTO on -PscratchDir (needs ~one compacted DB free there)."
+    dependsOn("jvmJar")
+    mainClass.set("io.github.kdroidfilter.seforimlibrary.common.patch.CompactDbCliKt")
+    classpath = files(tasks.named("jvmJar")) + configurations.getByName("jvmRuntimeClasspath")
+    val dbPath = (project.findProperty("dbPath") ?: project.findProperty("seforimDb")) as String?
+        ?: System.getenv("SEFORIM_DB")
+        ?: rootProject.layout.buildDirectory.file("seforim.db").get().asFile.absolutePath
+    systemProperty("dbPath", dbPath)
+    project.findProperty("scratchDir")?.let { systemProperty("scratchDir", it as String) }
+    jvmArgs = listOf("-Xmx512m")
+}
+
 tasks.register<JavaExec>("writeSchemaBarrier") {
     group = "application"
     description = "Writes the full-rebase barrier patch-v<from>-v<to>.db.zst + manifest for an anchor older than the split schema."

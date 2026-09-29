@@ -1776,6 +1776,25 @@ jobs:
             -PlinkerStrict=true \
             --no-daemon --stacktrace
 
+      # ─── Compact the finished DB ───────────────────────────────────────────
+      # splitLineContent (schema 6) leaves the pages it freed on the freelist
+      # (18% of the file on a 70-book subset). They are zeroed, so the .zst
+      # hardly grows, but every user would install them. Runs after Phase-2 and
+      # its ANALYZE, the last writers.
+      # Disk: VACUUM INTO writes the compact copy (~one DB, ~7 GiB) to
+      # $RUNNER_TEMP on the workspace disk (~850 GB free), then the original is
+      # deleted before the copy moves back, so the 20 GiB tmpfs never holds two
+      # DBs. A no-op when the freelist is empty.
+      - name: Compact Seforim Database (VACUUM INTO)
+        run: |
+          set -euo pipefail
+          ls -l build/seforim.db
+          gradle :generator-common:compactSeforimDb \
+            -PdbPath=$PWD/build/seforim.db \
+            -PscratchDir="$RUNNER_TEMP" \
+            --no-daemon --stacktrace
+          ls -l build/seforim.db
+
       # ─── E1: ship the buildstate compressed ────────────────────────────────
       # seforim.db.buildstate is a ~990 MB SQLite file that every run uploads and
       # every NEXT run downloads ("Seed allocator from offset-1 release" — 128 s
