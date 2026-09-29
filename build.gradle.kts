@@ -96,6 +96,14 @@ project(":generator-common").tasks.matching { it.name == "analyzeSeforimDb" }.co
     mustRunAfter(":generator-common:stampSchemaVersion")
     mustRunAfter(":sefariasqlite:generateLinkerLinks")
 }
+// VACUUM INTO carries sqlite_stat1 over, so compaction comes after every writer
+// including ANALYZE; the producer then reads the compacted DB's stat1.
+project(":generator-common").tasks.matching { it.name == "compactSeforimDb" }.configureEach {
+    mustRunAfter(":generator-common:splitLineContent")
+    mustRunAfter(":generator-common:stampSchemaVersion")
+    mustRunAfter(":sefariasqlite:generateLinkerLinks")
+    mustRunAfter(":generator-common:analyzeSeforimDb")
+}
 
 // Generator diagnostics side-channel (see GeneratorReport). Findings that are
 // too long for the build log — the missing priority entries, the metadata
@@ -287,6 +295,7 @@ project(":generator-common").tasks.matching { it.name == "producePatchAndVerify"
     mustRunAfter(project(":generator-common").tasks.matching { it.name == "splitLineContent" })
     mustRunAfter(project(":generator-common").tasks.matching { it.name == "stampSchemaVersion" })
     mustRunAfter(project(":generator-common").tasks.matching { it.name == "analyzeSeforimDb" })
+    mustRunAfter(project(":generator-common").tasks.matching { it.name == "compactSeforimDb" })
     // Map the umbrella task's -P props onto the CLI's gradle props.
     val prev = providers.gradleProperty("prevReleaseDb").orNull
     val from = providers.gradleProperty("fromVersion").orNull
