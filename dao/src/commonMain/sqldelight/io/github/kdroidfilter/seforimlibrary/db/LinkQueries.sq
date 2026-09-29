@@ -2,7 +2,7 @@
 -- Visibility contract: a ranged side also surfaces on its link_coverage lines,
 -- and a side listed in link_suppressed_side is never surfaced.
 -- The anchor set is spelled `l.id IN (<indexed UNION>)`, never `OR`: the DB ships
--- without sqlite_stat1, and the OR form makes the planner fall back to idx_link_type.
+-- without sqlite_stat1, and the OR form makes the planner fall back to a connectionTypeId-prefix scan.
 
 selectLinkById:
 SELECT l.*, ct.name AS connectionType

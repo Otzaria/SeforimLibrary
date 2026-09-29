@@ -38,6 +38,10 @@ import java.sql.DriverManager
  * alongside. A missing PRIMARY KEY column, a column dropped without a bump, or
  * a newly UNIQUE index/constraint makes an anchor genuinely unpatchable; that
  * raises [UnpatchableAnchorException].
+ *
+ * **Indexes removed from the schema.** An explicit index that prev has and new
+ * lacks ships as `DROP INDEX IF EXISTS main."<name>"` through the same
+ * `migrations` channel, so patch-updated clients converge with full downloads.
  */
 class PatchDbProducer(
     private val logger: Logger = Logger.withTag("PatchDbProducer"),
@@ -104,7 +108,14 @@ class PatchDbProducer(
                 firstVersion = (createTableMigrations.maxOfOrNull { it.first } ?: (nextMigrationVersion - 1)) + 1,
                 plans = columnPlans,
             )
-            writeMigrations(conn, migrations + createTableMigrations + addColumnMigrations)
+            val preDropMigrations = migrations + createTableMigrations + addColumnMigrations
+            var dropVersion = (preDropMigrations.maxOfOrNull { it.first } ?: 0) + 1
+            val dropIndexMigrations = planDroppedIndexMigrations(conn, targetTables)
+                .map { dropVersion++ to it }
+            writeMigrations(conn, preDropMigrations + dropIndexMigrations)
+            if (dropIndexMigrations.isNotEmpty()) {
+                logger.i { "Emitting ${dropIndexMigrations.size} DROP INDEX migration(s)" }
+            }
             for ((name, plan) in columnPlans) {
                 logger.i {
                     "Table '$name': prev lacks ${plan.missingColumns} — emitting ADD COLUMN migration(s)" +
@@ -434,6 +445,20 @@ class PatchDbProducer(
         }
         return created.mapNotNull { it.sql }
     }
+
+    /**
+     * Explicit indexes that prev has and new lacks. The drop is idempotent, so a
+     * client that never had the index (full download) runs a no-op.
+     */
+    private fun planDroppedIndexMigrations(conn: Connection, targetTables: List<PatchTable>): List<String> =
+        targetTables
+            .filter { tableExists(conn, "prev", it.name) && tableExists(conn, "new", it.name) }
+            .flatMap { table ->
+                val newNames = readIndexes(conn, "new", table.name).mapTo(HashSet()) { it.name }
+                readIndexes(conn, "prev", table.name)
+                    .filter { it.origin == "c" && it.name !in newNames }
+                    .map { "DROP INDEX IF EXISTS main.\"${it.name.replace("\"", "\"\"")}\"" }
+            }
 
     private fun readIndexes(conn: Connection, schemaAlias: String, table: String): List<IndexInfo> {
         data class ListRow(val name: String, val unique: Boolean, val origin: String)
