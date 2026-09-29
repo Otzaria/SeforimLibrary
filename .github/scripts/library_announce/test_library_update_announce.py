@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
 """Tests for library_update_announce.py, yemot.py and their workflow."""
+import hashlib
 import io
 import json
+import os
+import shutil
+import subprocess
 import sqlite3
 import sys
 import tempfile
@@ -83,6 +87,8 @@ class PlainTextTest(unittest.TestCase):
         self.assertEqual("א ב & ג", lua.plain_text("<b>א</b>  \n ב&nbsp;&amp; <span class='x'>ג</span> "))
         self.assertEqual("&lt;", lua.plain_text("&amp;lt;"))
         self.assertEqual("<", lua.plain_text("&lt;"))
+        self.assertEqual("חסר <חסר> כאן <בד\"ה אמר>", lua.plain_text("חסר <b><חסר></b> כאן <בד\"ה אמר>"))
+        self.assertEqual("x", lua.plain_text("<!-- c -->x<?php ?>"))
         self.assertEqual(lua.plain_text("נקודה: הלכה"), lua.plain_text("נקודה:<br>הלכה"))
         self.assertNotEqual(lua.plain_text("וירגה זכרונו"), lua.plain_text("וירגהזכרונו"))
 
@@ -280,13 +286,16 @@ class Response:
 
 
 class Session:
-    def __init__(self, max_file="005.tts", fail_on=None):
+    def __init__(self, max_file="005.tts", fail_on=None, fail_tzintuk=False):
         self.max_file, self.fail_on, self.uploads, self.calls = max_file, fail_on, [], []
+        self.fail_tzintuk = fail_tzintuk
 
     def get(self, url, params, timeout):
         self.calls.append((url, timeout))
         if url.endswith("GetIVR2DirStats"):
             return Response({"responseStatus": "OK", "maxFile": {"name": self.max_file}})
+        if self.fail_tzintuk:
+            return Response({"responseStatus": "ERROR", "message": "busy"})
         return Response({"responseStatus": "OK"})
 
     def post(self, url, data, timeout):
@@ -337,6 +346,42 @@ class YemotTest(unittest.TestCase):
         with self.assertRaisesRegex(yemot.YemotError, "UploadTextFile"):
             yemot.split_and_send({"כותרת": "א"}, "עדכון\n", "t", "ivr2:/1", "list", session=session)
 
+    def test_an_interrupted_send_resumes_without_reuploading(self):
+        content = {"כותרת": "אאאא\nבבבב\nגגגג"}
+        saved = []
+        progress = {}
+        with mock.patch.object(yemot, "CHUNK_SIZE", 10):
+            with self.assertRaises(yemot.YemotError):
+                yemot.split_and_send(content, "עדכון\n", "t", "ivr2:/1", "list", session=Session(fail_on="007-Title"),
+                                     progress=progress, save=lambda state: saved.append(dict(state)))
+            self.assertEqual({"base": 5, "uploaded": 2, "tzintuk": False}, progress)
+            # The folder grew meanwhile: a resume must keep the recorded numbering.
+            second = Session(max_file="007.tts")
+            yemot.split_and_send(content, "עדכון\n", "t", "ivr2:/1", "list", session=second,
+                                 progress=progress, save=lambda state: saved.append(dict(state)))
+        self.assertEqual([("ivr2:/1/007-Title.tts", "כותרת"), ("ivr2:/1/008.tts", "עדכון\n")], second.uploads)
+        self.assertFalse(any(url.endswith("GetIVR2DirStats") for url, _ in second.calls))
+        self.assertEqual({"base": 5, "uploaded": 4, "tzintuk": True}, saved[-1])
+
+    def test_tzintuk_runs_once_after_every_upload(self):
+        progress = {}
+        with self.assertRaises(yemot.YemotError):
+            yemot.split_and_send({"כ": "א"}, "ע\n", "t", "ivr2:/1", "list", session=Session(fail_tzintuk=True),
+                                 progress=progress)
+        self.assertEqual({"base": 5, "uploaded": 3, "tzintuk": False}, progress)
+        again = Session()
+        yemot.split_and_send({"כ": "א"}, "ע\n", "t", "ivr2:/1", "list", session=again, progress=progress)
+        self.assertEqual([], again.uploads)
+        self.assertEqual(["RunTzintuk"], [url.rsplit("/", 1)[-1] for url, _ in again.calls])
+        done = Session()
+        yemot.split_and_send({"כ": "א"}, "ע\n", "t", "ivr2:/1", "list", session=done, progress=progress)
+        self.assertEqual([], done.calls)
+
+    def test_upload_plan_is_deterministic(self):
+        content = {"א": "1\n2", "ב": "3"}
+        self.assertEqual([("006", "1\n2"), ("006-Title", "א"), ("007", "3"), ("007-Title", "ב"), ("008", "ד")],
+                         yemot.upload_plan(content, "ד", 5))
+
     def test_http_errors_and_non_json_fail_loudly(self):
         with self.assertRaisesRegex(yemot.YemotError, "HTTP 500"):
             yemot._checked(Response({}, status=500), "x")
@@ -381,34 +426,72 @@ class RenderAndSendTest(unittest.TestCase):
         self.assertTrue(posts[0].startswith("# גרסת ספרייה 30\n"))
         spoken = json.loads((self.dir / "out" / "yemot.json").read_text(encoding="utf-8"))
         self.assertEqual({"התווספו הספרים הבאים:": "שמות"}, spoken["content"])
-        self.assertIn("תשפ", spoken["date"])
+        self.assertRegex(spoken["heading"], r"^גרסת ספרייה 30\nעדכון .*תשפ.*\n$")
         self.assertIn('channels=["forum", "yemot"]\n', (self.dir / "gh_out").read_text(encoding="utf-8"))
 
     def test_unknown_channel_is_refused(self):
         with self.assertRaises(SystemExit):
             self.render(self.old, self.new, ["--channels", "forum,chat"])
 
+    def send(self, channel, env, progress=None):
+        argv = ["send", "--channel", channel, "--dir", str(self.dir / "out")]
+        if progress:
+            argv += ["--progress", str(progress)]
+        with mock.patch.dict("os.environ", env), redirect_stdout(io.StringIO()):
+            return lua.main(argv)
+
     def test_send_forum_posts_every_rendered_post_in_order(self):
         self.render(self.old, self.new)
         (self.dir / "out" / "forum_posts.json").write_text(json.dumps(["1", "2"]), encoding="utf-8")
-        with mock.patch.object(lua, "send_forum") as forum, mock.patch.dict("os.environ", {"FORUM_TOKEN": "t"}), \
-                redirect_stdout(io.StringIO()):
-            self.assertEqual(0, lua.main(["send", "--channel", "forum", "--dir", str(self.dir / "out")]))
+        with mock.patch.object(lua, "send_forum") as forum:
+            self.assertEqual(0, self.send("forum", {"FORUM_TOKEN": "t"}))
         self.assertEqual([mock.call("1", "t"), mock.call("2", "t")], forum.call_args_list)
+
+    def test_an_empty_secret_fails_before_sending(self):
+        self.render(self.old, self.new)
+        for channel, secret in (("forum", "FORUM_TOKEN"), ("yemot", "TOKEN_YEMOT")):
+            with self.subTest(channel=channel), mock.patch.object(lua, "send_forum") as forum, \
+                    mock.patch.object(lua, "send_yemot") as spoken:
+                with self.assertRaisesRegex(SystemExit, f"::error::{secret} is empty"):
+                    self.send(channel, {secret: " "})
+                forum.assert_not_called()
+                spoken.assert_not_called()
+
+    def test_a_rerun_continues_the_forum_after_the_last_accepted_post(self):
+        self.render(self.old, self.new)
+        (self.dir / "out" / "forum_posts.json").write_text(json.dumps(["1", "2", "3"]), encoding="utf-8")
+        progress = self.dir / "progress" / "forum_progress.json"
+        with mock.patch.object(lua, "send_forum", side_effect=[None, lua.ForumRefused("403: no")]):
+            with self.assertRaisesRegex(RuntimeError, "post 2/3 failed; posts 1-1"):
+                self.send("forum", {"FORUM_TOKEN": "t"}, progress)
+        self.assertEqual(1, json.loads(progress.read_text(encoding="utf-8"))["sent"])
+        with mock.patch.object(lua, "send_forum") as forum:
+            self.send("forum", {"FORUM_TOKEN": "t"}, progress)
+        self.assertEqual([mock.call("2", "t"), mock.call("3", "t")], forum.call_args_list)
+        self.assertEqual(3, json.loads(progress.read_text(encoding="utf-8"))["sent"])
+
+    def test_progress_for_another_announcement_is_refused(self):
+        self.render(self.old, self.new)
+        progress = self.dir / "forum_progress.json"
+        progress.write_text(json.dumps({"payload_sha256": "0" * 64, "sent": 1}), encoding="utf-8")
+        with mock.patch.object(lua, "send_forum") as forum, self.assertRaisesRegex(SystemExit, "another"):
+            self.send("forum", {"FORUM_TOKEN": "t"}, progress)
+        forum.assert_not_called()
 
     def test_a_failed_post_names_how_many_were_sent(self):
         send = mock.Mock(side_effect=[None, lua.ForumRefused("403: no")])
         with redirect_stdout(io.StringIO()), self.assertRaisesRegex(RuntimeError, "post 2/3 failed; posts 1-1"):
             lua.send_forum_posts(["a", "b", "c"], "t", send=send)
 
-    def test_send_yemot_uses_the_rendered_content(self):
+    def test_send_yemot_uses_the_rendered_content_and_heading(self):
         self.render(self.old, self.new)
-        with mock.patch.object(lua, "send_yemot") as spoken, mock.patch.dict("os.environ", {"TOKEN_YEMOT": "t"}), \
-                redirect_stdout(io.StringIO()):
-            lua.main(["send", "--channel", "yemot", "--dir", str(self.dir / "out")])
-        content, date_text, token = spoken.call_args.args
+        with mock.patch.object(lua, "send_yemot") as spoken:
+            self.send("yemot", {"TOKEN_YEMOT": "t"}, self.dir / "yemot_progress.json")
+        content, heading, token, state, _save = spoken.call_args.args
         self.assertEqual({"התווספו הספרים הבאים:": "שמות"}, content)
+        self.assertTrue(heading.startswith("גרסת ספרייה 30\nעדכון "))
         self.assertEqual("t", token)
+        self.assertIn("payload_sha256", state)
 
 
 class ForumTest(unittest.TestCase):
@@ -442,6 +525,154 @@ class ForumTest(unittest.TestCase):
             lua.post_to_forum("x", "t", session=session)
 
 
+FAKE_GH = r"""#!/usr/bin/env python3
+import json, os, re, subprocess, sys
+fixture = json.load(open(os.environ["FAKE_GH"]))
+with open(os.environ["FAKE_GH"] + ".log", "a") as log:
+    log.write(" ".join(sys.argv[1:]) + "\n")
+args, jq, endpoint = sys.argv[1:], None, None
+if args[:2] == ["release", "download"]:
+    tag, folder = args[2], args[args.index("-D") + 1]
+    for name, text in fixture["assets"][tag].items():
+        open(os.path.join(folder, name), "w").write(text)
+    sys.exit(0)
+i = 1
+while i < len(args):
+    if args[i] in ("-X", "-f", "-R"):
+        i += 2
+    elif args[i] == "--jq":
+        jq = args[i + 1]; i += 2
+    elif args[i] == "--paginate":
+        i += 1
+    else:
+        endpoint = args[i]; i += 1
+path = endpoint.split("?")[0]
+if m := re.fullmatch(r"repos/[^/]+/[^/]+/releases/tags/(.+)", path):
+    if m.group(1) not in fixture["releases"]:
+        sys.stderr.write("gh: Not Found (HTTP 404)\n"); sys.exit(1)
+    value = fixture["releases"][m.group(1)]
+elif path.endswith("/actions/workflows/library-update-announce.yml/runs"):
+    value = {"workflow_runs": [{"id": run} for run in fixture["jobs"]]}
+elif m := re.fullmatch(r"repos/[^/]+/[^/]+/actions/runs/([0-9]+)/jobs", path):
+    value = {"jobs": fixture["jobs"][m.group(1)]}
+else:
+    sys.stderr.write("unexpected endpoint " + endpoint + "\n"); sys.exit(2)
+sys.stdout.write(subprocess.run(["jq", "-r", jq], input=json.dumps(value), text=True,
+                                 capture_output=True, check=True).stdout)
+"""
+
+TAG = "v29-20260927072953"
+
+
+@unittest.skipUnless(all(shutil.which(tool) for tool in ("bash", "jq", "sha256sum")), "gate needs bash, jq, sha256sum")
+class GateTest(unittest.TestCase):
+    GATE = Path(__file__).resolve().parent / "gate.sh"
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.dir = Path(self.tmp.name)
+        (self.dir / "bin").mkdir()
+        gh = self.dir / "bin" / "gh"
+        gh.write_text(FAKE_GH, encoding="utf-8")
+        gh.chmod(0o755)
+        self.fixture = {"releases": {TAG: {"tag_name": TAG, "draft": False, "prerelease": False,
+                                           "created_at": "2026-09-27T07:30:00Z"}},
+                        "assets": {}, "jobs": {}}
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def handoff(self, status="published", run=100, attempt=1, tag=TAG, corrupt=False):
+        name = f"pipeline-result-run-{run}-{attempt}"
+        body = json.dumps({"status": status, "child_run_id": run, "child_run_attempt": attempt,
+                           "release_tag": tag}) + "\n"
+        digest = hashlib.sha256(body.encode()).hexdigest()
+        self.fixture["releases"][name] = {"tag_name": name, "prerelease": True}
+        self.fixture["assets"][name] = {"pipeline-result.json": body,
+                                        "pipeline-result.sha256": ("0" * 64 if corrupt else digest) + "\n"}
+
+    def gate(self, event, **env):
+        fixture = self.dir / "fixture.json"
+        fixture.write_text(json.dumps(self.fixture), encoding="utf-8")
+        output = self.dir / "out"
+        output.write_text("", encoding="utf-8")
+        values = {"PATH": f"{self.dir / 'bin'}{os.pathsep}{os.environ['PATH']}", "FAKE_GH": str(fixture),
+                  "EVENT_NAME": event, "GITHUB_REPOSITORY": "Otzaria/SeforimLibrary", "GITHUB_OUTPUT": str(output),
+                  "WORKFLOW_RUN_ID": "100", "WORKFLOW_RUN_ATTEMPT": "1", **env}
+        result = subprocess.run(["bash", str(self.GATE)], env=values, capture_output=True, text=True)
+        outputs = dict(line.split("=", 1) for line in output.read_text(encoding="utf-8").splitlines())
+        log = Path(str(fixture) + ".log")
+        return result, outputs, log.read_text(encoding="utf-8") if log.exists() else ""
+
+    def test_a_release_run_that_published_nothing_is_a_clean_skip(self):
+        result, out, _ = self.gate("workflow_run")
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual("false", out["proceed"])
+        self.assertIn("published nothing", result.stdout)
+
+    def test_a_reuse_run_is_a_clean_skip(self):
+        self.handoff(status="reused")
+        result, out, _ = self.gate("workflow_run")
+        self.assertEqual((0, "false"), (result.returncode, out["proceed"]))
+        self.assertIn("reused", result.stdout)
+
+    def test_a_release_run_announces_the_tag_it_published(self):
+        self.handoff()
+        result, out, _ = self.gate("workflow_run")
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual({"proceed": "true", "tag": TAG, "send": "true", "channels": '["forum","yemot"]'}, out)
+
+    def test_a_published_prerelease_is_a_clean_skip(self):
+        self.handoff()
+        self.fixture["releases"][TAG]["prerelease"] = True
+        result, out, _ = self.gate("workflow_run")
+        self.assertEqual((0, "false"), (result.returncode, out["proceed"]))
+
+    def test_a_handoff_that_does_not_verify_fails(self):
+        for kwargs in ({"corrupt": True}, {"run": 999}, {"status": "odd"}):
+            with self.subTest(**kwargs):
+                self.fixture["releases"] = {TAG: self.fixture["releases"][TAG]}
+                run = kwargs.pop("run", 100)
+                self.handoff(run=run, **kwargs)
+                if run != 100:
+                    self.fixture["releases"]["pipeline-result-run-100-1"] = self.fixture["releases"].pop(
+                        f"pipeline-result-run-{run}-1")
+                    self.fixture["assets"]["pipeline-result-run-100-1"] = self.fixture["assets"].pop(
+                        f"pipeline-result-run-{run}-1")
+                result, out, _ = self.gate("workflow_run")
+                self.assertNotEqual(0, result.returncode)
+                self.assertNotIn("proceed", out)
+
+    def test_channels_some_run_already_sent_are_dropped(self):
+        self.fixture["jobs"] = {"7": [{"name": f"forum {TAG}", "conclusion": "success", "html_url": "u"},
+                                      {"name": f"yemot {TAG}", "conclusion": "failure", "html_url": "v"}],
+                                "8": [{"name": "forum v28-20260910220310", "conclusion": "success", "html_url": "w"}]}
+        result, out, _ = self.gate("release", RELEASE_TAG=TAG)
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual('["yemot"]', out["channels"])
+        self.fixture["jobs"]["9"] = [{"name": f"yemot {TAG}", "conclusion": "success", "html_url": "x"}]
+        result, out, _ = self.gate("release", RELEASE_TAG=TAG)
+        self.assertEqual((0, "false"), (result.returncode, out["proceed"]))
+        self.assertIn("already announced", result.stdout)
+
+    def test_a_dry_run_checks_no_history_and_sends_nothing(self):
+        self.fixture["jobs"] = {"7": [{"name": f"forum {TAG}", "conclusion": "success", "html_url": "u"}]}
+        result, out, log = self.gate("workflow_dispatch", INPUT_TAG=TAG, DRY_RUN="true", INPUT_CHANNELS="yemot, forum")
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual({"proceed": "true", "tag": TAG, "send": "false", "channels": '["yemot","forum"]'}, out)
+        self.assertNotIn("/runs", log)
+
+    def test_a_manual_run_for_an_unpublished_tag_fails(self):
+        self.fixture["releases"][TAG]["prerelease"] = True
+        result, _, _ = self.gate("workflow_dispatch", INPUT_TAG=TAG, DRY_RUN="false", INPUT_CHANNELS="forum")
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("not a published", result.stdout)
+
+    def test_an_unknown_channel_fails(self):
+        result, _, _ = self.gate("workflow_dispatch", INPUT_TAG=TAG, DRY_RUN="true", INPUT_CHANNELS="forum,chat")
+        self.assertNotEqual(0, result.returncode)
+
+
 @unittest.skipIf(yaml is None, "PyYAML is required to parse the workflow")
 class WorkflowContractTest(unittest.TestCase):
     def setUp(self):
@@ -450,9 +681,21 @@ class WorkflowContractTest(unittest.TestCase):
         # PyYAML reads the bare `on:` key as boolean True.
         self.on = self.doc.get("on", self.doc.get(True))
 
+    def test_follows_every_completed_release_run(self):
+        release = yaml.safe_load(RELEASE.read_text(encoding="utf-8"))
+        self.assertEqual([release["name"]], self.on["workflow_run"]["workflows"])
+        self.assertEqual(["completed"], self.on["workflow_run"]["types"])
+        # Whatever the run's conclusion: a publish followed by a failed step still announces.
+        self.assertNotIn("workflow_run.conclusion", self.text)
+
     def test_runs_for_final_releases_including_a_promoted_prerelease(self):
         self.assertEqual(["released"], self.on["release"]["types"])
-        self.assertIn("github.event.release.prerelease == false", self.doc["jobs"]["prepare"]["if"])
+        self.assertIn("github.event.release.prerelease == false", self.doc["jobs"]["gate"]["if"])
+
+    def test_the_release_workflow_does_not_depend_on_the_announcement(self):
+        text = RELEASE.read_text(encoding="utf-8")
+        self.assertNotIn("library-update-announce", text)
+        self.assertNotIn("announce", yaml.safe_load(text)["jobs"])
 
     def test_manual_run_is_a_dry_run_by_default(self):
         inputs = self.on["workflow_dispatch"]["inputs"]
@@ -460,30 +703,40 @@ class WorkflowContractTest(unittest.TestCase):
         self.assertIs(True, inputs["dry_run"]["default"])
         self.assertEqual("forum,yemot", inputs["channels"]["default"])
 
-    def test_runs_for_one_tag_serialize(self):
-        concurrency = self.doc["concurrency"]
-        self.assertIn("inputs.tag", concurrency["group"])
-        self.assertIn("github.event.release.tag_name", concurrency["group"])
-        self.assertIs(False, concurrency["cancel-in-progress"])
-
-    def test_each_channel_is_its_own_job_with_a_dedup_check(self):
+    def test_the_gate_decides_before_anything_is_downloaded(self):
         jobs = self.doc["jobs"]
-        self.assertEqual({"prepare", "forum", "yemot"}, set(jobs))
+        self.assertEqual(["gate", "prepare", "forum", "yemot"], list(jobs))
+        self.assertEqual("gate", jobs["prepare"]["needs"])
+        self.assertEqual("needs.gate.outputs.proceed == 'true'", jobs["prepare"]["if"])
+        gate = next(s for s in jobs["gate"]["steps"] if s.get("id") == "gate")
+        self.assertEqual("bash .github/scripts/library_announce/gate.sh", gate["run"])
+        self.assertEqual("${{ github.event.workflow_run.id }}", gate["env"]["WORKFLOW_RUN_ID"])
+        self.assertEqual("${{ github.event.workflow_run.run_attempt }}", gate["env"]["WORKFLOW_RUN_ATTEMPT"])
+
+    def test_each_channel_is_its_own_locked_resumable_job(self):
+        jobs = self.doc["jobs"]
         for channel in ("forum", "yemot"):
             job = jobs[channel]
-            self.assertEqual(channel, job["name"])
-            self.assertEqual("prepare", job["needs"])
+            self.assertEqual(f"{channel} ${{{{ needs.gate.outputs.tag }}}}", job["name"])
+            self.assertEqual(["gate", "prepare"], job["needs"])
             self.assertEqual("read", job["permissions"]["actions"])
-            self.assertIn(f"contains(fromJSON(needs.prepare.outputs.channels), '{channel}')", job["if"])
-            steps = {step.get("name"): step for step in job["steps"]}
-            self.assertEqual("bash .github/scripts/library_announce/already_sent.sh",
-                             steps["Skip if this tag was already announced here"]["run"])
+            self.assertIn(f"contains(fromJSON(needs.gate.outputs.channels), '{channel}')", job["if"])
+            self.assertIn("needs.gate.outputs.send == 'true'", job["if"])
+            self.assertEqual(f"library-update-announce-{channel}-${{{{ needs.gate.outputs.tag }}}}",
+                             job["concurrency"]["group"])
+            self.assertIs(False, job["concurrency"]["cancel-in-progress"])
+            steps = {step.get("name") or step.get("uses"): step for step in job["steps"]}
+            self.assertIn("already_sent.sh", steps["Skip if this tag was already announced here"]["run"])
             self.assertIn("steps.dedup.outputs.sent != 'true'", steps["Announce"]["if"])
+            self.assertIn(f"-n {channel}-progress", steps["Restore progress from an earlier attempt"]["run"])
+            self.assertIn("--progress", steps["Announce"]["run"])
+            upload = steps["actions/upload-artifact@v6"]
+            self.assertTrue(upload["if"].startswith("always()"))
+            self.assertEqual(f"{channel}-progress", upload["with"]["name"])
         dedup = (Path(__file__).resolve().parent / "already_sent.sh").read_text(encoding="utf-8")
         self.assertIn('.conclusion == "success"', dedup)
         self.assertIn("filter=all", dedup)
-        self.assertIn('TITLE="announce $TAG"', dedup)
-        self.assertIn(" (dry run)", self.doc["run-name"])
+        self.assertIn('JOB_NAME="$CHANNEL $TAG"', dedup)
 
     def test_no_google_chat_left(self):
         script = (Path(__file__).resolve().parent / "library_update_announce.py").read_text(encoding="utf-8")
@@ -496,25 +749,17 @@ class WorkflowContractTest(unittest.TestCase):
         self.assertIn('rm -f "$db"', run)
 
     def test_hosted_python_is_set_up_before_pip(self):
+        checked = 0
         for job in self.doc["jobs"].values():
             uses = [step.get("uses", "") for step in job["steps"]]
             runs = [step.get("run", "") for step in job["steps"]]
+            pips = [i for i, r in enumerate(runs) if "pip install" in r]
+            if not pips:
+                continue
+            checked += 1
             setup = next(i for i, u in enumerate(uses) if u.startswith("actions/setup-python@"))
-            pip = next(i for i, r in enumerate(runs) if "pip install" in r)
-            self.assertLess(setup, pip)
-
-    def test_the_release_workflow_dispatches_a_final_new_release(self):
-        release = yaml.safe_load(RELEASE.read_text(encoding="utf-8"))
-        job = release["jobs"]["announce-library-update"]
-        self.assertEqual("build-and-release", job["needs"])
-        self.assertIn("needs.build-and-release.result == 'success'", job["if"])
-        self.assertIn("!inputs.prerelease", job["if"])
-        self.assertEqual({"actions": "write"}, job["permissions"])
-        run = job["steps"][0]["run"]
-        self.assertIn("gh workflow run library-update-announce.yml", run)
-        self.assertIn("-f dry_run=false", run)
-        self.assertEqual("${{ steps.publish.outputs.release_tag }}",
-                         release["jobs"]["build-and-release"]["outputs"]["release_tag"])
+            self.assertLess(setup, pips[0])
+        self.assertEqual(3, checked)
 
     def test_ci_installs_what_these_tests_import(self):
         ci = yaml.safe_load(CI.read_text(encoding="utf-8"))

@@ -1,21 +1,23 @@
 #!/usr/bin/env bash
 # shellcheck disable=SC2016  # the $ENV references are jq, not shell
-# Prints sent=true|false to $GITHUB_OUTPUT: whether an earlier non-dry run of this
-# workflow for $TAG has a successful $CHANNEL job in any attempt.
+# Prints true|false: whether any run of this workflow has a successful "$CHANNEL $TAG"
+# job in any attempt. Dry runs never run channel jobs, so they never count.
 set -euo pipefail
-: "${TAG:?}" "${CHANNEL:?}" "${GITHUB_REPOSITORY:?}" "${GITHUB_OUTPUT:?}"
-# A dry run's display title ends in " (dry run)", so the exact title excludes it.
-export TITLE="announce $TAG"
-runs="$(gh api --paginate "repos/$GITHUB_REPOSITORY/actions/workflows/library-update-announce.yml/runs?per_page=100" \
-  --jq '.workflow_runs[] | select(.display_title == $ENV.TITLE) | .id')"
+: "${TAG:?}" "${CHANNEL:?}" "${GITHUB_REPOSITORY:?}"
+export JOB_NAME="$CHANNEL $TAG"
+# An announcing run cannot predate the release itself.
+since="$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG" --jq .created_at)"
+[ -n "$since" ] || { echo "::error::release $TAG has no created_at" >&2; exit 1; }
+runs="$(gh api -X GET --paginate "repos/$GITHUB_REPOSITORY/actions/workflows/library-update-announce.yml/runs" \
+  -f per_page=100 -f created=">=$since" --jq '.workflow_runs[].id')"
 for run in $runs; do
   done_by="$(gh api --paginate "repos/$GITHUB_REPOSITORY/actions/runs/$run/jobs?filter=all&per_page=100" \
-    --jq '.jobs[] | select(.name == $ENV.CHANNEL and .conclusion == "success") | .html_url')"
+    --jq '.jobs[] | select(.name == $ENV.JOB_NAME and .conclusion == "success") | .html_url')"
   if [ -n "$done_by" ]; then
-    echo "::notice::$CHANNEL already announced $TAG in $(head -n1 <<<"$done_by") — skipping"
-    echo "sent=true" >> "$GITHUB_OUTPUT"
+    echo "::notice::$CHANNEL already announced $TAG in $(head -n1 <<<"$done_by")" >&2
+    echo true
     exit 0
   fi
 done
-echo "$CHANNEL: no earlier successful announcement of $TAG among $(wc -w <<<"$runs") matching run(s)"
-echo "sent=false" >> "$GITHUB_OUTPUT"
+echo "$CHANNEL: no successful '$JOB_NAME' job among $(wc -w <<<"$runs") run(s) since $since" >&2
+echo false

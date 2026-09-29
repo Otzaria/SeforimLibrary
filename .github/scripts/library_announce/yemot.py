@@ -46,10 +46,9 @@ def split_content(content: str, chunk_size: int = CHUNK_SIZE) -> list[str]:
     return [part for part in (p.strip() for p in parts) if part]
 
 
-def split_and_send(content: dict, date_yemot: str, token: str, path: str, tzintuk_list_name: str,
-                   session=None):
-    session = _session(session)
-    num = get_file_num(token, path, session)
+def upload_plan(content: dict, date_yemot: str, base: int) -> list[tuple[str, str]]:
+    """Every (file name, text) to upload after file `base`, in upload order."""
+    plan, num = [], base
     for key, value in content.items():
         all_partes = split_content(value, CHUNK_SIZE)
         if not all_partes:
@@ -57,10 +56,33 @@ def split_and_send(content: dict, date_yemot: str, token: str, path: str, tzintu
         for chunk in all_partes[-1::-1]:
             num += 1
             file_name = str(num).zfill(3)
-            send_to_yemot(chunk, token, path, file_name, session)
-        send_to_yemot(key, token, path, f"{file_name}-Title", session)
-    send_to_yemot(date_yemot, token, path, str(num + 1).zfill(3), session)
-    send_tzintuk(token, tzintuk_list_name, session)
+            plan.append((file_name, chunk))
+        plan.append((f"{file_name}-Title", key))
+    plan.append((str(num + 1).zfill(3), date_yemot))
+    return plan
+
+
+def split_and_send(content: dict, date_yemot: str, token: str, path: str, tzintuk_list_name: str,
+                   session=None, progress=None, save=None):
+    """Uploads the plan, then one tzintuk; `progress` resumes an interrupted send exactly."""
+    session = _session(session)
+    progress = progress if progress is not None else {}
+    save = save or (lambda _: None)
+    # The numbering is fixed once: a resumed send rewrites the same files, never new ones.
+    if "base" not in progress:
+        progress.update(base=get_file_num(token, path, session), uploaded=0, tzintuk=False)
+        save(progress)
+    plan = upload_plan(content, date_yemot, progress["base"])
+    if not 0 <= progress["uploaded"] <= len(plan):
+        raise YemotError(f"progress says {progress['uploaded']} uploads, but the plan has {len(plan)}")
+    for file_name, text in plan[progress["uploaded"]:]:
+        send_to_yemot(text, token, path, file_name, session)
+        progress["uploaded"] += 1
+        save(progress)
+    if not progress["tzintuk"]:
+        send_tzintuk(token, tzintuk_list_name, session)
+        progress["tzintuk"] = True
+        save(progress)
 
 
 def send_to_yemot(content: str, token: str, path: str, file_name: str, session=None):
@@ -85,7 +107,8 @@ def get_file_num(token: str, path: str, session=None) -> int:
     name = max_file.get("name") if isinstance(max_file, dict) else None
     match = NUMBERED_FILE_RE.fullmatch(name) if isinstance(name, str) else None
     if not match:
-        raise YemotError(f"GetIVR2DirStats: no numbered maxFile in {path}: {max_file!r}")
+        raise YemotError(f"GetIVR2DirStats: no numbered file in {path} (maxFile={max_file!r}); refusing to "
+                         "guess where numbering continues — an empty folder must be seeded by hand")
     return int(match.group(1))
 
 

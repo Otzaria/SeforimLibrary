@@ -1,22 +1,31 @@
 name: Announce a published library update
 
-run-name: announce ${{ github.event.release.tag_name || inputs.tag }}${{ github.event_name == 'workflow_dispatch' && inputs.dry_run && ' (dry run)' || '' }}
+run-name: announce ${{ github.event.release.tag_name || inputs.tag || format('after release run {0}:{1}', github.event.workflow_run.id, github.event.workflow_run.run_attempt) }}${{ github.event_name == 'workflow_dispatch' && inputs.dry_run && ' (dry run)' || '' }}
 
 # Posts what a published Seforim DB release changed to the Otzaria forum and
 # Yemot. A pre-release never reaches users, so it never announces; the
 # comparison is always against the previous PUBLISHED release, which skips any
 # pre-releases built in between.
 #
-# Two triggers can fire for one release: `released` (a PAT publish or a manual
-# pre-release promotion) and the dispatch from manual-generate-release.yml (a
-# GITHUB_TOKEN publish fires no release event). Runs for a tag serialize, and
-# each channel job skips when an earlier non-dry run already sent it.
+# Triggers, all of which may fire for one release:
+#  - workflow_run of the release workflow, whatever its conclusion: the run's own
+#    pipeline-result-run-<id>-<attempt> handoff names the tag it published (a
+#    GITHUB_TOKEN publish fires no release event, and the release run must never
+#    turn red over a notification);
+#  - `released`: a PAT publish, or a manual pre-release promotion;
+#  - workflow_dispatch, for a manual resend or a dry run.
+# The gate skips every channel some run already sent for the tag, before anything
+# is downloaded; each channel job re-checks under a per-tag lock before sending.
 #
 # Nothing is uploaded back to either release: the reuse scan in
 # manual-generate-release.yml requires a release's asset count to match its
 # provenance exactly, so the catalogs are computed here from seforim.db.zst.
 
 on:
+  workflow_run:
+    workflows:
+      - Weekly 5–6/6 · Build, link, validate and publish Seforim DB
+    types: [completed]
   release:
     types: [released]
   workflow_dispatch:
@@ -39,23 +48,48 @@ on:
 permissions:
   contents: read
 
-# A dry run gets its own group, so it can never displace a pending real run.
-concurrency:
-  group: library-update-announce-${{ github.event.release.tag_name || inputs.tag }}-${{ github.event_name == 'workflow_dispatch' && inputs.dry_run && 'dry' || 'send' }}
-  cancel-in-progress: false
-
 jobs:
+  gate:
+    if: github.event_name != 'release' || (github.event.release.prerelease == false && startsWith(github.event.release.tag_name, 'v'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      proceed: ${{ steps.gate.outputs.proceed }}
+      tag: ${{ steps.gate.outputs.tag }}
+      send: ${{ steps.gate.outputs.send }}
+      channels: ${{ steps.gate.outputs.channels }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - name: Resolve the tag and the channels still to announce
+        id: gate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_NAME: ${{ github.event_name }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          INPUT_TAG: ${{ inputs.tag }}
+          DRY_RUN: ${{ inputs.dry_run }}
+          INPUT_CHANNELS: ${{ inputs.channels }}
+          WORKFLOW_RUN_ID: ${{ github.event.workflow_run.id }}
+          WORKFLOW_RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+        run: bash .github/scripts/library_announce/gate.sh
+
   prepare:
-    if: github.event_name == 'workflow_dispatch' || (github.event.release.prerelease == false && startsWith(github.event.release.tag_name, 'v'))
+    needs: gate
+    if: needs.gate.outputs.proceed == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 60
     outputs:
       has_changes: ${{ steps.render.outputs.has_changes }}
-      channels: ${{ steps.render.outputs.channels }}
-      send: ${{ github.event_name == 'release' || !inputs.dry_run }}
     env:
       GH_TOKEN: ${{ github.token }}
-      TAG: ${{ github.event.release.tag_name || inputs.tag }}
+      TAG: ${{ needs.gate.outputs.tag }}
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -93,7 +127,7 @@ jobs:
           set -euo pipefail
           work="$RUNNER_TEMP/announce"
           mkdir -p "$work"
-          # One DB on disk at a time (v29 is ~8.7 GB unpacked), streamed with no .zst copy.
+          # One DB on disk at a time (v28 is 10.9 GB unpacked), streamed with no .zst copy.
           # --long=31 --memory=2048MB: the limits the app expands this asset with.
           for side in previous:"$PREVIOUS" current:"$TAG"; do
             name="${side%%:*}" tag="${side#*:}" db="$work/$name.db"
@@ -107,7 +141,7 @@ jobs:
       - name: Render the announcement
         id: render
         env:
-          CHANNELS: ${{ inputs.channels || 'forum,yemot' }}
+          CHANNELS: ${{ join(fromJSON(needs.gate.outputs.channels), ',') }}
         run: |
           set -euo pipefail
           published_at="$(gh release view "$TAG" -R "$GITHUB_REPOSITORY" --json publishedAt --jq .publishedAt)"
@@ -124,17 +158,21 @@ jobs:
           overwrite: true
 
   forum:
-    name: forum
-    needs: prepare
-    if: needs.prepare.outputs.send == 'true' && needs.prepare.outputs.has_changes == 'true' && contains(fromJSON(needs.prepare.outputs.channels), 'forum')
+    name: forum ${{ needs.gate.outputs.tag }}
+    needs: [gate, prepare]
+    if: needs.gate.outputs.send == 'true' && needs.prepare.outputs.has_changes == 'true' && contains(fromJSON(needs.gate.outputs.channels), 'forum')
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    # The per-tag lock makes the re-check below exact across concurrent triggers.
+    concurrency:
+      group: library-update-announce-forum-${{ needs.gate.outputs.tag }}
+      cancel-in-progress: false
     permissions:
       contents: read
       actions: read
     env:
       GH_TOKEN: ${{ github.token }}
-      TAG: ${{ github.event.release.tag_name || inputs.tag }}
+      TAG: ${{ needs.gate.outputs.tag }}
       CHANNEL: forum
     steps:
       - name: Checkout
@@ -144,7 +182,7 @@ jobs:
 
       - name: Skip if this tag was already announced here
         id: dedup
-        run: bash .github/scripts/library_announce/already_sent.sh
+        run: echo "sent=$(bash .github/scripts/library_announce/already_sent.sh)" >> "$GITHUB_OUTPUT"
 
       - uses: actions/setup-python@v6
         if: steps.dedup.outputs.sent != 'true'
@@ -161,26 +199,53 @@ jobs:
           name: announcement
           path: ${{ runner.temp }}/announce/out
 
+      # A re-run attempt continues where an earlier attempt of this run stopped.
+      - name: Restore progress from an earlier attempt
+        if: steps.dedup.outputs.sent != 'true'
+        run: |
+          set -euo pipefail
+          progress="$RUNNER_TEMP/progress/${CHANNEL}_progress.json"
+          found="$(gh api --paginate "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/artifacts?per_page=100" \
+            --jq '.artifacts[] | select(.name == "forum-progress" and (.expired | not)) | .id')"
+          if [ -n "$found" ]; then
+            gh run download "$GITHUB_RUN_ID" -R "$GITHUB_REPOSITORY" -n forum-progress -D "$(dirname "$progress")"
+            echo "resuming from $(cat "$progress")"
+          else
+            echo "no earlier progress: starting from the beginning"
+          fi
+
       - name: Announce
         if: steps.dedup.outputs.sent != 'true'
         env:
           FORUM_TOKEN: ${{ secrets.FORUM_TOKEN }}
         run: |
           python .github/scripts/library_announce/library_update_announce.py send \
-            --channel "$CHANNEL" --dir "$RUNNER_TEMP/announce/out"
+            --channel "$CHANNEL" --dir "$RUNNER_TEMP/announce/out" --progress "$RUNNER_TEMP/progress/${CHANNEL}_progress.json"
+
+      - uses: actions/upload-artifact@v6
+        if: always() && steps.dedup.outputs.sent != 'true'
+        with:
+          name: forum-progress
+          path: ${{ runner.temp }}/progress/forum_progress.json
+          if-no-files-found: ignore
+          overwrite: true
 
   yemot:
-    name: yemot
-    needs: prepare
-    if: needs.prepare.outputs.send == 'true' && needs.prepare.outputs.has_changes == 'true' && contains(fromJSON(needs.prepare.outputs.channels), 'yemot')
+    name: yemot ${{ needs.gate.outputs.tag }}
+    needs: [gate, prepare]
+    if: needs.gate.outputs.send == 'true' && needs.prepare.outputs.has_changes == 'true' && contains(fromJSON(needs.gate.outputs.channels), 'yemot')
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    # The per-tag lock makes the re-check below exact across concurrent triggers.
+    concurrency:
+      group: library-update-announce-yemot-${{ needs.gate.outputs.tag }}
+      cancel-in-progress: false
     permissions:
       contents: read
       actions: read
     env:
       GH_TOKEN: ${{ github.token }}
-      TAG: ${{ github.event.release.tag_name || inputs.tag }}
+      TAG: ${{ needs.gate.outputs.tag }}
       CHANNEL: yemot
     steps:
       - name: Checkout
@@ -190,7 +255,7 @@ jobs:
 
       - name: Skip if this tag was already announced here
         id: dedup
-        run: bash .github/scripts/library_announce/already_sent.sh
+        run: echo "sent=$(bash .github/scripts/library_announce/already_sent.sh)" >> "$GITHUB_OUTPUT"
 
       - uses: actions/setup-python@v6
         if: steps.dedup.outputs.sent != 'true'
@@ -207,10 +272,33 @@ jobs:
           name: announcement
           path: ${{ runner.temp }}/announce/out
 
+      # A re-run attempt continues where an earlier attempt of this run stopped.
+      - name: Restore progress from an earlier attempt
+        if: steps.dedup.outputs.sent != 'true'
+        run: |
+          set -euo pipefail
+          progress="$RUNNER_TEMP/progress/${CHANNEL}_progress.json"
+          found="$(gh api --paginate "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/artifacts?per_page=100" \
+            --jq '.artifacts[] | select(.name == "yemot-progress" and (.expired | not)) | .id')"
+          if [ -n "$found" ]; then
+            gh run download "$GITHUB_RUN_ID" -R "$GITHUB_REPOSITORY" -n yemot-progress -D "$(dirname "$progress")"
+            echo "resuming from $(cat "$progress")"
+          else
+            echo "no earlier progress: starting from the beginning"
+          fi
+
       - name: Announce
         if: steps.dedup.outputs.sent != 'true'
         env:
           TOKEN_YEMOT: ${{ secrets.TOKEN_YEMOT }}
         run: |
           python .github/scripts/library_announce/library_update_announce.py send \
-            --channel "$CHANNEL" --dir "$RUNNER_TEMP/announce/out"
+            --channel "$CHANNEL" --dir "$RUNNER_TEMP/announce/out" --progress "$RUNNER_TEMP/progress/${CHANNEL}_progress.json"
+
+      - uses: actions/upload-artifact@v6
+        if: always() && steps.dedup.outputs.sent != 'true'
+        with:
+          name: yemot-progress
+          path: ${{ runner.temp }}/progress/yemot_progress.json
+          if-no-files-found: ignore
+          overwrite: true

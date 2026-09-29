@@ -44,7 +44,8 @@ SECTIONS = (
 ALSO_CHANGED = " (השתנה גם תוכנו)"
 ALSO_MOVED = " (שונה גם מיקומו/שמו)"
 
-HTML_TAG_RE = re.compile(r"<[^>]*>")
+# Only real markup: literal text such as <חסר> or <בד"ה ...> is part of the book.
+HTML_TAG_RE = re.compile(r"<[A-Za-z/!?][^>]*>")
 WHITESPACE_RE = re.compile(r"\s+")
 
 
@@ -65,6 +66,7 @@ def previous_published_tag(current, tags):
 def plain_text(content):
     """A line as the reader sees it: tags stripped, entities decoded, whitespace collapsed."""
     # A tag is at most a word boundary: v29 turned spaces into <br> in 855 books.
+    # A space added or removed between two words, and any nikud/teamim change, IS a change.
     return WHITESPACE_RE.sub(" ", html.unescape(HTML_TAG_RE.sub(" ", content))).strip()
 
 
@@ -315,19 +317,53 @@ def send_forum(text, token, attempts=4, delay=5.0, post=post_to_forum):
             time.sleep(delay * attempt)
 
 
-def send_forum_posts(posts, token, send=None):
+def load_progress(path, payload):
+    """A channel's progress from an earlier attempt, bound to the exact payload bytes."""
+    digest = hashlib.sha256(payload).hexdigest()
+    if path and Path(path).exists():
+        state = json.loads(Path(path).read_text(encoding="utf-8"))
+        if state.get("payload_sha256") != digest:
+            raise SystemExit(f"::error::progress {path} was recorded for another announcement")
+        return state
+    return {"payload_sha256": digest}
+
+
+def progress_saver(path):
+    def save(state):
+        if not path:
+            return
+        target = Path(path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        temporary = target.with_suffix(".tmp")
+        temporary.write_text(json.dumps(state, ensure_ascii=False, sort_keys=True), encoding="utf-8")
+        temporary.replace(target)
+    return save
+
+
+def send_forum_posts(posts, token, state=None, save=None, send=None):
+    """Posts in order, from state["sent"] on; records each post the forum accepted."""
     send = send or send_forum
-    for index, text in enumerate(posts, 1):
+    state = state if state is not None else {}
+    save = save or (lambda _: None)
+    start = state.get("sent", 0)
+    if not 0 <= start <= len(posts):
+        raise SystemExit(f"::error::progress says {start} posts were sent, but there are {len(posts)}")
+    if start:
+        print(f"forum: posts 1-{start} were sent by an earlier attempt")
+    for index in range(start, len(posts)):
+        text = posts[index]
         try:
             send(text, token)
         except Exception as exc:
-            raise RuntimeError(f"forum post {index}/{len(posts)} failed; posts 1-{index - 1} were sent") from exc
-        print(f"forum post {index}/{len(posts)} sent ({post_length(text)} chars)")
+            raise RuntimeError(f"forum post {index + 1}/{len(posts)} failed; posts 1-{index} were sent") from exc
+        state["sent"] = index + 1
+        save(state)
+        print(f"forum post {index + 1}/{len(posts)} sent ({post_length(text)} chars)")
 
 
-def send_yemot(content, date_text, token):
+def send_yemot(content, heading, token, state=None, save=None):
     from yemot import split_and_send
-    split_and_send(content, f"עדכון {date_text}\n", token, YEMOT_PATH, TZINTUK_LIST)
+    split_and_send(content, heading, token, YEMOT_PATH, TZINTUK_LIST, progress=state, save=save)
 
 
 def parse_channels(text):
@@ -363,7 +399,7 @@ def render(args):
     if has_changes:
         date_text = heb_date(date.fromisoformat(args.as_of) if args.as_of else datetime.now(tz=TZ).date())
         posts = build_forum_posts(changes, version, date_text)
-        yemot = {"date": date_text, "content": build_yemot_content(changes)}
+        yemot = {"heading": f"גרסת ספרייה {version}\nעדכון {date_text}\n", "content": build_yemot_content(changes)}
         (out / "forum_posts.json").write_text(json.dumps(posts, ensure_ascii=False, indent=1), encoding="utf-8")
         (out / "yemot.json").write_text(json.dumps(yemot, ensure_ascii=False, indent=1), encoding="utf-8")
         summary["forum_posts"] = [post_length(p) for p in posts]
@@ -383,13 +419,17 @@ def render(args):
 
 
 def send(args):
-    folder = Path(args.dir)
+    secret = {"forum": "FORUM_TOKEN", "yemot": "TOKEN_YEMOT"}[args.channel]
+    token = os.environ.get(secret, "")
+    if not token.strip():
+        raise SystemExit(f"::error::{secret} is empty — set the repository secret before announcing to {args.channel}")
+    payload = (Path(args.dir) / ("forum_posts.json" if args.channel == "forum" else "yemot.json")).read_bytes()
+    state, save = load_progress(args.progress, payload), progress_saver(args.progress)
+    value = json.loads(payload.decode("utf-8"))
     if args.channel == "forum":
-        posts = json.loads((folder / "forum_posts.json").read_text(encoding="utf-8"))
-        send_forum_posts(posts, os.environ["FORUM_TOKEN"])
+        send_forum_posts(value, token, state, save)
     else:
-        yemot = json.loads((folder / "yemot.json").read_text(encoding="utf-8"))
-        send_yemot(yemot["content"], yemot["date"], os.environ["TOKEN_YEMOT"])
+        send_yemot(value["content"], value["heading"], token, state, save)
     print(f"✅ {args.channel} announced")
     return 0
 
@@ -412,6 +452,7 @@ def main(argv=None):
     sender = commands.add_parser("send")
     sender.add_argument("--channel", required=True, choices=CHANNELS)
     sender.add_argument("--dir", required=True)
+    sender.add_argument("--progress", default="")
     args = parser.parse_args(argv)
 
     if args.command == "previous-tag":
