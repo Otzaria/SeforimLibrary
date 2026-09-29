@@ -156,7 +156,7 @@ class AnnounceTest(unittest.TestCase):
         forum.assert_not_called()
 
     def test_each_channel_is_tried_and_a_failure_fails_the_run(self):
-        env = {"ANNOUNCE": "true", "USER_NAME": "u", "PASSWORD": "p",
+        env = {"ANNOUNCE": "true", "FORUM_TOKEN": "t",
                "GOOGLE_CHAT_URL": "https://chat.invalid", "TOKEN_YEMOT": "t"}
         with mock.patch.object(lua, "send_forum", side_effect=RuntimeError("down")) as forum, \
              mock.patch.object(lua, "send_chat") as chat, \
@@ -175,6 +175,36 @@ class AnnounceTest(unittest.TestCase):
         self.assertEqual(0, code)
         forum.assert_not_called()
         chat.assert_called_once()
+
+
+class ForumTest(unittest.TestCase):
+    def test_the_rate_limit_refusal_is_retried(self):
+        post = mock.Mock(side_effect=[lua.ForumRefused("400: [[error:too-many-posts, 10]]"), None])
+        with mock.patch.object(lua.time, "sleep"):
+            lua.send_forum("x", "t", post=post)
+        self.assertEqual(2, post.call_count)
+
+    def test_any_other_refusal_is_not_retried(self):
+        post = mock.Mock(side_effect=lua.ForumRefused("403: [[error:no-privileges]]"))
+        with self.assertRaises(lua.ForumRefused):
+            lua.send_forum("x", "t", post=post)
+        post.assert_called_once()
+
+    def test_the_token_is_sent_as_a_bearer_to_the_topic(self):
+        session = mock.Mock()
+        session.post.return_value.json.return_value = {"status": {"code": "ok"}}
+        lua.post_to_forum("טקסט", "secret", session=session)
+        url = session.post.call_args.args[0]
+        kwargs = session.post.call_args.kwargs
+        self.assertEqual(f"https://otzaria.org/forum/api/v3/topics/{lua.FORUM_TOPIC_ID}", url)
+        self.assertEqual("Bearer secret", kwargs["headers"]["Authorization"])
+        self.assertEqual({"content": "טקסט"}, kwargs["json"])
+
+    def test_a_refusal_in_the_body_is_not_a_success(self):
+        session = mock.Mock()
+        session.post.return_value.json.return_value = {"status": {"code": "bad-request", "message": "x"}}
+        with self.assertRaises(lua.ForumRefused):
+            lua.post_to_forum("x", "t", session=session)
 
 
 @unittest.skipIf(yaml is None, "PyYAML is required to parse the workflow")

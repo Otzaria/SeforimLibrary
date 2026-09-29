@@ -25,6 +25,7 @@ from zoneinfo import ZoneInfo
 TZ = ZoneInfo("Asia/Jerusalem")
 TAG_RE = re.compile(r"^v([1-9][0-9]*)-[0-9]{14}$")
 CATALOG_SCHEMA = 1
+FORUM_URL = "https://otzaria.org/forum"
 FORUM_TOPIC_ID = 20
 # NodeBB's default maximumPostLength is 32767; keep headroom for the header.
 FORUM_MAX_CHARS = 30000
@@ -175,26 +176,43 @@ def build_yemot_content(changes):
             for key, heading in SECTIONS if changes[key]}
 
 
-def send_forum(text, username, password, attempts=4, delay=5.0):
-    from otzaria_forum import ForumPostError, OtzariaForumClient
-    client = OtzariaForumClient(username.strip().replace(" ", "+"), password.strip())
-    client.login()
+class ForumRefused(RuntimeError):
+    # NodeBB's own error keys stay untranslated, so a locale change cannot hide the rate limit.
+    RATE_LIMIT_MARKERS = ("ניתן לפרסם פוסט רק פעם ב", "too-many-posts", "still-posting")
+
+    @property
+    def retryable(self):
+        return any(marker in str(self) for marker in self.RATE_LIMIT_MARKERS)
+
+
+def post_to_forum(text, token, session=None):
+    """One reply through NodeBB's Write API; raises ForumRefused if the forum refused it."""
+    import requests
+    response = (session or requests).post(
+        f"{FORUM_URL}/api/v3/topics/{FORUM_TOPIC_ID}",
+        json={"content": text},
+        headers={"Authorization": f"Bearer {token}"},
+        timeout=60,
+    )
     try:
-        for attempt in range(1, attempts + 1):
-            try:
-                client.send_post(text, FORUM_TOPIC_ID)
-                return
-            except ForumPostError as exc:
-                # Only the post-rate refusal is retried: after a transport error the
-                # post may already exist, and a duplicate is worse than a miss.
-                if not exc.retryable or attempt == attempts:
-                    raise
-                time.sleep(delay * attempt)
-    finally:
+        status = response.json().get("status") or {}
+    except ValueError:
+        raise ForumRefused(f"http-{response.status_code}: {response.text[:200]!r}") from None
+    if status.get("code") != "ok":
+        raise ForumRefused(f"{status.get('code') or response.status_code}: {status.get('message', '')}")
+
+
+def send_forum(text, token, attempts=4, delay=5.0, post=post_to_forum):
+    for attempt in range(1, attempts + 1):
         try:
-            client.logout()
-        except Exception as exc:
-            print(f"::warning::forum logout failed: {exc!r}")
+            post(text, token)
+            return
+        except ForumRefused as exc:
+            # Only the post-rate refusal is retried: after a transport error the
+            # post may already exist, and a duplicate is worse than a miss.
+            if not exc.retryable or attempt == attempts:
+                raise
+            time.sleep(delay * attempt)
 
 
 def send_chat(text, url):
@@ -240,7 +258,7 @@ def announce(args):
         return 0
 
     senders = {
-        "forum": lambda: send_forum(post, os.environ["USER_NAME"], os.environ["PASSWORD"]),
+        "forum": lambda: send_forum(post, os.environ["FORUM_TOKEN"]),
         "chat": lambda: send_chat(post, os.environ["GOOGLE_CHAT_URL"]),
         "yemot": lambda: send_yemot(build_yemot_content(changes), date_text, os.environ["TOKEN_YEMOT"]),
     }
