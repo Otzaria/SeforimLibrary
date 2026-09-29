@@ -2528,6 +2528,75 @@ class SeforimRepository(databasePath: String, private val driver: SqlDriver) : L
         }
     }
 
+    /**
+     * Sorted, distinct target-side line ids covered by links of [typeNames]:
+     * each link's target line plus its side-1 coverage rows.
+     */
+    suspend fun selectCoveredTargetLineIds(typeNames: List<String>): LongArray = withContext(Dispatchers.IO) {
+        val types = typeNames.joinToString(",") { "'$it'" }
+        selectLongColumns(
+            """
+            SELECT l.targetLineId FROM link l JOIN connection_type ct ON ct.id = l.connectionTypeId
+            WHERE ct.name IN ($types)
+            UNION
+            SELECT lc.lineId FROM link_coverage lc JOIN link l ON l.id = lc.linkId
+            JOIN connection_type ct ON ct.id = l.connectionTypeId
+            WHERE lc.side = 1 AND ct.name IN ($types)
+            ORDER BY 1
+            """.trimIndent(),
+            columns = 1,
+        ).single()
+    }
+
+    /**
+     * (endLineId, linkId) arrays, sorted by endLineId, for links of [typeNames]:
+     * where each link's target side ends. A side-1 range kept without coverage
+     * (whole perek/parasha) is left out.
+     */
+    suspend fun selectTargetSideEnds(typeNames: List<String>): Pair<LongArray, LongArray> =
+        withContext(Dispatchers.IO) {
+            val types = typeNames.joinToString(",") { "'$it'" }
+            val (ends, ids) = selectLongColumns(
+                """
+                SELECT COALESCE(lr.endLineId, l.targetLineId), l.id
+                FROM link l JOIN connection_type ct ON ct.id = l.connectionTypeId
+                LEFT JOIN link_range lr ON lr.linkId = l.id AND lr.side = 1
+                WHERE ct.name IN ($types)
+                  AND (lr.linkId IS NULL OR EXISTS (
+                      SELECT 1 FROM link_coverage lc WHERE lc.linkId = l.id AND lc.side = 1))
+                ORDER BY 1, 2
+                """.trimIndent(),
+                columns = 2,
+            )
+            ends to ids
+        }
+
+    private fun selectLongColumns(sql: String, columns: Int): List<LongArray> {
+        val out = List(columns) { LongArrayBuilder() }
+        driver.executeQuery(
+            identifier = null,
+            sql = sql,
+            mapper = { cursor: SqlCursor ->
+                while (cursor.next().value) {
+                    for (c in 0 until columns) out[c].add(cursor.getLong(c) ?: 0L)
+                }
+                QueryResult.Value(Unit)
+            },
+            parameters = 0,
+        ).value
+        return out.map { it.toArray() }
+    }
+
+    private class LongArrayBuilder {
+        private var data = LongArray(1024)
+        private var size = 0
+        fun add(v: Long) {
+            if (size == data.size) data = data.copyOf(size * 2)
+            data[size++] = v
+        }
+        fun toArray(): LongArray = data.copyOf(size)
+    }
+
     /** Upserts final hidden-side verdicts produced by the importer accumulator. */
     suspend fun insertLinkSuppressedSidesBatch(rows: List<LinkSuppressedSide>) = withContext(Dispatchers.IO) {
         if (rows.isEmpty()) return@withContext

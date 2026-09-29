@@ -646,6 +646,16 @@ class SefariaDirectImporter(
         // See [SefariaLinksImporter.demoteCrossCorpusDependantLinks].
         logger.i { "Demoting cross-corpus dependant links per Sefaria categorisation..." }
         linksImporter.demoteCrossCorpusDependantLinks(densityPrimaryBaseEdges)
+        // After demotion: only links still typed as commentary may be extended.
+        if (linksDir.exists()) {
+            SefariaContinuationParagraphs(repository, logger).generate(
+                refsByPath = refsByPath,
+                lineKeyToId = lineKeyToId,
+                headingLineIds = headingLineIds,
+                commentaryBookIds = bookMetaById.filterValues { it.dependence == Dependence.COMMENTARY }.keys,
+                lineIdToBookId = lineIdToBookId,
+            )
+        }
         linksImporter.updateBookHasLinks()
 
         // Capture the authoritative post-demotion per-type split. Demotion only
