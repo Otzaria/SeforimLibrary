@@ -45,6 +45,12 @@ V4_KEYS = V3_KEYS | {"db_schema"}
 # asset itself instead.
 V5_KEYS = V4_KEYS | {"snapshot_zst_sha256", "snapshot_release_tag"}
 IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,127}")
+LEGACY_FULL_DB_ASSET = "seforim.db.zst"
+
+
+def full_db_asset_name(db_schema_version: int) -> str:
+    """Mirror of db_asset_names.sh full_db_asset_name (a test pins the two)."""
+    return f"seforim-schema{db_schema_version}.db.zst" if db_schema_version >= 6 else LEGACY_FULL_DB_ASSET
 
 
 def load(path: Path) -> dict:
@@ -167,12 +173,18 @@ def validate(value: dict) -> None:
     # the duplicate lines snapshot is not published on the DB release at all —
     # snapshot_release_tag names the immutable pre-release that carries it.
     # v1..v4 keep the asset set they were published with.
+    # The full DB is named by its schema (db_asset_names.sh); a provenance without a
+    # db_schema block predates schema 6, i.e. its DB is seforim.db.zst.
+    full_db = full_db_asset_name(value["db_schema"]["db_schema_version"]) if version >= 4 else LEGACY_FULL_DB_ASSET
     if version >= 5:
-        required = {"seforim.db.zst", "seforim.db.buildstate.zst"}
+        required = {full_db, "seforim.db.buildstate.zst"}
         forbidden = {"seforim.db.buildstate", "lines_snapshot.db.zst"}
     else:
-        required = {"seforim.db.zst", "seforim.db.buildstate", "lines_snapshot.db.zst"}
+        required = {full_db, "seforim.db.buildstate", "lines_snapshot.db.zst"}
         forbidden = set()
+    # seforim.db.zst is matched by name by every released updater: never a schema-6+ DB.
+    if full_db != LEGACY_FULL_DB_ASSET:
+        forbidden = forbidden | {LEGACY_FULL_DB_ASSET}
     if not required.issubset(names):
         raise ValueError("required build assets are missing")
     if forbidden & set(names):

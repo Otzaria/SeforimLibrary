@@ -50,6 +50,9 @@ kotlin {
 // publishes them verbatim, so the direct invocation cannot drift from the task
 // it stands in for.
 val patchPipelineMainClass = "io.github.kdroidfilter.seforimlibrary.common.patch.PatchPipelineCliKt"
+// The fan writes a schema barrier (writeSchemaBarrier) instead of a delta for an
+// anchor no delta can leave, on the same classpath and JVM args.
+val schemaBarrierMainClass = "io.github.kdroidfilter.seforimlibrary.common.patch.SchemaBarrierCliKt"
 // --enable-native-access: the fan runs this CLI through `java` directly (see
 // the launcher below), so it never passes through the root build's JavaExec
 // argument provider; without the flag every fan fork re-prints JDK 25's
@@ -149,11 +152,13 @@ tasks.register("patchPipelineLauncher") {
     description = "Write build/patch-pipeline-launcher.properties — the main class, JVM args, toolchain version and runtime classpath producePatchAndVerify forks with."
     dependsOn("jvmJar")
     val launcherMainClass = patchPipelineMainClass
+    val launcherBarrierMainClass = schemaBarrierMainClass
     val launcherJvmArgs = patchPipelineJvmArgs
     val launcherClasspath = patchPipelineClasspath()
     val launcherJavaVersion = libs.versions.jvmToolchain.get()
     val specFile = layout.buildDirectory.file("patch-pipeline-launcher.properties")
     inputs.property("mainClass", launcherMainClass)
+    inputs.property("barrierMainClass", launcherBarrierMainClass)
     inputs.property("jvmArgs", launcherJvmArgs)
     inputs.property("javaVersion", launcherJavaVersion)
     inputs.files(launcherClasspath)
@@ -165,6 +170,7 @@ tasks.register("patchPipelineLauncher") {
             "mainClass=$launcherMainClass\n" +
                 "jvmArgs=${launcherJvmArgs.joinToString(" ")}\n" +
                 "javaVersion=$launcherJavaVersion\n" +
+                "barrierMainClass=$launcherBarrierMainClass\n" +
                 "classpath=${launcherClasspath.asPath}\n",
         )
     }
@@ -203,6 +209,18 @@ tasks.register<JavaExec>("splitLineContent") {
         project.findProperty(key)?.let { systemProperty(key, it as String) }
     }
     jvmArgs = listOf("-Xmx1g")
+}
+
+tasks.register<JavaExec>("writeSchemaBarrier") {
+    group = "application"
+    description = "Writes the full-rebase barrier patch-v<from>-v<to>.db.zst + manifest for an anchor older than the split schema."
+    dependsOn("jvmJar")
+    mainClass.set(schemaBarrierMainClass)
+    classpath = files(tasks.named("jvmJar")) + configurations.getByName("jvmRuntimeClasspath")
+    listOf("out", "fromVersion", "toVersion", "fromSchemaVersion", "toSchemaVersion").forEach { key ->
+        project.findProperty(key)?.let { systemProperty(key, it as String) }
+    }
+    jvmArgs = listOf("-Xmx256m")
 }
 
 tasks.register<JavaExec>("stampSchemaVersion") {

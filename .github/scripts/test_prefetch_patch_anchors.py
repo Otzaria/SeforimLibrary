@@ -32,6 +32,7 @@ SCRIPTS = Path(__file__).parent
 REPO = SCRIPTS.parents[1]
 WORKFLOW = REPO / ".github" / "workflows" / "manual-generate-release.yml"
 PREFETCH = SCRIPTS / "prefetch_patch_anchors.sh"
+ASSET_NAMES = SCRIPTS / "db_asset_names.sh"
 ANCHOR_DERIVATION = SCRIPTS / "patch_fan_anchors.sh"
 PRECHECK = SCRIPTS / "patch_anchor_schema.py"
 CONTRACT_TABLES = (
@@ -267,6 +268,7 @@ class AnchorPrefetchCacheSandboxTest(unittest.TestCase):
         cls.root = root
 
         shutil.copy(PREFETCH, root / "prefetch_patch_anchors.sh")
+        shutil.copy(ASSET_NAMES, root / "db_asset_names.sh")
         shutil.copy(PRECHECK, root / "patch_anchor_schema.py")
         shutil.copy(CONTRACT_TABLES, root / "contract.json")
         write(root / "bin" / "gh", STUB_GH, executable=True)
@@ -898,6 +900,7 @@ class AnchorCacheEdgeCaseSandboxTest(unittest.TestCase):
         cls.root = root
 
         shutil.copy(PREFETCH, root / "prefetch_patch_anchors.sh")
+        shutil.copy(ASSET_NAMES, root / "db_asset_names.sh")
         shutil.copy(PRECHECK, root / "patch_anchor_schema.py")
         shutil.copy(CONTRACT_TABLES, root / "contract.json")
         write(root / "bin" / "gh", STUB_GH, executable=True)
@@ -1234,13 +1237,22 @@ class PatchFanDriverSandboxTest(unittest.TestCase):
             "${{ steps.discover.outputs.db_version }}", "27"
         ).replace("\r\n", "\n")
 
-    def run_fan(self, publish_v25_asset=True):
+    def run_fan(self, publish_v25_asset=True, this_schema=5, anchor_provenance_schema=None):
         import tempfile
 
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             (root / "assets" / "v26-x").mkdir(parents=True)
             (root / "assets" / "v25-x").mkdir(parents=True)
+            # Anchors whose build_provenance.json states their db schema.
+            for tag, schema in (anchor_provenance_schema or {}).items():
+                write(
+                    root / "assets" / tag / "build_provenance.json",
+                    '{"db_schema": {"db_schema_version": %d, "tables": {"line": ["id"]}}}' % schema,
+                )
+            if this_schema >= 6:
+                write(_mkparents(root / "build" / "db_schema.json"),
+                      '{"db_schema_version": %d, "tables": {"line": ["id"]}}' % this_schema)
             control = root / ".pipeline-control" / ".github" / "scripts"
             control.mkdir(parents=True)
             # patch_fan_lib.sh carries read_schema, produce_anchor, the
@@ -1249,7 +1261,7 @@ class PatchFanDriverSandboxTest(unittest.TestCase):
             # pipeline-control checkout does.
             for name in ("patch_anchor_schema.py", "patch_fan_anchors.sh",
                          "patch_fan_lib.sh", "prefetch_patch_anchors.sh",
-                         "release_draft.sh"):
+                         "release_draft.sh", "db_asset_names.sh"):
                 shutil.copy(SCRIPTS / name, control / name)
             shutil.copy(
                 CONTRACT_TABLES,
@@ -1271,11 +1283,18 @@ class PatchFanDriverSandboxTest(unittest.TestCase):
                 _mkparents(root / "generator" / "common" / "build"
                            / "patch-pipeline-launcher.properties"),
                 "mainClass=io.example.PatchPipelineCli\n"
+                "barrierMainClass=io.example.SchemaBarrierCli\n"
                 "jvmArgs=-Xmx1g\nclasspath=/stub/cp\njavaVersion=25\n",
             )
             write(root / "bin" / "gh", STUB_GH, executable=True)
             write(root / "bin" / "python3", STUB_PYTHON3, executable=True)
-            write(root / "bin" / "sqlite3", "#!/bin/sh\necho 5\n", executable=True)
+            # This build's DB answers STUB_THIS_SCHEMA, every anchor schema 5.
+            write(
+                root / "bin" / "sqlite3",
+                '#!/bin/sh\ncase "$1" in *build/seforim.db) echo "${STUB_THIS_SCHEMA:-5}" ;;'
+                ' *) echo 5 ;; esac\n',
+                executable=True,
+            )
             write(
                 root / "bin" / "unzstd",
                 """
@@ -1301,6 +1320,13 @@ class PatchFanDriverSandboxTest(unittest.TestCase):
                     -Dout=*)         out=${a#-Dout=} ;;
                     -DfromVersion=*) from=${a#-DfromVersion=} ;;
                   esac
+                done
+                for a in "$@"; do
+                  if [ "$a" = io.example.SchemaBarrierCli ]; then
+                    echo barrier > "$out.zst"
+                    echo '{"fullRebase": true}' > "$out.zst.manifest.json"
+                    exit 0
+                  fi
                 done
                 echo "Info: (PatchPipelineCli) Producing patch v${from} -> v27"
                 secs=${STUB_PRODUCE_SECONDS:-4}
@@ -1340,11 +1366,16 @@ class PatchFanDriverSandboxTest(unittest.TestCase):
                 RELEASE_CROSS_REPO_WRITABLE="true",
                 RELEASE_TAG="v27-sandbox",
                 SOURCE_COMMIT="deadbeef",
+                STUB_THIS_SCHEMA=str(this_schema),
+                DOWNLOAD_LOG=str(root / "downloads.log"),
             )
-            return subprocess.run(
+            result = subprocess.run(
                 [self.bash, "step.sh"], cwd=root, env=env,
                 capture_output=True, text=True,
             )
+            log = root / "downloads.log"
+            result.downloads = log.read_text(encoding="utf-8").split() if log.exists() else []
+            return result
 
     def test_the_fan_narrates_every_anchor_from_start_to_end(self):
         result = self.run_fan()
@@ -1413,6 +1444,26 @@ class PatchFanDriverSandboxTest(unittest.TestCase):
         self.assertRegex(
             out, r"anchor 1/2 v26-x \(offset 1, v26 → v27\) done in \d+s:"
         )
+
+
+    def test_a_schema_6_build_publishes_a_barrier_for_every_older_anchor(self):
+        # v26 states schema 5 in its provenance: barrier without any download.
+        # v25 states nothing: its DB is fetched, read, and barriered too.
+        result = self.run_fan(this_schema=6, anchor_provenance_schema={"v26-x": 5})
+        out = result.stdout
+        self.assertEqual(result.returncode, 0, out + result.stderr[-2000:])
+        self.assertIn("pre-check: BARRIER 5 ", out)
+        for target in ("26", "25"):
+            self.assertIn(
+                f"schema 5 → 6 is a full rebase — published the schema barrier patch-v{target}-v27.db.zst",
+                out,
+            )
+        self.assertNotIn("v26-x/seforim.db.zst", result.downloads)
+        self.assertIn("v25-x/seforim.db.zst", result.downloads)
+        self.assertNotIn("(PatchPipelineCli) Producing patch", out)
+        self.assertRegex(out, r"done in \d+s: patch-v26-v27\.db\.zst \S+, verify=barrier")
+        self.assertIn("::notice::patch fan: 2 anchor(s) get the schema 6 full-rebase barrier", out)
+        self.assertNotIn("patch fan produced no patch", out)
 
 
 def _mkparents(path):

@@ -370,7 +370,7 @@ class ManualReleaseWorkflowContractTest(unittest.TestCase):
         # The per-anchor body is produce_anchor, in patch_fan_lib.sh.
         lib = self.fan_lib
         precheck_at = lib.index("patch_anchor_schema.py check")
-        db_download_at = lib.index("--pattern 'seforim.db.zst'")
+        db_download_at = lib.index('--pattern "$CANDIDATE"')
         self.assertLess(precheck_at, db_download_at)
         # Only the tiny provenance asset is fetched to decide.
         self.assertLess(
@@ -639,12 +639,24 @@ class ManualReleaseWorkflowContractTest(unittest.TestCase):
             'java $PATCH_JVM_ARGS -cp "$PATCH_CLASSPATH"', lib
         )
         self.assertIn('"$PATCH_MAIN_CLASS" || PRODUCE_RC=$?', lib)
-        java_args = re.findall(r"-D(\w+)=", lib)
-        gradle_args = re.findall(r"-P(\w+)=", lib)
+        produce = lib.split("produce_anchor() {", 1)[1]
+        java_args = re.findall(r"-D(\w+)=", produce)
+        gradle_args = re.findall(r"-P(\w+)=", produce)
         self.assertEqual(java_args, gradle_args)
         self.assertEqual(
             java_args, ["prevDb", "newDb", "out", "fromVersion", "toVersion"]
         )
+        # The schema barrier runs the same way: launcher class when published,
+        # else the Gradle task, with the same properties on both paths.
+        barrier = lib.split("write_barrier() {", 1)[1].split("\n}\n", 1)[0]
+        self.assertEqual(re.findall(r"-D(\w+)=", barrier), re.findall(r"-P(\w+)=", barrier))
+        self.assertEqual(
+            re.findall(r"-D(\w+)=", barrier),
+            ["out", "fromVersion", "toVersion", "fromSchemaVersion", "toSchemaVersion"],
+        )
+        self.assertIn("gradle :generator-common:writeSchemaBarrier", barrier)
+        self.assertIn('"barrierMainClass=$launcherBarrierMainClass\\n"', gradle)
+        self.assertIn("mainClass.set(schemaBarrierMainClass)", gradle)
         # ZSTD_LEVEL keeps reaching the CLI as an env var on both paths, so the
         # patch bytes do not depend on which one ran.
         self.assertIn('ZSTD_LEVEL: "19"', patch_fan)
@@ -783,7 +795,7 @@ class ManualReleaseWorkflowContractTest(unittest.TestCase):
         )
         self.assertLess(
             script.index('[ "${verdict%% *}" = UNPATCHABLE ]'),
-            script.index("--pattern 'seforim.db.zst'"),
+            script.index('--pattern "$expected_name"'),
         )
         # Verified against the release asset's own published size and digest.
         self.assertIn("size mismatch", script)
@@ -813,7 +825,7 @@ class ManualReleaseWorkflowContractTest(unittest.TestCase):
         self.assertIn("falling back to the serial download", lib)
         self.assertIn("prefetch_patch_anchors.sh abort", lib)
         self.assertLess(
-            lib.index("PREFETCH_STATE=absent"), lib.index("--pattern 'seforim.db.zst'")
+            lib.index("PREFETCH_STATE=absent"), lib.index('--pattern "$CANDIDATE"')
         )
         # A prefetch timing line per anchor, like the fan's own, and it now says
         # whether the bytes came off the network or out of the durable cache.
@@ -1012,11 +1024,11 @@ class ManualReleaseWorkflowContractTest(unittest.TestCase):
         # A failure names the asset it could not get, not just an exit code.
         self.assertIn(
             "::error::anchor v${TARGET_VER} ($TAG): could not download"
-            " seforim.db.zst from that release",
+            " ${DB_ASSETS// / or } from that release",
             lib,
         )
         self.assertIn(
-            "::error::anchor v${TARGET_VER} ($TAG): seforim.db.zst from that"
+            "::error::anchor v${TARGET_VER} ($TAG): the full DB from that"
             " release could not be decompressed",
             lib,
         )
@@ -1795,7 +1807,12 @@ class ManualReleaseWorkflowContractTest(unittest.TestCase):
 
         # Published DB: explicit -19 is byte-identical to the clamped -22.
         self.assertIn(
-            'zstd -T"$(zstd_workers)" -19 -f -o build/seforim.db.zst build/seforim.db',
+            'zstd -T"$(zstd_workers)" -19 -f -o "build/$FULL_DB_ASSET" build/seforim.db',
+            compress,
+        )
+        # The name is the schema's: seforim.db.zst only up to schema 5.
+        self.assertIn(
+            'FULL_DB_ASSET=$(full_db_asset_name "$(jq -er .db_schema_version build/db_schema.json)")',
             compress,
         )
 
@@ -1837,7 +1854,7 @@ class ManualReleaseWorkflowContractTest(unittest.TestCase):
         self.assertIn('cp build/seforim.db.buildstate.zst "$STAGE/"', stage)
         self.assertNotIn('cp build/seforim.db.buildstate "$STAGE/"', stage)
         self.assertIn(
-            '"seforim.db.zst", "seforim.db.buildstate.zst"',
+            'required = {full_db, "seforim.db.buildstate.zst"}',
             VALIDATOR.read_text(encoding="utf-8"),
         )
 

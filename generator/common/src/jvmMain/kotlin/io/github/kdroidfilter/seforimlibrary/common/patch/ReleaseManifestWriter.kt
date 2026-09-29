@@ -53,6 +53,8 @@ class ReleaseManifestWriter(
         catalogBlobName: String? = null,
         fromTableContentHashes: Map<String, String> = emptyMap(),
         toTableContentHashes: Map<String, String> = emptyMap(),
+        patchFormatVersion: Int = PatchDbSchema.CURRENT_VERSION,
+        fullRebase: Boolean = false,
     ): Path {
         require(Files.isRegularFile(patchFile)) { "patch file not found: $patchFile" }
         // Both maps or neither: a client that sees only one side cannot decide
@@ -69,7 +71,8 @@ class ReleaseManifestWriter(
             append("  \"toVersion\": ").append(toVersion).append(",\n")
             append("  \"fromSchemaVersion\": ").append(fromSchemaVersion).append(",\n")
             append("  \"toSchemaVersion\": ").append(toSchemaVersion).append(",\n")
-            append("  \"patchFormatVersion\": ").append(PatchDbSchema.CURRENT_VERSION).append(",\n")
+            append("  \"patchFormatVersion\": ").append(patchFormatVersion).append(",\n")
+            if (fullRebase) append("  \"fullRebase\": true,\n")
             append("  \"fromContentHash\": ").appendString(fromContentHash).append(",\n")
             append("  \"toContentHash\": ").appendString(toContentHash).append(",\n")
             if (fromTableContentHashes.isNotEmpty()) {

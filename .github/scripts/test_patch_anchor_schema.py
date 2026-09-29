@@ -327,5 +327,63 @@ class PatchAnchorSchemaTest(unittest.TestCase):
         }
 
 
+    def schema_6_paths(self, tmp, anchor_schema_version=None):
+        root = Path(tmp)
+        this = root / "db_schema.json"
+        this.write_text(json.dumps(dict(THIS_SCHEMA, db_schema_version=6)), encoding="utf-8")
+        prov = root / "build_provenance.json"
+        if anchor_schema_version is not None:
+            block = {"db_schema_version": anchor_schema_version, "tables": {"link": ["id"]}}
+            prov.write_text(json.dumps({"db_schema": block}), encoding="utf-8")
+        return this, prov
+
+    def test_a_schema_6_build_answers_barrier_for_an_older_anchor(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            this, prov = self.schema_6_paths(tmp, anchor_schema_version=5)
+            verdict, reason = anchor.check(this, 28, prov, None)
+            self.assertEqual(verdict, anchor.BARRIER)
+            # The fan reads the anchor's schema off the head of the reason.
+            self.assertEqual(reason.split()[0], "5")
+
+    def test_a_schema_6_build_downloads_an_anchor_of_unknown_schema(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            this, prov = self.schema_6_paths(tmp)
+            # Even a documented-unpatchable version: only its DB can state its schema.
+            verdict, reason = anchor.check(this, 12, prov, None)
+            self.assertEqual(verdict, anchor.PROCEED)
+            self.assertIn("reads it from the downloaded DB", reason)
+
+    def test_a_schema_6_anchor_gets_the_ordinary_check(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            this, prov = self.schema_6_paths(tmp, anchor_schema_version=6)
+            verdict, _ = anchor.check(this, 29, prov, None)
+            self.assertEqual(verdict, anchor.PROCEED)
+
+    def test_the_cli_prints_the_barrier_line_the_fan_parses(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            this, prov = self.schema_6_paths(tmp, anchor_schema_version=4)
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                anchor.main(["check", "--this-schema", str(this), "--anchor-version", "26",
+                             "--anchor-provenance", str(prov)])
+            self.assertTrue(out.getvalue().startswith("BARRIER 4 "), out.getvalue())
+
+    def test_the_split_schema_matches_the_kotlin_and_shell_definitions(self):
+        root = Path(__file__).parents[2]
+        tables = (root / "generator" / "common" / "src" / "jvmMain" / "kotlin" / "io" / "github"
+                  / "kdroidfilter" / "seforimlibrary" / "common" / "patch" / "PatchTables.kt")
+        self.assertIn(
+            f"LINE_CONTENT_SPLIT_SCHEMA_VERSION: Int = {anchor.LINE_CONTENT_SPLIT_SCHEMA}",
+            tables.read_text(encoding="utf-8"),
+        )
+        lib = Path(__file__).with_name("patch_fan_lib.sh").read_text(encoding="utf-8")
+        self.assertIn(
+            f'[ "$1" -lt {anchor.LINE_CONTENT_SPLIT_SCHEMA} ] && [ "$2" -ge {anchor.LINE_CONTENT_SPLIT_SCHEMA} ]',
+            lib,
+        )
+        names = Path(__file__).with_name("db_asset_names.sh").read_text(encoding="utf-8")
+        self.assertIn(f'if [ "$schema" -ge {anchor.LINE_CONTENT_SPLIT_SCHEMA} ]; then', names)
+
+
 if __name__ == "__main__":
     unittest.main()

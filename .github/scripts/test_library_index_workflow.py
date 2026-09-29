@@ -637,9 +637,14 @@ exit 0
     def test_the_index_is_built_from_the_exact_published_database(self):
         run = body(self.index)
         self.assertIn(
-            "::error::seforim.db.zst downloaded as $ACTUAL but the release publishes $EXPECTED",
+            "::error::$DB_ASSET downloaded as $ACTUAL but the release publishes $EXPECTED",
             run,
         )
+        # The full DB of a schema 6+ release is seforim-schema<N>.db.zst: the
+        # highest-schema asset is chosen through the one shared definition.
+        self.assertIn(". .github/scripts/db_asset_names.sh", run)
+        self.assertIn('DB_ASSET=$(jq -r "$FULL_DB_ASSET_JQ | .name // empty" "$WORK/release.json")', run)
+        self.assertIn('-p "$DB_ASSET" -O "$WORK/seforim.db.zst"', run)
         self.assertIn("seforimDbZstSha256: $seforimDbZstSha256", run)
 
     def test_the_provenance_pins_the_engine_that_built_the_index(self):

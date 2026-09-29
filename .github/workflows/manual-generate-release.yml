@@ -2075,6 +2075,8 @@ jobs:
             wait buildstate 3600
           echo "=== Final patch artefacts ==="
           ls -lh patches/ || true
+          # Barriers are patch-*.db.zst too: a barrier-only fan is a publishable full-only release.
+          announce_barriers
           # Skipped anchors are warnings. No delta AT ALL is only acceptable
           # when the size guard is what removed them: a corpus-wide churn build
           # legitimately ships full-only (seforim.db.zst + buildstate). Every
@@ -2105,7 +2107,12 @@ jobs:
           # byte-neutral (see "Dump lines snapshot for the linker" above); it
           # only stops `-T0` from parking on 8 of the runner's 16 vCPUs.
           . .pipeline-control/.github/scripts/zstd_workers.sh
-          zstd -T"$(zstd_workers)" -19 -f -o build/seforim.db.zst build/seforim.db
+          # seforim.db.zst names a schema <= 5 DB forever (old updaters match it);
+          # schema 6+ ships as seforim-schema<N>.db.zst. db_schema.json is this DB's dump.
+          . .pipeline-control/.github/scripts/db_asset_names.sh
+          FULL_DB_ASSET=$(full_db_asset_name "$(jq -er .db_schema_version build/db_schema.json)")
+          zstd -T"$(zstd_workers)" -19 -f -o "build/$FULL_DB_ASSET" build/seforim.db
+          echo "FULL_DB_ASSET=$FULL_DB_ASSET" >> "$GITHUB_ENV"
 
       # ─── Library stats (advisory) ──────────────────────────────────────────
       # One line of JSON — {"schema_version":1,"db_version":N,"books":…,
@@ -2181,7 +2188,7 @@ jobs:
           mkdir -p "$STAGE"
           # Full DB, compressed — canonical source of the DB.
           # Future releases reconstitute the prev DB from this.
-          cp build/seforim.db.zst "$STAGE/"
+          cp "build/$FULL_DB_ASSET" "$STAGE/"
           # E1: the IdAllocator seed for the NEXT build, compressed (~2x).
           cp build/seforim.db.buildstate.zst "$STAGE/"
           # E2: lines_snapshot.db.zst is deliberately NOT staged. The identical

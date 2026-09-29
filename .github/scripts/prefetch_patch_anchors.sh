@@ -55,6 +55,8 @@ set -uo pipefail
 
 self="${BASH_SOURCE[0]}"
 mode="${1:-}"
+# shellcheck source=db_asset_names.sh
+. "$(dirname "$self")/db_asset_names.sh"
 
 # The pre-download patchability check, run with exactly the arguments the fan
 # uses (task C). Note that build/db_schema.json does NOT exist yet while this
@@ -268,10 +270,10 @@ cache_mark_used() {  # <entry-dir> — this entry is in use, so it ranks newest
   touch "$meta" 2>/dev/null || true
 }
 
-asset_meta() {  # <tag> -> "<size>\t<digest>" of that release's seforim.db.zst
+asset_meta() {  # <tag> -> "<size>\t<digest>\t<name>" of that release's full-DB asset
   local tag="$1" row
   row=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$tag" \
-    --jq '.assets[] | select(.name=="seforim.db.zst") | [(.size|tostring), (.digest // "")] | @tsv') || return 1
+    --jq "$FULL_DB_ASSET_JQ"' | select(. != null) | [(.size|tostring), (.digest // ""), .name] | @tsv') || return 1
   [ -n "$row" ] || return 1
   printf '%s' "$row"
 }
@@ -427,7 +429,7 @@ cache_report() {
 
 fetch_one() {  # <target_version> <tag> <offset> <dest-dir>
   local version="$1" tag="$2" offset="$3" dest="$4" dir="$4/$2"
-  local verdict meta expected_size expected_digest reason sha msg source report=""
+  local verdict meta expected_size expected_digest expected_name reason sha msg source report=""
   local t_start t_checked t_fetched t_verified
 
   mkdir -p "$dir"
@@ -461,12 +463,14 @@ fetch_one() {  # <target_version> <tag> <offset> <dest-dir>
   # The release asset's own size and digest, fetched ONCE: they name the asset
   # in the log below, key the cache and verify both a cache hit and a download.
   if ! meta=$(asset_meta "$tag"); then
-    report+="prefetch anchor v$version ($tag): release publishes no seforim.db.zst asset (or the release API call failed) — the fan falls back to its serial download"$'\n'
+    report+="prefetch anchor v$version ($tag): release publishes no seforim.db.zst asset nor a seforim-schema<N>.db.zst one (or the release API call failed) — the fan falls back to its serial download"$'\n'
     printf 'failed\n%s' "$report" > "$dir/.done"
     return 0
   fi
-  IFS=$'\t' read -r expected_size expected_digest <<<"$meta"
-  report+="anchor $tag (offset $offset): seforim.db.zst $expected_size bytes${expected_digest:+ $expected_digest}"$'\n'
+  IFS=$'\t' read -r expected_size expected_digest expected_name <<<"$meta"
+  # Stored locally as seforim.db.zst whatever the release calls it; the fan reads that path.
+  [ -n "$expected_name" ] || expected_name="$LEGACY_FULL_DB_ASSET"
+  report+="anchor $tag (offset $offset): $expected_name $expected_size bytes${expected_digest:+ $expected_digest}"$'\n'
 
   rm -f "$dir/seforim.db.zst"
   source=release
@@ -481,15 +485,16 @@ fetch_one() {  # <target_version> <tag> <offset> <dest-dir>
     # that says why, and it would otherwise land bare in the prefetch log the
     # fan replays (run 34024655297 printed such a line with nothing naming the
     # asset). Capture it and fold it into the line that does.
-    if ! gh release download "$tag" --pattern 'seforim.db.zst' --dir "$dir" \
+    if ! gh release download "$tag" --pattern "$expected_name" --dir "$dir" \
          2> "$dir/download.err"; then
       reason=$(tr -d '\r' < "$dir/download.err" 2>/dev/null | head -n1)
-      report+="prefetch anchor v$version ($tag): download of seforim.db.zst failed (${reason:-gh gave no reason}) — the fan falls back to its serial download"$'\n'
+      report+="prefetch anchor v$version ($tag): download of $expected_name failed (${reason:-gh gave no reason}) — the fan falls back to its serial download"$'\n'
       printf 'failed\n%s' "$report" > "$dir/.done"
-      rm -f "$dir/seforim.db.zst" "$dir/download.err"
+      rm -f "$dir/seforim.db.zst" "$dir/$expected_name" "$dir/download.err"
       return 0
     fi
     rm -f "$dir/download.err"
+    [ "$expected_name" = seforim.db.zst ] || mv -f "$dir/$expected_name" "$dir/seforim.db.zst"
     t_fetched=$(date +%s)
     report+="downloaded $tag in $((t_fetched - t_checked))s"$'\n'
   fi

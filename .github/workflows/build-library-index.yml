@@ -552,17 +552,20 @@ jobs:
         run: |
           set -euo pipefail
           gh api "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" > "$WORK/release.json"
-          jq -e '[.assets[] | select(.name == "seforim.db.zst")] | length == 1' \
-            "$WORK/release.json" > /dev/null || {
-            echo "::error::release $RELEASE_TAG carries no seforim.db.zst asset"
+          # The full DB is seforim.db.zst up to schema 5 and seforim-schema<N>.db.zst
+          # from schema 6 on; the highest-schema one is the one to index.
+          # shellcheck source=/dev/null
+          . .github/scripts/db_asset_names.sh
+          DB_ASSET=$(jq -r "$FULL_DB_ASSET_JQ | .name // empty" "$WORK/release.json")
+          [ -n "$DB_ASSET" ] || {
+            echo "::error::release $RELEASE_TAG carries no seforim.db.zst or seforim-schema<N>.db.zst asset"
             exit 1
           }
-          EXPECTED=$(jq -r '
-            [.assets[] | select(.name == "seforim.db.zst")] | .[0].digest // ""
-          ' "$WORK/release.json")
+          echo "full DB asset: $DB_ASSET"
+          EXPECTED=$(jq -r "$FULL_DB_ASSET_JQ | .digest // empty" "$WORK/release.json")
           EXPECTED="${EXPECTED#sha256:}"
           printf '%s' "$EXPECTED" | grep -Eq '^[0-9a-f]{64}$' || {
-            echo "::error::release $RELEASE_TAG publishes no sha256 digest for seforim.db.zst"
+            echo "::error::release $RELEASE_TAG publishes no sha256 digest for $DB_ASSET"
             exit 1
           }
           # gh and zstd both print nothing while they work, so a slow phase
@@ -583,13 +586,13 @@ jobs:
           disown "$WATCH" 2>/dev/null || true
           timeout --kill-after=60 60m \
             gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
-              -p seforim.db.zst -D "$WORK"
+              -p "$DB_ASSET" -O "$WORK/seforim.db.zst"
           kill "$WATCH" 2>/dev/null || true
           DB_BYTES=$(stat -c %s "$WORK/seforim.db.zst")
           echo "downloaded $DB_BYTES bytes in $(( $(date +%s) - PHASE_START ))s"
           ACTUAL=$(sha256sum "$WORK/seforim.db.zst" | awk '{print $1}')
           [ "$ACTUAL" = "$EXPECTED" ] || {
-            echo "::error::seforim.db.zst downloaded as $ACTUAL but the release publishes $EXPECTED"
+            echo "::error::$DB_ASSET downloaded as $ACTUAL but the release publishes $EXPECTED"
             exit 1
           }
           echo "seforim_db_zst_sha256=$ACTUAL" >> "$GITHUB_OUTPUT"
