@@ -401,6 +401,8 @@ internal data class PlannedSimanChild(
     val lineId: Long,
     val lineIndex: Long,
     val named: Boolean,
+    /** Exclusive main-TOC boundary; the next heading belongs to another section. */
+    val endLineIndex: Long,
 )
 
 /**
@@ -425,7 +427,9 @@ internal fun planNestedChildren(
             if (name != null && !isInlineHeadingVisible(simanLabel(heading, name), siman.anchorWindow)) name = null
             if (name == null && !isInlineHeadingVisible(heading, siman.anchorWindow)) continue
         }
-        children += PlannedSimanChild(parent.id, simanLabel(heading, name), siman.anchorLineId, siman.anchorLineIndex, name != null)
+        children += PlannedSimanChild(
+            parent.id, simanLabel(heading, name), siman.anchorLineId, siman.anchorLineIndex, name != null, siman.endLineIndex,
+        )
     }
     return children
 }
@@ -433,19 +437,27 @@ internal fun planNestedChildren(
 /**
  * line_alt_toc owner per line: the nearest entry anchored at or before it,
  * the deeper one on a shared line — the rule the Sefaria builder applies.
- * [anchors] holds (lineIndex, level, entryId).
+ * Bounded entries expire at their exclusive [endByEntryId] boundary, falling
+ * back to the latest preceding entry still in range (an original Topic root),
+ * or leaving the line unowned. [anchors] holds (lineIndex, level, entryId).
+ * [lines] must be in lineIndex order. After sorting anchors, each is
+ * pushed/popped once: O(lines + anchors).
  */
 internal fun nearestPrecedingOwners(
     lines: List<Pair<Long, Long>>,
     anchors: List<Triple<Long, Int, Long>>,
+    endByEntryId: Map<Long, Long> = emptyMap(),
 ): Map<Long, Long> {
     val sorted = anchors.sortedWith(compareBy({ it.first }, { it.second }))
     val owners = HashMap<Long, Long>(lines.size)
     var next = 0
-    var owner: Long? = null
+    val active = ArrayDeque<Long>()
     for ((lineId, lineIndex) in lines) {
-        while (next < sorted.size && sorted[next].first <= lineIndex) owner = sorted[next++].third
-        owner?.let { owners[lineId] = it }
+        while (next < sorted.size && sorted[next].first <= lineIndex) active.addLast(sorted[next++].third)
+        while (active.isNotEmpty() && (endByEntryId[active.last()] ?: Long.MAX_VALUE) <= lineIndex) {
+            active.removeLast()
+        }
+        active.lastOrNull()?.let { owners[lineId] = it }
     }
     return owners
 }
@@ -826,7 +838,8 @@ private fun writeNestedChildren(
     val childIdSet = childIds.toHashSet()
     val anchors = roots.mapNotNull { r -> r.lineIndex?.let { Triple(it, 0, r.id) } } +
         planned.mapIndexed { i, child -> Triple(child.lineIndex, 1, childIds[i]) }
-    val owners = nearestPrecedingOwners(lines, anchors)
+    val ends = planned.withIndex().associate { (i, child) -> childIds[i] to child.endLineIndex }
+    val owners = nearestPrecedingOwners(lines, anchors, ends)
     conn.prepareStatement(
         "INSERT OR REPLACE INTO line_alt_toc (lineId, structureId, altTocEntryId) VALUES (?, ?, ?)",
     ).use { upsert ->
@@ -904,7 +917,12 @@ private fun writeSimanNamesStructure(
     stableIds: AttachedBuildStateIds?,
 ): Int {
     val book = plan.book
-    val simanim = book.simanim.map { it.atHeading() }
+    // Own-name structures represent only the sibling groups that passed the
+    // naming gate, including their unnamed simanim. Borrowers keep their own
+    // complete siman sequence. Do not fold an excluded group into the prior root.
+    val acceptedParents = book.simanim.filter { it.tocId in plan.namesByTocId }.map { it.parentTocId }.toHashSet()
+    val simanim = book.simanim.filter { plan.nameSource != book.bookId || it.parentTocId in acceptedParents }
+        .map { it.atHeading() }
     val structureId = stableIds?.altTocStructureId(book.bookId, SIMAN_NAMES_STRUCTURE_KEY)
         ?: (queryMaxId(conn, "alt_toc_structure") + 1)
     conn.prepareStatement(
@@ -923,6 +941,7 @@ private fun writeSimanNamesStructure(
 
     val entries = mutableListOf<PendingSimanEntry>()
     val anchors = mutableListOf<Triple<Long, Int, Long>>()
+    val ends = HashMap<Long, Long>()
     if (plan.createdRoots.isEmpty()) {
         val byId = simanim.associateBy { it.tocId }
         val flat = plan.flatSimanTocIds.map(byId::getValue)
@@ -931,6 +950,7 @@ private fun writeSimanNamesStructure(
             val label = simanLabel(s.text.trimHeadingStart().trim(), plan.namesByTocId[s.tocId])
             entries += PendingSimanEntry(id, null, 0, label, s.anchorLineId, i == flat.lastIndex, false)
             anchors += Triple(s.anchorLineIndex, 0, id)
+            ends[id] = s.endLineIndex
         }
     } else {
         val rootRows = plan.createdRoots.mapIndexed { i, root ->
@@ -938,9 +958,9 @@ private fun writeSimanNamesStructure(
         }
         val children = planNestedChildren(rootRows, simanim, plan.namesByTocId)
         val childCount = children.groupingBy { it.parentId }.eachCount()
+        // Generated roots organize children; they must not claim gaps or appendices.
         rootRows.forEachIndexed { i, root ->
             entries += PendingSimanEntry(root.id, null, 0, root.text, root.lineId!!, i == rootRows.lastIndex, root.id in childCount)
-            anchors += Triple(root.lineIndex!!, 0, root.id)
         }
         val pathByRoot = rootRows.withIndex().associate { (i, root) -> root.id to altTocChildPath("", i + 1) }
         val ordinalByParent = HashMap<Long, Int>()
@@ -950,11 +970,12 @@ private fun writeSimanNamesStructure(
             val id = idFor(altTocChildPath(pathByRoot.getValue(child.parentId), ordinal))
             entries += PendingSimanEntry(id, child.parentId, 1, child.text, child.lineId, ordinal == childCount[child.parentId], false)
             anchors += Triple(child.lineIndex, 1, id)
+            ends[id] = child.endLineIndex
         }
     }
     insertEntries(conn, structureId, entries, stableIds)
 
-    val owners = nearestPrecedingOwners(readBookLines(conn, book.bookId), anchors)
+    val owners = nearestPrecedingOwners(readBookLines(conn, book.bookId), anchors, ends)
     conn.prepareStatement(
         "INSERT INTO line_alt_toc (lineId, structureId, altTocEntryId) VALUES (?, ?, ?)",
     ).use { st ->

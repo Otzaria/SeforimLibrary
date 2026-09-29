@@ -21,6 +21,7 @@ import java.sql.DriverManager
 import kotlin.test.AfterTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
@@ -195,6 +196,25 @@ class PlanSimanNamesTest {
             inlineVisibleOnly = true,
         )
         assertEquals(listOf("[סימן א] דין א", "סימן ב"), children.map { it.text })
+    }
+
+    @Test
+    fun `bounded owners expire at gaps and restore roots without resurrecting expired children`() {
+        val owners = nearestPrecedingOwners(
+            (0L..12).map { (100 + it) to it },
+            listOf(Triple(1L, 0, 1L), Triple(2L, 1, 2L), Triple(5L, 1, 3L), Triple(9L, 0, 4L), Triple(9L, 1, 5L)),
+            mapOf(2L to 4L, 3L to 7L, 5L to 11L),
+        )
+        assertNull(owners[100])
+        assertEquals(listOf(1L, 2L, 2L, 1L, 3L, 3L, 1L, 1L, 5L, 5L, 4L, 4L), (101L..112).map { owners[it] })
+        assertEquals(
+            mapOf(102L to 2L, 103L to 2L, 105L to 3L, 106L to 3L),
+            nearestPrecedingOwners(
+                (0L..8).map { (100 + it) to it },
+                listOf(Triple(2L, 0, 2L), Triple(5L, 0, 3L)),
+                mapOf(2L to 4L, 3L to 7L),
+            ),
+        )
     }
 
     @Test
@@ -496,9 +516,9 @@ class SynthesizeSimanNamesAltTocIntegrationTest {
             listOf(
                 2L to "[סימן א] דין השכמת הבוקר",
                 3L to "[סימן א] דין השכמת הבוקר",
-                4L to "[סימן א] דין השכמת הבוקר",
+                4L to "הלכות הנהגת האדם בבוקר",
                 5L to "[סימן ב] דין לבישת בגדים",
-                6L to "[סימן ב] דין לבישת בגדים",
+                6L to "הלכות הנהגת האדם בבוקר",
                 7L to "סימן ג",
                 8L to "סימן ג",
             ),
@@ -625,6 +645,119 @@ class SynthesizeSimanNamesAltTocIntegrationTest {
             listOf(listOf(0, "[סימן א] דין הקלף", 1, 0), listOf(0, "[סימן ב] דין הדיו", 3, 1)),
             tree(namesOf(seeded.keset)!!).map { listOf(it[2], it[3], it[4], it[5]) },
         )
+    }
+
+    @Test
+    fun `Topic children stop at external sections and reruns repair earlier leaked ownership`() {
+        val seeded = seed()
+        val saId = (dump("SELECT bookId FROM alt_toc_structure WHERE id = ${seeded.saTopic}").single()[0] as Number).toLong()
+        val appended = runBlocking {
+            val contents = listOf(
+                "<h2>סדר הגט</h2>", "פסקה ראשונה", "<h3>פרק א</h3>", "פסקה שניה",
+                "<h2>סימן ד</h2>", "<b>דין נוסף ובו ג סעיפים</b> x", "<h3>סעיף א</h3>", "המשך הדין",
+                "<h2>סדר חליצה</h2>", "נספח",
+            )
+            val ids = contents.mapIndexed { i, c -> repo.insertLine(Line(bookId = saId, lineIndex = i + 9, content = c)) }
+            val title = (dump("SELECT id FROM tocEntry WHERE bookId = $saId AND parentId IS NULL").single()[0] as Number).toLong()
+            val get = repo.insertTocEntry(TocEntry(bookId = saId, parentId = title, text = "סדר הגט", level = 1, lineId = ids[0]))
+            repo.insertTocEntry(TocEntry(bookId = saId, parentId = get, text = "פרק א", level = 2, lineId = ids[2]))
+            val siman = repo.insertTocEntry(TocEntry(bookId = saId, parentId = title, text = "סימן ד", level = 1, lineId = ids[4]))
+            repo.insertTocEntry(TocEntry(bookId = saId, parentId = siman, text = "סעיף א", level = 2, lineId = ids[6]))
+            repo.insertTocEntry(TocEntry(bookId = saId, parentId = title, text = "סדר חליצה", level = 1, lineId = ids[8]))
+            // The original Topic root mapping is authoritative outside generated children.
+            val root = (tree(seeded.saTopic).last()[0] as Number).toLong()
+            ids.forEach { repo.upsertLineAltToc(it, seeded.saTopic, root) }
+            ids
+        }
+        val originalLines = dump("SELECT * FROM line ORDER BY id")
+        val originalToc = dump("SELECT * FROM tocEntry ORDER BY id")
+        run(seeded, createState = true)
+        val byIndex = owners(seeded.saTopic).toMap()
+        for (index in listOf(9L, 10L, 11L, 12L, 13L, 17L, 18L)) assertEquals("הלכות ציצית", byIndex[index])
+        for (index in 14L..16L) assertEquals("[סימן ד] דין נוסף", byIndex[index], "descendant headings remain in the siman")
+        val firstTree = tree(seeded.saTopic)
+        val firstOwners = owners(seeded.saTopic)
+        val lastChild = (firstTree.last { it[1] != null }[0] as Number).toLong()
+        // Simulate a previously released unbounded owner map, including both gaps.
+        runBlocking { appended.filterIndexed { i, _ -> i < 4 || i >= 8 }.forEach { repo.upsertLineAltToc(it, seeded.saTopic, lastChild) } }
+        run(seeded, createState = false)
+        assertEquals(firstTree, tree(seeded.saTopic), "all entry IDs survive repair")
+        assertEquals(firstOwners, owners(seeded.saTopic))
+        assertEquals(originalLines, dump("SELECT * FROM line ORDER BY id"))
+        assertEquals(originalToc, dump("SELECT * FROM tocEntry ORDER BY id"))
+        assertTrue(dump("PRAGMA foreign_key_check").isEmpty())
+    }
+
+    @Test
+    fun `separate flat and grouped structures exclude appendices and rejected intervening groups`() {
+        val seeded = seed()
+        runBlocking {
+            val flatAppendix = listOf("<h2>סדר הגט</h2>", "נספח").mapIndexed { i, c ->
+                repo.insertLine(Line(bookId = seeded.keset, lineIndex = 5 + i, content = c))
+            }
+            val flatTitle = (dump("SELECT id FROM tocEntry WHERE bookId = ${seeded.keset} AND parentId IS NULL").single()[0] as Number).toLong()
+            repo.insertTocEntry(TocEntry(bookId = seeded.keset, parentId = flatTitle, text = "סדר הגט", level = 1, lineId = flatAppendix[0]))
+            val contents = listOf(
+                "<h2>דיני שמיטה</h2>", "<h3>סימן א</h3>", "בלי שם", "<h3>סימן ב</h3>", "בלי שם",
+                "<h2>דיני תרומות</h2>", "<h3>סימן א</h3>", "<b>דין תרומה ובו ג סעיפים</b> x",
+                "<h3>סימן ב</h3>", "<b>דין מעשר ובו ד סעיפים</b> x", "<h2>נספח</h2>", "נספח",
+            )
+            val ids = contents.mapIndexed { i, c -> repo.insertLine(Line(bookId = seeded.heAtid, lineIndex = 6 + i, content = c)) }
+            val title = (dump("SELECT id FROM tocEntry WHERE bookId = ${seeded.heAtid} AND parentId IS NULL").single()[0] as Number).toLong()
+            for ((parentIndex, simanIndices) in listOf(0 to listOf(1, 3), 5 to listOf(6, 8))) {
+                val parent = repo.insertTocEntry(TocEntry(bookId = seeded.heAtid, parentId = title, text = if (parentIndex == 0) "דיני שמיטה" else "דיני תרומות", level = 1, lineId = ids[parentIndex]))
+                simanIndices.forEachIndexed { i, index -> repo.insertTocEntry(TocEntry(bookId = seeded.heAtid, parentId = parent, text = "סימן ${if (i == 0) "א" else "ב"}", level = 2, lineId = ids[index])) }
+            }
+            repo.insertTocEntry(TocEntry(bookId = seeded.heAtid, parentId = title, text = "נספח", level = 1, lineId = ids[10]))
+        }
+        run(seeded, createState = true)
+        assertEquals(listOf(1L, 2L, 3L, 4L), owners(namesOf(seeded.keset)!!).map { it.first })
+        assertEquals(listOf(2L, 3L, 4L, 5L, 12L, 13L, 14L, 15L), owners(namesOf(seeded.heAtid)!!).map { it.first })
+        assertEquals(6, tree(namesOf(seeded.heAtid)!!).size, "two roots and four children; rejected group has no children")
+        val tableSql = listOf("SELECT * FROM alt_toc_entry ORDER BY id", "SELECT * FROM line_alt_toc ORDER BY lineId, structureId")
+        val before = tableSql.map(::dump)
+        run(seeded, createState = false)
+        assertEquals(before, tableSql.map(::dump))
+        assertTrue(dump("PRAGMA foreign_key_check").isEmpty())
+    }
+
+    @Test
+    fun `a failed child insert rolls back owner maps text rows and allocator changes`() {
+        val seeded = seed()
+        val tables = listOf("book", "line", "tocEntry", "tocText", "alt_toc_structure", "alt_toc_entry", "line_alt_toc")
+        val before = tables.map { dump("SELECT * FROM $it ORDER BY 1, 2") }
+        DriverManager.getConnection("jdbc:sqlite:$dbFile").use { conn ->
+            attachState(conn, seeded, create = true)
+            val stateTables = listOf("id_alt_toc_entry", "id_alt_toc_structure", "id_lookup", "id_counters")
+            fun stateRows() = stateTables.map { table ->
+                conn.createStatement().use { st ->
+                    st.executeQuery("SELECT * FROM seifim_state.$table ORDER BY 1, 2").use { rs ->
+                        buildList { while (rs.next()) add((1..rs.metaData.columnCount).map { rs.getObject(it) }) }
+                    }
+                }
+            }
+            val stateBefore = stateRows()
+            // Abort the last SA child after earlier entries/text IDs have been written.
+            val lastLine = (dump("SELECT lineId FROM alt_toc_entry WHERE structureId = ${seeded.saTopic} ORDER BY id DESC LIMIT 1").single()[0] as Number).toLong()
+            conn.createStatement().use { st ->
+                st.executeUpdate(
+                    """
+                    CREATE TRIGGER fail_siman_child BEFORE INSERT ON alt_toc_entry
+                    WHEN NEW.structureId = ${seeded.saTopic} AND NEW.parentId IS NOT NULL AND NEW.lineId = $lastLine
+                    BEGIN SELECT RAISE(ABORT, 'intentional QA insert failure'); END
+                    """.trimIndent(),
+                )
+            }
+            val books = readSimanNamesSnapshots(conn)
+            val failure = assertFailsWith<Exception> {
+                writeSimanNames(conn, planSimanNames(books, readBorrowEvidence(conn, books)), AttachedBuildStateIds(conn))
+            }
+            assertTrue(failure.message.orEmpty().contains("intentional QA insert failure"))
+            assertTrue(conn.autoCommit, "caller regains JDBC ownership")
+            assertEquals(stateBefore, stateRows(), "attached allocator participates in rollback")
+        }
+        assertEquals(before, tables.map { dump("SELECT * FROM $it ORDER BY 1, 2") })
+        assertTrue(dump("PRAGMA foreign_key_check").isEmpty())
     }
 
     @Test
