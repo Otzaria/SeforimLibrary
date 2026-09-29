@@ -20,6 +20,7 @@ import java.sql.Connection
  *     `DO NOTHING` for pure-PK junctions).
  *  6. For each tracked table in REVERSE FK order:
  *     `DELETE FROM <table> WHERE (pk…) IN (SELECT pk… FROM patch.delete_<table>)`.
+ *  6a. Replace `sqlite_stat1` with the patch's `stat1_snapshot`, when it has one.
  *  7. Verify the FK violation count did not grow.
  *  8. (Optional) verify logical content hash.
  *  9. COMMIT.
@@ -50,6 +51,7 @@ class PatchApplier(
             val migrations = runMigrations(conn)
             val upserts = runUpserts(conn)
             val deletes = runDeletes(conn)
+            applyStat1Snapshot(conn)
             val postFkCount = countFkViolations(conn)
             check(postFkCount <= preFkCount) {
                 "Patch introduced ${postFkCount - preFkCount} new FK violations (pre=$preFkCount, post=$postFkCount)"
@@ -134,6 +136,20 @@ class PatchApplier(
             if (n > 0) logger.d { "Upserted $n row(s) into ${table.name}" }
         }
         return counts
+    }
+
+    /** Replaces the planner statistics with the patch's snapshot; a patch without one keeps them. */
+    private fun applyStat1Snapshot(conn: Connection) {
+        if (!patchHasTable(conn, PatchDbSchema.STAT1_SNAPSHOT_TABLE)) return
+        conn.createStatement().use { st ->
+            // Creates sqlite_stat1 when missing: CREATE TABLE sqlite_* is reserved.
+            st.execute("ANALYZE main.sqlite_schema")
+            st.execute("DELETE FROM main.sqlite_stat1")
+            st.execute(
+                "INSERT INTO main.sqlite_stat1 (tbl, idx, stat) " +
+                    "SELECT tbl, idx, stat FROM patch.\"${PatchDbSchema.STAT1_SNAPSHOT_TABLE}\"",
+            )
+        }
     }
 
     private fun runDeletes(conn: Connection): Map<String, Int> {
