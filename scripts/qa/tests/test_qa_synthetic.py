@@ -641,8 +641,39 @@ def test_unusable_schema_shape_policy():
         assert len(_FAILURES) == before, _FAILURES[before:]
 
 
+def test_check8_schema6_line_content():
+    # schema 6: טקסט השורה ב-line_content (FK ל-line), version_line.content NULL = ירושה מהבסיס.
+    print("check8: DB בצורת schema 6 (line_content + version_line.content NULL)")
+    with tempfile.TemporaryDirectory() as d:
+        def make(path, orphan):
+            conn = sqlite3.connect(path)
+            conn.executescript("""
+                CREATE TABLE line(id INTEGER PRIMARY KEY NOT NULL, bookId INTEGER NOT NULL);
+                CREATE TABLE line_content(id INTEGER PRIMARY KEY NOT NULL, content TEXT NOT NULL,
+                    FOREIGN KEY (id) REFERENCES line(id) ON DELETE CASCADE);
+                CREATE TABLE version_line(versionId INTEGER NOT NULL, lineId INTEGER NOT NULL,
+                    content TEXT, PRIMARY KEY (versionId, lineId),
+                    FOREIGN KEY (lineId) REFERENCES line(id) ON DELETE CASCADE);
+                INSERT INTO line VALUES (1, 1), (2, 1);
+                INSERT INTO line_content VALUES (1, 'a'), (2, 'b');
+                INSERT INTO version_line VALUES (1, 1, NULL), (1, 2, 'c');
+            """)
+            if orphan:
+                conn.execute("INSERT INTO line_content VALUES (3, 'orphan')")
+            conn.commit()
+            conn.close()
+        ok, bad = os.path.join(d, "ok.db"), os.path.join(d, "bad.db")
+        make(ok, orphan=False)
+        make(bad, orphan=True)
+        rc, _out = _run("check8_integrity.py", "--db", ok)
+        _check("check8 schema 6 תקין → PASS", rc == 0)
+        rc, _out = _run("check8_integrity.py", "--db", bad)
+        _check("check8 schema 6 line_content יתום → FAIL", rc != 0)
+
+
 def main():
     for t in (test_primary_beats_earlier_alias, test_resolve_order,
+              test_check8_schema6_line_content,
               test_check2, test_check6, test_check6_missing_book_gate,
               test_check7,
               test_source_filter_regression, test_check5,
