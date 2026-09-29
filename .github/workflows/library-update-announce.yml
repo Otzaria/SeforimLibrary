@@ -1,0 +1,107 @@
+name: Announce a published library update
+
+run-name: announce ${{ github.event.release.tag_name || inputs.tag }}${{ github.event_name == 'workflow_dispatch' && inputs.dry_run && ' (dry run)' || '' }}
+
+# Posts what a published Seforim DB release changed to the Otzaria forum,
+# Google Chat and Yemot. A pre-release never reaches users, so it never
+# announces; the comparison is always against the previous PUBLISHED release,
+# which skips any pre-releases built in between.
+#
+# Nothing is uploaded back to either release: the reuse scan in
+# manual-generate-release.yml requires a release's asset count to match its
+# provenance exactly, so the catalogs are computed here from seforim.db.zst.
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Published v<N>-<timestamp> release to announce
+        type: string
+        required: true
+      dry_run:
+        description: Print the announcement without sending it
+        type: boolean
+        required: false
+        default: true
+      channels:
+        description: Comma-separated subset of forum,chat,yemot (for a resend)
+        type: string
+        required: false
+        default: forum,chat,yemot
+
+permissions:
+  contents: read
+
+concurrency:
+  group: library-update-announce
+  cancel-in-progress: false
+
+jobs:
+  announce:
+    if: github.event_name == 'workflow_dispatch' || (github.event.release.prerelease == false && startsWith(github.event.release.tag_name, 'v'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG: ${{ github.event.release.tag_name || inputs.tag }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - name: Install dependencies
+        run: python3 -m pip install --quiet --disable-pip-version-check requests beautifulsoup4 pyluach tzdata pyyaml
+
+      - name: Validate the announcer before using it
+        run: python3 .github/scripts/test_library_update_announce.py
+
+      - name: Resolve the previous published release
+        id: previous
+        run: |
+          set -euo pipefail
+          published="$(gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
+            --jq '.[] | select(.draft == false and .prerelease == false) | .tag_name')"
+          grep -qxF "$TAG" <<<"$published" || {
+            echo "::error::$TAG is not a published (non-draft, non-pre-release) release"; exit 1; }
+          previous="$(python3 .github/scripts/library_announce/library_update_announce.py \
+            previous-tag --current "$TAG" <<<"$published")"
+          [ -n "$previous" ] || { echo "::error::no published release precedes $TAG"; exit 1; }
+          echo "comparing $previous -> $TAG"
+          echo "tag=$previous" >> "$GITHUB_OUTPUT"
+
+      - name: Build both catalogs
+        env:
+          PREVIOUS: ${{ steps.previous.outputs.tag }}
+        run: |
+          set -euo pipefail
+          work="$RUNNER_TEMP/announce"
+          mkdir -p "$work"
+          # One DB on disk at a time: each is ~7 GB unpacked.
+          for side in previous:"$PREVIOUS" current:"$TAG"; do
+            name="${side%%:*}" tag="${side#*:}"
+            gh release download "$tag" -R "$GITHUB_REPOSITORY" -p seforim.db.zst -D "$work/$name"
+            unzstd --rm -q "$work/$name/seforim.db.zst" -o "$work/$name/seforim.db"
+            df -h "$work" | tail -n1
+            python3 .github/scripts/library_announce/library_update_announce.py \
+              catalog "$work/$name/seforim.db" "$work/$name.json"
+            rm -rf "$work/$name"
+          done
+
+      - name: Announce
+        env:
+          ANNOUNCE: ${{ (github.event_name == 'release' || !inputs.dry_run) && 'true' || 'false' }}
+          CHANNELS: ${{ inputs.channels || 'forum,chat,yemot' }}
+          USER_NAME: ${{ secrets.USER_NAME }}
+          PASSWORD: ${{ secrets.PASSWORD }}
+          GOOGLE_CHAT_URL: ${{ secrets.GOOGLE_CHAT_URL }}
+          TOKEN_YEMOT: ${{ secrets.TOKEN_YEMOT }}
+        run: |
+          set -euo pipefail
+          published_at="$(gh release view "$TAG" -R "$GITHUB_REPOSITORY" --json publishedAt --jq .publishedAt)"
+          as_of="$(TZ=Asia/Jerusalem date -d "$published_at" +%F)"
+          python3 .github/scripts/library_announce/library_update_announce.py announce \
+            --old "$RUNNER_TEMP/announce/previous.json" --new "$RUNNER_TEMP/announce/current.json" \
+            --tag "$TAG" --as-of "$as_of" --channels "$CHANNELS"

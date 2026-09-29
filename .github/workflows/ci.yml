@@ -86,6 +86,10 @@ jobs:
           done
           echo "tests: local orchestration boundary contracts $total passed"
 
+      # Not a release gate, so it stays out of the loop pinned to the release workflow's.
+      - name: Validate the library update announcer
+        run: python3 .github/scripts/test_library_update_announce.py
+
   test:
     runs-on: ubuntu-latest
 
