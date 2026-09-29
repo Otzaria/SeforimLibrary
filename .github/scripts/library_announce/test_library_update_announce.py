@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Tests for library_update_announce.py and its workflow."""
+"""Tests for library_update_announce.py, yemot.py and their workflow."""
 import io
 import json
 import sqlite3
@@ -18,31 +18,50 @@ except ImportError:  # pragma: no cover - CI installs PyYAML explicitly
 ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import library_update_announce as lua  # noqa: E402
+import yemot  # noqa: E402
 
 WORKFLOW = ROOT / ".github" / "workflows" / "library-update-announce.yml"
+RELEASE = ROOT / ".github" / "workflows" / "manual-generate-release.yml"
+CI = ROOT / ".github" / "workflows" / "ci.yml"
 
 
-def make_db(path, books, lines):
+def make_db(path, books, lines, versions=()):
     conn = sqlite3.connect(path)
     conn.executescript("""
         CREATE TABLE category (id INTEGER PRIMARY KEY, parentId INTEGER, title TEXT NOT NULL);
         CREATE TABLE source (id INTEGER PRIMARY KEY, name TEXT NOT NULL);
         CREATE TABLE book (id INTEGER PRIMARY KEY, categoryId INTEGER, sourceId INTEGER, title TEXT NOT NULL);
         CREATE TABLE line (id INTEGER PRIMARY KEY, bookId INTEGER, lineIndex INTEGER, content TEXT NOT NULL);
-        INSERT INTO category VALUES (1, 1, 'ספרייה'), (2, 1, 'תנך'), (3, 1, 'הלכה');
-        INSERT INTO source VALUES (1, 'sefaria'), (2, 'otzaria');
+        CREATE TABLE book_version (id INTEGER PRIMARY KEY, bookId INTEGER NOT NULL, versionTitle TEXT NOT NULL,
+            heVersionTitle TEXT, hasContent INTEGER NOT NULL DEFAULT 0);
+        CREATE TABLE version_line (versionId INTEGER NOT NULL, lineId INTEGER NOT NULL, content TEXT NOT NULL);
+        -- Like the real DB: every root has parentId NULL, none is its own parent.
+        INSERT INTO category VALUES (1, NULL, 'תנך'), (2, 1, 'תורה'), (3, NULL, 'הלכה');
+        INSERT INTO source VALUES (1, 'Sefaria'), (2, 'DictaToOtzaria');
     """)
     conn.executemany("INSERT INTO book VALUES (?, ?, ?, ?)", books)
     conn.executemany("INSERT INTO line (bookId, lineIndex, content) VALUES (?, ?, ?)", lines)
+    # versions: (bookId, versionTitle, heVersionTitle, {lineIndex: content} or None for metadata-only)
+    for book_id, title, he_title, texts in versions:
+        version_id = conn.execute(
+            "INSERT INTO book_version (bookId, versionTitle, heVersionTitle, hasContent) VALUES (?, ?, ?, ?)",
+            (book_id, title, he_title, int(texts is not None))).lastrowid
+        for index, content in (texts or {}).items():
+            [(line_id,)] = conn.execute("SELECT id FROM line WHERE bookId = ? AND lineIndex = ?", (book_id, index))
+            conn.execute("INSERT INTO version_line VALUES (?, ?, ?)", (version_id, line_id, content))
     conn.commit()
     conn.close()
 
 
-def catalog(books, lines):
+def catalog(books, lines, versions=()):
     with tempfile.TemporaryDirectory() as tmp:
         path = Path(tmp) / "seforim.db"
-        make_db(path, books, lines)
+        make_db(path, books, lines, versions)
         return lua.build_catalog(path)
+
+
+def names(entries):
+    return [e["name"] for e in entries]
 
 
 class PreviousTagTest(unittest.TestCase):
@@ -59,12 +78,32 @@ class PreviousTagTest(unittest.TestCase):
             lua.previous_published_tag("pipeline-result-run-1-1", [])
 
 
+class PlainTextTest(unittest.TestCase):
+    def test_markup_entities_and_whitespace_are_not_text(self):
+        self.assertEqual("א ב & ג", lua.plain_text("<b>א</b>  \n ב&nbsp;&amp; <span class='x'>ג</span> "))
+        self.assertEqual("&lt;", lua.plain_text("&amp;lt;"))
+        self.assertEqual("<", lua.plain_text("&lt;"))
+        self.assertEqual(lua.plain_text("נקודה: הלכה"), lua.plain_text("נקודה:<br>הלכה"))
+        self.assertNotEqual(lua.plain_text("וירגה זכרונו"), lua.plain_text("וירגהזכרונו"))
+
+
 class CatalogTest(unittest.TestCase):
-    def test_paths_walk_up_to_the_self_parented_root(self):
+    def test_paths_walk_up_to_a_null_parent_root(self):
         value = catalog([(10, 2, 1, "בראשית")], [(10, 0, "א")])
-        self.assertEqual("ספרייה/תנך", value["books"][0]["path"])
-        self.assertEqual("sefaria", value["books"][0]["source"])
+        self.assertEqual("תנך/תורה", value["books"][0]["path"])
+        self.assertEqual("Sefaria", value["books"][0]["source"])
         self.assertEqual(1, value["books"][0]["lines"])
+
+    def test_a_category_cycle_fails_loudly(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "seforim.db"
+            make_db(path, [(10, 2, 1, "בראשית")], [])
+            conn = sqlite3.connect(path)
+            conn.execute("UPDATE category SET parentId = 2 WHERE id = 1")
+            conn.commit()
+            conn.close()
+            with self.assertRaisesRegex(ValueError, "broken parent chain"):
+                lua.build_catalog(path)
 
     def test_hash_follows_line_order_not_insertion_order(self):
         a = catalog([(10, 2, 1, "בראשית")], [(10, 0, "א"), (10, 1, "ב")])
@@ -73,108 +112,303 @@ class CatalogTest(unittest.TestCase):
         self.assertEqual(a["books"][0]["hash"], b["books"][0]["hash"])
         self.assertNotEqual(a["books"][0]["hash"], c["books"][0]["hash"])
 
+    def test_markup_and_line_wrapping_do_not_change_the_hash(self):
+        a = catalog([(10, 2, 1, "בראשית")], [(10, 0, "בראשית ברא"), (10, 1, "אלהים")])
+        b = catalog([(10, 2, 1, "בראשית")], [(10, 0, "<h1>בראשית</h1>  ברא&nbsp;אלהים"), (10, 1, "<br>")])
+        c = catalog([(10, 2, 1, "בראשית")], [(10, 0, "בראשית ברא אלוהים")])
+        self.assertEqual(a["books"][0]["hash"], b["books"][0]["hash"])
+        self.assertNotEqual(a["books"][0]["hash"], c["books"][0]["hash"])
+
     def test_book_without_lines_has_no_hash(self):
         value = catalog([(10, 2, 1, "ריק")], [])
         self.assertIsNone(value["books"][0]["hash"])
+
+    def test_edition_is_the_version_whose_text_the_book_lines_are(self):
+        value = catalog(
+            [(1, 2, 1, "א"), (2, 2, 1, "ב"), (3, 2, 1, "ג"), (4, 2, 2, "ד"), (5, 2, 1, "ה"), (6, 2, 1, "ו"),
+             (7, 2, 1, "ז")],
+            [(b, i, t) for b in range(1, 8) for i, t in ((0, "א"), (1, "ב"))],
+            [(1, "Only", None, None),
+             (2, "Other", "אחרת", {0: "א", 1: "שונה"}), (2, "Read", "הנקראת", {0: "א", 1: "ב"}),
+             (3, "Part A", "א", {0: "א"}), (3, "Part B", "ב", {1: "ב"}),
+             (5, "Blank", "  ", {0: "א", 1: "ב"}),
+             (6, "Twin A", None, {0: "א", 1: "ב"}), (6, "Twin B", None, {0: "א", 1: "ב"}),
+             (7, "Not the text", "לא", {0: "א", 1: "אחר"})])
+        books = {b["id"]: b for b in value["books"]}
+        self.assertEqual(("Only", "Only"), (books[1]["edition"], books[1]["edition_name"]))
+        self.assertEqual(("Read", "הנקראת"), (books[2]["edition"], books[2]["edition_name"]))
+        self.assertIsNone(books[3]["edition"], "a mosaic of editions is no one edition")
+        self.assertIsNone(books[4]["edition"], "no versions at all")
+        self.assertEqual("Blank", books[5]["edition_name"])
+        self.assertIsNone(books[6]["edition"], "two identical editions are a tie")
+        self.assertIsNone(books[7]["edition"], "the only edition is not the book's text")
 
 
 class DiffTest(unittest.TestCase):
     def setUp(self):
         self.old = catalog(
-            [(1, 2, 1, "בראשית"), (2, 2, 1, "שמות"), (3, 3, 2, "ישן"), (4, 3, 2, "נמחק"), (5, 2, 2, "נודד")],
-            [(1, 0, "א"), (2, 0, "ב"), (3, 0, "תוכן ישן"), (4, 0, "ד"), (5, 0, "ה")])
+            [(1, 2, 1, "בראשית"), (2, 2, 1, "שמות"), (3, 3, 2, "ישן"), (4, 3, 2, "נמחק"), (5, 2, 2, "נודד"),
+             (8, 2, 1, "ויקרא"), (9, 3, 1, "משנה")],
+            [(1, 0, "א"), (2, 0, "ב"), (3, 0, "תוכן ישן"), (4, 0, "ד"), (5, 0, "ה"), (8, 0, "ח"), (9, 0, "ט")],
+            [(8, "Old ed", "ישנה", {0: "ח"}), (8, "New ed", "מהדורה חדשה", {0: "ח ישן"}), (9, "Same", "אותה", None)])
         self.new = catalog(
-            [(1, 2, 1, "בראשית"), (2, 2, 1, "שמות"), (6, 3, 2, "חדש-בשם"), (7, 2, 1, "חדש"), (5, 3, 2, "נודד")],
-            [(1, 0, "א"), (2, 0, "ב שונה"), (6, 0, "תוכן ישן"), (7, 0, "ז"), (5, 0, "ה")])
+            [(1, 2, 1, "בראשית"), (2, 2, 1, "שמות"), (6, 3, 2, "חדש-בשם"), (7, 2, 1, "חדש"), (5, 3, 2, "נודד"),
+             (8, 2, 1, "ויקרא"), (9, 1, 1, "משנה")],
+            [(1, 0, "<b>א</b>"), (2, 0, "ב שונה"), (6, 0, "תוכן ישן"), (7, 0, "ז"), (5, 0, "ה"), (8, 0, "ח שונה"),
+             (9, 0, "ט שונה")],
+            [(8, "Old ed", "ישנה", {0: "ח"}), (8, "New ed", "מהדורה חדשה", {0: "ח שונה"}),
+             (9, "Same", "אותה", None)])
+        self.changes = lua.diff_catalogs(self.old, self.new)
 
     def test_classifies_every_kind_of_change(self):
-        changes = lua.diff_catalogs(self.old, self.new)
-        self.assertEqual(["ספרייה/תנך/חדש"], changes["added"])
-        self.assertEqual(["ספרייה/הלכה/נמחק"], changes["removed"])
-        self.assertEqual(["ספרייה/תנך/שמות"], changes["changed"])
-        self.assertEqual(sorted([
-            "ספרייה/הלכה/חדש-בשם (לשעבר: ספרייה/הלכה/ישן)",
-            "ספרייה/הלכה/נודד (לשעבר: ספרייה/תנך/נודד)",
-        ]), changes["moved"])
+        self.assertEqual(["תנך/תורה/חדש"], names(self.changes["added"]))
+        self.assertEqual(["הלכה/נמחק"], names(self.changes["removed"]))
+        self.assertEqual(["תנך/משנה", "תנך/תורה/ויקרא", "תנך/תורה/שמות"], names(self.changes["changed"]))
+        self.assertEqual(["הלכה/חדש-בשם", "הלכה/נודד", "תנך/משנה"], names(self.changes["moved"]))
+
+    def test_markup_only_change_is_not_a_change(self):
+        self.assertNotIn("תנך/תורה/בראשית", names(self.changes["changed"]))
+
+    def test_edition_change_is_one_changed_line(self):
+        lines = lua.forum_lines(self.changes)["changed"]
+        self.assertIn("* תנך/תורה/ויקרא - שינוי מהדורה ל-מהדורה חדשה", lines)
+        self.assertEqual(1, sum("ויקרא" in line for line in lines))
+
+    def test_an_edition_newly_identified_is_not_an_edition_change(self):
+        old = catalog([(1, 2, 1, "א")], [(1, 0, "א")], [(1, "Listed", None, {0: "אחר"})])
+        new = catalog([(1, 2, 1, "א")], [(1, 0, "א")], [(1, "Listed", None, {0: "אחר"}), (1, "Read", None, {0: "א"})])
+        self.assertIsNone(old["books"][0]["edition"])
+        self.assertEqual("Read", new["books"][0]["edition"])
+        self.assertFalse(any(lua.diff_catalogs(old, new).values()))
+
+    def test_moved_and_changed_is_explicit_in_both_sections(self):
+        lines = lua.forum_lines(self.changes)
+        self.assertIn("* תנך/משנה (לשעבר: הלכה/משנה) (השתנה גם תוכנו)", lines["moved"])
+        self.assertIn("* תנך/משנה (שונה גם מיקומו/שמו)", lines["changed"])
+        self.assertIn("* הלכה/חדש-בשם (לשעבר: הלכה/ישן)", lines["moved"])
 
     def test_identical_catalogs_have_no_changes(self):
-        changes = lua.diff_catalogs(self.old, self.old)
-        self.assertFalse(any(changes.values()))
+        self.assertFalse(any(lua.diff_catalogs(self.old, self.old).values()))
+
+    def test_ambiguous_rename_fails_loudly(self):
+        old = catalog([(1, 2, 1, "א"), (2, 2, 1, "ב")], [(1, 0, "זהה"), (2, 0, "זהה")])
+        new = catalog([(3, 2, 1, "ג"), (4, 2, 1, "ד")], [(3, 0, "זהה"), (4, 0, "<i>זהה</i>")])
+        with self.assertRaisesRegex(ValueError, "ambiguous rename"):
+            lua.diff_catalogs(old, new)
+
+    def test_a_single_twin_on_one_side_only_is_no_rename(self):
+        old = catalog([(1, 2, 1, "א"), (2, 2, 1, "ב")], [(1, 0, "זהה"), (2, 0, "זהה")])
+        new = catalog([(3, 2, 1, "ג")], [(3, 0, "אחר")])
+        changes = lua.diff_catalogs(old, new)
+        self.assertEqual(2, len(changes["removed"]))
+        self.assertEqual([], changes["moved"])
 
 
-class PostTest(unittest.TestCase):
-    CHANGES = {"added": ["א/ב"], "removed": [], "moved": [], "changed": ["ג/ד", "ג/ה"]}
+class ForumPostTest(unittest.TestCase):
+    def changes(self, count, key="added"):
+        value = {k: [] for k, _ in lua.SECTIONS}
+        value[key] = [{"name": f"קטגוריה/ספר {i:04d}", "title": f"ספר {i:04d}"} for i in range(count)]
+        return value
 
     def test_post_lists_only_non_empty_sections(self):
-        post = lua.build_forum_post(self.CHANGES, 30, "א' תשרי")
-        self.assertTrue(post.startswith("# גירסת ספרייה 30\n"))
+        changes = {"added": [{"name": "א/ב", "title": "ב"}], "removed": [], "moved": [],
+                   "changed": [{"name": "ג/ד", "title": "ד", "edition": None, "also_moved": False},
+                               {"name": "ג/ה", "title": "ה", "edition": "מהד", "also_moved": False}]}
+        [post] = lua.build_forum_posts(changes, 30, "א' תשרי")
+        self.assertTrue(post.startswith("# גרסת ספרייה 30\n\n**עדכון א' תשרי**\n"))
         self.assertIn("## התווספו הספרים הבאים:\n* א/ב\n", post)
-        self.assertIn("## השתנו הספרים הבאים:\n* ג/ד\n* ג/ה\n", post)
+        self.assertIn("## השתנו הספרים הבאים:\n* ג/ד\n* ג/ה - שינוי מהדורה ל-מהד\n", post)
         self.assertNotIn("נמחקו", post)
 
-    def test_post_is_cut_to_the_forum_limit(self):
-        changes = {"added": [f"ספר {i}" for i in range(1000)], "removed": [], "moved": [], "changed": []}
-        post = lua.build_forum_post(changes, 30, "x", limit=500)
-        self.assertLess(len(post), 530)
-        self.assertRegex(post, r"\* ועוד \d+ ספרים\n$")
+    def test_long_list_is_split_on_line_boundaries_without_losing_a_line(self):
+        changes = self.changes(1000)
+        changes["removed"] = [{"name": "x/נמחק", "title": "נמחק"}]
+        posts = lua.build_forum_posts(changes, 30, "x", limit=500)
+        self.assertGreater(len(posts), 10)
+        self.assertTrue(all(lua.post_length(p) <= 500 for p in posts))
+        self.assertTrue(posts[0].startswith("# גרסת ספרייה 30\n"))
+        for post in posts[1:]:
+            self.assertTrue(post.startswith("# גרסת ספרייה 30 (המשך)\n\n## "))
+        items = [line for post in posts for line in post.splitlines() if line.startswith("* ")]
+        self.assertEqual([f"* קטגוריה/ספר {i:04d}" for i in range(1000)] + ["* x/נמחק"], items)
+        self.assertEqual(posts, lua.build_forum_posts(changes, 30, "x", limit=500))
 
-    def test_yemot_reads_titles_without_paths(self):
-        content = lua.build_yemot_content(self.CHANGES)
-        self.assertEqual({"התווספו הספרים הבאים:": "ב", "השתנו הספרים הבאים:": "ד\nה"}, content)
+    def test_a_continuation_mid_section_repeats_its_heading(self):
+        posts = lua.build_forum_posts(self.changes(100), 30, "x", limit=500)
+        self.assertIn("\n\n## התווספו הספרים הבאים: (המשך)\n* ", posts[1])
+
+    def test_default_limit_is_the_forum_maximum(self):
+        posts = lua.build_forum_posts(self.changes(3000), 30, "x")
+        self.assertGreater(len(posts), 1)
+        self.assertTrue(all(lua.post_length(p) <= 32767 for p in posts))
+
+    def test_length_counts_utf16_units_like_nodebb(self):
+        self.assertEqual(4, lua.post_length("אב😀"))
+
+    def test_a_line_longer_than_a_post_fails_loudly(self):
+        changes = self.changes(1)
+        changes["added"][0]["name"] = "א" * 600
+        with self.assertRaises(ValueError):
+            lua.build_forum_posts(changes, 30, "x", limit=500)
 
 
-class AnnounceTest(unittest.TestCase):
-    def run_announce(self, old, new, env, argv=()):
-        with tempfile.TemporaryDirectory() as tmp:
-            paths = []
-            for name, value in (("old.json", old), ("new.json", new)):
-                path = Path(tmp) / name
-                path.write_text(json.dumps(value, ensure_ascii=False), encoding="utf-8")
-                paths.append(str(path))
-            out = io.StringIO()
-            with mock.patch.dict("os.environ", env, clear=False), redirect_stdout(out):
-                code = lua.main(["announce", "--old", paths[0], "--new", paths[1],
-                                 "--tag", "v30-20261001000000", "--as-of", "2026-10-01", *argv])
-            return code, out.getvalue()
+class YemotContentTest(unittest.TestCase):
+    def test_reads_titles_and_the_new_name_of_a_moved_book(self):
+        changes = {
+            "added": [{"name": "א/ב", "title": "ב"}],
+            "removed": [],
+            "moved": [{"name": "a/חדש", "title": "חדש", "old_name": "c/ישן", "old_title": "ישן", "also_changed": False},
+                      {"name": "a/נודד", "title": "נודד", "old_name": "c/נודד", "old_title": "נודד",
+                       "also_changed": True}],
+            "changed": [{"name": "ג/ד", "title": "ד", "edition": "מהד", "also_moved": False}],
+        }
+        self.assertEqual({
+            "התווספו הספרים הבאים:": "ב",
+            "שונה מיקום/שם של הספרים הבאים:": "חדש (לשעבר: ישן)\nנודד (השתנה גם תוכנו)",
+            "השתנו הספרים הבאים:": "ד - שינוי מהדורה ל-מהד",
+        }, lua.build_yemot_content(changes))
 
+
+class Response:
+    def __init__(self, body, status=200):
+        self.status_code, self.body, self.text = status, body, repr(body)
+
+    def json(self):
+        if isinstance(self.body, Exception):
+            raise self.body
+        return self.body
+
+
+class Session:
+    def __init__(self, max_file="005.tts", fail_on=None):
+        self.max_file, self.fail_on, self.uploads, self.calls = max_file, fail_on, [], []
+
+    def get(self, url, params, timeout):
+        self.calls.append((url, timeout))
+        if url.endswith("GetIVR2DirStats"):
+            return Response({"responseStatus": "OK", "maxFile": {"name": self.max_file}})
+        return Response({"responseStatus": "OK"})
+
+    def post(self, url, data, timeout):
+        self.calls.append((url, timeout))
+        if self.fail_on and self.fail_on in data["what"]:
+            return Response({"responseStatus": "ERROR", "message": "denied"})
+        self.uploads.append((data["what"], data["contents"]))
+        return Response({"responseStatus": "OK"})
+
+
+class YemotTest(unittest.TestCase):
+    def test_split_never_loses_or_duplicates_text(self):
+        lines = [f"שורה {i}" + "x" * (i % 37) for i in range(400)]
+        content = "\n".join(lines)
+        parts = yemot.split_content(content, 100)
+        self.assertTrue(all(len(p) <= 100 for p in parts))
+        self.assertEqual(lines, "\n".join(parts).split("\n"))
+
+    def test_a_chunk_without_a_newline_is_cut_not_dropped(self):
+        content = "א" * 250 + "\nב"
+        parts = yemot.split_content(content, 100)
+        self.assertEqual(["א" * 100, "א" * 100, "א" * 50 + "\nב"], parts)
+
+    def test_a_newline_at_the_chunk_start_does_not_loop(self):
+        content = "\n" + "א" * 150
+        self.assertEqual(["א" * 99, "א" * 51], yemot.split_content(content, 100))
+
+    def test_uploads_continue_numbering_and_reverse_each_section(self):
+        session = Session(max_file="005.tts")
+        with mock.patch.object(yemot, "CHUNK_SIZE", 10):
+            yemot.split_and_send({"כותרת": "אאאא\nבבבב\nגגגג"}, "עדכון\n", "t", "ivr2:/1", "list",
+                                 session=session)
+        self.assertEqual([
+            ("ivr2:/1/006.tts", "גגגג"), ("ivr2:/1/007.tts", "אאאא\nבבבב"),
+            ("ivr2:/1/007-Title.tts", "כותרת"), ("ivr2:/1/008.tts", "עדכון\n"),
+        ], session.uploads)
+        self.assertTrue(all(timeout for _, timeout in session.calls))
+        self.assertTrue(session.calls[-1][0].endswith("RunTzintuk"))
+
+    def test_unknown_numbering_fails_instead_of_restarting_at_000(self):
+        for max_file in (None, "", "Title.tts", "005-Title.tts"):
+            with self.subTest(max_file=max_file):
+                with self.assertRaises(yemot.YemotError):
+                    yemot.get_file_num("t", "ivr2:/1", Session(max_file=max_file))
+
+    def test_a_refused_upload_fails_loudly(self):
+        session = Session(fail_on="-Title")
+        with self.assertRaisesRegex(yemot.YemotError, "UploadTextFile"):
+            yemot.split_and_send({"כותרת": "א"}, "עדכון\n", "t", "ivr2:/1", "list", session=session)
+
+    def test_http_errors_and_non_json_fail_loudly(self):
+        with self.assertRaisesRegex(yemot.YemotError, "HTTP 500"):
+            yemot._checked(Response({}, status=500), "x")
+        with self.assertRaisesRegex(yemot.YemotError, "not JSON"):
+            yemot._checked(Response(ValueError("bad")), "x")
+
+
+class RenderAndSendTest(unittest.TestCase):
     def setUp(self):
         self.old = catalog([(1, 2, 1, "בראשית")], [(1, 0, "א")])
         self.new = catalog([(1, 2, 1, "בראשית"), (2, 2, 1, "שמות")], [(1, 0, "א"), (2, 0, "ב")])
+        self.tmp = tempfile.TemporaryDirectory()
+        self.dir = Path(self.tmp.name)
 
-    def test_nothing_changed_sends_nothing(self):
-        with mock.patch.object(lua, "send_forum") as forum:
-            code, out = self.run_announce(self.old, self.old, {"ANNOUNCE": "true"})
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def render(self, old, new, argv=()):
+        paths = []
+        for name, value in (("old.json", old), ("new.json", new)):
+            path = self.dir / name
+            path.write_text(json.dumps(value, ensure_ascii=False), encoding="utf-8")
+            paths.append(str(path))
+        out = io.StringIO()
+        with mock.patch.dict("os.environ", {"GITHUB_OUTPUT": str(self.dir / "gh_out")}), redirect_stdout(out):
+            code = lua.main(["render", "--old", paths[0], "--new", paths[1], "--tag", "v30-20261001000000",
+                             "--as-of", "2026-10-01", "--out", str(self.dir / "out"), *argv])
+        return code, out.getvalue()
+
+    def test_nothing_changed_renders_nothing_to_send(self):
+        code, out = self.render(self.old, self.old)
         self.assertEqual(0, code)
         self.assertIn("nothing to announce", out)
-        forum.assert_not_called()
+        self.assertFalse((self.dir / "out" / "forum_posts.json").exists())
+        self.assertIn("has_changes=false\n", (self.dir / "gh_out").read_text(encoding="utf-8"))
 
-    def test_dry_run_prints_but_does_not_send(self):
-        with mock.patch.object(lua, "send_forum") as forum:
-            code, out = self.run_announce(self.old, self.new, {"ANNOUNCE": "false"})
+    def test_render_writes_every_channel_payload(self):
+        code, out = self.render(self.old, self.new)
         self.assertEqual(0, code)
-        self.assertIn("ספרייה/תנך/שמות", out)
-        forum.assert_not_called()
+        self.assertIn("תנך/תורה/שמות", out)
+        posts = json.loads((self.dir / "out" / "forum_posts.json").read_text(encoding="utf-8"))
+        self.assertTrue(posts[0].startswith("# גרסת ספרייה 30\n"))
+        spoken = json.loads((self.dir / "out" / "yemot.json").read_text(encoding="utf-8"))
+        self.assertEqual({"התווספו הספרים הבאים:": "שמות"}, spoken["content"])
+        self.assertIn("תשפ", spoken["date"])
+        self.assertIn('channels=["forum", "yemot"]\n', (self.dir / "gh_out").read_text(encoding="utf-8"))
 
-    def test_each_channel_is_tried_and_a_failure_fails_the_run(self):
-        env = {"ANNOUNCE": "true", "FORUM_TOKEN": "t",
-               "GOOGLE_CHAT_URL": "https://chat.invalid", "TOKEN_YEMOT": "t"}
-        with mock.patch.object(lua, "send_forum", side_effect=RuntimeError("down")) as forum, \
-             mock.patch.object(lua, "send_chat") as chat, \
-             mock.patch.object(lua, "send_yemot") as yemot:
-            code, out = self.run_announce(self.old, self.new, env)
-        self.assertEqual(1, code)
-        forum.assert_called_once()
-        chat.assert_called_once()
-        yemot.assert_called_once()
-        self.assertIn("forum announcement failed", out)
+    def test_unknown_channel_is_refused(self):
+        with self.assertRaises(SystemExit):
+            self.render(self.old, self.new, ["--channels", "forum,chat"])
 
-    def test_channels_can_be_limited_for_a_resend(self):
-        env = {"ANNOUNCE": "true", "GOOGLE_CHAT_URL": "https://chat.invalid"}
-        with mock.patch.object(lua, "send_forum") as forum, mock.patch.object(lua, "send_chat") as chat:
-            code, _ = self.run_announce(self.old, self.new, env, ["--channels", "chat"])
-        self.assertEqual(0, code)
-        forum.assert_not_called()
-        chat.assert_called_once()
+    def test_send_forum_posts_every_rendered_post_in_order(self):
+        self.render(self.old, self.new)
+        (self.dir / "out" / "forum_posts.json").write_text(json.dumps(["1", "2"]), encoding="utf-8")
+        with mock.patch.object(lua, "send_forum") as forum, mock.patch.dict("os.environ", {"FORUM_TOKEN": "t"}), \
+                redirect_stdout(io.StringIO()):
+            self.assertEqual(0, lua.main(["send", "--channel", "forum", "--dir", str(self.dir / "out")]))
+        self.assertEqual([mock.call("1", "t"), mock.call("2", "t")], forum.call_args_list)
+
+    def test_a_failed_post_names_how_many_were_sent(self):
+        send = mock.Mock(side_effect=[None, lua.ForumRefused("403: no")])
+        with redirect_stdout(io.StringIO()), self.assertRaisesRegex(RuntimeError, "post 2/3 failed; posts 1-1"):
+            lua.send_forum_posts(["a", "b", "c"], "t", send=send)
+
+    def test_send_yemot_uses_the_rendered_content(self):
+        self.render(self.old, self.new)
+        with mock.patch.object(lua, "send_yemot") as spoken, mock.patch.dict("os.environ", {"TOKEN_YEMOT": "t"}), \
+                redirect_stdout(io.StringIO()):
+            lua.main(["send", "--channel", "yemot", "--dir", str(self.dir / "out")])
+        content, date_text, token = spoken.call_args.args
+        self.assertEqual({"התווספו הספרים הבאים:": "שמות"}, content)
+        self.assertEqual("t", token)
 
 
 class ForumTest(unittest.TestCase):
@@ -199,6 +433,7 @@ class ForumTest(unittest.TestCase):
         self.assertEqual(f"https://otzaria.org/forum/api/v3/topics/{lua.FORUM_TOPIC_ID}", url)
         self.assertEqual("Bearer secret", kwargs["headers"]["Authorization"])
         self.assertEqual({"content": "טקסט"}, kwargs["json"])
+        self.assertTrue(kwargs["timeout"])
 
     def test_a_refusal_in_the_body_is_not_a_success(self):
         session = mock.Mock()
@@ -210,19 +445,83 @@ class ForumTest(unittest.TestCase):
 @unittest.skipIf(yaml is None, "PyYAML is required to parse the workflow")
 class WorkflowContractTest(unittest.TestCase):
     def setUp(self):
-        self.doc = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
+        self.text = WORKFLOW.read_text(encoding="utf-8")
+        self.doc = yaml.safe_load(self.text)
         # PyYAML reads the bare `on:` key as boolean True.
         self.on = self.doc.get("on", self.doc.get(True))
 
-    def test_runs_only_for_published_releases(self):
-        self.assertEqual(["published"], self.on["release"]["types"])
-        job = self.doc["jobs"]["announce"]
-        self.assertIn("github.event.release.prerelease == false", job["if"])
+    def test_runs_for_final_releases_including_a_promoted_prerelease(self):
+        self.assertEqual(["released"], self.on["release"]["types"])
+        self.assertIn("github.event.release.prerelease == false", self.doc["jobs"]["prepare"]["if"])
 
     def test_manual_run_is_a_dry_run_by_default(self):
         inputs = self.on["workflow_dispatch"]["inputs"]
         self.assertTrue(inputs["tag"]["required"])
         self.assertIs(True, inputs["dry_run"]["default"])
+        self.assertEqual("forum,yemot", inputs["channels"]["default"])
+
+    def test_runs_for_one_tag_serialize(self):
+        concurrency = self.doc["concurrency"]
+        self.assertIn("inputs.tag", concurrency["group"])
+        self.assertIn("github.event.release.tag_name", concurrency["group"])
+        self.assertIs(False, concurrency["cancel-in-progress"])
+
+    def test_each_channel_is_its_own_job_with_a_dedup_check(self):
+        jobs = self.doc["jobs"]
+        self.assertEqual({"prepare", "forum", "yemot"}, set(jobs))
+        for channel in ("forum", "yemot"):
+            job = jobs[channel]
+            self.assertEqual(channel, job["name"])
+            self.assertEqual("prepare", job["needs"])
+            self.assertEqual("read", job["permissions"]["actions"])
+            self.assertIn(f"contains(fromJSON(needs.prepare.outputs.channels), '{channel}')", job["if"])
+            steps = {step.get("name"): step for step in job["steps"]}
+            self.assertEqual("bash .github/scripts/library_announce/already_sent.sh",
+                             steps["Skip if this tag was already announced here"]["run"])
+            self.assertIn("steps.dedup.outputs.sent != 'true'", steps["Announce"]["if"])
+        dedup = (Path(__file__).resolve().parent / "already_sent.sh").read_text(encoding="utf-8")
+        self.assertIn('.conclusion == "success"', dedup)
+        self.assertIn("filter=all", dedup)
+        self.assertIn('TITLE="announce $TAG"', dedup)
+        self.assertIn(" (dry run)", self.doc["run-name"])
+
+    def test_no_google_chat_left(self):
+        script = (Path(__file__).resolve().parent / "library_update_announce.py").read_text(encoding="utf-8")
+        for text in (self.text, script):
+            self.assertNotIn("chat", text.lower())
+
+    def test_databases_stream_into_zstd_with_the_long_window(self):
+        run = next(s["run"] for s in self.doc["jobs"]["prepare"]["steps"] if s.get("name") == "Build both catalogs")
+        self.assertIn("-O - | zstd -d -q --long=31 --memory=2048MB", run)
+        self.assertIn('rm -f "$db"', run)
+
+    def test_hosted_python_is_set_up_before_pip(self):
+        for job in self.doc["jobs"].values():
+            uses = [step.get("uses", "") for step in job["steps"]]
+            runs = [step.get("run", "") for step in job["steps"]]
+            setup = next(i for i, u in enumerate(uses) if u.startswith("actions/setup-python@"))
+            pip = next(i for i, r in enumerate(runs) if "pip install" in r)
+            self.assertLess(setup, pip)
+
+    def test_the_release_workflow_dispatches_a_final_new_release(self):
+        release = yaml.safe_load(RELEASE.read_text(encoding="utf-8"))
+        job = release["jobs"]["announce-library-update"]
+        self.assertEqual("build-and-release", job["needs"])
+        self.assertIn("needs.build-and-release.result == 'success'", job["if"])
+        self.assertIn("!inputs.prerelease", job["if"])
+        self.assertEqual({"actions": "write"}, job["permissions"])
+        run = job["steps"][0]["run"]
+        self.assertIn("gh workflow run library-update-announce.yml", run)
+        self.assertIn("-f dry_run=false", run)
+        self.assertEqual("${{ steps.publish.outputs.release_tag }}",
+                         release["jobs"]["build-and-release"]["outputs"]["release_tag"])
+
+    def test_ci_installs_what_these_tests_import(self):
+        ci = yaml.safe_load(CI.read_text(encoding="utf-8"))
+        job = ci["jobs"]["announcer"]
+        install = next(s["run"] for s in job["steps"] if "pip install" in s.get("run", ""))
+        for package in ("requests", "pyluach", "tzdata", "pyyaml"):
+            self.assertIn(package, install)
 
 
 if __name__ == "__main__":

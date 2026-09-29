@@ -2,10 +2,15 @@ name: Announce a published library update
 
 run-name: announce ${{ github.event.release.tag_name || inputs.tag }}${{ github.event_name == 'workflow_dispatch' && inputs.dry_run && ' (dry run)' || '' }}
 
-# Posts what a published Seforim DB release changed to the Otzaria forum,
-# Google Chat and Yemot. A pre-release never reaches users, so it never
-# announces; the comparison is always against the previous PUBLISHED release,
-# which skips any pre-releases built in between.
+# Posts what a published Seforim DB release changed to the Otzaria forum and
+# Yemot. A pre-release never reaches users, so it never announces; the
+# comparison is always against the previous PUBLISHED release, which skips any
+# pre-releases built in between.
+#
+# Two triggers can fire for one release: `released` (a PAT publish or a manual
+# pre-release promotion) and the dispatch from manual-generate-release.yml (a
+# GITHUB_TOKEN publish fires no release event). Runs for a tag serialize, and
+# each channel job skips when an earlier non-dry run already sent it.
 #
 # Nothing is uploaded back to either release: the reuse scan in
 # manual-generate-release.yml requires a release's asset count to match its
@@ -13,7 +18,7 @@ run-name: announce ${{ github.event.release.tag_name || inputs.tag }}${{ github.
 
 on:
   release:
-    types: [published]
+    types: [released]
   workflow_dispatch:
     inputs:
       tag:
@@ -26,23 +31,28 @@ on:
         required: false
         default: true
       channels:
-        description: Comma-separated subset of forum,chat,yemot (for a resend)
+        description: Comma-separated subset of forum,yemot (for a resend)
         type: string
         required: false
-        default: forum,chat,yemot
+        default: forum,yemot
 
 permissions:
   contents: read
 
+# A dry run gets its own group, so it can never displace a pending real run.
 concurrency:
-  group: library-update-announce
+  group: library-update-announce-${{ github.event.release.tag_name || inputs.tag }}-${{ github.event_name == 'workflow_dispatch' && inputs.dry_run && 'dry' || 'send' }}
   cancel-in-progress: false
 
 jobs:
-  announce:
+  prepare:
     if: github.event_name == 'workflow_dispatch' || (github.event.release.prerelease == false && startsWith(github.event.release.tag_name, 'v'))
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    outputs:
+      has_changes: ${{ steps.render.outputs.has_changes }}
+      channels: ${{ steps.render.outputs.channels }}
+      send: ${{ github.event_name == 'release' || !inputs.dry_run }}
     env:
       GH_TOKEN: ${{ github.token }}
       TAG: ${{ github.event.release.tag_name || inputs.tag }}
@@ -52,11 +62,15 @@ jobs:
         with:
           persist-credentials: false
 
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
       - name: Install dependencies
-        run: python3 -m pip install --quiet --disable-pip-version-check requests pyluach tzdata pyyaml
+        run: python -m pip install --quiet --disable-pip-version-check requests pyluach tzdata pyyaml
 
       - name: Validate the announcer before using it
-        run: python3 .github/scripts/library_announce/test_library_update_announce.py
+        run: python .github/scripts/library_announce/test_library_update_announce.py
 
       - name: Resolve the previous published release
         id: previous
@@ -66,7 +80,7 @@ jobs:
             --jq '.[] | select(.draft == false and .prerelease == false) | .tag_name')"
           grep -qxF "$TAG" <<<"$published" || {
             echo "::error::$TAG is not a published (non-draft, non-pre-release) release"; exit 1; }
-          previous="$(python3 .github/scripts/library_announce/library_update_announce.py \
+          previous="$(python .github/scripts/library_announce/library_update_announce.py \
             previous-tag --current "$TAG" <<<"$published")"
           [ -n "$previous" ] || { echo "::error::no published release precedes $TAG"; exit 1; }
           echo "comparing $previous -> $TAG"
@@ -79,28 +93,124 @@ jobs:
           set -euo pipefail
           work="$RUNNER_TEMP/announce"
           mkdir -p "$work"
-          # One DB on disk at a time: each is ~7 GB unpacked.
+          # One DB on disk at a time (v29 is ~8.7 GB unpacked), streamed with no .zst copy.
+          # --long=31 --memory=2048MB: the limits the app expands this asset with.
           for side in previous:"$PREVIOUS" current:"$TAG"; do
-            name="${side%%:*}" tag="${side#*:}"
-            gh release download "$tag" -R "$GITHUB_REPOSITORY" -p seforim.db.zst -D "$work/$name"
-            unzstd --rm -q "$work/$name/seforim.db.zst" -o "$work/$name/seforim.db"
+            name="${side%%:*}" tag="${side#*:}" db="$work/$name.db"
+            gh release download "$tag" -R "$GITHUB_REPOSITORY" -p seforim.db.zst -O - | zstd -d -q --long=31 --memory=2048MB -o "$db"
             df -h "$work" | tail -n1
-            python3 .github/scripts/library_announce/library_update_announce.py \
-              catalog "$work/$name/seforim.db" "$work/$name.json"
-            rm -rf "$work/$name"
+            python .github/scripts/library_announce/library_update_announce.py \
+              catalog "$db" "$work/$name.json"
+            rm -f "$db"
           done
 
-      - name: Announce
+      - name: Render the announcement
+        id: render
         env:
-          ANNOUNCE: ${{ (github.event_name == 'release' || !inputs.dry_run) && 'true' || 'false' }}
-          CHANNELS: ${{ inputs.channels || 'forum,chat,yemot' }}
-          FORUM_TOKEN: ${{ secrets.FORUM_TOKEN }}
-          GOOGLE_CHAT_URL: ${{ secrets.GOOGLE_CHAT_URL }}
-          TOKEN_YEMOT: ${{ secrets.TOKEN_YEMOT }}
+          CHANNELS: ${{ inputs.channels || 'forum,yemot' }}
         run: |
           set -euo pipefail
           published_at="$(gh release view "$TAG" -R "$GITHUB_REPOSITORY" --json publishedAt --jq .publishedAt)"
           as_of="$(TZ=Asia/Jerusalem date -d "$published_at" +%F)"
-          python3 .github/scripts/library_announce/library_update_announce.py announce \
+          python .github/scripts/library_announce/library_update_announce.py render \
             --old "$RUNNER_TEMP/announce/previous.json" --new "$RUNNER_TEMP/announce/current.json" \
-            --tag "$TAG" --as-of "$as_of" --channels "$CHANNELS"
+            --tag "$TAG" --as-of "$as_of" --channels "$CHANNELS" --out "$RUNNER_TEMP/announce/out"
+
+      - uses: actions/upload-artifact@v6
+        with:
+          name: announcement
+          path: ${{ runner.temp }}/announce/out
+          if-no-files-found: error
+          overwrite: true
+
+  forum:
+    name: forum
+    needs: prepare
+    if: needs.prepare.outputs.send == 'true' && needs.prepare.outputs.has_changes == 'true' && contains(fromJSON(needs.prepare.outputs.channels), 'forum')
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      actions: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG: ${{ github.event.release.tag_name || inputs.tag }}
+      CHANNEL: forum
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - name: Skip if this tag was already announced here
+        id: dedup
+        run: bash .github/scripts/library_announce/already_sent.sh
+
+      - uses: actions/setup-python@v6
+        if: steps.dedup.outputs.sent != 'true'
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        if: steps.dedup.outputs.sent != 'true'
+        run: python -m pip install --quiet --disable-pip-version-check requests
+
+      - uses: actions/download-artifact@v7
+        if: steps.dedup.outputs.sent != 'true'
+        with:
+          name: announcement
+          path: ${{ runner.temp }}/announce/out
+
+      - name: Announce
+        if: steps.dedup.outputs.sent != 'true'
+        env:
+          FORUM_TOKEN: ${{ secrets.FORUM_TOKEN }}
+        run: |
+          python .github/scripts/library_announce/library_update_announce.py send \
+            --channel "$CHANNEL" --dir "$RUNNER_TEMP/announce/out"
+
+  yemot:
+    name: yemot
+    needs: prepare
+    if: needs.prepare.outputs.send == 'true' && needs.prepare.outputs.has_changes == 'true' && contains(fromJSON(needs.prepare.outputs.channels), 'yemot')
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      actions: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG: ${{ github.event.release.tag_name || inputs.tag }}
+      CHANNEL: yemot
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - name: Skip if this tag was already announced here
+        id: dedup
+        run: bash .github/scripts/library_announce/already_sent.sh
+
+      - uses: actions/setup-python@v6
+        if: steps.dedup.outputs.sent != 'true'
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        if: steps.dedup.outputs.sent != 'true'
+        run: python -m pip install --quiet --disable-pip-version-check requests
+
+      - uses: actions/download-artifact@v7
+        if: steps.dedup.outputs.sent != 'true'
+        with:
+          name: announcement
+          path: ${{ runner.temp }}/announce/out
+
+      - name: Announce
+        if: steps.dedup.outputs.sent != 'true'
+        env:
+          TOKEN_YEMOT: ${{ secrets.TOKEN_YEMOT }}
+        run: |
+          python .github/scripts/library_announce/library_update_announce.py send \
+            --channel "$CHANNEL" --dir "$RUNNER_TEMP/announce/out"
