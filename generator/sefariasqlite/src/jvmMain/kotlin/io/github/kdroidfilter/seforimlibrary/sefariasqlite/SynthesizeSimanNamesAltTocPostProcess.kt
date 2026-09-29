@@ -275,28 +275,34 @@ internal fun ownSimanNames(simanim: List<SimanHeadingRow>): Map<Long, String> {
 }
 
 /**
- * RELABEL when the Topic structure already holds siman entries, NEST when it
- * is flat (every entry level 0 with a line, ignoring this stage's own
- * children), null when there is none or it has another shape.
+ * Existing siman entries are always relabeled in place. Their shape, label,
+ * anchor and allocator path cannot prove that this stage created them.
+ * NEST is permitted only for a genuinely flat Topic with no siman entries.
  */
 internal fun classifyTopicStructure(book: SimanNamesBookSnapshot): SimanNamesMode? {
-    if (book.structureId == null) return null
-    val own = ownChildIds(book)
-    val others = book.entries.filter { it.id !in own }
-    if (others.isEmpty()) return null
-    if (others.any { isSimanHeading(simanLabelHeading(it.text)) }) return SimanNamesMode.RELABEL
-    if (others.all { it.level == 0 && it.parentId == null && it.lineIndex != null }) return SimanNamesMode.NEST
+    if (book.structureId == null || book.entries.isEmpty()) return null
+    if (book.entries.any { isSimanHeading(simanLabelHeading(it.text)) }) return SimanNamesMode.RELABEL
+    if (book.entries.all { it.level == 0 && it.parentId == null && it.lineIndex != null }) return SimanNamesMode.NEST
     return null
 }
 
-/** Children an earlier run of this stage nested under a flat Topic structure. */
-private fun ownChildIds(book: SimanNamesBookSnapshot): Set<Long> {
-    val rootIds = book.entries.filter { it.parentId == null && it.level == 0 }.map { it.id }.toHashSet()
-    val anchors = book.simanim.map { it.anchorLineIndex }.toHashSet()
-    return book.entries.filter {
-        it.parentId in rootIds && it.level == 1 && it.lineIndex in anchors &&
-            isSimanHeading(simanLabelHeading(it.text))
-    }.map { it.id }.toHashSet()
+/**
+ * A source's flat Topic roots remain suitable for borrowing after children
+ * have been inserted or were supplied by Sefaria. This is a shape check only;
+ * it does not grant ownership of any entry or permission to replace it.
+ */
+private fun hasFlatBorrowingRoots(book: SimanNamesBookSnapshot): Boolean {
+    if (book.structureId == null) return false
+    val roots = book.entries.filter { it.parentId == null }
+    if (roots.isEmpty() || roots.any { it.level != 0 || it.lineIndex == null || isSimanHeading(simanLabelHeading(it.text)) }) {
+        return false
+    }
+    val rootIds = roots.map { it.id }.toHashSet()
+    val simanAnchors = book.simanim.map { it.anchorLineIndex to it.text.trimHeadingStart().trim() }.toHashSet()
+    return book.entries.all { entry ->
+        entry.parentId == null || (entry.parentId in rootIds && entry.level == 1 &&
+            (entry.lineIndex to simanLabelHeading(entry.text)) in simanAnchors)
+    }
 }
 
 /** Decides, per book, which names it gets — its own, or a source's by siman number — and where they go. */
@@ -328,8 +334,8 @@ private fun borrowPlan(
     if (e.linkShare < BORROW_MIN_LINK_SHARE || e.simanCoverage < BORROW_MIN_SIMAN_COVERAGE) return null
     val source = booksById[e.sourceId] ?: return null
     val sourceNames = ownByBook.getValue(source.bookId)
-    // The roots are the source's Topic entries, so the source needs a flat Topic.
-    if (sourceNames.isEmpty() || classifyTopicStructure(source) != SimanNamesMode.NEST) return null
+    // Borrowing remains eligible when a later run relabels existing source children.
+    if (sourceNames.isEmpty() || !hasFlatBorrowingRoots(source)) return null
     // Only a source with one siman per number can be read by number.
     val sourceKeys = source.simanim.groupBy { simanNumberKey(it.text) }
     if (sourceKeys.values.any { it.size > 1 }) return null
@@ -787,21 +793,9 @@ private fun writeNestedChildren(
 ): List<PlannedSimanChild> {
     val book = plan.book
     val structureId = book.structureId!!
-    val previous = ownChildIds(book)
-    val roots = book.entries.filter { it.id !in previous }
+    check(classifyTopicStructure(book) == SimanNamesMode.NEST) { "Only an untouched flat Topic can receive new children" }
+    val roots = book.entries
     val planned = planNestedChildren(roots, book.simanim, plan.namesByTocId, inlineVisibleOnly = true)
-
-    val previousOwnedLines = HashSet<Long>()
-    if (previous.isNotEmpty()) {
-        val ids = previous.joinToString(",")
-        conn.createStatement().use { st ->
-            st.executeQuery("SELECT lineId FROM line_alt_toc WHERE altTocEntryId IN ($ids)").use { rs ->
-                while (rs.next()) previousOwnedLines += rs.getLong(1)
-            }
-            st.executeUpdate("DELETE FROM line_alt_toc WHERE altTocEntryId IN ($ids)")
-            st.executeUpdate("DELETE FROM alt_toc_entry WHERE id IN ($ids)")
-        }
-    }
 
     var nextEntryId = queryMaxId(conn, "alt_toc_entry")
     val ordinalByParent = HashMap<Long, Int>()
@@ -833,7 +827,7 @@ private fun writeNestedChildren(
         st.executeBatch()
     }
 
-    // Only lines a child owns now, or an earlier child owned, change hands.
+    // Only bounded new-child ownership replaces the original flat root mappings.
     val lines = readBookLines(conn, book.bookId)
     val childIdSet = childIds.toHashSet()
     val anchors = roots.mapNotNull { r -> r.lineIndex?.let { Triple(it, 0, r.id) } } +
@@ -843,23 +837,15 @@ private fun writeNestedChildren(
     conn.prepareStatement(
         "INSERT OR REPLACE INTO line_alt_toc (lineId, structureId, altTocEntryId) VALUES (?, ?, ?)",
     ).use { upsert ->
-        conn.prepareStatement("DELETE FROM line_alt_toc WHERE lineId = ? AND structureId = ?").use { delete ->
-            for ((lineId, _) in lines) {
-                val owner = owners[lineId]
-                if (owner != null && (owner in childIdSet || lineId in previousOwnedLines)) {
-                    upsert.setLong(1, lineId)
-                    upsert.setLong(2, structureId)
-                    upsert.setLong(3, owner)
-                    upsert.addBatch()
-                } else if (owner == null && lineId in previousOwnedLines) {
-                    delete.setLong(1, lineId)
-                    delete.setLong(2, structureId)
-                    delete.addBatch()
-                }
-            }
-            upsert.executeBatch()
-            delete.executeBatch()
+        for ((lineId, _) in lines) {
+            val owner = owners[lineId] ?: continue
+            if (owner !in childIdSet) continue
+            upsert.setLong(1, lineId)
+            upsert.setLong(2, structureId)
+            upsert.setLong(3, owner)
+            upsert.addBatch()
         }
+        upsert.executeBatch()
     }
     return planned
 }

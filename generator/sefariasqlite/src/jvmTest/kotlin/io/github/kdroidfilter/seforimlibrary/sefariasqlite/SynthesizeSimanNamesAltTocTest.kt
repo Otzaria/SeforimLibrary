@@ -648,10 +648,10 @@ class SynthesizeSimanNamesAltTocIntegrationTest {
     }
 
     @Test
-    fun `Topic children stop at external sections and reruns repair earlier leaked ownership`() {
+    fun `Topic children stop at external sections and reruns preserve bounded ownership`() {
         val seeded = seed()
         val saId = (dump("SELECT bookId FROM alt_toc_structure WHERE id = ${seeded.saTopic}").single()[0] as Number).toLong()
-        val appended = runBlocking {
+        runBlocking {
             val contents = listOf(
                 "<h2>סדר הגט</h2>", "פסקה ראשונה", "<h3>פרק א</h3>", "פסקה שניה",
                 "<h2>סימן ד</h2>", "<b>דין נוסף ובו ג סעיפים</b> x", "<h3>סעיף א</h3>", "המשך הדין",
@@ -667,7 +667,6 @@ class SynthesizeSimanNamesAltTocIntegrationTest {
             // The original Topic root mapping is authoritative outside generated children.
             val root = (tree(seeded.saTopic).last()[0] as Number).toLong()
             ids.forEach { repo.upsertLineAltToc(it, seeded.saTopic, root) }
-            ids
         }
         val originalLines = dump("SELECT * FROM line ORDER BY id")
         val originalToc = dump("SELECT * FROM tocEntry ORDER BY id")
@@ -677,9 +676,6 @@ class SynthesizeSimanNamesAltTocIntegrationTest {
         for (index in 14L..16L) assertEquals("[סימן ד] דין נוסף", byIndex[index], "descendant headings remain in the siman")
         val firstTree = tree(seeded.saTopic)
         val firstOwners = owners(seeded.saTopic)
-        val lastChild = (firstTree.last { it[1] != null }[0] as Number).toLong()
-        // Simulate a previously released unbounded owner map, including both gaps.
-        runBlocking { appended.filterIndexed { i, _ -> i < 4 || i >= 8 }.forEach { repo.upsertLineAltToc(it, seeded.saTopic, lastChild) } }
         run(seeded, createState = false)
         assertEquals(firstTree, tree(seeded.saTopic), "all entry IDs survive repair")
         assertEquals(firstOwners, owners(seeded.saTopic))
@@ -718,6 +714,62 @@ class SynthesizeSimanNamesAltTocIntegrationTest {
         val before = tableSql.map(::dump)
         run(seeded, createState = false)
         assertEquals(before, tableSql.map(::dump))
+        assertTrue(dump("PRAGMA foreign_key_check").isEmpty())
+    }
+
+    @Test
+    fun `original Topic siman children retain IDs shape invisible entries and nonstandard ownership`() {
+        val seeded = seed()
+        val sourceTopic = runBlocking {
+            val existing = dump("SELECT categoryId, sourceId FROM book ORDER BY id LIMIT 1").single()
+            val bookId = book((existing[0] as Number).toLong(), (existing[1] as Number).toLong(), "פסקי רקנאטי")
+            val ids = lines(
+                bookId,
+                listOf(
+                    "<h1>פסקי רקנאטי</h1>", "<h2>סימן א</h2>", "<b>דיני ציצית. ובו סעיף אחד:</b> x",
+                    "<h2>סימן ב</h2>", "<h3>סעיף א</h3>", "<h4>פרטי הדין</h4>", "<h5>תוכן ההלכה</h5>", "טקסט",
+                    "<h2>נספח</h2>", "נספח",
+                ),
+            )
+            val title = repo.insertTocEntry(TocEntry(bookId = bookId, text = "פסקי רקנאטי", level = 0, lineId = ids[0]))
+            repo.insertTocEntry(TocEntry(bookId = bookId, parentId = title, text = "סימן א", level = 1, lineId = ids[1]))
+            var parent = repo.insertTocEntry(TocEntry(bookId = bookId, parentId = title, text = "סימן ב", level = 1, lineId = ids[3]))
+            for (index in 4..6) {
+                parent = repo.insertTocEntry(TocEntry(bookId = bookId, parentId = parent, text = "כותרת $index", level = index - 2, lineId = ids[index]))
+            }
+            repo.insertTocEntry(TocEntry(bookId = bookId, parentId = title, text = "נספח", level = 1, lineId = ids[8]))
+            val structure = repo.upsertAltTocStructure(AltTocStructure(bookId = bookId, key = TOPIC_STRUCTURE_KEY, title = "Topic"))
+            val root = repo.insertAltTocEntry(AltTocEntry(structureId = structure, text = "דיני ציצית ותפילין", level = 0, lineId = ids[2], hasChildren = true))
+            val first = repo.insertAltTocEntry(AltTocEntry(structureId = structure, parentId = root, text = "סימן א", level = 1, lineId = ids[2]))
+            val invisible = repo.insertAltTocEntry(AltTocEntry(structureId = structure, parentId = root, text = "סימן ב", level = 1, lineId = ids[7], isLastChild = true))
+            // A source Topic range can intentionally extend beyond its main-TOC siman.
+            for (index in 2..9) repo.upsertLineAltToc(ids[index], structure, if (index < 7) first else invisible)
+            structure
+        }
+        val originalTree = tree(sourceTopic)
+        val sourceOwnerSql = "SELECT * FROM line_alt_toc WHERE structureId = $sourceTopic ORDER BY lineId"
+        val originalOwners = dump(sourceOwnerSql)
+        val originalTextRows = dump("SELECT * FROM tocText ORDER BY id")
+        fun shape(rows: List<List<Any?>>) = rows.map { listOf(it[0], it[1], it[2], it[4], it[5], it[6]) }
+        run(seeded, createState = true)
+        assertEquals(shape(originalTree), shape(tree(sourceTopic)), "source IDs, parents, anchors and flags survive")
+        assertEquals(listOf("דיני ציצית ותפילין", "[סימן א] דיני ציצית", "סימן ב"), tree(sourceTopic).map { it[3] })
+        assertEquals(originalOwners, dump(sourceOwnerSql), "source Topic bounds are not inferred from main-TOC bounds")
+        val retainedTexts = dump("SELECT * FROM tocText ORDER BY id").toHashSet()
+        assertTrue(originalTextRows.all { it in retainedTexts })
+        val after = tree(sourceTopic)
+        DriverManager.getConnection("jdbc:sqlite:$dbFile").use { conn ->
+            conn.prepareStatement("UPDATE line SET content = ? WHERE bookId = (SELECT bookId FROM alt_toc_structure WHERE id = ?) AND lineIndex = 2").use { st ->
+                // Extraction ignores this editorial note; the app still displays it before the new name.
+                st.setString(1, "<b><small>הערת מערכת ארוכה מאוד</small>דיני תפילין. ובו סעיף אחד:</b> x")
+                st.setLong(2, sourceTopic)
+                assertEquals(1, st.executeUpdate())
+            }
+        }
+        val hidden = run(seeded, createState = false)
+        assertEquals(1, hidden.invisibleNames, "an invisible new name must keep the original entry and label")
+        assertEquals(after, tree(sourceTopic))
+        assertEquals(originalOwners, dump(sourceOwnerSql))
         assertTrue(dump("PRAGMA foreign_key_check").isEmpty())
     }
 
@@ -763,7 +815,7 @@ class SynthesizeSimanNamesAltTocIntegrationTest {
     @Test
     fun `a rerun reproduces every row and id`() {
         val seeded = seed()
-        val first = run(seeded, createState = true)
+        run(seeded, createState = true)
         val all = "SELECT * FROM alt_toc_entry ORDER BY id"
         val map = "SELECT * FROM line_alt_toc ORDER BY lineId, structureId"
         val others = listOf(
@@ -774,7 +826,11 @@ class SynthesizeSimanNamesAltTocIntegrationTest {
         val rows = listOf(dump(all), dump(map)) + others.map(::dump)
         val second = run(seeded, createState = false)
         assertEquals(rows, listOf(dump(all), dump(map)) + others.map(::dump))
-        assertEquals(first.copy(relabeled = 0, relabelUnchanged = 2), second, "the relabels are already in place")
+        assertEquals(
+            SimanNamesResult(books = 6, children = 0, named = 0, relabeled = 0, relabelUnchanged = 4, separateStructures = 4, separateEntries = 14),
+            second,
+            "existing source and inserted Topic children are relabeled in place; borrowed structures survive",
+        )
     }
 
     @Test
@@ -856,6 +912,19 @@ class BorrowGatesTest {
         assertEquals(10L, plan.nameSource)
         assertEquals(listOf("דין א", "דין ב", "דין ג", "דין ד", "דין ה"), plan.namesByTocId.toSortedMap().values.toList())
         assertEquals(listOf("הלכות פלוניות"), plan.createdRoots.map { it.text })
+    }
+
+    @Test
+    fun `borrowing retains its source after flat roots acquire siman children`() {
+        val root = source.entries.single()
+        val nestedSource = source.copy(entries = source.entries + source.simanim.mapIndexed { i, siman ->
+            TopicEntryRow(1000L + i, root.id, 1, siman.text, siman.anchorLineId, siman.anchorLineIndex, false)
+        })
+        assertEquals(SimanNamesMode.RELABEL, classifyTopicStructure(nestedSource))
+        assertEquals(planFor()!!.namesByTocId, planFor(src = nestedSource)!!.namesByTocId)
+        assertEquals(SimanNamesMode.SEPARATE, planFor(src = nestedSource)!!.mode)
+        val unsupported = nestedSource.copy(entries = nestedSource.entries + TopicEntryRow(2000, root.id, 1, "קבוצת משנה", null, null, true))
+        assertNull(planFor(src = unsupported), "deeper section groups are not flat borrowing roots")
     }
 
     @Test
