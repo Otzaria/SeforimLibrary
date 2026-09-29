@@ -31,13 +31,20 @@ class PatchTableColumnContractTest {
     val tmp = TemporaryFolder()
 
     // The DB schema and patch-artifact format are independent version axes.
-    // v26 froze DB schema 4; dhDisplay therefore starts a new schema 5 fixture
-    // while PatchDbSchema.CURRENT_VERSION remains the patch format version.
-    private val dbSchemaVersion = CURRENT_DB_SCHEMA_VERSION
-    private val fixtureName = "/patch_table_columns_schema_$dbSchemaVersion.json"
+    // The generator writes the schema-5 working shape; SplitLineContentCli turns it into 6.
 
     @Test
     fun `physical columns of every patch table match the committed expectation`() {
+        assertColumns(CURRENT_DB_SCHEMA_VERSION, PATCH_TABLES_IN_FK_ORDER, split = true)
+    }
+
+    @Test
+    fun `the generator working shape still matches the frozen schema 5 expectation`() {
+        assertColumns(5, PATCH_TABLES_SCHEMA_5, split = false)
+    }
+
+    private fun assertColumns(dbSchemaVersion: Int, tables: List<PatchTable>, split: Boolean) {
+        val fixtureName = "/patch_table_columns_schema_$dbSchemaVersion.json"
         val fixture = javaClass.getResourceAsStream(fixtureName)
             ?.readBytes()?.toString(Charsets.UTF_8)
             ?: error("fixture $fixtureName missing from test resources")
@@ -51,7 +58,7 @@ class PatchTableColumnContractTest {
             v.jsonArray.map { it.jsonPrimitive.content }
         }
 
-        val actual = freshDatabaseColumns()
+        val actual = freshDatabaseColumns(tables, split)
 
         val hint = "bump db_schema_version or add a column migration"
         val followUp = "If you bump db_schema_version, add a NEW " +
@@ -77,7 +84,7 @@ class PatchTableColumnContractTest {
     }
 
     /** Column names (alphabetical, like LogicalContentHasher) per patch table. */
-    private fun freshDatabaseColumns(): Map<String, List<String>> {
+    private fun freshDatabaseColumns(tables: List<PatchTable>, split: Boolean): Map<String, List<String>> {
         val db = tmp.newFolder().toPath().resolve("fresh-seforim.db")
         Files.deleteIfExists(db)
         JdbcSqliteDriver("jdbc:sqlite:${db.toAbsolutePath()}").use { driver ->
@@ -85,7 +92,8 @@ class PatchTableColumnContractTest {
         }
         val out = LinkedHashMap<String, List<String>>()
         DriverManager.getConnection("jdbc:sqlite:${db.toAbsolutePath()}").use { conn ->
-            for (table in PATCH_TABLES_IN_FK_ORDER) {
+            if (split) splitLineContent(conn)
+            for (table in tables) {
                 val cols = PatchDbSchema.readTableInfo(conn, "main", table.name).map { it.name }
                 if (cols.isEmpty()) error("patch table '${table.name}' is missing from a freshly created DB")
                 out[table.name] = cols.sorted()

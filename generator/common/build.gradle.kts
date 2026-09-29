@@ -189,6 +189,22 @@ tasks.register<JavaExec>("compareLogicalContent") {
     jvmArgs = listOf("-Xmx$generatorHeap", "-XX:+UseG1GC")
 }
 
+tasks.register<JavaExec>("splitLineContent") {
+    group = "application"
+    description = "Converts the finished seforim.db to schema 6: line text into line_content, version_line.content NULL when identical."
+    dependsOn("jvmJar")
+    mainClass.set("io.github.kdroidfilter.seforimlibrary.common.patch.SplitLineContentCliKt")
+    classpath = files(tasks.named("jvmJar")) + configurations.getByName("jvmRuntimeClasspath")
+    val dbPath = (project.findProperty("dbPath") ?: project.findProperty("seforimDb")) as String?
+        ?: System.getenv("SEFORIM_DB")
+        ?: rootProject.layout.buildDirectory.file("seforim.db").get().asFile.absolutePath
+    systemProperty("dbPath", dbPath)
+    listOf("chunkRows", "vacuumInto").forEach { key ->
+        project.findProperty(key)?.let { systemProperty(key, it as String) }
+    }
+    jvmArgs = listOf("-Xmx1g")
+}
+
 tasks.register<JavaExec>("stampSchemaVersion") {
     group = "application"
     description = "Stamps schema_meta.db_version + db_schema_version into the freshly-built seforim.db so the client can read the current release version."
