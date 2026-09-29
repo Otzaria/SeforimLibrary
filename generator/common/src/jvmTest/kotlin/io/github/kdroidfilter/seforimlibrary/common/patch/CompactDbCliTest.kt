@@ -60,6 +60,19 @@ class CompactDbCliTest {
         connect(db).use { assertEquals(0, pragma(it, "freelist_count")) }
     }
 
+    @Test
+    fun `planner statistics of an analyzed DB survive the compaction`() {
+        val db = splitDb("analyzed.db")
+        connect(db).use { conn -> conn.createStatement().use { it.execute("ANALYZE") } }
+        val before = connect(db).use { stat1(it) }
+        assertTrue(before.any { it.startsWith("line_content|") }, "ANALYZE covers the split table: $before")
+
+        assertTrue(compactDatabase(db, tmp.newFolder("analyzed-scratch").toPath()).compacted)
+
+        // PatchDbProducer ships these rows as stat1_snapshot, so they must not be lost here.
+        assertEquals(before, connect(db).use { stat1(it) })
+    }
+
     /** A schema-5 working-shape DB with enough text that the split frees pages. */
     private fun splitDb(name: String): Path {
         val db = tmp.root.toPath().resolve(name)
@@ -105,6 +118,11 @@ class CompactDbCliTest {
                 "UNION ALL SELECT 'v|' || versionId || '|' || lineId || '|' || IFNULL(content, '<inherit>') FROM version_line " +
                 "ORDER BY 1",
         ).use { rs -> buildList { while (rs.next()) add(rs.getString(1)) } }
+    }
+
+    private fun stat1(conn: Connection): List<String> = conn.createStatement().use { st ->
+        st.executeQuery("SELECT tbl || '|' || IFNULL(idx, '') || '|' || stat FROM sqlite_stat1 ORDER BY 1")
+            .use { rs -> buildList { while (rs.next()) add(rs.getString(1)) } }
     }
 
     private fun pragma(conn: Connection, name: String): Long =
