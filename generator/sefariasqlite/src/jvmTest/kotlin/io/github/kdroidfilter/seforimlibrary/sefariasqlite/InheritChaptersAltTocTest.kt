@@ -134,7 +134,7 @@ class InheritChaptersParsingTest {
             listOf(
                 listOf(DafNode("דף ב.", 1, listOf(DafNode("הגהות", 2))), DafNode("דף ג.", 4, listOf(DafNode("חדושים", 5)))),
                 // "דף ג." opens above the chapter-2 anchor, so it and its in-range heading stay in chapter 1.
-                listOf(DafNode("דף ג:", 8)),
+                listOf(DafNode("חדושים", 7), DafNode("דף ג:", 8)),
             ),
             dafs,
         )
@@ -154,6 +154,82 @@ class InheritChaptersParsingTest {
             listOf(listOf(DafNode("דף לח.", 1), DafNode("דף לט.", 4)), listOf(DafNode("דף מ.", 7))),
             buildDafChildren(anchors, headings),
         )
+    }
+
+    @Test
+    fun `nested amud survives a chapter boundary with its complete subtree exactly once`() {
+        val anchors = listOf(ChapterAnchor(chapters[0], 1, 0), ChapterAnchor(chapters[1], 10, 1))
+        val headings = listOf(
+            ChaptersHeading(1, "דף יג", 1),
+            ChaptersHeading(2, "יג.", 2, 1),
+            ChaptersHeading(3, "ביאור א", 3, 2),
+            ChaptersHeading(9, "קבוצה", 4, 1),
+            ChaptersHeading(10, "יג:", 5, 4),
+            ChaptersHeading(11, "ביאור ב", 6, 5),
+            ChaptersHeading(12, "הערה", 7, 6),
+            ChaptersHeading(13, "יד.", 8, 5),
+        )
+        assertEquals(
+            listOf(
+                listOf(DafNode("דף יג", 1, listOf(DafNode("יג.", 2, listOf(DafNode("ביאור א", 3))), DafNode("קבוצה", 9)))),
+                listOf(DafNode("יג:", 10, listOf(DafNode("ביאור ב", 11, listOf(DafNode("הערה", 12))), DafNode("יד.", 13)))),
+            ),
+            buildDafChildren(anchors, headings),
+        )
+    }
+
+    @Test
+    fun `crossing non-daf descendants are promoted with all their children`() {
+        val anchors = listOf(ChapterAnchor(chapters[0], 1, 0), ChapterAnchor(chapters[1], 5, 1), ChapterAnchor(chapters[2], 9, 2))
+        val headings = listOf(
+            ChaptersHeading(1, "דף יג", 1),
+            ChaptersHeading(3, "ביאור", 2, 1),
+            ChaptersHeading(5, "הערה", 3, 2),
+            ChaptersHeading(6, "תוספת", 4, 3),
+            ChaptersHeading(9, "סיום", 5, 4),
+        )
+        assertEquals(listOf(
+            listOf(DafNode("דף יג", 1, listOf(DafNode("ביאור", 3)))),
+            listOf(DafNode("הערה", 5, listOf(DafNode("תוספת", 6)))),
+            listOf(DafNode("סיום", 9)),
+        ), buildDafChildren(anchors, headings))
+    }
+
+    @Test
+    fun `cyclic source headings are retained once without looping`() {
+        val anchors = listOf(ChapterAnchor(chapters[0], 1, 0))
+        assertEquals(listOf(listOf(DafNode("דף יג", 1, listOf(DafNode("יג.", 1))))), buildDafChildren(anchors, listOf(ChaptersHeading(1, "דף יג", 1, 2), ChaptersHeading(1, "יג.", 2, 1))))
+    }
+
+    @Test
+    fun `chapter names do not establish pagination and a sparse donor is never used`() {
+        val bavli = ChaptersBase(1, "ברכות", chapters, isBaseBook = true)
+        val rif = ChaptersBase(2, "רי״ף ברכות", chapters.mapIndexed { i, c -> c.copy(amud = listOf(2, 14, 20)[i]) })
+        val sparse = ChaptersBase(3, "פירוש על ברכות", chapters.mapIndexed { i, c -> c.copy(amud = listOf(5, 7, 10)[i]) })
+        val bases = mapOf(1L to bavli, 2L to rif, 3L to sparse)
+        assertEquals(bavli, chooseDafBoundaryBase(1, emptyList(), rif, bases))
+        assertEquals(bavli, chooseDafBoundaryBase(1, listOf(1), sparse, bases))
+        assertNull(chooseDafBoundaryBase(2, listOf(1), rif, bases), "do not follow Rif's declared tractate")
+        assertNull(chooseDafBoundaryBase(3, listOf(1), sparse, bases), "title names a sparse commentary")
+        assertNull(chooseDafBoundaryBase(1, listOf(1, 2), rif, bases), "explicit pagination conflicts")
+        assertNull(chooseDafBoundaryBase(null, listOf(3), sparse, bases))
+        assertNull(chooseDafBoundaryBase(null, listOf(1, 9), sparse, bases), "unknown declared base")
+    }
+
+    @Test
+    fun `canonical donor places Bavli chapters despite a Rif link base`() {
+        val bavli = chapters.mapIndexed { i, c -> c.copy(amud = listOf(4, 26, 35)[i]) }
+        val rif = chapters.mapIndexed { i, c -> c.copy(amud = listOf(2, 14, 20)[i]) }
+        val headings = listOf(ChaptersHeading(10, "דף ב."), ChaptersHeading(20, "דף ז."), ChaptersHeading(30, "דף י."), ChaptersHeading(40, "דף יג."), ChaptersHeading(50, "דף יז:"))
+        assertEquals(listOf(10L, 40L, 50L), computeChapterAnchors(rif, (0L..55L).toList(), headings, mapOf(11L to 0), bavli).map { it.lineIndex })
+        assertEquals(listOf(11L), computeChapterAnchors(rif, (0L..55L).toList(), headings, mapOf(11L to 0)).map { it.lineIndex }, "without pagination evidence neither fallback nor snap-back is allowed")
+    }
+
+    @Test
+    fun `link evidence vetoes title pagination before both fallback and snap-back`() {
+        val bavli = chapters.mapIndexed { i, c -> c.copy(amud = listOf(4, 26, 35)[i]) }
+        val headings = listOf(ChaptersHeading(10, "דף ב."), ChaptersHeading(20, "דף ז."), ChaptersHeading(30, "דף יג."), ChaptersHeading(40, "דף יז:"))
+        assertEquals(listOf(11L, 21L), computeChapterAnchors(bavli, (0L..45L).toList(), headings, mapOf(11L to 0, 21L to 1), bavli).map { it.lineIndex })
     }
 
     @Test
@@ -192,7 +268,7 @@ class InheritChaptersParsingTest {
             ChaptersHeading(10, "דף ד."),
         )
         val links = mapOf(2L to 2L, 3L to 3L, 5L to 7L, 6L to 8L, 8L to 3L, 9L to 10L, 11L to 12L, 12L to 13L)
-        val anchors = computeChapterAnchors(chapters, (0L..12L).toList(), headings, byChapter(links))
+        val anchors = computeChapterAnchors(chapters, (0L..12L).toList(), headings, byChapter(links), dafChapters = chapters)
         assertEquals(listOf("מאימתי" to 1L, "היה קורא" to 6L, "מי שמתו" to 10L), anchors.map { it.chapter.text to it.lineIndex })
     }
 
@@ -200,14 +276,14 @@ class InheritChaptersParsingTest {
     fun `link anchors climb non-daf heading lines and drop chapters without material`() {
         val headings = listOf(ChaptersHeading(3, "ד\"ה מאימתי"), ChaptersHeading(4, "בא"))
         val links = mapOf(5L to 2L, 6L to 13L)
-        val anchors = computeChapterAnchors(chapters, (0L..6L).toList(), headings, byChapter(links))
+        val anchors = computeChapterAnchors(chapters, (0L..6L).toList(), headings, byChapter(links), dafChapters = chapters)
         assertEquals(listOf("מאימתי" to 3L, "מי שמתו" to 6L), anchors.map { it.chapter.text to it.lineIndex })
     }
 
     @Test
     fun `full daf headings beat sparse links`() {
         val headings = listOf(ChaptersHeading(1, "דף ב."), ChaptersHeading(4, "דף ג."), ChaptersHeading(10, "דף ד."))
-        val anchors = computeChapterAnchors(chapters, (0L..12L).toList(), headings, byChapter(mapOf(2L to 2L)))
+        val anchors = computeChapterAnchors(chapters, (0L..12L).toList(), headings, byChapter(mapOf(2L to 2L)), dafChapters = chapters)
         assertEquals(listOf("מאימתי" to 1L, "היה קורא" to 4L, "מי שמתו" to 10L), anchors.map { it.chapter.text to it.lineIndex })
     }
 
@@ -219,7 +295,7 @@ class InheritChaptersParsingTest {
             ChaptersHeading(3, "דף ג עמוד א"),
             ChaptersHeading(5, "דף ג:"),
         )
-        val anchors = computeChapterAnchors(chapters, (0L..6L).toList(), headings, emptyMap())
+        val anchors = computeChapterAnchors(chapters, (0L..6L).toList(), headings, emptyMap(), dafChapters = chapters)
         // Chapter 3 (4a) is past the commentary's last heading: partial coverage.
         assertEquals(listOf("מאימתי" to 1L, "היה קורא" to 3L), anchors.map { it.chapter.text to it.lineIndex })
     }
@@ -227,14 +303,14 @@ class InheritChaptersParsingTest {
     @Test
     fun `daf fallback skips a chapter the commentary does not reach`() {
         val headings = listOf(ChaptersHeading(1, "דף ב."), ChaptersHeading(2, "דף ד."), ChaptersHeading(3, "דף ה"))
-        val anchors = computeChapterAnchors(chapters, (0L..4L).toList(), headings, emptyMap())
+        val anchors = computeChapterAnchors(chapters, (0L..4L).toList(), headings, emptyMap(), dafChapters = chapters)
         assertEquals(listOf("מאימתי" to 1L, "מי שמתו" to 2L), anchors.map { it.chapter.text to it.lineIndex })
     }
 
     @Test
     fun `no daf fallback for a base without amud refs`() {
         val offDaf = chapters.map { it.copy(amud = null) }
-        assertTrue(computeChapterAnchors(offDaf, (0L..3L).toList(), listOf(ChaptersHeading(1, "דף ב.")), emptyMap()).isEmpty())
+        assertTrue(computeChapterAnchors(offDaf, (0L..3L).toList(), listOf(ChaptersHeading(1, "דף ב.")), emptyMap(), dafChapters = offDaf).isEmpty())
     }
 }
 
@@ -267,7 +343,7 @@ class InheritChaptersAltTocIntegrationTest {
         val otzaria = repo.insertSource("Otzaria")
         val cat = repo.insertCategory(Category(0, null, "תלמוד", level = 0, order = 1))
 
-        val baseId = repo.insertBook(Book(categoryId = cat, sourceId = sefaria, title = "ברכות", heRef = "ברכות"))
+        val baseId = repo.insertBook(Book(categoryId = cat, sourceId = sefaria, title = "ברכות", heRef = "ברכות", isBaseBook = true))
         val baseRefs = listOf(
             null, null, "ברכות, ב., א", "ברכות, ב., ב", null, "ברכות, ב:, א", null,
             "ברכות, ג., א", "ברכות, ג., ב", null, "ברכות, ג:, א", null, "ברכות, ד., א", "ברכות, ד., ב",
@@ -437,6 +513,68 @@ class InheritChaptersAltTocIntegrationTest {
         assertTrue(repo.getBook(seeded.linkedId)!!.hasAltStructures)
         assertTrue(repo.getBook(seeded.dafId)!!.hasAltStructures)
         assertFalse(repo.getBook(seeded.perekId)!!.hasAltStructures)
+    }
+
+    @Test
+    fun `a link winner with different pagination cannot donate daf boundaries`() = runBlocking {
+        val seeded = seed()
+        val base = repo.getBook(seeded.baseId)!!
+        val rifId = repo.insertBook(Book(categoryId = base.categoryId, sourceId = base.sourceId, title = "רי״ף ברכות", heRef = "רי״ף ברכות"))
+        val rifLines = (0 until 4).map { i -> repo.insertLine(Line(bookId = rifId, lineIndex = i, content = "רי״ף $i", heRef = listOf("רי״ף ברכות, א., א", "רי״ף ברכות, ז., א", "רי״ף ברכות, י., א", null)[i])) }
+        val structure = repo.upsertAltTocStructure(AltTocStructure(bookId = rifId, key = "Chapters"))
+        listOf("מאימתי", "היה קורא", "מי שמתו").forEachIndexed { i, text -> repo.insertAltTocEntry(AltTocEntry(structureId = structure, text = text, level = 0, lineId = rifLines[i])) }
+        val target = repo.insertBook(Book(categoryId = base.categoryId, sourceId = base.sourceId, title = "חדש על ברכות"))
+        repo.insertBookBaseText(target, seeded.baseId)
+        val targetLines = (0 until 10).map { repo.insertLine(Line(bookId = target, lineIndex = it, content = "פירוש $it")) }
+        listOf(1 to "דף ב.", 4 to "דף ג.", 7 to "דף ד.").forEach { (i, text) -> repo.insertTocEntry(TocEntry(bookId = target, text = text, level = 1, lineId = targetLines[i])) }
+        repo.insertLink(Link(sourceBookId = rifId, targetBookId = target, sourceLineId = rifLines[0], targetLineId = targetLines[2], targetLineIndex = 2, connectionType = ConnectionType.COMMENTARY))
+        DriverManager.getConnection("jdbc:sqlite:$dbFile").use { conn ->
+            val snapshot = readInheritChaptersSnapshots(conn).single { it.bookId == target }
+            assertEquals(rifId, snapshot.baseId)
+            assertEquals(seeded.baseId, snapshot.dafBaseId)
+            assertEquals(listOf(1L, 4L, 7L), snapshot.anchors.map { it.lineIndex })
+            val state = attachEmptyBuildState(conn)
+            synthesizeInheritedChapters(conn, listOf(snapshot), AttachedBuildStateIds(conn))
+            assertTrue(Files.exists(state))
+        }
+        assertEquals(listOf("מאימתי" to 1L, "היה קורא" to 4L, "מי שמתו" to 7L), chapters(target))
+    }
+
+    @Test
+    fun `promoted nested amud remains navigable after writing and rebuilding with stable ids`() = runBlocking {
+        val seeded = seed()
+        // Retain the first daf root but turn the last daf into its descendant;
+        // the last chapter starts at this descendant's own line.
+        DriverManager.getConnection("jdbc:sqlite:$dbFile").use { conn ->
+            conn.prepareStatement("UPDATE tocEntry SET parentId = (SELECT id FROM tocEntry WHERE bookId = ? ORDER BY lineId LIMIT 1) WHERE bookId = ? AND lineId = ?").use { st ->
+                st.setLong(1, seeded.linkedId)
+                st.setLong(2, seeded.linkedId)
+                st.setLong(3, repo.getLineByIndex(seeded.linkedId, 10)!!.id)
+                assertEquals(1, st.executeUpdate())
+            }
+        }
+        val state = Files.createTempFile("inherit-nested-buildstate", ".db").also {
+            Files.delete(it)
+            BuildStateWriter().write(BuildStateSnapshot.empty(), it)
+            tempFiles.add(it)
+        }
+        run(state)
+        val before = entries(seeded.linkedId)
+        val promoted = before.single { it.text == "דף ד." }
+        val parent = before.single { it.id == promoted.parentId }
+        assertEquals("מי שמתו", parent.text)
+        assertEquals(10L, lineIndexOf(promoted))
+        assertEquals("דף ד.", lineOwners(seeded.linkedId)[10])
+        DriverManager.getConnection("jdbc:sqlite:$dbFile").use { conn ->
+            conn.createStatement().use { st ->
+                val ours = "SELECT id FROM alt_toc_structure WHERE title = '$INHERITED_CHAPTERS_TITLE_EN'"
+                st.executeUpdate("DELETE FROM line_alt_toc WHERE structureId IN ($ours)")
+                st.executeUpdate("DELETE FROM alt_toc_entry WHERE structureId IN ($ours)")
+                st.executeUpdate("DELETE FROM alt_toc_structure WHERE id IN ($ours)")
+            }
+        }
+        run(state)
+        assertEquals(before, entries(seeded.linkedId))
     }
 
     @Test

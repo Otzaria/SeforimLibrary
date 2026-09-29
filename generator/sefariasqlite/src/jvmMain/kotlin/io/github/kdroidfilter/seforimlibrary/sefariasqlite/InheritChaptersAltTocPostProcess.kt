@@ -31,9 +31,14 @@ import kotlin.system.exitProcess
  * 2. no COMMENTARY links: the single declared Chapters base, else
  * 3. the title "X על <base>" (optionally "על מסכת <base>").
  *
- * Anchors, per base chapter (start line S_k, start amud from the base line's
- * heRef "ברכות, יג., טז"), by whichever method places more chapters (links on
- * a tie — sparse links place only the chapters they touch):
+ * Chapter numbers come from the source-specific link base. Daf coordinates
+ * come separately from a full, curated base book explicitly identified by the
+ * title or declared bases, with no conflicting pagination. Same chapter names
+ * never establish identical pagination; a commentary's first represented amud
+ * is not a chapter boundary. Without such a donor only links place chapters.
+ * Linked lines that contradict the donor's amud intervals veto both heading
+ * fallback and daf snap-back. Otherwise whichever method places more chapters
+ * wins (links on a tie — sparse links place only the chapters they touch):
  * - links: each linked line maps to the lowest chapter it is linked to;
  *   strays are dropped by keeping the longest non-decreasing run of
  *   chapters. A chapter opens at its first line in that run, moved back onto
@@ -48,7 +53,8 @@ import kotlin.system.exitProcess
  * Under each chapter hang the book's own daf headings (text copied verbatim)
  * whose line is in [its anchor, the next chapter's anchor) — the first chapter
  * also takes the dafs above its anchor — with their main-TOC sub-headings below
- * them: the app's find-ref resolves "<book> דף ה:" through the alt-TOC as soon
+ * them. Subheadings crossing a chapter boundary are promoted into their own
+ * chapter so they also survive exactly once. The app's find-ref resolves "<book> דף ה:" through the alt-TOC as soon
  * as a book has one, so every daf must be there. A daf heading on a chapter's
  * first amud but above its anchor stays in the previous chapter, as its lines do.
  *
@@ -115,7 +121,12 @@ private fun resolveInheritChaptersBuildStatePath(dbPath: Path): Path {
 /** One base chapter: its name, base start line and start amud (null off-daf). */
 internal data class BaseChapter(val text: String, val lineIndex: Long, val amud: Int?)
 
-internal data class ChaptersBase(val bookId: Long, val title: String, val chapters: List<BaseChapter>) {
+internal data class ChaptersBase(
+    val bookId: Long,
+    val title: String,
+    val chapters: List<BaseChapter>,
+    val isBaseBook: Boolean = false,
+) {
     /** Bases sharing this key have the same chapters, so chapter numbers are interchangeable. */
     val groupKey: String get() = chapters.joinToString("\u0001") { it.text.trim() }
 }
@@ -157,6 +168,8 @@ internal data class InheritChaptersSnapshot(
     /** Per anchor, the daf entries hanging below it. */
     val dafs: List<List<DafNode>> = anchors.map { emptyList() },
     val credited: Boolean = false,
+    /** Independently identified complete pagination donor, never a sparse commentary. */
+    val dafBaseId: Long? = null,
 )
 
 internal data class InheritChaptersResult(val structures: Int, val entries: Int)
@@ -219,6 +232,32 @@ internal fun chooseChaptersBase(
             ?.let { ChaptersBaseChoice(it, ChaptersBaseRule.DECLARED) }
     }
     return titleBaseId?.let { ChaptersBaseChoice(it, ChaptersBaseRule.TITLE) }
+}
+
+/**
+ * Chapter-name equivalence only permits exchanging chapter numbers in links.
+ * A daf boundary must come from a full base book explicitly named by this
+ * commentary. Commentary Chapters may start at their first surviving comment,
+ * even when their daf coordinates are those of the underlying tractate.
+ *
+ * Do not follow declared-base chains: a differently paginated work can itself
+ * depend on a tractate. Conflicting/unknown declared identities and titles that
+ * explicitly name a commentary leave pagination unproven; links still work.
+ */
+internal fun chooseDafBoundaryBase(
+    titleBaseId: Long?,
+    declaredBaseIds: Collection<Long>,
+    chapterBase: ChaptersBase,
+    bases: Map<Long, ChaptersBase>,
+): ChaptersBase? {
+    val explicit = if (declaredBaseIds.isEmpty()) listOfNotNull(titleBaseId) else declaredBaseIds.distinct()
+    val identified = explicit.map { bases[it] ?: return null }
+    val donor = identified.filter { it.isBaseBook && it.groupKey == chapterBase.groupKey }.singleOrNull() ?: return null
+    // Same-name commentaries with later/other pagination are not corroboration.
+    val donorAmuds = donor.chapters.map { it.amud }
+    if (identified.any { it.groupKey != donor.groupKey || it.chapters.map { c -> c.amud } != donorAmuds }) return null
+    if (titleBaseId != null && titleBaseId != donor.bookId) return null
+    return donor.takeIf { it.chapters.all { c -> c.amud != null } }
 }
 
 /** The longest " על " suffix of [title] (without a leading "מסכת") naming a base. */
@@ -336,19 +375,46 @@ internal fun longestNonDecreasingRun(values: List<Int>): List<Int> {
 /**
  * Chapter anchors for one commentary (see the file KDoc). [chapterByLine]
  * maps a linked commentary lineIndex to the lowest chapter number it is
- * linked to.
+ * linked to. [dafChapters] must be an independently identified complete
+ * pagination donor with the same chapter names; null disables daf inference.
  */
 internal fun computeChapterAnchors(
     chapters: List<BaseChapter>,
     lineIndices: List<Long>,
     headings: List<ChaptersHeading>,
     chapterByLine: Map<Long, Int>,
+    dafChapters: List<BaseChapter>? = null,
 ): List<ChapterAnchor> {
     if (chapters.isEmpty()) return emptyList()
-    val byLinks = anchorsFromLinks(chapters, lineIndices, headings, chapterByLine)
-    val byDaf = anchorsFromDafHeadings(chapters, headings)
+    require(dafChapters == null || dafChapters.map { it.text.trim() } == chapters.map { it.text.trim() })
+    val pagination = dafChapters?.takeIf { dafHeadingsAgreeWithLinks(it, headings, chapterByLine) }
+    val byLinks = anchorsFromLinks(chapters, lineIndices, headings, chapterByLine, pagination)
+    val byDaf = pagination?.let { anchorsFromDafHeadings(it, headings) }
+        ?.map { it.copy(chapter = chapters[it.index]) }.orEmpty()
     // Sparse links place only the chapters they touch; full daf headings then place more.
     return if (byDaf.size > byLinks.size) byDaf else byLinks
+}
+
+/** A linked chapter outside its heading's proven amud interval vetoes daf inference. */
+private fun dafHeadingsAgreeWithLinks(
+    chapters: List<BaseChapter>,
+    headings: List<ChaptersHeading>,
+    chapterByLine: Map<Long, Int>,
+): Boolean {
+    val dafs = headings.mapNotNull { h -> parseDafHeading(h.text)?.let { h.lineIndex to it } }.sortedBy { it.first }
+    val linked = chapterByLine.entries.filter { it.value in chapters.indices }.sortedBy { it.key }
+    val run = longestNonDecreasingRun(linked.map { it.value }).map { linked[it] }
+    var cursor = 0
+    var preceding: AmudSpan? = null
+    for ((line, chapter) in run) {
+        while (cursor < dafs.size && dafs[cursor].first <= line) preceding = dafs[cursor++].second
+        val span = preceding ?: continue
+        val start = chapters[chapter].amud ?: return false
+        val next = chapters.getOrNull(chapter + 1)?.amud ?: Int.MAX_VALUE
+        // A chapter can start mid-amud: both adjacent chapters may cite that amud.
+        if (span.end < start || span.start > next) return false
+    }
+    return true
 }
 
 internal fun chapterOfBaseLine(chapters: List<BaseChapter>, baseLineIndex: Long): Int {
@@ -370,6 +436,7 @@ private fun anchorsFromLinks(
     lineIndices: List<Long>,
     headings: List<ChaptersHeading>,
     chapterByLine: Map<Long, Int>,
+    dafChapters: List<BaseChapter>?,
 ): List<ChapterAnchor> {
     val linked = chapterByLine.entries
         .map { it.key to it.value }
@@ -397,7 +464,7 @@ private fun anchorsFromLinks(
         while (cursor < run.size && run[cursor].second == k) lastLine = run[cursor++].first
 
         var anchor = firstLine
-        val dafAnchor = chapter.amud?.let { start ->
+        val dafAnchor = dafChapters?.get(k)?.amud?.let { start ->
             dafHeadings.firstOrNull { (line, span) -> line > previousLine && line < firstLine && span.end >= start }
         }
         if (dafAnchor != null) {
@@ -451,40 +518,60 @@ private fun isDafEntryHeading(text: String): Boolean =
 private val DAF_WORD_HEADING = Regex("""^דף(?=\s)""")
 
 /**
- * The daf entries of each anchor: every top-most daf heading whose line is in
- * [anchor, next anchor), with its main-TOC sub-headings that stay in range.
+ * Partitions the book's daf subtrees by chapter, preserving each original
+ * heading exactly once. A descendant whose parent belongs to another chapter
+ * is promoted into its own chapter, including non-daf subheadings. The first
+ * chapter also retains headings above its anchor. Unrelated main-TOC headings
+ * are not copied. Traversal visits each edge once, even for malformed cycles.
  */
 internal fun buildDafChildren(anchors: List<ChapterAnchor>, headings: List<ChaptersHeading>): List<List<DafNode>> {
-    val byId = headings.filter { it.id != 0L }.associateBy { it.id }
-    val childrenOf = headings.filter { it.parentId != null }.groupBy { it.parentId }
-    val daf = headings.filter { isDafEntryHeading(it.text) }
-    val dafIds = daf.map { it.id }.toHashSet()
-
-    fun hasDafAncestor(h: ChaptersHeading): Boolean {
-        var parent = h.parentId?.let(byId::get)
-        val seen = HashSet<Long>()
-        while (parent != null && seen.add(parent.id)) {
-            if (parent.id in dafIds) return true
-            parent = parent.parentId?.let(byId::get)
-        }
-        return false
+    if (anchors.isEmpty()) return emptyList()
+    val byId = headings.withIndex().filter { it.value.id != 0L }.associate { it.value.id to it.index }
+    val originalChildren = headings.withIndex().groupBy { it.value.parentId }
+    val relevant = BooleanArray(headings.size)
+    val pending = java.util.ArrayDeque<Int>()
+    headings.forEachIndexed { i, h -> if (isDafEntryHeading(h.text)) pending.addLast(i) }
+    while (pending.isNotEmpty()) {
+        val i = pending.removeLast()
+        if (relevant[i]) continue
+        relevant[i] = true
+        if (headings[i].id != 0L) originalChildren[headings[i].id].orEmpty().forEach { pending.addLast(it.index) }
     }
-
-    fun subtree(h: ChaptersHeading, end: Long): DafNode = DafNode(
-        text = h.text,
-        lineIndex = h.lineIndex,
-        children = childrenOf[h.id].orEmpty()
-            .filter { it.lineIndex >= h.lineIndex && it.lineIndex < end }
-            .sortedWith(compareBy({ it.lineIndex }, { it.id }))
-            .map { subtree(it, end) },
-    )
-
-    return anchors.mapIndexed { i, anchor ->
-        val start = if (i == 0) Long.MIN_VALUE else anchor.lineIndex
-        val end = anchors.getOrNull(i + 1)?.lineIndex ?: Long.MAX_VALUE
-        daf.filter { it.lineIndex >= start && it.lineIndex < end && !hasDafAncestor(it) }
-            .sortedWith(compareBy({ it.lineIndex }, { it.id }))
-            .map { subtree(it, end) }
+    fun owner(line: Long): Int {
+        var lo = 0
+        var hi = anchors.size
+        while (lo < hi) {
+            val mid = (lo + hi) ushr 1
+            if (anchors[mid].lineIndex <= line) lo = mid + 1 else hi = mid
+        }
+        return (lo - 1).coerceAtLeast(0)
+    }
+    val owners = IntArray(headings.size) { owner(headings[it].lineIndex) }
+    val keptParent = Array<Int?>(headings.size) { i ->
+        headings[i].parentId?.let(byId::get)?.takeIf { parent ->
+            relevant[parent] && owners[parent] == owners[i] && headings[parent].lineIndex <= headings[i].lineIndex
+        }
+    }
+    val ordered = headings.indices.filter { relevant[it] }
+        .sortedWith(compareBy({ headings[it].lineIndex }, { headings[it].id }, { it }))
+    val children = ordered.filter { keptParent[it] != null }.groupBy { keptParent[it] }
+    val byChapter = ordered.groupBy { owners[it] }
+    val emitted = BooleanArray(headings.size)
+    fun subtree(i: Int): DafNode {
+        emitted[i] = true
+        val h = headings[i]
+        return DafNode(h.text, h.lineIndex, children[i].orEmpty().mapNotNull {
+            if (emitted[it]) null else subtree(it)
+        })
+    }
+    return anchors.indices.map { chapter ->
+        val local = byChapter[chapter].orEmpty()
+        buildList {
+            local.filter { keptParent[it] == null }.forEach { if (!emitted[it]) add(subtree(it)) }
+            // A cyclic source component has no root. Break it at its first
+            // ordered heading, retaining all of its nodes without recursion loops.
+            local.forEach { if (!emitted[it]) add(subtree(it)) }
+        }
     }
 }
 
@@ -529,12 +616,12 @@ internal fun hasOwnChapterHeadings(headings: List<ChaptersHeading>, chapters: Li
 
 /** Pre-existing Chapters structures — minus those this stage wrote. */
 internal fun readChaptersBases(conn: Connection): Map<Long, ChaptersBase> {
-    data class Root(val bookId: Long, val bookTitle: String, val text: String, val lineIndex: Long)
+    data class Root(val bookId: Long, val bookTitle: String, val text: String, val lineIndex: Long, val isBaseBook: Boolean)
 
     val roots = mutableListOf<Root>()
     conn.prepareStatement(
         """
-        SELECT s.bookId, b.title, t.text, l.lineIndex
+        SELECT s.bookId, b.title, t.text, l.lineIndex, b.isBaseBook
         FROM alt_toc_structure s
         JOIN book b ON b.id = s.bookId
         JOIN alt_toc_entry e ON e.structureId = s.id AND e.parentId IS NULL
@@ -547,7 +634,7 @@ internal fun readChaptersBases(conn: Connection): Map<Long, ChaptersBase> {
         st.setString(1, CHAPTERS_STRUCTURE_KEY)
         st.setString(2, INHERITED_CHAPTERS_TITLE_EN)
         st.executeQuery().use { rs ->
-            while (rs.next()) roots += Root(rs.getLong(1), rs.getString(2), rs.getString(3), rs.getLong(4))
+            while (rs.next()) roots += Root(rs.getLong(1), rs.getString(2), rs.getString(3), rs.getLong(4), rs.getBoolean(5))
         }
     }
     val heRefAtOrAfter = conn.prepareStatement(
@@ -561,7 +648,7 @@ internal fun readChaptersBases(conn: Connection): Map<Long, ChaptersBase> {
                 val heRef = st.executeQuery().use { rs -> if (rs.next()) rs.getString(1) else null }
                 BaseChapter(root.text, root.lineIndex, parseHeRefAmud(heRef))
             }
-            ChaptersBase(bookId, bookRoots.first().bookTitle, chapters)
+            ChaptersBase(bookId, bookRoots.first().bookTitle, chapters, bookRoots.first().isBaseBook)
         }
     }
 }
@@ -657,11 +744,13 @@ internal fun readInheritChaptersSnapshots(
                         ?: chapterOfAnchoredLine(anchorsOfSource.getValue(source), lineIndex)
                 }
             }
+            val dafBase = chooseDafBoundaryBase(candidate.titleBaseId, candidate.declared, base, bases)
             val anchors = computeChapterAnchors(
                 chapters = base.chapters,
                 lineIndices = readBookLineIndex(conn, candidate.bookId).map { it.second },
                 headings = headings,
                 chapterByLine = chapterByLine,
+                dafChapters = dafBase?.chapters,
             )
             if (anchors.isEmpty()) {
                 stats.skip("no-anchor", candidate.bookId)
@@ -682,6 +771,7 @@ internal fun readInheritChaptersSnapshots(
                 chapterCount = base.chapters.size,
                 dafs = buildDafChildren(anchors, headings),
                 credited = pass == 2,
+                dafBaseId = dafBase?.bookId,
             )
         }
     }
