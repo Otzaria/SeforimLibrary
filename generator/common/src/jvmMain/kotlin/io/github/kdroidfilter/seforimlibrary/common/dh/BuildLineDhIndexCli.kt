@@ -351,7 +351,8 @@ internal fun indexAllBooks(
                 selectLines.executeQuery().use { rs ->
                     while (rs.next()) {
                         val lineIndex = rs.getLong(1)
-                        val content = rs.getString(2) ?: continue
+                        // Generated display bolding must preserve the original format/noise policy.
+                        val content = DhExtractor.sourceLineForIndex(rs.getString(2) ?: continue)
                         if (content.isBlank() || DhExtractor.isHeadingLine(content)) continue
                         contentLines++
                         DhExtractor.extract(content, DhExtractor.Format.BOLD)?.let {

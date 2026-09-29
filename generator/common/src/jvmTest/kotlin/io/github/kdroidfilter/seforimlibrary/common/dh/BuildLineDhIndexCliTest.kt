@@ -465,4 +465,38 @@ class BuildLineDhIndexCliTest {
             assertEquals(listOf(Triple(99L, "ישן", 99L)), dhRows(conn))
         }
     }
+
+    @Test
+    fun `generated formatting preserves raw format winners noise gates and native bold policy`() {
+        val dash = List(12) { "דיבור מקורי $it – פירוש הדיבור" }
+        val bold = List(14) { "<b>דיבור מודגש $it</b> פירוש הדיבור" }
+        val lead = List(14) { "<b>דיבור</b> מצוטט $it כו'. פירוש הדיבור" }
+        val cases = listOf(
+            dash + "<b>גליון</b> הערה שאינה דיבור מצוטט",
+            dash + bold,
+            dash + lead,
+            List(12) { "אחד – פירוש" } + "<b>ל\"א</b> נוסח אחר",
+            List(9) { "דיבור קטן $it – פירוש" },
+        )
+        for (rawLines in cases) {
+            withDb { conn ->
+                conn.createStatement().use { it.execute("INSERT INTO book (id, title) VALUES (1, 'ספר מעורב')") }
+                insertLines(conn, 1, rawLines)
+                val originalReport = rebuildLineDhIndex(conn, Logger.withTag("test"))
+                fun rows(): List<List<String>> = conn.createStatement().use { st ->
+                    st.executeQuery("SELECT bookId, dhText, lineIndex, dhDisplay FROM line_dh ORDER BY bookId, lineIndex, dhText").use { rs ->
+                        buildList { while (rs.next()) add((1..4).map { rs.getString(it) }) }
+                    }
+                }
+                val original = rows()
+                conn.createStatement().use { it.executeUpdate("DELETE FROM line") }
+                insertLines(conn, 1, rawLines.map(DhExtractor::boldDashDibbur))
+                assertEquals(originalReport, rebuildLineDhIndex(conn, Logger.withTag("test")))
+                assertEquals(original, rows())
+                assertEquals(originalReport, rebuildLineDhIndex(conn, Logger.withTag("test")))
+                assertEquals(original, rows())
+            }
+        }
+    }
+
 }

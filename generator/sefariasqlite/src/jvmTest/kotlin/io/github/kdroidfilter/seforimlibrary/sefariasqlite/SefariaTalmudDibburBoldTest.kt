@@ -19,7 +19,7 @@ class SefariaTalmudDibburBoldTest {
     @Test
     fun `the dibbur before the dash is bolded and the dash is kept`() {
         assertEquals(
-            "<b>עד סוף האשמורה הראשונה</b> – שליש הלילה כדמפרש בגמרא",
+            "<b><b></b><i></i>עד סוף האשמורה הראשונה</b> – שליש הלילה כדמפרש בגמרא",
             SefariaTalmudDibburBold.bold(plain),
         )
     }
@@ -27,7 +27,7 @@ class SefariaTalmudDibburBoldTest {
     @Test
     fun `a daf's first comment is bolded up to its sentence break`() {
         assertEquals(
-            "<b>מאימתי קורין את שמע בערבין</b>. משעה שהכהנים נכנסים לאכול בתרומתן – כהנים שנטמאו וטבלו",
+            "<b><b></b><i></i>מאימתי קורין את שמע בערבין</b>. משעה שהכהנים נכנסים לאכול בתרומתן – כהנים שנטמאו וטבלו",
             SefariaTalmudDibburBold.bold(firstComment),
         )
     }
@@ -98,7 +98,7 @@ class SefariaTalmudDibburBoldTest {
         val before = "דיבור ".repeat(7).trim()
         val sentenceAfterDash = "$before – פירוש. המשך"
         val bold = SefariaTalmudDibburBold.bold(sentenceAfterDash)
-        assertEquals("<b>$before</b> – פירוש. המשך", bold)
+        assertEquals("<b><b></b><i></i>$before</b> – פירוש. המשך", bold)
         assertEquals(DhExtractor.extract(sentenceAfterDash, DhExtractor.Format.DASH), DhExtractor.extract(bold, DhExtractor.Format.BOLD))
         val overlong = "דיבור ראשון. " + "מילה ".repeat(25) + "– פירוש"
         assertEquals(overlong, SefariaTalmudDibburBold.bold(overlong))
