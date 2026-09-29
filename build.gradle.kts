@@ -63,6 +63,7 @@ tasks.register("generateSeforimDb") {
     // db_version=0 (default) and the path chooser always picks FullBundle
     // instead of the incremental chain.
     finalizedBy(":generator-common:stampSchemaVersion")
+    finalizedBy(":generator-common:analyzeSeforimDb")
 }
 // Force stamp ordering after every step that writes to seforim.db, so the
 // stamp runs at the very end of the pipeline (not concurrently with content
@@ -75,6 +76,12 @@ project(":generator-common").tasks.matching { it.name == "stampSchemaVersion" }.
     mustRunAfter(":sefariasqlite:synthesizeSeifimAltToc")
     mustRunAfter(":generator-common:buildLineRefIndex")
     mustRunAfter(":generator-common:buildLineDhIndex")
+}
+// sqlite_stat1 must describe the final rows, so ANALYZE follows the stamp and
+// Phase-2 (generateLinkerLinks), the last writer in the release workflow.
+project(":generator-common").tasks.matching { it.name == "analyzeSeforimDb" }.configureEach {
+    mustRunAfter(":generator-common:stampSchemaVersion")
+    mustRunAfter(":sefariasqlite:generateLinkerLinks")
 }
 
 // Generator diagnostics side-channel (see GeneratorReport). Findings that are
@@ -265,6 +272,7 @@ project(":generator-common").tasks.matching { it.name == "producePatchAndVerify"
     // The stamp writes schema_meta.db_schema_version, which resolveSchemaVersion
     // reads — must land before the producer runs in a single-invocation build.
     mustRunAfter(project(":generator-common").tasks.matching { it.name == "stampSchemaVersion" })
+    mustRunAfter(project(":generator-common").tasks.matching { it.name == "analyzeSeforimDb" })
     // Map the umbrella task's -P props onto the CLI's gradle props.
     val prev = providers.gradleProperty("prevReleaseDb").orNull
     val from = providers.gradleProperty("fromVersion").orNull
