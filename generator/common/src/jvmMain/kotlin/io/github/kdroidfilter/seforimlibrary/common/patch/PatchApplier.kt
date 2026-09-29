@@ -20,7 +20,8 @@ import java.sql.Connection
  *     `DO NOTHING` for pure-PK junctions).
  *  6. For each tracked table in REVERSE FK order:
  *     `DELETE FROM <table> WHERE (pk…) IN (SELECT pk… FROM patch.delete_<table>)`.
- *  6a. Replace `sqlite_stat1` with the patch's `stat1_snapshot`, when it has one.
+ *  6a. Install the patch's `stat1_snapshot`, when present, clear stale STAT4
+ *      histograms, and reload planner statistics on the applying connection.
  *  7. Verify the FK violation count did not grow.
  *  8. (Optional) verify logical content hash.
  *  9. COMMIT.
@@ -138,17 +139,24 @@ class PatchApplier(
         return counts
     }
 
-    /** Replaces the planner statistics with the patch's snapshot; a patch without one keeps them. */
+    /** Installs the patch's planner statistics; a patch without a snapshot keeps the existing ones. */
     private fun applyStat1Snapshot(conn: Connection) {
         if (!patchHasTable(conn, PatchDbSchema.STAT1_SNAPSHOT_TABLE)) return
         conn.createStatement().use { st ->
-            // Creates sqlite_stat1 when missing: CREATE TABLE sqlite_* is reserved.
-            st.execute("ANALYZE main.sqlite_schema")
+            // CREATE TABLE sqlite_* is reserved, so ANALYZE creates sqlite_stat1
+            // for a client that has never been analyzed.
+            if (!mainHasTable(conn, "sqlite_stat1")) st.execute("ANALYZE main.sqlite_schema")
             st.execute("DELETE FROM main.sqlite_stat1")
             st.execute(
                 "INSERT INTO main.sqlite_stat1 (tbl, idx, stat) " +
                     "SELECT tbl, idx, stat FROM patch.\"${PatchDbSchema.STAT1_SNAPSHOT_TABLE}\"",
             )
+            // The patch carries no STAT4 histograms. Old ones describe the
+            // previous DB and can override the fresh stat1 estimates.
+            if (mainHasTable(conn, "sqlite_stat4")) st.execute("DELETE FROM main.sqlite_stat4")
+            // Direct writes to sqlite_stat1 do not refresh this connection's
+            // in-memory query planner statistics.
+            st.execute("ANALYZE main.sqlite_schema")
         }
     }
 
@@ -218,6 +226,13 @@ class PatchApplier(
 
     private fun patchHasTable(conn: Connection, name: String): Boolean {
         conn.prepareStatement("SELECT 1 FROM patch.sqlite_master WHERE type='table' AND name=?").use { ps ->
+            ps.setString(1, name)
+            ps.executeQuery().use { rs -> return rs.next() }
+        }
+    }
+
+    private fun mainHasTable(conn: Connection, name: String): Boolean {
+        conn.prepareStatement("SELECT 1 FROM main.sqlite_master WHERE type='table' AND name=?").use { ps ->
             ps.setString(1, name)
             ps.executeQuery().use { rs -> return rs.next() }
         }
