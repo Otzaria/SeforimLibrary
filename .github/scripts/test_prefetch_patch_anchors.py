@@ -161,11 +161,13 @@ STUB_GH = r"""
     case "$1" in
       api)
         tag=${2##*/}
-        f="$ASSET_ROOT/$tag/seforim.db.zst"
-        [ -f "$f" ] || { echo "no seforim.db.zst on $tag" >&2; exit 1; }
+        name=seforim.db.zst
+        [ ! -f "$ASSET_ROOT/$tag/asset_name" ] || name=$(cat "$ASSET_ROOT/$tag/asset_name")
+        f="$ASSET_ROOT/$tag/$name"
+        [ -f "$f" ] || { echo "no $name on $tag" >&2; exit 1; }
         digest=""
         [ -f "$ASSET_ROOT/$tag/digest" ] && digest=$(cat "$ASSET_ROOT/$tag/digest")
-        printf '%s\t%s\n' "$(stat --format='%s' "$f")" "$digest"
+        printf '%s\t%s\t%s\n' "$(stat --format='%s' "$f")" "$digest" "$name"
         exit 0 ;;
       release)
         shift; shift
@@ -952,7 +954,7 @@ class AnchorCacheEdgeCaseSandboxTest(unittest.TestCase):
             executable=True,
         )
 
-        for tag in ("rp", "nd", "ln", "ro", "keep"):
+        for tag in ("rp", "nd", "ln", "ro", "keep", "s6"):
             write(root / f"a-{tag}.tsv", f"ANCHOR\t1\t26\tv-{tag}\n")
         write(root / "a-dots.tsv", "ANCHOR\t1\t26\t..\nANCHOR\t2\t26\t.\n")
 
@@ -1066,6 +1068,18 @@ class AnchorCacheEdgeCaseSandboxTest(unittest.TestCase):
             run run a-dots.tsv d-dots 2>&1
             echo "-- cache root: $(ls cache | tr '\n' ' ')"
             echo "-- siblings of the cache root survive: $(ls | tr '\n' ' ')"
+
+            # Schema-named assets still need their name when the digest is empty.
+            ./publish.sh v-s6 S nodigest
+            mv assets/v-s6/seforim.db.zst assets/v-s6/seforim-schema6.db.zst
+            printf '%s\n' seforim-schema6.db.zst > assets/v-s6/asset_name
+            phase SCHEMA6_NO_PUBLISHED_DIGEST_COLD
+            run run a-s6.tsv d-s61 2>&1
+            marker d-s61/v-s6; fetched
+            echo "-- delivered bytes: $(stat --format='%s' d-s61/v-s6/seforim.db.zst 2>/dev/null || echo MISSING)"
+            phase SCHEMA6_NO_PUBLISHED_DIGEST_WARM
+            run run a-s6.tsv d-s62 2>&1
+            marker d-s62/v-s6; fetched
             """
         result = subprocess.run(
             [bash, "-c", textwrap.dedent(driver)],
@@ -1146,6 +1160,17 @@ class AnchorCacheEdgeCaseSandboxTest(unittest.TestCase):
         self.assertIn("-- verdict ok", unwritable)
         self.assertIn("-- delivered bytes: 204800", unwritable)
         self.assertEqual(self.result.returncode, 0, self.result.stderr[-2000:])
+
+    def test_a_schema_named_asset_without_a_digest_downloads_once_and_reuses_verified_bytes(self):
+        cold = self.phase("SCHEMA6_NO_PUBLISHED_DIGEST_COLD")
+        self.assertIn("anchor v-s6 (offset 1): seforim-schema6.db.zst 204800 bytes\n", cold)
+        self.assertIn("-- verdict ok", cold)
+        self.assertIn("-- delivered bytes: 204800", cold)
+        self.assertEqual(cold.split("-- downloaded:")[1].splitlines()[0].strip(), "v-s6/seforim-schema6.db.zst")
+        warm = self.phase("SCHEMA6_NO_PUBLISHED_DIGEST_WARM")
+        self.assertIn("reused v-s6 from cache (sha256 ok)", warm)
+        self.assertIn("-- verdict ok", warm)
+        self.assertEqual(warm.split("-- downloaded:")[1].strip(), "")
 
     def test_deleting_the_run_dir_only_drops_a_link_into_the_cache(self):
         # "Clean run-scoped disk leftovers" runs `rm -rf … prefetch` on every

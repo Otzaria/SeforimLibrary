@@ -467,7 +467,8 @@ fetch_one() {  # <target_version> <tag> <offset> <dest-dir>
     printf 'failed\n%s' "$report" > "$dir/.done"
     return 0
   fi
-  IFS=$'\t' read -r expected_size expected_digest expected_name <<<"$meta"
+  # Tab is IFS whitespace: read would collapse an absent digest into the name.
+  IFS='|' read -r expected_size expected_digest expected_name <<<"${meta//$'\t'/|}"
   # Stored locally as seforim.db.zst whatever the release calls it; the fan reads that path.
   [ -n "$expected_name" ] || expected_name="$LEGACY_FULL_DB_ASSET"
   report+="anchor $tag (offset $offset): $expected_name $expected_size bytes${expected_digest:+ $expected_digest}"$'\n'
