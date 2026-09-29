@@ -2530,18 +2530,21 @@ class SeforimRepository(databasePath: String, private val driver: SqlDriver) : L
 
     /**
      * Sorted, distinct target-side line ids covered by links of [typeNames]:
-     * each link's target line plus its side-1 coverage rows.
+     * each link's target line plus its side-1 coverage rows. When [targetBookId]
+     * is supplied, use the book index even if corpus statistics favor a broad type scan.
      */
-    suspend fun selectCoveredTargetLineIds(typeNames: List<String>): LongArray = withContext(Dispatchers.IO) {
-        val types = typeNames.joinToString(",") { "'$it'" }
+    suspend fun selectCoveredTargetLineIds(typeNames: List<String>, targetBookId: Long? = null): LongArray = withContext(Dispatchers.IO) {
+        val types = typeNames.joinToString(",") { "'${it.replace("'", "''")}'" }
+        val bookFilter = targetBookId?.let { "AND l.targetBookId = $it" }.orEmpty()
+        val linkIndex = if (targetBookId != null) " INDEXED BY idx_link_target_book" else ""
         selectLongColumns(
             """
-            SELECT l.targetLineId FROM link l JOIN connection_type ct ON ct.id = l.connectionTypeId
-            WHERE ct.name IN ($types)
+            SELECT l.targetLineId FROM link l$linkIndex JOIN connection_type ct ON ct.id = l.connectionTypeId
+            WHERE ct.name IN ($types) $bookFilter
             UNION
-            SELECT lc.lineId FROM link_coverage lc JOIN link l ON l.id = lc.linkId
+            SELECT lc.lineId FROM link_coverage lc JOIN link l$linkIndex ON l.id = lc.linkId
             JOIN connection_type ct ON ct.id = l.connectionTypeId
-            WHERE lc.side = 1 AND ct.name IN ($types)
+            WHERE lc.side = 1 AND ct.name IN ($types) $bookFilter
             ORDER BY 1
             """.trimIndent(),
             columns = 1,
@@ -2551,25 +2554,41 @@ class SeforimRepository(databasePath: String, private val driver: SqlDriver) : L
     /**
      * (endLineId, linkId) arrays, sorted by endLineId, for links of [typeNames]:
      * where each link's target side ends. A side-1 range kept without coverage
-     * (whole perek/parasha) is left out.
+     * (whole perek/parasha) and suppressed target sides are left out.
+     * [targetBookId] optionally scopes the result to one indexed book.
      */
-    suspend fun selectTargetSideEnds(typeNames: List<String>): Pair<LongArray, LongArray> =
+    suspend fun selectTargetSideEnds(typeNames: List<String>, targetBookId: Long? = null): Pair<LongArray, LongArray> =
         withContext(Dispatchers.IO) {
-            val types = typeNames.joinToString(",") { "'$it'" }
-            val (ends, ids) = selectLongColumns(
-                """
-                SELECT COALESCE(lr.endLineId, l.targetLineId), l.id
-                FROM link l JOIN connection_type ct ON ct.id = l.connectionTypeId
-                LEFT JOIN link_range lr ON lr.linkId = l.id AND lr.side = 1
-                WHERE ct.name IN ($types)
-                  AND (lr.linkId IS NULL OR EXISTS (
-                      SELECT 1 FROM link_coverage lc WHERE lc.linkId = l.id AND lc.side = 1))
-                ORDER BY 1, 2
-                """.trimIndent(),
-                columns = 2,
-            )
-            ends to ids
+            val columns = selectTargetSideEndColumns(typeNames, targetBookId, includeSource = false)
+            columns[0] to columns[1]
         }
+
+    /** End, link and source-line arrays for structurally validating continuation anchors in one book. */
+    suspend fun selectTargetSideEndSources(typeNames: List<String>, targetBookId: Long): Triple<LongArray, LongArray, LongArray> =
+        withContext(Dispatchers.IO) {
+            val columns = selectTargetSideEndColumns(typeNames, targetBookId, includeSource = true)
+            Triple(columns[0], columns[1], columns[2])
+        }
+
+    private fun selectTargetSideEndColumns(typeNames: List<String>, targetBookId: Long?, includeSource: Boolean): List<LongArray> {
+        val types = typeNames.joinToString(",") { "'${it.replace("'", "''")}'" }
+        val bookFilter = targetBookId?.let { "AND l.targetBookId = $it" }.orEmpty()
+        val linkIndex = if (targetBookId != null) " INDEXED BY idx_link_target_book" else ""
+        val sourceColumn = if (includeSource) ", l.sourceLineId" else ""
+        return selectLongColumns(
+            """
+            SELECT COALESCE(lr.endLineId, l.targetLineId), l.id$sourceColumn
+            FROM link l$linkIndex JOIN connection_type ct ON ct.id = l.connectionTypeId
+            LEFT JOIN link_range lr ON lr.linkId = l.id AND lr.side = 1
+            WHERE ct.name IN ($types) $bookFilter
+              AND NOT EXISTS (SELECT 1 FROM link_suppressed_side ss WHERE ss.linkId = l.id AND ss.side = 1)
+              AND (lr.linkId IS NULL OR EXISTS (
+                  SELECT 1 FROM link_coverage lc WHERE lc.linkId = l.id AND lc.side = 1))
+            ORDER BY 1, 2
+            """.trimIndent(),
+            columns = if (includeSource) 3 else 2,
+        )
+    }
 
     private fun selectLongColumns(sql: String, columns: Int): List<LongArray> {
         val out = List(columns) { LongArrayBuilder() }
