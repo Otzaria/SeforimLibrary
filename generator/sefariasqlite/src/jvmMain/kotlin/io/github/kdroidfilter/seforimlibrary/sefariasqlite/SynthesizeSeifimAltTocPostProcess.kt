@@ -97,7 +97,7 @@ fun main(args: Array<String>) {
 }
 
 /** Resolves -DbuildStatePath / BUILD_STATE_PATH, else `<db>.buildstate`. */
-private fun resolveSeifimBuildStatePath(dbPath: Path): Path {
+internal fun resolveSeifimBuildStatePath(dbPath: Path): Path {
     val explicit = System.getProperty("buildStatePath") ?: System.getenv("BUILD_STATE_PATH")
     return if (explicit != null) Paths.get(explicit) else Paths.get("$dbPath.buildstate")
 }
@@ -625,9 +625,9 @@ private fun readBookLines(conn: Connection, bookId: Long): List<SeifRefLine> {
 }
 
 /** Kotlin's trimStart() keeps a BOM; the app strips it too (cleanSectionHeadingLabel). */
-private fun String.trimHeadingStart(): String = trimStart('\uFEFF').trimStart()
+internal fun String.trimHeadingStart(): String = trimStart('\uFEFF').trimStart()
 
-private fun isSimanHeading(text: String): Boolean {
+internal fun isSimanHeading(text: String): Boolean {
     val trimmed = text.trimHeadingStart()
     return trimmed.startsWith("סימן") &&
         trimmed.length > "סימן".length &&
@@ -643,13 +643,13 @@ private fun isSeifHeading(text: String): Boolean {
         !trimmed.removePrefix("סעיף").trimStart().startsWith("קטן")
 }
 
-private fun queryMaxId(conn: Connection, table: String): Long =
+internal fun queryMaxId(conn: Connection, table: String): Long =
     conn.prepareStatement("SELECT COALESCE(MAX(id), 0) FROM $table").use { st ->
         st.executeQuery().use { rs -> rs.next(); rs.getLong(1) }
     }
 
 /** Get-or-create over tocText's UNIQUE text, using build-state for a new id. */
-private fun tocTextId(conn: Connection, text: String, stableIds: AttachedBuildStateIds?): Long {
+internal fun tocTextId(conn: Connection, text: String, stableIds: AttachedBuildStateIds?): Long {
     conn.prepareStatement("SELECT id FROM tocText WHERE text = ?").use { st ->
         st.setString(1, text)
         st.executeQuery().use { rs -> if (rs.next()) return rs.getLong(1) }
