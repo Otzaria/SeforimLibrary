@@ -473,6 +473,8 @@ jobs:
     name: Build seforim.db + bundle + delta fan, publish release
     needs: reconcile
     if: needs.reconcile.outputs.reuse != 'true'
+    outputs:
+      release_tag: ${{ steps.publish.outputs.release_tag }}
     runs-on: ${{ inputs.runner_selection == 'local' && fromJSON('["otzaria-db"]') || (inputs.runner_selection == 'server-2' && fromJSON('["self-hosted", "Linux", "X64", "server-2"]') || fromJSON('["self-hosted", "Linux", "ARM64"]')) }}
     # Self-hosted jobs have a five-day (7200-minute) execution ceiling.  What this
     # parent waits on is the whole child CHAIN in relink.yml, not one job: the default
@@ -2944,3 +2946,26 @@ jobs:
           else
             echo "manifest: unchanged at $(git rev-parse --short HEAD) — nothing to commit"
           fi
+
+  # A GITHUB_TOKEN publish fires no `release` event, so the announcer is dispatched
+  # here too; it dedups per channel when the event also fired.
+  announce-library-update:
+    name: Dispatch the library update announcement
+    needs: build-and-release
+    if: needs.build-and-release.result == 'success' && !inputs.prerelease
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      actions: write
+    steps:
+      - name: Dispatch library-update-announce.yml for the published tag
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ needs.build-and-release.outputs.release_tag }}
+        run: |
+          set -euo pipefail
+          [[ "$RELEASE_TAG" =~ ^v[1-9][0-9]*-[0-9]{14}$ ]] || {
+            echo "::error::build-and-release published no v<N>-<timestamp> tag: '$RELEASE_TAG'"; exit 1; }
+          gh workflow run library-update-announce.yml -R "$GITHUB_REPOSITORY" --ref otzaria \
+            -f tag="$RELEASE_TAG" -f dry_run=false -f channels=forum,yemot
+          echo "dispatched library-update-announce.yml for $RELEASE_TAG"

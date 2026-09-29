@@ -44,6 +44,7 @@ RUN_CEILING = 19000
 # (`runs.using`) at the major tag on 2026-09-08, not from memory.
 NODE24_MAJOR = {
     "actions/checkout": 5,
+    "actions/download-artifact": 7,
     "actions/setup-java": 5,
     "actions/setup-python": 6,
     "actions/upload-artifact": 6,
