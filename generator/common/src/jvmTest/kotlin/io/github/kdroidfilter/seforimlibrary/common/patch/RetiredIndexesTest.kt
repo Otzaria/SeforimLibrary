@@ -80,6 +80,7 @@ class RetiredIndexesTest {
     private companion object {
         val RETIRED = linkedMapOf(
             "idx_link_type" to "CREATE INDEX idx_link_type ON link(connectionTypeId)",
+            "idx_line_heref" to "CREATE INDEX idx_line_heref ON line(heRef)",
         )
     }
 }

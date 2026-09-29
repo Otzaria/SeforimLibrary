@@ -286,7 +286,6 @@ CREATE TABLE IF NOT EXISTS line (
 
 CREATE INDEX IF NOT EXISTS idx_line_book_index ON line(bookId, lineIndex);
 CREATE INDEX IF NOT EXISTS idx_line_toc ON line(tocEntryId);
-CREATE INDEX IF NOT EXISTS idx_line_heref ON line(heRef);
 
 -- Canonical line-reference index: (bookId, refKeyHash) -> lineIndex.
 -- refKeyHash is FNV-1a 64 of the RefKey normalisation of line.heRef with the

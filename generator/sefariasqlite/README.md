@@ -460,21 +460,12 @@ val line = repository.getLineById(lineId)
 println("Ref: ${line.heRef}")  // "בראשית א, א"
 ```
 
-SQLite examples:
-```sql
-SELECT * FROM line WHERE heRef = 'בראשית א, א';
-SELECT * FROM line WHERE heRef LIKE 'בראשית א,%';
-```
+### Resolving a citation to a line
 
-### Index Performance
-
-The schema includes an index on the Hebrew reference column for fast lookups:
-- `idx_line_heref` - Index on Hebrew references
-
-These enable efficient queries like:
-- Finding all lines for a specific citation
-- Range queries (e.g., all lines in a chapter)
-- Reverse lookup from citation to content
+`line.heRef` is stored for display and is not indexed, so a `WHERE heRef = ?`
+predicate is a full scan of `line`. Resolve citations through the `line_ref`
+index (`bookId`, `refKeyHash` -> `lineIndex`), then read the line by
+`bookId` + `lineIndex` (`idx_line_book_index`).
 
 ## Usage
 
