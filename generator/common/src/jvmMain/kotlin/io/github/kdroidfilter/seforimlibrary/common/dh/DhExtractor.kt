@@ -101,17 +101,40 @@ object DhExtractor {
     private const val GENERATED_DASH_OPEN = "<b><b></b><i></i>"
     private const val GENERATED_DASH_CLOSE = "</b>"
 
+    // The generator's "(א) " line numbering (toGematria form, 1..999) precedes the dibbur.
+    private val NUMBERING_MARKER = Regex("""^\s*\(([א-ת]{1,5})\) """)
+    private val GEMATRIA_1_TO_999: Set<String> = (1..999).mapTo(HashSet(), ::gematria)
+
     /** Extracts the dibbur of [line] in [format], or `null`. */
     fun extract(line: String, format: Format): Dh? {
         val raw = originalGeneratedDashLine(line)
         if (raw != null) {
-            return if (format == Format.BOLD_LEAD) null else extractDash(raw)
+            return if (format == Format.BOLD_LEAD) null else extractDash(withoutNumberingMarker(raw))
         }
+        val text = withoutNumberingMarker(line)
         return when (format) {
-            Format.BOLD -> extractBold(line)
-            Format.DASH -> extractDash(line)
-            Format.BOLD_LEAD -> extractBoldLead(line)
+            Format.BOLD -> extractBold(text)
+            Format.DASH -> extractDash(text)
+            Format.BOLD_LEAD -> extractBoldLead(text)
         }
+    }
+
+    /** [line] without one leading exact-gematria numbering marker, else unchanged. */
+    private fun withoutNumberingMarker(line: String): String {
+        val m = NUMBERING_MARKER.find(line) ?: return line
+        return if (m.groupValues[1] in GEMATRIA_1_TO_999) line.substring(m.range.last + 1) else line
+    }
+
+    // Mirrors sefariasqlite's toGematria for 1..999 (pinned by a test there).
+    private fun gematria(value: Int): String {
+        var n = value
+        val sb = StringBuilder()
+        while (n >= 400) { sb.append('ת'); n -= 400 }
+        for ((v, c) in listOf(300 to 'ש', 200 to 'ר', 100 to 'ק')) if (n >= v) { sb.append(c); n -= v }
+        if (n == 15 || n == 16) return sb.append('ט').append(if (n == 15) 'ו' else 'ז').toString()
+        if (n >= 10) { sb.append("יכלמנסעפצ"[n / 10 - 1]); n %= 10 }
+        if (n > 0) sb.append("אבגדהוזחט"[n - 1])
+        return sb.toString()
     }
 
     /**

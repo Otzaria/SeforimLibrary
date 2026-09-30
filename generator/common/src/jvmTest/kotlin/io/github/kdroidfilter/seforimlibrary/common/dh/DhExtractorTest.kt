@@ -1,6 +1,7 @@
 package io.github.kdroidfilter.seforimlibrary.common.dh
 
 import io.github.kdroidfilter.seforimlibrary.common.dh.DhExtractor.Format
+import io.github.kdroidfilter.seforimlibrary.core.dh.DhKey
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNull
@@ -279,4 +280,60 @@ class DhExtractorTest {
         assertNull(key(native, Format.DASH))
     }
 
+    // ── Leading "(gematria) " numbering marker ─────────────────────────────
+
+    @Test
+    fun `generated numbering prefix does not hide a bold dibbur`() {
+        // Magen Avraham 1 in seforim.db.
+        assertEquals(
+            DhExtractor.Dh("שיהא הוא מעורר השחר", "שיהא הוא מעורר השחר"),
+            DhExtractor.extract("(א) <b>שיהא הוא מעורר השחר</b>. בשל\"ה כתוב סוד לחבר יום ולילה", Format.BOLD),
+        )
+        assertEquals("ומיד", key("  (תתקצט) <b>ומיד</b>. ל\"ד אלא ישהא מעט", Format.BOLD))
+    }
+
+    @Test
+    fun `numbering prefix is excluded from a dash dibbur`() {
+        // Mishnah Berurah 1:1 in seforim.db.
+        assertEquals(
+            DhExtractor.Dh("לעבודת בוראו", "לעבודת בוראו"),
+            DhExtractor.extract("(א) לעבודת בוראו – כי לכך נברא האדם", Format.DASH),
+        )
+        assertEquals("השחר", key("(טו) השחר – בשל\"ה כתב סוד", Format.DASH))
+        // A stop marker stays a stop marker once its number is removed.
+        assertNull(key("(מז) סימן – פירוש", Format.DASH))
+    }
+
+    @Test
+    fun `numbering prefix before a generated dash envelope is removed from the key only`() {
+        val raw = "(ב) השחר – בשל\"ה כתב סוד"
+        val generated = DhExtractor.boldDashDibbur(raw)
+        assertEquals(raw, DhExtractor.sourceLineForIndex(generated))
+        assertEquals("השחר", key(generated, Format.BOLD))
+        assertEquals(DhExtractor.extract(raw, Format.DASH), DhExtractor.extract(generated, Format.BOLD))
+    }
+
+    @Test
+    fun `parenthesised words and non-canonical numerals are not stripped`() {
+        for (marker in listOf("כדור", "שם", "יה", "יו", "טוו", "אא", "הי", "תתתק", "א׳", "ט\"ו", "ך", "1")) {
+            assertEquals(DhKey.normalize("($marker) דיבור"), key("($marker) דיבור – פירוש", Format.DASH), marker)
+        }
+        assertNull(key("(כדור) <b>דיבור</b> פירוש", Format.BOLD))
+    }
+
+    @Test
+    fun `only the exact marker shape is stripped`() {
+        assertNull(key("(א)<b>דיבור</b> פירוש", Format.BOLD))
+        assertNull(key("(א)\t<b>דיבור</b> פירוש", Format.BOLD))
+        assertNull(key("[א] <b>דיבור</b> פירוש", Format.BOLD))
+        // Exactly one marker: a second one is left in place.
+        assertNull(key("(א) (ב) <b>דיבור</b> פירוש", Format.BOLD))
+    }
+
+    @Test
+    fun `lines without a numbering prefix are unchanged`() {
+        assertEquals("בראשית", key("<b>בראשית.</b> אמר רבי יצחק", Format.BOLD))
+        assertEquals("עד סוף האשמורה", key("עד סוף האשמורה – שליש הלילה", Format.DASH))
+        assertEquals("אין שלום", key("<b>אין</b> שלום כו'. הכא ניחא", Format.BOLD_LEAD))
+    }
 }
