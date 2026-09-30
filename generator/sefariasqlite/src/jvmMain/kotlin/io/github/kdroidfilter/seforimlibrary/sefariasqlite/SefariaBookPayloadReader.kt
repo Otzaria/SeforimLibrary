@@ -728,24 +728,35 @@ internal class SefariaBookPayloadReader(
                 // A second walk of the book repeats the same separations: count them once.
                 val cleaned = SefariaDashlessDibburim.separate(bookHeTitle, normalized, recordStats = !labels.repeatedWalk)
                 if (cleaned.isNotEmpty()) {
+                    val topic = if (output.lastOrNull()?.startsWith("<h") == true) {
+                        SefariaSimanTopicLines.split(bookHeTitle, cleaned)
+                    } else {
+                        null
+                    }
+                    if (topic != null) output += topic.line
+                    val stored = topic?.seif ?: cleaned
                     // Reproduce the old pipeline BEFORE the dashless repair: keeping
                     // a break can either enable or suppress that repair. Collapsing
                     // the final rendered line cannot undo an already inserted dash.
                     // Store only changed hashes, so plain lines need no extra scan
                     // during precomputation and we retain no second copy of the text.
-                    if (lineKeyHashOverrides != null && !collapseBreaks && "<br>" in normalized) {
-                        val keyContent = SefariaDashlessDibburim.separate(
-                            bookHeTitle,
-                            cleanSefariaLine(content, collapseInlineBreaks = true),
-                            recordStats = false,
-                        )
-                        if (keyContent != cleaned) {
+                    if (lineKeyHashOverrides != null) {
+                        val keyContent = if (!collapseBreaks && "<br>" in normalized) {
+                            SefariaDashlessDibburim.separate(
+                                bookHeTitle,
+                                cleanSefariaLine(content, collapseInlineBreaks = true),
+                                recordStats = false,
+                            )
+                        } else {
+                            cleaned
+                        }
+                        if (keyContent != stored) {
                             lineKeyHashOverrides[output.size] = IdAllocatorBindings.lineNaturalKeyHash(keyContent)
                         }
                     }
-                    output += linePrefix + cleaned
+                    output += linePrefix + stored
                     if (cleanShifts != null) {
-                        if (cleaned != content) {
+                        if (stored != content) {
                             // Keep the char-offset gate and the generated-prefix
                             // length in one value: anchors reject every negative
                             // value, while the line-key path can still strip the
