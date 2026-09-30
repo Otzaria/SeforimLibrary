@@ -1,7 +1,14 @@
 package io.github.kdroidfilter.seforimlibrary.sefariasqlite
 
+import app.cash.sqldelight.driver.jdbc.sqlite.JdbcSqliteDriver
 import co.touchlab.kermit.Logger
 import io.github.kdroidfilter.seforimlibrary.common.ids.IdAllocatorBindings
+import io.github.kdroidfilter.seforimlibrary.common.ids.InMemoryIdAllocator
+import io.github.kdroidfilter.seforimlibrary.core.models.Book
+import io.github.kdroidfilter.seforimlibrary.core.models.Category
+import io.github.kdroidfilter.seforimlibrary.core.models.Line
+import io.github.kdroidfilter.seforimlibrary.dao.repository.SeforimRepository
+import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonPrimitive
@@ -80,11 +87,54 @@ class SefariaSimanTopicLinesTest {
     }
 
     @Test
-    fun `lines without a topic are left as they are`() {
-        val countOnly = "<b>ובו סעיף אחד:</b> טקסט"
+    fun `a bare seif count gets its own line like every other topic`() {
+        val built = build("שולחן ערוך, אורח חיים", listOf("<b>ובו סעיף אחד:</b> טקסט"))
+
+        assertEquals(listOf("<b>ובו סעיף אחד:</b>", "טקסט"), built.lines.drop(2))
+    }
+
+    @Test
+    fun `only the first seif of a siman in the Shulchan Aruch is split`() {
         val laterSeif = "<b>דין אחר. ובו ב סעיפים:</b> טקסט"
-        assertEquals(countOnly, build("שולחן ערוך, אורח חיים", listOf(countOnly)).lines.last())
         assertEquals("(ב) $laterSeif", build("שולחן ערוך, אורח חיים", listOf("ראשון", laterSeif)).lines.last())
         assertEquals("(א) $laterSeif", build("ספר אחר", listOf(laterSeif, "שני")).lines[2])
+    }
+
+    @Test
+    fun `a Topic alt-toc entry opening a siman points at its topic line`() = runBlocking {
+        val heTitle = "שולחן ערוך, אורח חיים"
+        val built = build(heTitle, listOf("<b>דין השכמת הבוקר. ובו ט סעיפים:</b> יתגבר", "שני"))
+        val driver = JdbcSqliteDriver(JdbcSqliteDriver.IN_MEMORY)
+        val repository = SeforimRepository(":memory:", driver)
+        val bookId = repository.insertBook(
+            Book(
+                id = 0, categoryId = repository.insertCategory(Category(id = 0, parentId = null, title = "שולחן ערוך", level = 0, order = 0)),
+                sourceId = repository.insertSource("Sefaria"), title = heTitle, heShortDesc = null, notesContent = null,
+                order = 0f, totalLines = built.lines.size, isBaseBook = true, hasAltStructures = true,
+            ),
+        )
+        val lineKeyToId = built.lines.indices.associate { i ->
+            (heTitle to i) to repository.insertLine(Line(id = 0, bookId = bookId, lineIndex = i, content = built.lines[i], heRef = null))
+        }
+        val node = AltNodePayload(
+            title = "Laws of Morning Conduct", heTitle = "הלכות הנהגת האדם בבוקר",
+            wholeRef = "Shulchan Arukh, Orach Chayim 1", refs = listOf("Shulchan Arukh, Orach Chayim 1:1"),
+            addressTypes = listOf("Siman"), childLabel = null, addresses = emptyList(), skippedAddresses = emptyList(),
+            startingAddress = null, offset = null, children = emptyList(),
+        )
+        val payload = BookPayload(
+            heTitle = heTitle, enTitle = "Shulchan Arukh, Orach Chayim", categoriesHe = listOf("שולחן ערוך"),
+            lines = built.lines, refEntries = built.refs, headings = built.headings,
+            authors = emptyList(), description = null, heShortDesc = null, pubDates = emptyList(),
+            altStructures = listOf(AltStructurePayload(key = "Topic", title = "Topic", heTitle = heTitle, nodes = listOf(node))),
+        )
+
+        val bindings = IdAllocatorBindings(InMemoryIdAllocator.load(path = null), repository)
+        SefariaAltTocBuilder(repository, bindings).buildAltTocStructuresForBook(payload, bookId, heTitle, lineKeyToId, built.lines.size)
+
+        val structureId = repository.getAltTocStructuresForBook(bookId).single().id
+        val entry = repository.getAltTocEntriesForStructure(structureId).single { it.text == "הלכות הנהגת האדם בבוקר" }
+        assertEquals(lineKeyToId[heTitle to 2], entry.lineId)
+        driver.close()
     }
 }

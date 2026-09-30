@@ -28,8 +28,7 @@ internal object SefariaSimanTopicLines {
         val match = LEADING_BOLD.find(line) ?: return null
         val inner = match.groupValues[1]
         val plain = TAG.replace(inner, "").replace(WHITESPACE, " ").trim()
-        // A bare "ובו סעיף אחד" names no topic; a line of its own would only add noise.
-        if (plain.startsWith("ובו ") || !SEIF_COUNT.containsMatchIn(plain)) return null
+        if (!SEIF_COUNT.containsMatchIn(plain)) return null
         val rest = line.substring(match.range.last + 1)
         if (rest.isBlank()) return null
         // Commentator markers keep their line: only the se'if line carries a ref to anchor them.
@@ -39,4 +38,9 @@ internal object SefariaSimanTopicLines {
             seif = markers + rest,
         )
     }
+
+    /** True when [lines]`[index]` is a topic line [split] placed between a siman heading and its se'if. */
+    fun isTopicLine(bookHeTitle: String, lines: List<String>, index: Int): Boolean =
+        bookHeTitle in bookHeTitles && index >= 1 &&
+            lines.getOrNull(index)?.startsWith("<b>") == true && lines[index - 1].startsWith("<h")
 }
