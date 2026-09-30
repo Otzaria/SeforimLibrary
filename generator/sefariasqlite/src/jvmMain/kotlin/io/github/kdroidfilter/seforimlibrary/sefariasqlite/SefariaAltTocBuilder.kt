@@ -110,7 +110,7 @@ internal class SefariaAltTocBuilder(
                     bookId = bookId,
                     key = structure.key,
                     title = structure.title,
-                    heTitle = structure.heTitle
+                    heTitle = SefariaAltStructureNames.heTitle(structure.key, structure.heTitle, payload.heTitle)
                 )
             )
 
