@@ -352,6 +352,21 @@ class SefariaImageEmbedderTest {
     }
 
     @Test
+    fun gcsPathOfTheBucketIsScannedAndSubstituted() = runBlocking {
+        // Yahel Ohr links its page images this way; they used to ship remote.
+        val url = "https://storage.googleapis.com/textimages.sefaria.org/yahel_ohr/500px-YAHEL_OR_PAGE_140.png"
+        val (dir, json) = mergedJsonWith(url)
+        val requested = mutableListOf<String>()
+        SefariaImageEmbedder.downloader = { requested += it; byteArrayOf(1, 2, 3) }
+
+        SefariaImageEmbedder.prefetch(listOf(json), cacheDir = dir, reportPath = reportPath(dir))
+
+        assertEquals(listOf(url), requested)
+        assertEquals(0, reportIn(dir).failed)
+        assertTrue(cleanSefariaLine("""<img src="$url">""").contains("data:image/png;base64,AQID"))
+    }
+
+    @Test
     fun onlyTheRequestIsPercentEncoded() {
         assertEquals(
             "https://textimages.sefaria.org/a%20b/c.png",

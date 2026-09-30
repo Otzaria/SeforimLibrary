@@ -44,7 +44,8 @@ import kotlin.io.path.readBytes
  *      to `<img src="data:…">`; called from [cleanSefariaLine].
  */
 object SefariaImageEmbedder {
-    private const val URL_PREFIX = "https://textimages.sefaria.org/"
+    // Cheap pre-filter; it also matches the bucket's storage.googleapis.com path.
+    private const val URL_MARKER = "textimages.sefaria.org/"
     private const val USER_AGENT = "SeforimLibrary-SefariaImageEmbedder/1.0"
     private const val DOWNLOAD_PARALLELISM = 16
     private const val MAX_IMAGE_BYTES = 5 * 1024 * 1024 // 5 MiB ceiling per image
@@ -96,11 +97,15 @@ object SefariaImageEmbedder {
     // and at any line break.
     private const val URL_BODY = """[^"'<>\\\n\r\t]+"""
 
+    // Some books (Yahel Ohr) reference the same bucket through its GCS path;
+    // without this those images stay remote and render as ❌.
+    private const val URL_START = """https://(?:storage\.googleapis\.com/)?textimages\.sefaria\.org/"""
+
     // Regex used both to detect URLs up-front and to rewrite them inline.
     // Captures: (1) the full URL, (2) nothing — we replace the URL inside the
     // matched `<img ...>` tag so surrounding attributes are preserved.
     private val IMG_TAG_REGEX = Regex(
-        "<img\\s+[^>]*src=[\"'](https://textimages\\.sefaria\\.org/$URL_BODY)[\"'][^>]*/?>",
+        "<img\\s+[^>]*src=[\"']($URL_START$URL_BODY)[\"'][^>]*/?>",
         RegexOption.IGNORE_CASE
     )
 
@@ -182,7 +187,7 @@ object SefariaImageEmbedder {
      * Preserves any other attributes on the tag.
      */
     fun substituteImages(content: String): String {
-        if (!enabled || !content.contains(URL_PREFIX)) return content
+        if (!enabled || !content.contains(URL_MARKER)) return content
         return IMG_TAG_REGEX.replace(content) { match ->
             val url = match.groupValues[1]
             val dataUri = dataUriByUrl[url] ?: return@replace match.value
@@ -253,8 +258,8 @@ object SefariaImageEmbedder {
 
     private fun collectUrls(mergedJsonPaths: Collection<Path>): Set<String> {
         val out = HashSet<String>()
-        val bytePattern = URL_PREFIX.toByteArray(Charsets.UTF_8)
-        val textRegex = Regex("https://textimages\\.sefaria\\.org/$URL_BODY")
+        val bytePattern = URL_MARKER.toByteArray(Charsets.UTF_8)
+        val textRegex = Regex("$URL_START$URL_BODY")
         for (p in mergedJsonPaths) {
             val bytes = runCatching { Files.readAllBytes(p) }.getOrNull() ?: continue
             if (indexOfSubSequence(bytes, bytePattern) < 0) continue

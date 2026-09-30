@@ -187,6 +187,15 @@ class RecoverySnapshotVerifierTest(_VerifierCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("unlinked_image_src_differences=1", result.stdout)
 
+    def test_unlinked_gcs_remote_to_inline_image_passes(self):
+        inline = base64.b64encode(b"png").decode()
+        result = self.run_case(
+            '<img src="https://storage.googleapis.com/textimages.sefaria.org/book/image.png">',
+            f'<img src="data:image/png;base64,{inline}">',
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("unlinked_image_src_differences=1", result.stdout)
+
     def test_unlinked_image_inside_text_passes(self):
         inline = base64.b64encode(b"png").decode()
         result = self.run_case(
