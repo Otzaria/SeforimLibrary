@@ -815,13 +815,16 @@ class ManualReleaseWorkflowContractTest(unittest.TestCase):
         self.assertIn('WAIT_BUDGET="$PREFETCH_WAIT_SECONDS"', lib)
         self.assertIn('"$PREFETCH_WAITED" -lt "$WAIT_BUDGET"', lib)
         self.assertIn('if [ -f "$PREFETCH_DIR/.abandoned" ]; then\n    WAIT_BUDGET=0', lib)
+        # A verified prefetch hands over the asset under its release name, a
+        # zdb first, so the restore below knows its container.
+        self.assertIn('if [ "$PREFETCH_STATE" = ok ]; then', lib)
         self.assertIn(
-            'if [ "$PREFETCH_STATE" = ok ] && [ -s "$PREFETCH_DIR/$TAG/seforim.db.zst" ]; then',
+            'for CANDIDATE in "$PREFETCH_DIR/$TAG"/seforim-schema*.zdb'
+            ' "$PREFETCH_DIR/$TAG/$LEGACY_FULL_DB_ASSET"; do',
             lib,
         )
-        self.assertIn(
-            'mv "$PREFETCH_DIR/$TAG/seforim.db.zst" "$ANCHOR_DIR/seforim.db.zst"', lib
-        )
+        self.assertIn('mv "$CANDIDATE" "$ANCHOR_ASSET"', lib)
+        self.assertNotIn('"$ANCHOR_DIR/seforim.db.zst"', lib)
         self.assertIn("falling back to the serial download", lib)
         self.assertIn("prefetch_patch_anchors.sh abort", lib)
         self.assertLess(
@@ -1029,8 +1032,25 @@ class ManualReleaseWorkflowContractTest(unittest.TestCase):
         )
         self.assertIn(
             "::error::anchor v${TARGET_VER} ($TAG): the full DB from that"
-            " release could not be decompressed",
+            " release could not be restored from ${ANCHOR_ASSET##*/}",
             lib,
+        )
+
+    def test_the_fan_restores_a_zdb_anchor_with_the_pinned_converter(self):
+        # From the second zdb release on, the previous anchor is a zdb: unzstd
+        # cannot read it, the converter the job already built can.
+        lib = self.fan_lib
+        restore = lib.split("restore_anchor_db() {", 1)[1].split("\n}\n", 1)[0]
+        self.assertIn('unzstd -c "$ASSET" > "$OUT"', restore)
+        self.assertIn('--pattern "$NAME.manifest.json"', restore)
+        self.assertLess(restore.index("manifest.json"), restore.index('"$ZVFS_CLI" verify "$ASSET"'))
+        self.assertIn('"$ZVFS_CLI" verify "$ASSET" && "$ZVFS_CLI" export "$ASSET" "$OUT"', restore)
+        self.assertIn('restore_anchor_db "$ANCHOR_ASSET" "$PREV_DB" "$TAG"', lib)
+        self.assertNotIn("unzstd", lib.split("restore_anchor_db() {", 1)[0])
+        # ZVFS_CLI reaches the fan through GITHUB_ENV, so it is built first.
+        self.assertLess(
+            self.workflow.index("      - name: Build pinned zvfs_cli\n"),
+            self.workflow.index("      - name: Produce + verify patch fan\n"),
         )
 
     def test_the_background_aborts_say_what_they_aborted(self):

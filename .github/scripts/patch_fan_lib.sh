@@ -102,6 +102,48 @@ record_skip() {  # <oversized|structural> <target-version> <reason>
   printf 'anchor v%s: %s\n' "$2" "$3" > "$SKIP_DIR/v$2.$1"
 }
 
+# The anchor's plain seforim.db from its release asset, whichever container it is.
+# A zdb is checked against its release manifest when the release has one.
+restore_anchor_db() {  # <asset-file> <out-db> <tag>
+  local ASSET="$1" OUT="$2" TAG="$3" NAME="${1##*/}" MANIFEST
+  case "$NAME" in
+    "$LEGACY_FULL_DB_ASSET")
+      unzstd -c "$ASSET" > "$OUT"
+      return
+      ;;
+    seforim-schema*.zdb) ;;
+    *)
+      echo "$NAME is neither $LEGACY_FULL_DB_ASSET nor a seforim-schema<N>.zdb"
+      return 1
+      ;;
+  esac
+  if [ ! -x "${ZVFS_CLI:-}" ]; then
+    echo "$NAME is a zdb and ZVFS_CLI ('${ZVFS_CLI:-}') is not executable — 'Build pinned zvfs_cli' must run before the fan"
+    return 1
+  fi
+  MANIFEST="$ASSET.manifest.json"
+  rm -f "$MANIFEST"
+  if gh release download "$TAG" --pattern "$NAME.manifest.json" \
+       --dir "$(dirname "$ASSET")" 2>"$MANIFEST.err"; then
+    python3 - "$MANIFEST" "$NAME" "$(stat -c %s "$ASSET")" "$(sha256sum "$ASSET" | cut -d' ' -f1)" <<'PY' || return 1
+import json, sys
+path, name, size, sha = sys.argv[1:]
+try:
+    manifest = json.load(open(path, encoding="utf-8"))
+except (OSError, ValueError) as error:
+    sys.exit(f"{name}.manifest.json is unreadable: {error}")
+got = (manifest.get("file"), manifest.get("size"), manifest.get("sha256"))
+if got != (name, int(size), sha):
+    sys.exit(f"{name} is {size} bytes sha256 {sha}; its manifest says file={got[0]} size={got[1]} sha256={got[2]}")
+print(f"{name}: size and sha256 match its release manifest")
+PY
+  else
+    echo "::warning::$TAG: release carries no $NAME.manifest.json ($(tr -d '\r' < "$MANIFEST.err" | head -n1)) — relying on zvfs_cli verify alone"
+  fi
+  rm -f "$MANIFEST" "$MANIFEST.err"
+  "$ZVFS_CLI" verify "$ASSET" && "$ZVFS_CLI" export "$ASSET" "$OUT"
+}
+
 # One anchor, start to finish: pre-check, reconstitute, produce,
 # verify, clean up. Every path it touches is scoped to its own offset
 # so two of these can run side by side, it writes to its own log, and
@@ -116,7 +158,7 @@ produce_anchor() {  # <offset> <target-version> <tag>
   local PREV_DB="$ANCHOR_DIR/seforim.db"
   local PATCH_OUT="$PWD/patches/patch-v${TARGET_VER}-v${THIS_VER}.db"
   local PRECHECK WAIT_BUDGET PREFETCH_STATE PREFETCH_WAITED
-  local PREV_SCHEMA PRODUCE_RC REASON SKIP_KIND ANCHOR_SCHEMA DB_ASSETS DB_ASSET CANDIDATE
+  local PREV_SCHEMA PRODUCE_RC REASON SKIP_KIND ANCHOR_SCHEMA DB_ASSETS DB_ASSET CANDIDATE ANCHOR_ASSET
   local T_START T_DOWNLOADED T_EXTRACTED T_DONE
   echo "=== Producing patch v${TARGET_VER} → v${THIS_VER} (offset $OFFSET, tag=$TAG) ==="
 
@@ -202,10 +244,18 @@ produce_anchor() {  # <offset> <target-version> <tag>
     fi
   fi
   T_START=$(date +%s)
-  if [ "$PREFETCH_STATE" = ok ] && [ -s "$PREFETCH_DIR/$TAG/seforim.db.zst" ]; then
-    mv "$PREFETCH_DIR/$TAG/seforim.db.zst" "$ANCHOR_DIR/seforim.db.zst"
-    echo "anchor v${TARGET_VER} ($TAG): reused the prefetched DB"
-  else
+  # The asset keeps its release name: the name is what says .zst or .zdb.
+  ANCHOR_ASSET=""
+  if [ "$PREFETCH_STATE" = ok ]; then
+    for CANDIDATE in "$PREFETCH_DIR/$TAG"/seforim-schema*.zdb "$PREFETCH_DIR/$TAG/$LEGACY_FULL_DB_ASSET"; do
+      [ -s "$CANDIDATE" ] || continue
+      ANCHOR_ASSET="$ANCHOR_DIR/${CANDIDATE##*/}"
+      mv "$CANDIDATE" "$ANCHOR_ASSET"
+      echo "anchor v${TARGET_VER} ($TAG): reused the prefetched ${CANDIDATE##*/}"
+      break
+    done
+  fi
+  if [ -z "$ANCHOR_ASSET" ]; then
     # Under `set -e` a failed download used to end this subshell with
     # nothing but gh's own bare stderr, and the driver could only say
     # "exit code 1". Name the release, the asset and gh's reason.
@@ -228,11 +278,11 @@ produce_anchor() {  # <offset> <target-version> <tag>
       return 1
     fi
     rm -f "$ANCHOR_DIR/gh.err"
-    [ "$DB_ASSET" = seforim.db.zst ] || mv "$ANCHOR_DIR/$DB_ASSET" "$ANCHOR_DIR/seforim.db.zst"
+    ANCHOR_ASSET="$ANCHOR_DIR/$DB_ASSET"
   fi
   T_DOWNLOADED=$(date +%s)
-  if ! unzstd -c "$ANCHOR_DIR/seforim.db.zst" > "$PREV_DB"; then
-    echo "::error::anchor v${TARGET_VER} ($TAG): the full DB from that release could not be decompressed — no patch can be produced against this anchor"
+  if ! restore_anchor_db "$ANCHOR_ASSET" "$PREV_DB" "$TAG"; then
+    echo "::error::anchor v${TARGET_VER} ($TAG): the full DB from that release could not be restored from ${ANCHOR_ASSET##*/} — no patch can be produced against this anchor"
     rm -rf "$ANCHOR_DIR"
     return 1
   fi

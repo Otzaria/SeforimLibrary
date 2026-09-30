@@ -2,14 +2,15 @@
 # Fetch the patch fan's anchor DBs in parallel while the job is busy elsewhere,
 # through a cache that OUTLIVES a failed attempt.
 #
-# The fan reconstitutes every anchor from that release's 1.3 GB seforim.db.zst.
+# The fan reconstitutes every anchor from that release's 1.3 GB full-DB asset.
 # Serially, in the fan itself, that cost run 33865604251 110-135 s per anchor
 # (~10 min of the 2015 s step) with the CPU idle. The anchor tags are known long
 # before: prior-versions.tsv exists before "Generate Seforim Database", which
 # then burns ~36 minutes of CPU without touching the network. This script runs
-# in the background across that window and leaves each anchor's verified .zst in
-# <dest>/<tag>/seforim.db.zst on the workspace disk (never on the 16 GiB tmpfs
-# build/, which has no room for 6.5 GB of anchors).
+# in the background across that window and leaves each anchor's verified asset,
+# under its release name (seforim.db.zst or seforim-schema<N>.zdb), in <dest>/<tag>/
+# on the workspace disk (never on the 16 GiB tmpfs build/, which has no room for
+# 6.5 GB of anchors).
 #
 #   prefetch_patch_anchors.sh start <anchors-tsv> <dest-dir>
 #   prefetch_patch_anchors.sh run   <anchors-tsv> <dest-dir>   (internal)
@@ -43,7 +44,7 @@
 # Per anchor it writes <dest>/<tag>/.done whose FIRST line is the verdict the fan
 # reads and whose remaining lines are the human timing report:
 #
-#   ok           <dest>/<tag>/seforim.db.zst exists and matches the release
+#   ok           <dest>/<tag>/<asset> exists and matches the release
 #                asset's published size (and digest, when GitHub has computed it)
 #   unpatchable  the shared pre-download patchability check rejected the anchor,
 #                so nothing was downloaded
@@ -293,13 +294,14 @@ verify_asset() {  # <file> <tag> <expected-size> <expected-digest> <actual-sha25
   fi
 }
 
-cache_lookup() {  # <tag> <expected-size> <expected-digest> <dest-file>
+cache_lookup() {  # <tag> <asset-name> <expected-size> <expected-digest> <dest-file>
   # 0 only when <dest-file> now holds the anchor and its sha256 was re-verified.
-  local tag="$1" size="$2" digest="$3" out="$4"
+  local tag="$1" name="$2" size="$3" digest="$4" out="$5"
   local dir file recorded expected actual actual_size
   cache_enabled || return 1
   dir="$CACHE_DIR/$tag"
-  file="$dir/seforim.db.zst"
+  # Keyed by the asset name too: a .zst entry never answers for a .zdb.
+  file="$dir/$name"
   [ -s "$file" ] || return 1
   actual_size=$(stat --format='%s' "$file" 2>/dev/null) || actual_size=0
   if [ "$actual_size" != "$size" ]; then
@@ -337,8 +339,8 @@ cache_lookup() {  # <tag> <expected-size> <expected-digest> <dest-file>
   cache_mark_used "$dir"
 }
 
-cache_store() {  # <file> <tag> <sha256> <size> <published-digest>
-  local file="$1" tag="$2" sha="$3" size="$4" digest="$5" dir tmp
+cache_store() {  # <file> <tag> <sha256> <size> <published-digest>; stored under <file>'s name
+  local file="$1" tag="$2" sha="$3" size="$4" digest="$5" name="${1##*/}" dir tmp
   cache_enabled || return 1
   dir="$CACHE_DIR/$tag"
   mkdir -p "$dir" 2>/dev/null || {
@@ -353,11 +355,11 @@ cache_store() {  # <file> <tag> <sha256> <size> <published-digest>
     return 1
   fi
   # Publish the entry atomically: a half-written file must never look cached.
-  mv -f "$tmp" "$dir/seforim.db.zst" || { rm -f "$tmp"; return 1; }
+  mv -f "$tmp" "$dir/$name" || { rm -f "$tmp"; return 1; }
   # used_ns is the pruner's rank key and is computed while this tag's previous
   # .meta (if it had one) is still on disk, so a re-store also ranks newest.
-  printf 'tag=%s\nsize=%s\nsha256=%s\npublished_digest=%s\ncached_at=%s\nused_ns=%s\n' \
-    "$tag" "$size" "$sha" "$digest" "$(date +%s)" "$(cache_next_use_key)" > "$dir/.meta"
+  printf 'tag=%s\nasset=%s\nsize=%s\nsha256=%s\npublished_digest=%s\ncached_at=%s\nused_ns=%s\n' \
+    "$tag" "$name" "$size" "$sha" "$digest" "$(date +%s)" "$(cache_next_use_key)" > "$dir/.meta"
   cache_prune
 }
 
@@ -429,7 +431,7 @@ cache_report() {
 
 fetch_one() {  # <target_version> <tag> <offset> <dest-dir>
   local version="$1" tag="$2" offset="$3" dest="$4" dir="$4/$2"
-  local verdict meta expected_size expected_digest expected_name reason sha msg source report=""
+  local verdict meta expected_size expected_digest expected_name file reason sha msg source report=""
   local t_start t_checked t_fetched t_verified
 
   mkdir -p "$dir"
@@ -463,19 +465,20 @@ fetch_one() {  # <target_version> <tag> <offset> <dest-dir>
   # The release asset's own size and digest, fetched ONCE: they name the asset
   # in the log below, key the cache and verify both a cache hit and a download.
   if ! meta=$(asset_meta "$tag"); then
-    report+="prefetch anchor v$version ($tag): release publishes no seforim.db.zst asset nor a seforim-schema<N>.db.zst one (or the release API call failed) — the fan falls back to its serial download"$'\n'
+    report+="prefetch anchor v$version ($tag): release publishes no seforim.db.zst asset nor a seforim-schema<N>.zdb one (or the release API call failed) — the fan falls back to its serial download"$'\n'
     printf 'failed\n%s' "$report" > "$dir/.done"
     return 0
   fi
   # Tab is IFS whitespace: read would collapse an absent digest into the name.
   IFS='|' read -r expected_size expected_digest expected_name <<<"${meta//$'\t'/|}"
-  # Stored locally as seforim.db.zst whatever the release calls it; the fan reads that path.
+  # Kept under its release name: the fan tells a .zst from a .zdb by it.
   [ -n "$expected_name" ] || expected_name="$LEGACY_FULL_DB_ASSET"
+  file="$dir/$expected_name"
   report+="anchor $tag (offset $offset): $expected_name $expected_size bytes${expected_digest:+ $expected_digest}"$'\n'
 
-  rm -f "$dir/seforim.db.zst"
+  rm -f "$file"
   source=release
-  msg=$(cache_lookup "$tag" "$expected_size" "$expected_digest" "$dir/seforim.db.zst" 2>&1) && source=cache
+  msg=$(cache_lookup "$tag" "$expected_name" "$expected_size" "$expected_digest" "$file" 2>&1) && source=cache
   [ -z "$msg" ] || report+="$msg"$'\n'
   if [ "$source" = cache ]; then
     t_fetched=$(date +%s)
@@ -491,11 +494,10 @@ fetch_one() {  # <target_version> <tag> <offset> <dest-dir>
       reason=$(tr -d '\r' < "$dir/download.err" 2>/dev/null | head -n1)
       report+="prefetch anchor v$version ($tag): download of $expected_name failed (${reason:-gh gave no reason}) — the fan falls back to its serial download"$'\n'
       printf 'failed\n%s' "$report" > "$dir/.done"
-      rm -f "$dir/seforim.db.zst" "$dir/$expected_name" "$dir/download.err"
+      rm -f "$file" "$dir/download.err"
       return 0
     fi
     rm -f "$dir/download.err"
-    [ "$expected_name" = seforim.db.zst ] || mv -f "$dir/$expected_name" "$dir/seforim.db.zst"
     t_fetched=$(date +%s)
     report+="downloaded $tag in $((t_fetched - t_checked))s"$'\n'
   fi
@@ -503,14 +505,14 @@ fetch_one() {  # <target_version> <tag> <offset> <dest-dir>
   # A cache hit was already re-verified byte for byte in cache_lookup, so it is
   # never hashed twice; a fresh download is verified here and then cached.
   if [ "$source" = release ]; then
-    sha=$(sha256sum "$dir/seforim.db.zst" | cut -d' ' -f1)
-    if ! reason=$(verify_asset "$dir/seforim.db.zst" "$tag" "$expected_size" "$expected_digest" "$sha"); then
+    sha=$(sha256sum "$file" | cut -d' ' -f1)
+    if ! reason=$(verify_asset "$file" "$tag" "$expected_size" "$expected_digest" "$sha"); then
       report+="prefetch anchor v$version ($tag): ${reason:-verification failed}"$'\n'
       printf 'failed\n%s' "$report" > "$dir/.done"
-      rm -f "$dir/seforim.db.zst"
+      rm -f "$file"
       return 0
     fi
-    msg=$(cache_store "$dir/seforim.db.zst" "$tag" "$sha" "$expected_size" "$expected_digest" 2>&1)
+    msg=$(cache_store "$file" "$tag" "$sha" "$expected_size" "$expected_digest" 2>&1)
     [ -z "$msg" ] || report+="$msg"$'\n'
   fi
   t_verified=$(date +%s)

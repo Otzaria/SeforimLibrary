@@ -1027,7 +1027,7 @@ jobs:
 
       # ─── A1: overlap the patch fan's anchor downloads with the DB build ────
       # The fan reconstitutes every anchor from that release's 1.3 GB
-      # seforim.db.zst; serially, inside the fan, that was 110-135 s per anchor
+      # full-DB asset; serially, inside the fan, that was 110-135 s per anchor
       # with the CPU idle (run 33865604251). Every tag it will consider is
       # already known here — prior-versions.tsv exists and the offsets are
       # fixed — and "Generate Seforim Database" below spends ~36 minutes of CPU
@@ -1050,7 +1050,7 @@ jobs:
           # log renders as five bare lines reading `ANCHOR` with no tag, offset
           # or target version anywhere (run 34021998271). Same `anchor <tag>
           # (offset N):` prefix the prefetch script uses, so the plan line and
-          # the `seforim.db.zst <size>` line it prints after querying the
+          # the `<full-DB asset> <size>` line it prints after querying the
           # release pair up by eye.
           awk -F'\t' -v this="$THIS_VER" '
             $1 == "ANCHOR"     { printf "anchor %s (offset %s): will patch v%s -> v%s\n", $4, $2, $3, this; next }
@@ -2016,7 +2016,7 @@ jobs:
           #     build/ pins (seforim.db 7.15 GiB + buildstate + snapshot) and
           #     the background buildstate upload, inside the ≥30 GiB this job
           #     demanded before it mounted that tmpfs.
-          #   Disk — each concurrent anchor owns its extracted 7.15 GiB prev DB
+          #   Disk — each concurrent anchor owns its restored 7.15 GiB prev DB
           #     plus the verify copy the CLI makes from it, so ~31 GiB for two
           #     against ~880 GB free on the workspace disk.
           # PATCH_FAN_PARALLELISM=1 restores the strictly serial fan.
@@ -2132,14 +2132,14 @@ jobs:
           announce_barriers
           # Skipped anchors are warnings. No delta AT ALL is only acceptable
           # when the size guard is what removed them: a corpus-wide churn build
-          # legitimately ships full-only (seforim.db.zst + buildstate). Every
+          # legitimately ships full-only (full DB + buildstate). Every
           # anchor skipped for any other reason is still a broken patch
           # contract and must fail loudly. SKIP_DIR is patch_fan_lib.sh's.
           if ! compgen -G "patches/patch-*.db.zst" > /dev/null; then
             OVERSIZED_SKIPS=$(find "$SKIP_DIR" -type f -name '*.oversized' | wc -l)
             STRUCTURAL_SKIPS=$(find "$SKIP_DIR" -type f -name '*.structural' | wc -l)
             if [ "$OVERSIZED_SKIPS" -gt 0 ]; then
-              echo "::warning::patch fan produced no patch: $OVERSIZED_SKIPS anchor(s) dropped by the delta size guard, $STRUCTURAL_SKIPS structurally unpatchable — publishing a full-only release (seforim.db.zst + buildstate)"
+              echo "::warning::patch fan produced no patch: $OVERSIZED_SKIPS anchor(s) dropped by the delta size guard, $STRUCTURAL_SKIPS structurally unpatchable — publishing a full-only release (full DB + buildstate)"
               cat "$SKIP_DIR"/*.oversized
             else
               echo "::error::patch fan produced no patch although prior releases exist (every anchor skipped; $STRUCTURAL_SKIPS structurally unpatchable, none dropped by the size guard)"
