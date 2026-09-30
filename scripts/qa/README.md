@@ -33,7 +33,7 @@ schema אחד (למשל `export/` המכיל רק `table_of_contents.json`) — 
 
 ### שער סחיפה מול ה-reference snapshot
 
-בדיקות 1/2/6/7 נושאות baselines קשיחים. בנוסף להשוואה הפנימית (DB מול schemas) הן
+בדיקות 1/2/6/7/9 נושאות baselines קשיחים. בנוסף להשוואה הפנימית (DB מול schemas) הן
 מעבירות כל מדד סָפוּר דרך `gate_snapshot_drift`: התכווצות מעבר ל-
 `QA_DRIFT_MAX_SHRINK_PCT` אחוזים מה-baseline היא `::error::` ויציאה 1; כל הפרש אחר
 (התכווצות קטנה יותר, או גדילה) הוא `::warning::` עם המספרים.

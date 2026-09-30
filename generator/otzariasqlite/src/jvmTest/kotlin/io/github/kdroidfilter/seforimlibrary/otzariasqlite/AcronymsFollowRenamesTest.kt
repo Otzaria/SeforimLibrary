@@ -18,6 +18,7 @@ import kotlin.test.Test
 import kotlin.test.assertContains
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlin.test.assertFailsWith
 import kotlin.test.assertTrue
 
 /**
@@ -303,21 +304,24 @@ class AcronymsFollowRenamesTest {
         log: Capture? = null,
     ): Map<String, Set<String>> = runBlocking {
         val repo = newRepo()
-        // The repository drops the global severity, so the capture goes in after it.
-        if (log != null) {
-            Logger.setLogWriters(listOf(log))
-            Logger.setMinSeverity(Severity.Verbose)
+        try {
+            // The repository drops the global severity, so the capture goes in after it.
+            if (log != null) {
+                Logger.setLogWriters(listOf(log))
+                Logger.setMinSeverity(Severity.Verbose)
+            }
+            val allocator = InMemoryIdAllocator.load(state.takeIf { Files.exists(it) })
+            DatabaseGenerator(
+                sourceDirectory = library(books),
+                repository = repo,
+                acronymDbPath = acronyms.toString(),
+                allocator = allocator,
+            ).generateLinesOnly()
+            allocator.snapshotTo(state)
+            repo.getAllBooks().associate { it.title to repo.getAcronymsForBook(it.id).toSet() }
+        } finally {
+            repo.close()
         }
-        val allocator = InMemoryIdAllocator.load(state.takeIf { Files.exists(it) })
-        DatabaseGenerator(
-            sourceDirectory = library(books),
-            repository = repo,
-            acronymDbPath = acronyms.toString(),
-            allocator = allocator,
-        ).generateLinesOnly()
-        allocator.snapshotTo(state)
-        repo.getAllBooks().associate { it.title to repo.getAcronymsForBook(it.id).toSet() }
-            .also { repo.close() }
     }
 
     @Test
@@ -411,12 +415,13 @@ class AcronymsFollowRenamesTest {
     }
 
     @Test
-    fun anUnreadableAcronymizerCostsTheAcronymsNotTheBuild() {
+    fun anUnreadableAcronymizerFailsTheBuild() {
         // An empty file opens as a DB without the Acronymizer's tables.
         val broken = Files.createTempFile("acronymizer", ".db")
         val state = Files.createTempDirectory("otzaria-renames-state").resolve("build_state.db")
-        build(state, broken, mapOf("ספר ישן" to text("ספר ישן")))
-        assertEquals(mapOf("ספר חדש" to emptySet()), build(state, broken, mapOf("ספר חדש" to text("ספר חדש"))))
+        assertFailsWith<IllegalStateException> {
+            build(state, broken, mapOf("ספר ישן" to text("ספר ישן")))
+        }
     }
 
     @Test

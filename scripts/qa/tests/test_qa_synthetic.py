@@ -65,7 +65,7 @@ SRC_SEFARIA, SRC_MOREBOOKS = 1, 2
 
 def _make_db(path, books=(), bbt=(), links=(), conn_types=(), lines=(),
              sources=((SRC_SEFARIA, "Sefaria"), (SRC_MOREBOOKS, "MoreBooks")),
-             schema_meta=()):
+             schema_meta=(), acronyms=((1, "כינוי"),)):
     # books: 8-tuple — (id, heRef, dep, collHe, collEn, isBaseBook, orderIndex, sourceId).
     conn = sqlite3.connect(path)
     conn.executescript("""
@@ -80,8 +80,10 @@ def _make_db(path, books=(), bbt=(), links=(), conn_types=(), lines=(),
         CREATE TABLE link(id INTEGER PRIMARY KEY AUTOINCREMENT, sourceBookId INTEGER,
             targetBookId INTEGER, sourceLineId INTEGER, targetLineId INTEGER,
             connectionTypeId INTEGER, baseProvenance INTEGER);
+        CREATE TABLE book_acronym(bookId INTEGER NOT NULL, term TEXT NOT NULL);
     """)
     conn.executemany("INSERT INTO source VALUES(?,?)", sources)
+    conn.executemany("INSERT INTO book_acronym VALUES(?,?)", acronyms)
     conn.executemany("INSERT INTO schema_meta VALUES(?,?)", schema_meta)
     conn.executemany("INSERT INTO book(id,heRef,dependenceType,collectiveTitleHe,"
                      "collectiveTitleEn,isBaseBook,orderIndex,sourceId) "
@@ -671,11 +673,26 @@ def test_check8_schema6_line_content():
         _check("check8 schema 6 line_content יתום → FAIL", rc != 0)
 
 
+def test_check9_acronyms():
+    print("check9: book_acronym ריקה או מתכווצת → FAIL")
+    with tempfile.TemporaryDirectory() as d:
+        ok, empty = os.path.join(d, "ok.db"), os.path.join(d, "empty.db")
+        _make_db(ok)
+        _make_db(empty, acronyms=())
+        rc, _out = _run("check9_acronyms.py", "--db", ok)
+        _check("check9 כינוי אחד, שער כבוי → PASS", rc == 0)
+        rc, _out = _run("check9_acronyms.py", "--db", empty)
+        _check("check9 טבלה ריקה → FAIL", rc != 0)
+        rc, _out = _run("check9_acronyms.py", "--db", ok,
+                        env_extra={"QA_DRIFT_MAX_SHRINK_PCT": "2"})
+        _check("check9 כינוי אחד מול snapshot מלא, שער 2% → FAIL", rc != 0)
+
+
 def main():
     for t in (test_primary_beats_earlier_alias, test_resolve_order,
               test_check8_schema6_line_content,
               test_check2, test_check6, test_check6_missing_book_gate,
-              test_check7,
+              test_check7, test_check9_acronyms,
               test_source_filter_regression, test_check5,
               test_snapshot_drift_gate, test_unreadable_schema_policy,
               test_unusable_schema_shape_policy,

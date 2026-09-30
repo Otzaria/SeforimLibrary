@@ -1269,8 +1269,8 @@ class DatabaseGenerator(
 
         // Insert acronyms for this book if an Acronymizer DB is available
         var acronymCount = 0
+        val terms = fetchAcronymsForTitle(title)
         try {
-            val terms = fetchAcronymsForTitle(title)
             if (terms.isNotEmpty()) {
                 repository.bulkInsertBookAcronyms(insertedBookId, terms)
                 acronymCount = terms.size
@@ -2354,9 +2354,9 @@ class DatabaseGenerator(
     /** Sanitized acronym terms for a given book title from the Acronymizer DB. */
     private fun fetchAcronymsForTitle(title: String): List<String> = try {
         acronymizer()?.termsFor(title).orEmpty()
-    } catch (e: Exception) {
-        logger.w(e) { "Error reading acronyms for '$title' from $acronymDbPath" }
-        emptyList()
+    } catch (e: java.sql.SQLException) {
+        // Swallowing this would ship a whole DB without acronyms on a schema change.
+        throw IllegalStateException("Acronymizer DB at $acronymDbPath is unreadable or has an unexpected schema", e)
     }
 
     private suspend fun backfillAcronymsForExistingBooks() {
