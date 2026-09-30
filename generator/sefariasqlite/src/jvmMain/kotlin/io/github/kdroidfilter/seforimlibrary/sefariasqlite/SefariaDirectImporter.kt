@@ -394,7 +394,7 @@ class SefariaDirectImporter(
                     id = lineId,
                     bookId = bookId,
                     lineIndex = idx,
-                    content = content,
+                    content = if (payload.boldDashDibburim) SefariaTalmudDibburBold.bold(content) else content,
                     heRef = refEntry?.heRef,
                     charCount = lineCharCount,
                 )

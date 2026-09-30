@@ -4,6 +4,7 @@ import io.github.kdroidfilter.seforimlibrary.common.dh.DhExtractor.Format
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNull
+import kotlin.test.assertNotNull
 
 /** Shapes below are verbatim from a real seforim.db unless noted. */
 class DhExtractorTest {
@@ -234,4 +235,48 @@ class DhExtractorTest {
         assertNull(key("<b>אין</b> שלום: ועוד ביאור כו'. המשך", Format.BOLD_LEAD))
         assertNull(key("<b>אין:</b> שלום כו'. המשך", Format.BOLD_LEAD))
     }
+
+    @Test
+    fun `generated dash provenance preserves exact raw whitespace tail and extraction`() {
+        for (raw in listOf(
+            "  דִּבּוּר  ראשון   – פירוש\nועוד <i>ביאור</i>",
+            "דיבור ראשון. " + "מילה ".repeat(8) + "– פירוש",
+            "דיבור כו' – פירוש ועוד כו'. המשך",
+        )) {
+            val generated = DhExtractor.boldDashDibbur(raw)
+            assertEquals(raw, DhExtractor.sourceLineForIndex(generated))
+            assertEquals(generated, DhExtractor.boldDashDibbur(generated))
+            val expected = assertNotNull(DhExtractor.extract(raw, Format.DASH))
+            assertEquals(expected, DhExtractor.extract(generated, Format.BOLD))
+            assertEquals(expected, DhExtractor.extract(generated, Format.DASH))
+            assertNull(DhExtractor.extract(generated, Format.BOLD_LEAD))
+        }
+    }
+
+    @Test
+    fun `only the exact generated dash marker and exact accepted span are trusted`() {
+        for (line in listOf(
+            "<b><b></b><i></i>דיבור – פירוש",
+            "<b><b></b><i></i>דיבור</b> בלי מפריד",
+            "<b><b></b><i></i>מתני'</b> – פירוש",
+            "<b><b></b><i></i>דיבור </b> – פירוש",
+            "<b><b></b><i></i>דיבור</b> נוסף – פירוש",
+            "<b><b></b><i></i>דיבור. נוסף</b> " + "מילה ".repeat(8) + "– פירוש",
+            "<b><b></b><i></i><i>דיבור</i></b> – פירוש",
+            "<b><b></b><i class=\"other\"></i>דיבור</b> – פירוש",
+            "<b><i></i><b></b>דיבור</b> – פירוש",
+            "<b><b>נוסף</b><i></i>דיבור</b> – פירוש",
+            "<b data-seforim-dh='dash'>דיבור</b> – פירוש",
+            "<B><b></b><i></i>דיבור</B> – פירוש",
+            "<span><b><b></b><i></i>דיבור</b></span> – פירוש",
+        )) {
+            assertEquals(line, DhExtractor.sourceLineForIndex(line), line)
+            for (format in Format.entries) assertNull(DhExtractor.extract(line, format), "$format: $line")
+        }
+        val native = "<b>דיבור</b> – פירוש"
+        assertEquals(native, DhExtractor.sourceLineForIndex(native))
+        assertEquals("דיבור", key(native, Format.BOLD))
+        assertNull(key(native, Format.DASH))
+    }
+
 }

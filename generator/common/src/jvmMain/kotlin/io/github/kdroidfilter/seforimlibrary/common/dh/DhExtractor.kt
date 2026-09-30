@@ -94,11 +94,55 @@ object DhExtractor {
     /** Same edge trim as DhKey, so key and display agree on where the dibbur ends. */
     private const val EDGE_PUNCTUATION = ".,:;?!()[]"
 
+    // Reserved provenance for formatting a DASH prefix. Ordinary source bold
+    // markup must keep its separate book-level format/noise selection policy.
+    // Empty nested elements are a reserved machine envelope, not source bold.
+    // They keep existing clients' simple-tag rendering fast path compatible.
+    private const val GENERATED_DASH_OPEN = "<b><b></b><i></i>"
+    private const val GENERATED_DASH_CLOSE = "</b>"
+
     /** Extracts the dibbur of [line] in [format], or `null`. */
-    fun extract(line: String, format: Format): Dh? = when (format) {
-        Format.BOLD -> extractBold(line)
-        Format.DASH -> extractDash(line)
-        Format.BOLD_LEAD -> extractBoldLead(line)
+    fun extract(line: String, format: Format): Dh? {
+        val raw = originalGeneratedDashLine(line)
+        if (raw != null) {
+            return if (format == Format.BOLD_LEAD) null else extractDash(raw)
+        }
+        return when (format) {
+            Format.BOLD -> extractBold(line)
+            Format.DASH -> extractDash(line)
+            Format.BOLD_LEAD -> extractBoldLead(line)
+        }
+    }
+
+    /**
+     * Bolds an accepted DASH prefix without changing its raw text or tail.
+     * The reserved envelope lets index generation preserve the original
+     * DASH policy rather than treating generated markup as native BOLD data.
+     */
+    fun boldDashDibbur(line: String): String {
+        val end = dashDibburEnd(line) ?: return line
+        val dibbur = line.substring(0, end).trimEnd()
+        return GENERATED_DASH_OPEN + dibbur + GENERATED_DASH_CLOSE + line.substring(dibbur.length)
+    }
+
+    /**
+     * Restores only our exact generated wrapper for index format statistics.
+     * Native HTML and malformed or modified markers are returned unchanged.
+     * This must be applied before counting BOLD, BOLD_LEAD and DASH hits so
+     * formatting cannot change the winning format or admit incidental bolds.
+     */
+    fun sourceLineForIndex(line: String): String = originalGeneratedDashLine(line) ?: line
+
+    private fun originalGeneratedDashLine(line: String): String? {
+        if (!line.startsWith(GENERATED_DASH_OPEN)) return null
+        val close = line.indexOf(GENERATED_DASH_CLOSE, GENERATED_DASH_OPEN.length)
+        if (close < GENERATED_DASH_OPEN.length || close - GENERATED_DASH_OPEN.length > MAX_DH_LENGTH) return null
+        val dibbur = line.substring(GENERATED_DASH_OPEN.length, close)
+        val raw = dibbur + line.substring(close + GENERATED_DASH_CLOSE.length)
+        val end = dashDibburEnd(raw) ?: return null
+        // Validate the precise span, including the sentence-recut boundary and
+        // whitespace placement. A partial or extended bold prefix is not ours.
+        return raw.takeIf { raw.substring(0, end).trimEnd() == dibbur }
     }
 
     /** `true` when [line] is a `<h1>`–`<h6>` heading (never carries a dibbur). */
@@ -153,19 +197,28 @@ object DhExtractor {
         return leadDh.takeIf { it.display.length > boldDh.display.length }
     }
 
-    private fun extractDash(line: String): Dh? {
+    /**
+     * End (exclusive) of the [Format.DASH] dibbur in [line] — the exact span
+     * [extract] reads in that format — or `null` when the line has none.
+     */
+    fun dashDibburEnd(line: String): Int? =
+        dashCut(line)?.takeIf { accept(line.substring(0, it)) != null }
+
+    private fun extractDash(line: String): Dh? = dashCut(line)?.let { accept(line.substring(0, it)) }
+
+    private fun dashCut(line: String): Int? {
         if (isHeadingLine(line)) return null
         val m = SPACED_DASH.find(line) ?: return null
-        var dh = line.substring(0, m.range.first)
-        if ('<' in dh || dh.length > MAX_DH_LENGTH) return null
+        var end = m.range.first
+        if (end > MAX_DH_LENGTH || line.lastIndexOf('<', end - 1) >= 0) return null
         if (line.substring(m.range.last + 1).isBlank()) return null
         // A daf's first comment ends its dibbur with a sentence break instead
         // of a dash; when the dash-cut is implausibly long, re-cut there.
-        if (dh.length > LONG_DASH_DH) {
-            val cut = dh.indexOf(SENTENCE_BREAK)
-            if (cut > 0) dh = dh.substring(0, cut)
+        if (end > LONG_DASH_DH) {
+            val cut = line.indexOf(SENTENCE_BREAK)
+            if (cut > 0 && cut + SENTENCE_BREAK.length <= end) end = cut
         }
-        return accept(dh)
+        return end
     }
 
     private fun accept(rawDh: String): Dh? {

@@ -131,6 +131,8 @@ internal data class BookPayload(
     // Raw English `categories` from the index record. Only the whole-unit ref
     // sets need them (Sefaria's own gate is English-category based).
     val categoriesEn: List<String> = emptyList(),
+    // Store lines with their dash dibbur bolded — see SefariaTalmudDibburBold.
+    val boldDashDibburim: Boolean = false,
 ) {
     /**
      * Text-only per-line derivations for this book: computed on the parallel
