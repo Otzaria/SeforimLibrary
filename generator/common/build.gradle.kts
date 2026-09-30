@@ -272,6 +272,18 @@ tasks.register<JavaExec>("analyzeSeforimDb") {
     jvmArgs = listOf("-Xmx512m")
 }
 
+tasks.register<JavaExec>("logicalContentHash") {
+    group = "application"
+    description = "Writes the logical content hash of a finished seforim.db (a patch manifest's toContentHash) to -Pout."
+    dependsOn("jvmJar")
+    mainClass.set("io.github.kdroidfilter.seforimlibrary.common.patch.LogicalContentHashCliKt")
+    classpath = files(tasks.named("jvmJar")) + configurations.getByName("jvmRuntimeClasspath")
+    listOf("dbPath", "out", "dbSchemaVersion").forEach { key ->
+        project.findProperty(key)?.let { systemProperty(key, it as String) }
+    }
+    jvmArgs = listOf("-Xmx1g")
+}
+
 tasks.register<JavaExec>("buildLineRefIndex") {
     group = "application"
     description = "Rebuild line_ref — the canonical (bookId, refKeyHash) -> lineIndex reference index."
