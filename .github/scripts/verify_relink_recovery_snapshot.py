@@ -39,7 +39,11 @@ IMAGE_TAG = re.compile(
     r"(?P<src>[^\"']+)(?P=quote)(?P<suffix>[^>]*?/?>)",
     re.IGNORECASE,
 )
-TEXTIMAGE_PREFIX = "https://textimages.sefaria.org/"
+# Must match URL_START in SefariaImageEmbedder.kt.
+TEXTIMAGE_PREFIXES = (
+    "https://textimages.sefaria.org/",
+    "https://storage.googleapis.com/textimages.sefaria.org/",
+)
 DATA_IMAGE = re.compile(
     r"data:(image/(?:png|jpeg|gif|svg\+xml|webp));base64,"
     r"(?P<payload>[A-Za-z0-9+/]*={0,2})\Z",
@@ -111,14 +115,21 @@ def check_baseline_manifest(path: Path) -> object:
     return baseline.get("snapshot_sha256")
 
 
+def _textimage_path(src: str) -> str | None:
+    for prefix in TEXTIMAGE_PREFIXES:
+        if src.startswith(prefix):
+            return src[len(prefix) :]
+    return None
+
+
 def _remote_inline_equivalent(src_a: str, src_b: str) -> bool:
-    if src_a.startswith(TEXTIMAGE_PREFIX):
+    if _textimage_path(src_a) is not None:
         remote, inline = src_a, src_b
-    elif src_b.startswith(TEXTIMAGE_PREFIX):
+    elif _textimage_path(src_b) is not None:
         remote, inline = src_b, src_a
     else:
         return False
-    if not remote[len(TEXTIMAGE_PREFIX) :] or any(c.isspace() for c in remote):
+    if not _textimage_path(remote) or any(c.isspace() for c in remote):
         return False
     match = DATA_IMAGE.fullmatch(inline)
     if match is None:
