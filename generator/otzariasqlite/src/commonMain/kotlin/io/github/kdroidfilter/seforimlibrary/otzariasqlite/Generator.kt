@@ -1413,9 +1413,10 @@ class DatabaseGenerator(
             val lineCharCount = countVisibleChars(line)
 
             if (level > 0) {
+                // A shallower heading closes every deeper one, or a level skip (h2 → h4) adopts a stale parent.
+                parentStack.keys.removeAll { it >= level }
                 if (plainText.isBlank()) {
                     logger.d { "⚠️ Skipping empty header at level $level (line $lineIndex)" }
-                    parentStack.remove(level)
                     continue
                 }
 
