@@ -30,6 +30,7 @@ internal class MissingVersionLanguageException(message: String) : IllegalStateEx
  * Runs after all book lines are inserted, so every joined lineId exists.
  * Versions listed in black_versions.txt are skipped entirely (no row at all),
  * and so are version files whose actualLanguage isn't Hebrew.
+ * Hebrew display names from version_titles_he.txt apply after the blacklist.
  */
 internal class SefariaVersionsImporter(
     private val repository: SeforimRepository,
@@ -38,6 +39,7 @@ internal class SefariaVersionsImporter(
     private val payloadReader: SefariaBookPayloadReader,
     private val logger: Logger = Logger.withTag("SefariaVersionsImporter"),
     private val blacklist: VersionsBlacklist = VersionsBlacklist.Empty,
+    hebrewTitles: VersionHebrewTitles = VersionHebrewTitles.Empty,
 ) {
     internal data class BookInput(
         val payload: BookPayload,
@@ -54,6 +56,8 @@ internal class SefariaVersionsImporter(
     private var filesSkipped = 0
     private var versionsBlacklisted = 0
     private var versionsForeignLanguage = 0
+
+    private val titlesUsage = VersionTitlesUsage(hebrewTitles, logger)
 
     private val versionBatch = mutableListOf<BookVersion>()
     private val lineBatch = mutableListOf<VersionLine>()
@@ -75,6 +79,7 @@ internal class SefariaVersionsImporter(
                 "duplicateRefs=$duplicateRefs, emptyWalks=$emptyWalks, filesSkipped=$filesSkipped, " +
                 "blacklisted=$versionsBlacklisted, foreignLanguage=$versionsForeignLanguage"
         }
+        titlesUsage.logSummary()
     }
 
     // merged.json's `versions` pairs carry no language field at all, so these rows
@@ -86,6 +91,7 @@ internal class SefariaVersionsImporter(
                 id = allocator.bookVersionId(input.bookId, meta.title),
                 bookId = input.bookId,
                 versionTitle = meta.title,
+                heVersionTitle = titlesUsage.resolve(input.payload.heTitle, input.payload.enTitle, meta.title, null),
                 versionSource = meta.source,
                 hasContent = false,
             )
@@ -192,7 +198,7 @@ internal class SefariaVersionsImporter(
                 id = versionId,
                 bookId = input.bookId,
                 versionTitle = versionTitle,
-                heVersionTitle = heVersionTitle,
+                heVersionTitle = titlesUsage.resolve(payload.heTitle, payload.enTitle, versionTitle, heVersionTitle),
                 versionSource = doc["versionSource"]?.stringOrNull(),
                 priority = doc["priority"]?.stringOrNull()?.toDoubleOrNull(),
                 license = doc["license"]?.stringOrNull(),

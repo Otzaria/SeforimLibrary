@@ -110,6 +110,8 @@ class SefariaDirectImporter(
         logger.i { "Parsed ${bookPayloads.size} books" }
 
         val classLoader = javaClass.classLoader
+        // Parsed up front so a malformed file fails before the long insert phase.
+        val versionHebrewTitles = loadVersionHebrewTitles(classLoader)
         val blacklists = loadSefariaBlacklists(classLoader, logger)
         if (!blacklists.isEmpty()) {
             logger.i {
@@ -482,8 +484,9 @@ class SefariaDirectImporter(
                     "perBook=${versionsBlacklist.perBookKeys.values.sumOf { it.size }}"
             }
         }
-        SefariaVersionsImporter(repository, allocator, json, bookPayloadReader, logger, versionsBlacklist)
-            .import(versionBookInputs, lineKeyToId)
+        SefariaVersionsImporter(
+            repository, allocator, json, bookPayloadReader, logger, versionsBlacklist, versionHebrewTitles,
+        ).import(versionBookInputs, lineKeyToId)
 
         // Apply default mappings
         if (defaultCommentatorsConfig.isNotEmpty()) {

@@ -1,0 +1,238 @@
+# שמות עבריים לגרסאות (מהדורות ספרים, book_version) — השם שהאפליקציה מציגה
+# (heVersionTitle) במקום versionTitle האנגלי של ספריא.
+#
+# כללי רישום:
+#   שורות ריקות ושורות שמתחילות ב-# — מתעלמים מהן.
+#
+#   versionTitle => שם עברי                 שורה כללית: בכל הספרים שבהם הגרסה מופיעה.
+#   שם ספר | versionTitle => שם עברי        שורת ספר: בספר הזה בלבד.
+#
+#   שורת ספר קובעת תמיד, גם כשלגרסה יש שם עברי בספריא (versionTitleInHebrew).
+#   שורה כללית ממלאת רק גרסה שאין לה שם עברי בספריא, ולעולם לא דורסת אותו.
+#   שורת ספר גוברת על שורה כללית.
+#
+#   שם הספר: הכותרת העברית או האנגלית, כפי שמופיעה בסכמות ספריא (heTitle/title).
+#   שם הגרסה: versionTitle האנגלי בלבד, כפי שמופיע בקובץ הגרסה.
+#   ההשוואה מדויקת: רק רווחים בקצוות נחתכים. בניגוד לבלאקליסטים — אין התעלמות
+#   מרישיות, מרווחים כפולים או מגרשיים/מרכאות.
+#   המפרידים הם " => " (עם רווחים) ו-| (צינור); לכן שם שמכיל אותם אינו נתמך.
+#   השם חל אחרי black_versions.txt, שממשיך להתאים לשם העברי המקורי של ספריא.
+#
+#   שורה שלא התאימה לאף גרסה (למשל: ספריא שינתה את שם הגרסה) — אזהרה בלוג בלבד.
+#   שורה פגומה או מפתח כפול — הבנייה נופלת.
+#   שתי שורות לאותה גרסה באותו ספר, אחת בכותרת העברית ואחת באנגלית — אזהרה בלוג,
+#   והשורה המוקדמת בקובץ (מספר שורה נמוך) קובעת.
+#
+# דוגמאות (מנוטרלות):
+#   Torat-Emet => תורת אמת
+#   בראשית | Mechon-Mamre => מכון ממרא
+
+# --- מגילת אנטיוכוס: שתי גרסאות מפרויקט הסידור הפתוח, המקור והתרגום ---
+Megillat Antiochus | the Open Siddur Project - Aramaic => מקור ארמי (פרויקט הסידור הפתוח)
+Megillat Antiochus | the Open Siddur Project => תרגום עברי (פרויקט הסידור הפתוח)
+
+# --- שורות כלליות: ממלאות רק גרסה שאין לה שם עברי בספריא ---
+Torat-Emet => תורת אמת
+Mishnah based on the Kaufmann manuscript, edited by Dan Be'eri => משנה על פי כתב יד קאופמן, בעריכת דן בארי
+Mechon-Mamre => מכון ממרא
+The Jerusalem Talmud, edition by Heinrich W. Guggenheimer. Berlin, De Gruyter, 1999-2015 => תלמוד ירושלמי, מהדורת היינריך גוגנהיימר, ברלין, דה גרויטר, 1999–2015
+Venice Edition => דפוס ונציה
+Sefaria vocalized edition => מהדורת ספריא מנוקדת
+Vocalized Edition => מהדורה מנוקדת
+William Davidson Edition - Vocalized Aramaic => מהדורת וויליאם דייוידסון - ארמית המנוקד
+On Your Way => ובלכתך בדרך
+The Metsudah Five Megillot, Lakewood, N.J., 2001 => חמש מגילות, הוצאת מצודה, לייקווד, ניו ג'רזי, 2001
+Pentateuch with Rashi's commentary by M. Rosenbaum and A.M. Silbermann, 1929-1934 => חומש עם פירוש רש"י, בעריכת מ. רוזנבאום וא.מ. זילברמן, 1929–1934
+Rashi Chumash, Metsudah Publications, 2009 => חמשה חומשי תורה; הוצאת מצודה, ליקווד, נ.ג'., תש"ע
+Wikisource => ויקיטקסט
+Kisse Rahamim, Livorno, 1803 => כסא רחמים, דפוס ליוורנו, 1803
+Piotrkow, 1907-1911 => דפוס פיעטרקוב, 1907–1911
+Sefaria Vocalized Edition => מהדורת ספריא מנוקדת
+Shtettin, 1861 => דפוס שטעטין, 1861
+Warsaw, 1891 => דפוס ורשה, 1891
+Abarbanel, Tel Aviv 1960 => אברבנאל, תל אביב 1960
+Critical edition, Hebrew text. Yitzhak Berger, 2003, 2007 => מהדורה ביקורתית, הנוסח העברי, יצחק ברגר, 2003, 2007
+Kol Yaakov References => קול יעקב – מראי מקומות
+Netivot Olam, Netiv Hateshuva, with footnotes and annotations by Rabbi Yehoshua D. Hartman, Machon Yerushalyim, 1997 => נתיבות עולם, נתיב התשובה, עם הערות וביאורים מאת הרב יהושע דוד הרטמן, מכון ירושלים, 1997
+Netivot Olam, Netiv Hatorah, with footnotes and annotations by Rabbi Yehoshua D. Hartman, Machon Yerushalyim, 2012 => נתיבות עולם, נתיב התורה, עם הערות וביאורים מאת הרב יהושע דוד הרטמן, מכון ירושלים, 2012
+On Your Way New => ובלכתך בדרך – חדש
+Rashi => רש"י
+The Metsudah Tanach series, Lakewood, N.J => סדרת התנ"ך של הוצאת מצודה, לייקווד, ניו ג'רזי
+Vilna Edition => דפוס וילנא
+Vocalized Edition - Kehot Publication Society => מהדורה מנוקדת – הוצאת קה"ת
+Wikisource -- Lower Accents => ויקיטקסט – טעם תחתון
+Wikisource -- Upper Accents => ויקיטקסט – טעם עליון
+(With paragraph breaks) => (עם חלוקה לפסקאות)
+<b>Ibn Ezra on Habakkuk</b>- Daat => אבן עזרא על חבקוק – דעת
+Abarbanel Chapter 3 - Orim Gedolim => אברבנאל פרק ג – אורים גדולים
+Abudarham. Lisbon, 1489. => אבודרהם, דפוס ליסבון, 1489
+Abudarham; MS, The British Library London England Or. 10727 => אבודרהם; כתב יד, הספרייה הבריטית, לונדון, Or. 10727
+Avodat HaKodesh => עבודת הקודש
+bar ilan responsa project => פרויקט השו"ת של אוניברסיטת בר-אילן
+Be'er Mayim Chaim on Chofetz Chaim => באר מים חיים על חפץ חיים
+Bekhor Shor, Jerusalem, 1994 => בכור שור, ירושלים, 1994
+Ben Sira, David Kahana ed. -- Wikisource => בן סירא, מהדורת דוד כהנא – ויקיטקסט
+Birkat Hamazon -- Ari => ברכת המזון – נוסח האר"י
+Birkat Hamazon -- Ashkenaz => ברכת המזון – נוסח אשכנז
+Birkat Hamazon -- Edot HaMizrach => ברכת המזון – נוסח עדות המזרח
+Birkat Hamazon -- Sefard => ברכת המזון – נוסח ספרד
+Bologna => דפוס בולוניה
+Brit Mila Additions => תוספות לברית מילה
+Chavot Yair, Lemberg, 1896 => חוות יאיר, דפוס למברג, 1896
+Chayei Adam, Vilna, 1843 => חיי אדם, דפוס וילנא, 1843
+Chiddushei HaRamban,  Prag, 1826 => חידושי הרמב"ן, דפוס פראג, 1826
+Chiddushei HaRashba, Sheva Shitot, Warsaw, 1883. => חידושי הרשב"א, שבע שיטות, דפוס ורשה, 1883
+Chidushei HaRashba. Warsaw 1883. => חידושי הרשב"א, דפוס ורשה 1883
+Chofetz Chaim => חפץ חיים
+Chovat Halevavot, Amsterdam 1768. => חובות הלבבות, דפוס אמשטרדם 1768
+Constantinople, 1740 => דפוס קושטא, 1740
+Contemporary Version => נוסח בן זמננו
+Daat => דעת
+Daat Shemot Rabbah => שמות רבה, דעת
+Darchei Moshe, Fürth 1760 => דרכי משה, דפוס פיורדא 1760
+Debrecen, 1942 => דפוס דברצין, 1942
+Dyhernfurth, 1692 => דפוס דיהרנפורט, 1692
+Eichen edition. Jerusalem, 2011 => מהדורת אייכן, ירושלים, 2011
+Enhanced edition, 2023 => מהדורה משופרת, 2023
+Frankfurt am Main, 1697 => דפוס פרנקפורט דמיין, 1697
+From Wikitext => מתוך ויקיטקסט
+Gevurot Hashem, with footnotes and annotations by Rabbi Yehoshua D. Hartman, Machon Yerushalyim, 2015-2020 => גבורות השם, עם הערות וביאורים מאת הרב יהושע דוד הרטמן, מכון ירושלים, 2015–2020
+Gevurot Hashem, with footnotes and annotations by Rabbi Yehoshua D. Hartman, Machon Yerushalyim, 2015-2020 Part II => גבורות השם, עם הערות וביאורים מאת הרב יהושע דוד הרטמן, מכון ירושלים, 2015–2020, חלק ב
+Ha'amek Davar => העמק דבר
+Ha-Techiyah vol. ii, Berlin, 1857 => התחיה, כרך ב, דפוס ברלין, 1857
+Haggadah Shaliehsaboo Edition => הגדה, מהדורת Shaliehsaboo
+Hamisha Shitot, Sulzbach 1761. => חמש שיטות, דפוס זולצבאך 1761
+Hanau, 1622 => דפוס הנאו, 1622
+Hebrew books => היברובוקס
+Hokhmat Adam, Vilna, 1844 => חכמת אדם, דפוס וילנא, 1844
+Ibn Ezra on Haggai => אבן עזרא על חגי
+Ibn Ezra on Haggai -- Daat => אבן עזרא על חגי, דעת
+Ibn Ezra on Psalms -- Daat => אבן עזרא על תהלים, דעת
+Ibn Ezra on Zecharia -- Daat => אבן עזרא על זכריה, דעת
+Iggerot Moshe, New York, 1985 => אגרות משה, ניו יורק, 1985
+Jerusalem, 1956-1966 => ירושלים, 1956–1966
+Jerusalem, 1959 => ירושלים, 1959
+Kaufmann A 50 => כתב יד קאופמן A 50
+Kehot Publication Society => הוצאת קה"ת
+Keset Hasofer, Ungvar 1871 => קסת הסופר, דפוס אונגוואר 1871
+Ketuvim Achronim, Seckel Isaac Frankel. Warsaw, 1885 => כתובים אחרונים, יצחק זעקיל פרענקיל, דפוס ורשה, 1885
+Kinnot for Tisha B'Av -- Wikisource => קינות לתשעה באב – ויקיטקסט
+Kitzur Baal HaTurim => קיצור בעל הטורים
+Kitzur.net => אתר kitzur.net
+L'viv, 1872 => דפוס לבוב, 1872
+Leipzig: H.L. Shnuis, 1859 => דפוס לייפציג, ה"ל שנויס, 1859
+Likut Sifrei Stam Part 1 => ליקוט ספרי סת"ם חלק א
+Likutey Halakhot, Breslov Research Institute. Jerusalem-New York, 2019 => ליקוטי הלכות, מכון ברסלב, ירושלים–ניו יורק, 2019
+Maharal => מהר"ל
+Malbim on Genesis -- Wikisource => מלבי"ם על בראשית – ויקיטקסט
+Malbim on Zechariah--Wikisource => מלבי"ם על זכריה – ויקיטקסט
+Malbim, Vilna Romm, 1892. => מלבי"ם, דפוס וילנא, ראם, 1892
+Masejet Guerim. Tratado de los prosélitos, Versión Hebreo. Rabbi Uriel Romano, 2018 => מסכת גרים, הנוסח העברי, הרב אוריאל רומנו, 2018
+Matpachas Seforim first ed. => מטפחת ספרים, מהדורה ראשונה
+Mechon Mamre Mishneh Torah => משנה תורה, מכון ממרא
+Mechon-mamre Mishneh Torah => משנה תורה, מכון ממרא
+Midrash Rabbeinu Bachya [ben Asher]. Warsaw, 1878 => מדרש רבנו בחיי [בן אשר], דפוס ורשה, 1878
+Milot Higayon, Warsaw, 1928 => מילות הגיון, דפוס ורשה, 1928
+Mishneh Torah => משנה תורה
+Ms. Guenzburg 495 => כתב יד גינצבורג 495
+new edition => מהדורה חדשה
+Ohr Yisrael haMenukad, Jerusalem 1997 => אור ישראל המנוקד, ירושלים 1997
+On Your Way -- new => ובלכתך בדרך – חדש
+On Your Way new => ובלכתך בדרך – חדש
+Onkelos Deuteronomy => אונקלוס דברים
+Onkelos Leviticus => אונקלוס ויקרא
+Orchot Tzadikim -- Vocalized => אורחות צדיקים – מנוקד
+Original version => הנוסח המקורי
+Original version with nikkud => הנוסח המקורי, מנוקד
+Ostroh, 1843 => דפוס אוסטרהא, 1843
+Otzar Midrashim, New York, 1915 => אוצר מדרשים, דפוס ניו יורק, 1915
+OYW => ובלכתך בדרך
+Pardes Rimonim => פרדס רימונים
+Pardes Rimonim, Koretz, 1780. => פרדס רימונים, דפוס קארעץ, 1780
+Pentateuch with Rashi's commentary by M. Rosenbaum and A.M. Silbermann -- corrected vocalization => חומש עם פירוש רש"י, בעריכת מ. רוזנבאום וא.מ. זילברמן – ניקוד מתוקן
+Perek Shirah => פרק שירה
+Pesach Haggadah => הגדה של פסח
+Pirke DeRabbi Eliezer, Sefaria Vocalized Edition => פרקי דרבי אליעזר, מהדורת ספריא מנוקדת
+Pirkei Avot, Berlin, 1848 => פרקי אבות, דפוס ברלין, 1848
+Prague, 1840 => דפוס פראג, 1840
+Presburg : A. Schmid, 1842 => דפוס פרשבורג: א. שמיד, 1842
+Pressburg, 1855 [typed] => דפוס פרשבורג, 1855 [מוקלד]
+Pressburg, 1855-1864 => דפוס פרשבורג, 1855–1864
+R' Zadok -- Machshavot Charutz => ר' צדוק – מחשבות חרוץ
+Rabbeinu Behaye, Rimini, 1524 => רבנו בחיי, דפוס רימיני, 1524
+Radak on Genesis => רד"ק על בראשית
+Rambam => רמב"ם
+Rashi on Shir HaShirim -- Wikisource => רש"י על שיר השירים – ויקיטקסט
+Reshimot Shiurim, Kiddushin, New York, 2022 => רשימות שיעורים, קידושין, ניו יורק, 2022
+Ritva on Sukka 4d-9a based on manuscripts, Friedlander ed. => ריטב"א על סוכה, דף ד–ט, על פי כתבי יד, מהדורת פרידלנדר
+Schechter edition, Recension A, Vienna, 1887 => מהדורת שכטר, נוסחא א, דפוס וינה, 1887
+Seder Olam Zuta, Rabbi M. Grossberg. London, 1910 => סדר עולם זוטא, הרב מ. גרוסברג, דפוס לונדון, 1910
+Seder Olam Zutta -- Wikisource => סדר עולם זוטא – ויקיטקסט
+Sefer HaMidot -- rabenubook => ספר המידות – אתר rabenubook
+Sefer HaMidot, Moghilev, 1811 => ספר המידות, דפוס מוהילוב, 1811
+Sefer Hamitzvot L'Rasag, Warsaw, 1914 => ספר המצוות לרס"ג, דפוס ורשה, 1914
+Sefer Hamitzvot L'Rasag, Warsaw, 1914 -- vol. 1 => ספר המצוות לרס"ג, דפוס ורשה, 1914 – כרך א
+Sefer Hamitzvot L'Rasag, Warsaw, 1914 -- vol. 2 => ספר המצוות לרס"ג, דפוס ורשה, 1914 – כרך ב
+Sefer Hamitzvot L'Rasag, Warsaw, 1914 -- vol. 3 => ספר המצוות לרס"ג, דפוס ורשה, 1914 – כרך ג
+Sefer Hamitzvot L'Rasag, Warsaw, 1914. Vocalized Edition => ספר המצוות לרס"ג, דפוס ורשה, 1914, מהדורה מנוקדת
+Sefer HaMitzvot, Warsaw 1883 new => ספר המצוות, דפוס ורשה 1883 – חדש
+Sforno on Deuteronomy -- Daat => ספורנו על דברים, דעת
+Sforno on Leviticus -- Da'at => ספורנו על ויקרא, דעת
+Shaliehsaboo Edition => מהדורת Shaliehsaboo
+Sheiltot d'Rav Achai Gaon; Vilna, 1861 => שאילתות דרב אחאי גאון; דפוס וילנא, 1861
+Sheva Brachot => שבע ברכות
+Sifre on Deuteronomy, ed. Dr. Louis Finkelstein. JTS, 1969 => ספרי על ספר דברים, מהדורת ד"ר לואיס פינקלשטיין, בית המדרש לרבנים באמריקה, 1969
+Sifrei Devarim, Hebrew => ספרי דברים, עברית
+Tanakh, Venice, 1617-1619 => תנ"ך, דפוס ונציה, 1617–1619
+Teshuvot haRambam Vol 2 => תשובות הרמב"ם, כרך ב
+Teshuvot HaRambam, Blau edition, 1961 => תשובות הרמב"ם, מהדורת בלאו, 1961
+Teshuvot haRashba I, Bnei Brak, 1958 => תשובות הרשב"א, חלק א, בני ברק, 1958
+Teshuvot haRashba I, Wien 1812 => תשובות הרשב"א, חלק א, דפוס וינה 1812
+Teshuvot HaRosh, Venice, 1607 => תשובות הרא"ש, דפוס ונציה, 1607
+Teshuvot HaRosh, Vilna, 1885 -- typed => תשובות הרא"ש, דפוס וילנא, 1885 – מוקלד
+The Book of Joshua, Metsudah Publications, 1997 => ספר יהושע, הוצאת מצודה, 1997
+The Metsudah siddur, 1981 => סידור מצודה, 1981
+The Metsudah Siddur, Metsudah Publications, 1981 - HE => סידור מצודה, הוצאת מצודה, 1981 – עברית
+The path of Torah, Urim 2009 => דרכה של תורה (קדמת העמק), הוצאת אורים, 2009
+The Psalms with Qimchi’s Longer Commentary, Leipzig, 1883 => תהלים עם פירוש רד"ק הארוך, דפוס לייפציג, 1883
+The Targum to Canticles according to six Yemen MSS, Raphael Hai Melamed, 1921 => תרגום שיר השירים על פי שישה כתבי יד תימניים, רפאל חי מלמד, 1921
+Torah Commentary of Yitzchak Abarbanel, Warsaw 1862 => פירוש התורה ליצחק אברבנאל, דפוס ורשה 1862
+Torat Emet 357 => תורת אמת 357
+Torat Emet 363 - censorship omissions reinserted => תורת אמת 363 – עם החזרת השמטות הצנזורה
+Torat Emet Sefer HaBahir => תורת אמת – ספר הבהיר
+ToratEmet => תורת אמת
+Tosefta Tohorot - Machon Mamre => תוספתא טהרות - מכון ממרא
+Tur Orach Chaim, Vilna, 1923 => טור אורח חיים, דפוס וילנא 1923
+Tur Yoreh Deah, Vilna, 1923 => טור יורה דעה, דפוס וילנא 1923
+Turin National University Library, Turin, Italy Ms. A II 29 => הספרייה הלאומית האוניברסיטאית, טורינו, איטליה, כתב יד A II 29
+Venice, 1579 => דפוס ונציה, 1579
+Vilna, 1815 => דפוס וילנא, 1815
+Vilna, 1873 => דפוס וילנא, 1873
+Vilna, 1895 => דפוס וילנא, 1895
+Wikisource (with changes) => ויקיטקסט (עם שינויים)
+Wikisource Edition => מהדורת ויקיטקסט
+Wikisource Kitzur Shulchan Aruch - Menukad => קיצור שולחן ערוך (ויקיטקסט) – מנוקד
+Wikisource Sefer HaBahir => ספר הבהיר (ויקיטקסט)
+WikiSource Tosafot => תוספות (ויקיטקסט)
+Yakar MiPaz, 1912. => יקר מפז, 1912
+Yakar MiPaz, Lvov 1874 => יקר מפז, דפוס לבוב 1874
+YU Torah miTzion Beit Midrash => בית מדרש תורה מציון של ישיבה יוניברסיטי, טורונטו
+Zikhru Na, Rabbi Shlomo Halberstam, Bobover Rav => זכרו נא, הרב שלמה הלברשטאם, האדמו"ר מבאבוב
+Zohar Ruth - Midrash HaNe'elam => זוהר רות – מדרש הנעלם
+
+# --- שורות לפי ספר ---
+Idra Zuta | Hebrew translation according to the Sulam => תרגום עברי (על פי הסולם)
+Idra Zuta | Zohar Sulam Aramaic Text => מקור ארמי (מהדורת הסולם)
+Idra Zuta | Zohar Menukad => מקור ארמי, מנוקד (זוהר מנוקד)
+Malbim on Deuteronomy | Mikraei Kodesh, Vilna, 1891 -- Torah Ohr => מקראי קודש, דפוס וילנא תרנ"א – תורה אור
+Tzror HaMor on Torah | Tzror HaMor on Torah - with citations => צרור המור על התורה, דפוס ורשה, תרל"ט – עם מראי מקומות
+Bereshit Rabbah | Bereishit Rabbah 33,5 => קטע: בראשית רבה לג, ה
+Chidushei Agadot on Makkot | Chidushei Agadot on Makkot : Daf 10b => קטע: חידושי אגדות על מכות, דף י ע"ב
+Rashi on Avot | Rashi on Avot : Chapter 1: Mishnah 6 => קטע: רש"י על אבות, פרק א משנה ו
+Ritva on Makkot | Ritva on Makkos 12a => קטע: ריטב"א על מכות, דף יב ע"א
+Mishneh Torah, Prayer and the Priestly Blessing | just the first two halachot => קטע: הלכות תפילה וברכת כהנים, פרק א הלכות א–ב (מכון הדר)
+Mishnah Berurah | eu5 text => נוסח אתר משנה ברורה (mishnaberura.eu5.org), סימנים ב–קפו
+Benayahu on Berakhot | new edition => קטע: מהדורה חדשה
+Lechem Mishneh on Mishneh Torah, Prayer and the Priestly Blessing | Rambam => קטע: לשון הרמב"ם (הלכות תפילה יב, יח)
+Chidushei Agadot on Makkot | Maharal => קטע: מהר"ל (מכות ז ע"א)
+Tosafot on Shabbat | Hebrew books => קטע: היברובוקס (תוספות על שבת קיט ע"ב)
