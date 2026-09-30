@@ -7,7 +7,8 @@ import java.nio.file.Path
 import java.nio.file.Paths
 
 object AcronymizerFetcher {
-    private const val LATEST_API = "https://api.github.com/repos/kdroidFilter/SeforimAcronymizer/releases/latest"
+    // The Otzaria fork: it carries acronyms for Otzaria-only titles and renames.
+    private const val LATEST_API = "https://api.github.com/repos/Otzaria/SeforimAcronymizer/releases/latest"
     private const val USER_AGENT = "SeforimLibrary-AcronymizerFetcher/1.0"
 
     /** Ensure acronymizer DB is available locally under build/acronymizer/acronymizer.db (relative to CWD). */
