@@ -487,7 +487,7 @@ class InheritChaptersAltTocIntegrationTest {
 
         val structure = repo.getAltTocStructuresForBook(seeded.linkedId).single()
         assertEquals(INHERITED_CHAPTERS_TITLE_EN, structure.title)
-        assertEquals("מפרש על ברכות", structure.heTitle)
+        assertEquals("פרקים", structure.heTitle)
         val roots = entries(seeded.linkedId).filter { it.parentId == null }
         assertTrue(roots.all { it.level == 0 })
         assertEquals(listOf(true, false, true), roots.map { it.hasChildren })

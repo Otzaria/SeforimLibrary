@@ -907,7 +907,7 @@ private fun writeInheritedChapters(
         st.setLong(2, snapshot.bookId)
         st.setString(3, CHAPTERS_STRUCTURE_KEY)
         st.setString(4, INHERITED_CHAPTERS_TITLE_EN)
-        st.setString(5, snapshot.title)
+        st.setString(5, SefariaAltStructureNames.forKey(CHAPTERS_STRUCTURE_KEY) ?: snapshot.title)
         st.executeUpdate()
     }
 
