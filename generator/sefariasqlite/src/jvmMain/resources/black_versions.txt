@@ -131,3 +131,10 @@ William Davidson Edition - Aramaic
 # --- כתר מלכות: חלוקה שאינה תואמת את הטקסט המוצהר ב-preferred_versions.txt ---
 # Mahberet מחולקת לפסוקים ו-Tikkun לפרקים מוזזים ב-3 — אין ולו כתובת אחת משותפת.
 כתר מלכות | Tikkun Midot HaNefesh, Jerusalem 1996
+# --- כפילויות: עותק שני של גרסה קיימת באותו ספר (החסום אינו מקור הטקסט הראשי) ---
+תוספתא טהרות | Tosefta Tahorot - Machon Mamre
+משנה תורה, הלכות דעות | Wikisource Mishneh Torah - Hebrew
+ונתנה תוקף | Goldshmidt with ms emendation
+
+# --- תוכן שאינו שייך לספר: טופס כתובה שהוצמד להלכות יבום וחליצה ד, כג ---
+משנה תורה, הלכות יבום וחליצה | טופס הכתובה: ביום פלוני וכו'
