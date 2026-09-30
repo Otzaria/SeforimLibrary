@@ -229,7 +229,7 @@ class ManualReleaseWorkflowContractTest(unittest.TestCase):
         self.assertGreaterEqual(self.workflow.count(f"PHASE2_IMPLEMENTATION_COMMIT: {expression}"), 3)
         self.assertIn('--arg phase2 "$PHASE2_IMPLEMENTATION_COMMIT"', lookup)
         self.assertIn(".phase2_implementation_commit==$phase2", lookup)
-        self.assertIn('"schema_version": 5', stage)
+        self.assertIn('"schema_version": 6', stage)
         self.assertIn(
             '"phase2_implementation_commit": os.environ["PHASE2_IMPLEMENTATION_COMMIT"]',
             stage,
@@ -364,7 +364,7 @@ class ManualReleaseWorkflowContractTest(unittest.TestCase):
         )
         self.assertLess(
             self.workflow.index("      - name: Fingerprint published DB schema\n"),
-            self.workflow.index("      - name: Compress Seforim Database (zstd)\n"),
+            self.workflow.index("      - name: Package Seforim Database (zstd or zdb)\n"),
         )
 
         # The per-anchor body is produce_anchor, in patch_fan_lib.sh.
@@ -1762,7 +1762,7 @@ class ManualReleaseWorkflowContractTest(unittest.TestCase):
         helper = ZSTD_WORKERS_HELPER.read_text(encoding="utf-8")
         source = ". .pipeline-control/.github/scripts/zstd_workers.sh"
         snapshot = self.step("Dump lines snapshot for the linker")
-        compress = self.step("Compress Seforim Database (zstd)")
+        compress = self.step("Package Seforim Database (zstd or zdb)")
         buildstate = self.step("Compress buildstate for the release (zstd)")
 
         # `-T0` resolves to PHYSICAL cores (8 of the runner's 16 vCPUs), so it
@@ -1812,9 +1812,9 @@ class ManualReleaseWorkflowContractTest(unittest.TestCase):
         )
         # The name is the schema's: seforim.db.zst only up to schema 5.
         self.assertIn(
-            'FULL_DB_ASSET=$(full_db_asset_name "$(jq -er .db_schema_version build/db_schema.json)")',
-            compress,
+            "DB_SCHEMA_VERSION=$(jq -er .db_schema_version build/db_schema.json)", compress
         )
+        self.assertIn('FULL_DB_ASSET=$(full_db_asset_name "$DB_SCHEMA_VERSION")', compress)
 
         # E1 buildstate: -10 is the measured knee (1.97x in 8.0 s on a real
         # 615.9 MB buildstate; -19 buys 6.4% for 3.5x the CPU). The worker count
@@ -1870,7 +1870,7 @@ class ManualReleaseWorkflowContractTest(unittest.TestCase):
 
         # The staging step copies the buildstate and the DB, never the snapshot.
         self.assertNotIn('cp build/lines_snapshot.db.zst', stage)
-        self.assertIn('"schema_version": 5,', stage)
+        self.assertIn('"schema_version": 6,', stage)
         self.assertIn('"snapshot_zst_sha256": snapshot_sha256,', stage)
         self.assertIn(
             '"snapshot_release_tag": "lines-snapshot-sha256-" + snapshot_sha256,', stage
@@ -2313,7 +2313,7 @@ class ManualReleaseWorkflowContractTest(unittest.TestCase):
         # Reads build/seforim.db, which the compress step keeps (-o, no --rm),
         # and must finish before staging hashes the directory.
         self.assertLess(
-            self.workflow.index("      - name: Compress Seforim Database (zstd)\n"),
+            self.workflow.index("      - name: Package Seforim Database (zstd or zdb)\n"),
             self.workflow.index("      - name: Compute library stats (advisory)\n"),
         )
         self.assertLess(
@@ -2681,6 +2681,208 @@ class ManualReleaseWorkflowContractTest(unittest.TestCase):
         self.assertIn('::error::$suite failed', step)
 
     @unittest.skipIf(yaml is None, "PyYAML unavailable on this runner")
+    # ── S5c: the schema-6+ full DB is a zdb made by the pinned app converter ──
+    def test_the_zvfs_converter_is_pinned_built_first_and_part_of_the_identity(self):
+        contract = json.loads((SCRIPTS_DIR.parent / "contracts" / "zvfs.json").read_text(encoding="utf-8"))
+        self.assertEqual(sorted(contract), ["commit", "repository"])
+        self.assertRegex(contract["commit"], r"^[0-9a-f]{40}$")
+        self.assertIn(contract["repository"], ("palmoni5/otzaria", "Otzaria/otzaria"))
+
+        build = self.step("Build pinned zvfs_cli")
+        self.assertIn("CONTRACT=.pipeline-control/.github/contracts/zvfs.json", build)
+        self.assertIn(
+            'ZVFS_CLI=$(bash .pipeline-control/.github/scripts/build_zvfs_cli.sh "$CONTRACT" | tail -n1)',
+            build,
+        )
+        for var in ("ZVFS_CLI", "ZVFS_REPOSITORY", "ZVFS_COMMIT", "ZVFS_CLI_SHA256"):
+            self.assertIn(f'echo "{var}=', build)
+        # Before hours of DB generation, after the toolchain it needs (cc).
+        self.assertLess(
+            self.workflow.index("      - name: Install DB workflow dependencies\n"),
+            self.workflow.index("      - name: Build pinned zvfs_cli\n"),
+        )
+        self.assertLess(
+            self.workflow.index("      - name: Build pinned zvfs_cli\n"),
+            self.workflow.index("      - name: Generate Seforim Database\n"),
+        )
+        installer = (SCRIPTS_DIR / "install-db-workflow-deps.sh").read_text(encoding="utf-8")
+        self.assertIn("jq curl unzip cc; do", installer)
+
+        script = (SCRIPTS_DIR / "build_zvfs_cli.sh").read_text(encoding="utf-8")
+        self.assertIn("printf '/%s/\\n' \"$package\" > \"$src/.git/info/sparse-checkout\"", script)
+        self.assertIn("package=packages/otzaria_zvfs", script)
+        self.assertIn('fetch -q --depth 1 --filter=blob:none origin "$commit"', script)
+        self.assertIn('[ "$(git -C "$src" rev-parse HEAD)" = "$commit" ]', script)
+        self.assertIn('sh "$src/$package/tool/build_cli.sh" "$work/slot/zvfs_cli"', script)
+        self.assertIn('sh "$src/$package/tool/cli_roundtrip.sh" "$work/slot/zvfs_cli"', script)
+        self.assertIn('slot="$cache/$commit-$arch"', script)
+
+        stage = self.step("Stage release assets")
+        for field in ("zvfs_repository", "zvfs_commit", "zvfs_cli_sha256"):
+            self.assertIn(f'"{field}": os.environ["{field.upper()}"],', stage)
+        self.assertIn('"zdb_level": int(os.environ["ZDB_LEVEL"]),', stage)
+        # Reuse needs the same converter and level; the CLI digest is per-arch.
+        lookup = self.step("Find and verify exact provenance")
+        self.assertIn("ZVFS_COMMIT=$(jq -er .commit .github/contracts/zvfs.json)", lookup)
+        self.assertIn(".zvfs_repository==$zr and .zvfs_commit==$zc and .zdb_level==$zl", lookup)
+        self.assertNotIn(".zvfs_cli_sha256==", lookup)
+        self.assertEqual(self.workflow.count("ZDB_LEVEL: ${{ vars.ZDB_LEVEL || '19' }}"), 1)
+
+    def test_a_schema_6_full_db_ships_as_a_verified_zdb_with_its_manifest(self):
+        package = self.step("Package Seforim Database (zstd or zdb)")
+        self.assertIn('if [ "$DB_SCHEMA_VERSION" -lt 6 ]; then', package)
+        self.assertIn("gradle :generator-common:logicalContentHash", package)
+        self.assertIn('ROUNDTRIP="$RUNNER_TEMP/zdb-roundtrip-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"', package)
+        self.assertIn("PATCH_MANIFEST_DIR=patches", package)
+        self.assertIn("bash .pipeline-control/.github/scripts/package_full_db_zdb.sh", package)
+        self.assertIn('echo "FULL_DB_MANIFEST=$FULL_DB_ASSET.manifest.json" >> "$GITHUB_ENV"', package)
+        common = GENERATOR_COMMON_BUILD.read_text(encoding="utf-8")
+        self.assertIn('tasks.register<JavaExec>("logicalContentHash")', common)
+        self.assertIn("common.patch.LogicalContentHashCliKt", common)
+
+        script = (SCRIPTS_DIR / "package_full_db_zdb.sh").read_text(encoding="utf-8")
+        self.assertIn(
+            '"$ZVFS_CLI" convert "$db" "$zdb" --dict seforim-v1 --level "$ZDB_LEVEL" \\\n'
+            '  --threads "$threads" --uuid-from-content --created-ms 0',
+            script,
+        )
+        self.assertIn('[ "$threads" -le 16 ] || threads=16', script)
+        for call in ('"$ZVFS_CLI" verify "$zdb"', '"$ZVFS_CLI" export "$zdb" "$roundtrip"',
+                     'cmp "$db" "$roundtrip"', '"$ZVFS_CLI" info --json "$zdb" > "$info"'):
+            self.assertIn(call, script)
+        self.assertIn('if [ "$size" -gt 2147483647 ]; then', script)
+
+        # Both assets are staged, so the draft holds both before it is published.
+        stage = self.step("Stage release assets")
+        self.assertIn('cp "build/$FULL_DB_MANIFEST" "$STAGE/"', stage)
+        self.assertIn("-size +${MAX}c", stage)
+        publish = self.step("Create draft, verify every uploaded asset, then publish")
+        self.assertLess(
+            publish.index('for asset_path in release-staging/*; do upload_asset "$asset_path"; done'),
+            publish.index('gh release edit "$RELEASE_TAG" --draft=false'),
+        )
+        self.assertLess(publish.index("verify_remote; then verified=true"),
+                        publish.index('gh release edit "$RELEASE_TAG" --draft=false'))
+        cleanup = self.step("Clean run-scoped disk leftovers (workspace persists on self-hosted)")
+        self.assertIn('"$RUNNER_TEMP/zdb-roundtrip-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"; do', cleanup)
+
+    def _package_zdb(self, tmp, cli_body, patch_manifests=()):
+        root = Path(tmp)
+        bin_dir = root / "bin"
+        bin_dir.mkdir()
+        cli = bin_dir / "zvfs_cli"
+        cli.write_text(f"#!{Path(sys.executable).as_posix()}\n" + textwrap.dedent(cli_body), encoding="utf-8")
+        cli.chmod(0o755)
+        python3 = bin_dir / "python3"
+        python3.write_text(f"#!/bin/sh\nexec '{sys.executable}' \"$@\"\n", encoding="utf-8")
+        python3.chmod(0o755)
+        (root / "build").mkdir()
+        db = root / "build" / "seforim.db"
+        db.write_bytes(b"SQLite format 3\0" + bytes(range(256)) * 64)
+        patches = root / "patches"
+        patches.mkdir()
+        for name, body in patch_manifests:
+            (patches / name).write_text(json.dumps(body), encoding="utf-8")
+        env = dict(
+            os.environ, PATH=f"{bin_dir}{os.pathsep}{os.environ['PATH']}", ZVFS_CLI=cli.as_posix(),
+            ZVFS_REPOSITORY="palmoni5/otzaria", ZVFS_COMMIT="c" * 40, ZDB_LEVEL="19",
+            DB_VERSION="30", DB_SCHEMA_VERSION="6", CONTENT_HASH="a" * 64,
+            PATCH_MANIFEST_DIR=str(patches),
+        )
+        done = subprocess.run(
+            [shutil.which("bash"), (SCRIPTS_DIR / "package_full_db_zdb.sh").as_posix(), db.as_posix(),
+             (root / "build").as_posix(), (root / "scratch").as_posix()],
+            env=env, capture_output=True, text=True,
+        )
+        return done, root / "build" / "seforim-schema6.zdb"
+
+    # A stand-in converter: the "zdb" is the DB itself, info reports its sizes.
+    COPY_CLI = """
+        import json, os, shutil, sys
+        cmd = sys.argv[1]
+        if cmd == "convert":
+            shutil.copyfile(sys.argv[2], sys.argv[3])
+        elif cmd == "export":
+            shutil.copyfile(sys.argv[2], sys.argv[3])
+        elif cmd == "info":
+            path = sys.argv[3]
+            size = os.path.getsize(path)
+            print(json.dumps({"formatMajor": 1, "formatMinor": 2, "fileUuid": "0" * 32,
+                              "contentXxh64": "1" * 16, "logicalSize": size, "pageSize": 4096,
+                              "dictName": "seforim-v1", "dictId": 7, "level": 19,
+                              "physicalSize": size, "lockGap": False,
+                              "overlay": {"present": False}}))
+        """
+
+    @unittest.skipUnless(shutil.which("bash") and shutil.which("sha256sum") and shutil.which("cmp"),
+                         "bash, sha256sum and cmp are required")
+    def test_the_zdb_manifest_is_the_updaters_contract(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            done, zdb = self._package_zdb(tmp, self.COPY_CLI, [
+                ("patch-v29-v30.db.zst.manifest.json", {"toVersion": 30, "toContentHash": "a" * 64}),
+                ("patch-v28-v30.db.zst.manifest.json",
+                 {"toVersion": 30, "fullRebase": True, "toContentHash": "barrier"}),
+            ])
+            self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+            manifest = json.loads(zdb.with_name(zdb.name + ".manifest.json").read_text(encoding="utf-8"))
+            # Field names and types of otzaria_library_updater#15 full_db_manifest.dart.
+            self.assertEqual(list(manifest), ["manifestVersion", "file", "size", "sha256", "zdb",
+                                              "dbVersion", "dbSchemaVersion", "contentHash", "converter"])
+            self.assertEqual(manifest["manifestVersion"], 1)
+            self.assertEqual(manifest["file"], "seforim-schema6.zdb")
+            self.assertEqual(manifest["size"], zdb.stat().st_size)
+            import hashlib
+            self.assertEqual(manifest["sha256"], hashlib.sha256(zdb.read_bytes()).hexdigest())
+            self.assertEqual(sorted(manifest["zdb"]), sorted([
+                "formatMajor", "formatMinor", "fileUuid", "contentXxh64", "logicalSize",
+                "pageSize", "dictName", "dictId", "level"]))
+            self.assertEqual((manifest["dbVersion"], manifest["dbSchemaVersion"]), (30, 6))
+            self.assertEqual(manifest["contentHash"], "a" * 64)
+            self.assertEqual(manifest["converter"], {"repository": "palmoni5/otzaria", "commit": "c" * 40})
+            self.assertIn("agrees with 1 delta manifest(s)", done.stdout)
+            self.assertEqual(list((Path(tmp) / "scratch").iterdir()), [])
+
+        # A delta ending anywhere else is a build failure, not a manifest.
+        with tempfile.TemporaryDirectory() as tmp:
+            done, zdb = self._package_zdb(tmp, self.COPY_CLI, [
+                ("patch-v29-v30.db.zst.manifest.json", {"toVersion": 30, "toContentHash": "b" * 64}),
+            ])
+            self.assertNotEqual(done.returncode, 0)
+            self.assertIn("patch-v29-v30.db.zst.manifest.json ends at v30", done.stderr)
+            self.assertFalse(zdb.with_name(zdb.name + ".manifest.json").exists())
+
+    @unittest.skipUnless(shutil.which("bash") and shutil.which("sha256sum") and shutil.which("cmp"),
+                         "bash, sha256sum and cmp are required")
+    def test_a_zdb_that_does_not_export_back_byte_for_byte_fails_the_build(self):
+        broken = self.COPY_CLI.replace(
+            """        elif cmd == "export":
+            shutil.copyfile(sys.argv[2], sys.argv[3])""",
+            """        elif cmd == "export":
+            open(sys.argv[3], "wb").write(open(sys.argv[2], "rb").read()[:-1] + b"x")""")
+        self.assertNotEqual(broken, self.COPY_CLI)
+        with tempfile.TemporaryDirectory() as tmp:
+            done, zdb = self._package_zdb(tmp, broken)
+            self.assertNotEqual(done.returncode, 0)
+            self.assertIn("does not export back", done.stderr)
+            self.assertFalse(zdb.with_name(zdb.name + ".manifest.json").exists())
+            self.assertEqual(list((Path(tmp) / "scratch").iterdir()), [])
+
+    @unittest.skipUnless(sys.platform.startswith("linux") and shutil.which("bash"),
+                         "needs a filesystem with sparse files")
+    def test_a_zdb_over_the_2_gib_asset_limit_fails_instead_of_splitting(self):
+        oversized = self.COPY_CLI.replace(
+            """        if cmd == "convert":
+            shutil.copyfile(sys.argv[2], sys.argv[3])""",
+            """        if cmd == "convert":
+            with open(sys.argv[3], "wb") as out:
+                out.truncate(2147483648)""")
+        self.assertNotEqual(oversized, self.COPY_CLI)
+        with tempfile.TemporaryDirectory() as tmp:
+            done, _ = self._package_zdb(tmp, oversized)
+            self.assertNotEqual(done.returncode, 0)
+            self.assertIn("over GitHub's 2 GiB per-asset limit", done.stderr)
+            self.assertIn("a zdb is not split", done.stderr)
+
     def test_hosted_jobs_run_node24_checkout_and_the_self_hosted_one_does_not(self):
         # "Node.js 20 is deprecated … forced to run on Node.js 24:
         # actions/checkout@v4" fired once per job. v5 is the first checkout

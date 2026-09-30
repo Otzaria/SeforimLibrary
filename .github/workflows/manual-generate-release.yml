@@ -104,6 +104,13 @@ on:
 permissions:
   contents: write
 
+env:
+  # zstd level of the schema-6+ zdb (repository variable ZDB_LEVEL), part of the
+  # reuse identity. On a 7.9 GB schema-5 DB, 12 threads: L9 2,076,806,779 B in
+  # 78 s (97% of the 2 GiB asset cap), L19 1,898,040,856 B in 440 s; the same DB
+  # as seforim.db.zst -19 was 1,568,057,071 B.
+  ZDB_LEVEL: ${{ vars.ZDB_LEVEL || '19' }}
+
 # Only one release build at a time. A RAM-backed build dir (see the tmpfs step)
 # makes two concurrent runs on the same self-hosted host a memory hazard, and a
 # release pipeline should never race itself. Queue rather than cancel — a build
@@ -247,6 +254,13 @@ jobs:
           PHASE2_IMPLEMENTATION_COMMIT: ${{ inputs.relink_recovery_run_id != '' && github.sha || inputs.source_commit }}
         run: |
           set -euo pipefail
+          # The converter pin and level change the published zdb, so they are part
+          # of the identity. zvfs_cli_sha256 is not: it is known only once the
+          # build runner compiled it, and it differs per architecture.
+          ZVFS_REPOSITORY=$(jq -er .repository .github/contracts/zvfs.json)
+          ZVFS_COMMIT=$(jq -er .commit .github/contracts/zvfs.json)
+          [[ "$ZDB_LEVEL" =~ ^[1-9][0-9]?$ ]] && [ "$ZDB_LEVEL" -le 22 ] || {
+            echo "::error::repository variable ZDB_LEVEL='$ZDB_LEVEL' is not a zstd level 1..22"; exit 1; }
           mkdir -p "$RUNNER_TEMP/provenance-scan"
           gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" | jq -s 'add' > "$RUNNER_TEMP/releases.json"
           MATCHES=0
@@ -287,11 +301,13 @@ jobs:
               --arg ec "$EXPECTED_LINKS_COMMIT" --arg tc "$OTZARIA_TARGET_COMMIT" \
               --arg fd "$FORDB_ARCHIVE_SHA" --arg ft "$FORDB_TAG" \
               --arg phase2 "$PHASE2_IMPLEMENTATION_COMMIT" \
+              --arg zr "$ZVFS_REPOSITORY" --arg zc "$ZVFS_COMMIT" --argjson zl "$ZDB_LEVEL" \
               '.source_commit==$source and .sefaria_tag==$st and .sefaria_release_metadata_sha256==$sm and
                .sefaria_archive_sha256==$sa and .otzaria_tag==$ot and .otzaria_asset_sha256==$oa and
                .expected_links_commit==$ec and .otzaria_target_commit==$tc and
                .fordb_archive_sha256==$fd and .fordb_tag==$ft and
-               .phase2_implementation_commit==$phase2' "$file" >/dev/null; then
+               .phase2_implementation_commit==$phase2 and
+               .zvfs_repository==$zr and .zvfs_commit==$zc and .zdb_level==$zl' "$file" >/dev/null; then
               test "$draft" = false
               test "$target" = "$SOURCE_COMMIT"
               [[ "$tag" =~ ^v[1-9][0-9]*-[0-9]{14}$ ]]
@@ -744,6 +760,24 @@ jobs:
 
       - name: Install DB workflow dependencies
         run: bash .pipeline-control/.github/scripts/install-db-workflow-deps.sh
+
+      # The schema-6+ full DB ships as a zdb made by the app's own converter,
+      # pinned in .github/contracts/zvfs.json and built here with plain cc (no
+      # cmake), cached per commit+arch. Built before the DB so a broken pin
+      # fails in seconds, not after hours of generation.
+      - name: Build pinned zvfs_cli
+        run: |
+          set -euo pipefail
+          CONTRACT=.pipeline-control/.github/contracts/zvfs.json
+          ZVFS_CLI=$(bash .pipeline-control/.github/scripts/build_zvfs_cli.sh "$CONTRACT" | tail -n1)
+          ZVFS_CLI_SHA256=$(sha256sum "$ZVFS_CLI" | cut -d' ' -f1)
+          echo "zvfs_cli sha256 $ZVFS_CLI_SHA256 ($(uname -m))"
+          {
+            echo "ZVFS_CLI=$ZVFS_CLI"
+            echo "ZVFS_REPOSITORY=$(jq -er .repository "$CONTRACT")"
+            echo "ZVFS_COMMIT=$(jq -er .commit "$CONTRACT")"
+            echo "ZVFS_CLI_SHA256=$ZVFS_CLI_SHA256"
+          } >> "$GITHUB_ENV"
 
       # Resolve both source archives by immutable tag and digest before any DB
       # work. No fetcher in the build is allowed to consult /releases/latest.
@@ -2113,25 +2147,50 @@ jobs:
             fi
           fi
 
-      # Compress the full DB into a single .zst for the release. Done after the
-      # delta phase so build/seforim.db (the diff ground-truth) and the .zst
-      # don't both sit on disk during the patch fan.
-      - name: Compress Seforim Database (zstd)
+      # Package the full DB for the release. Done after the delta phase so
+      # build/seforim.db (the diff ground-truth) and the package don't both sit
+      # on disk during the patch fan.
+      #
+      # Schema <= 5: seforim.db.zst, one zstd stream. Schema 6+: the page-compressed
+      # seforim-schema<N>.zdb and its manifest, both staged, so the draft carries
+      # both before it is published — a client refuses a zdb without its manifest.
+      # The zdb is verified, then exported back to $RUNNER_TEMP (one more DB of
+      # workspace disk, like VACUUM INTO above) and compared with build/seforim.db
+      # byte for byte. contentHash is the same logical hash a patch manifest ending
+      # at this DB carries as toContentHash, and the script checks the fan's agree.
+      - name: Package Seforim Database (zstd or zdb)
+        env:
+          DB_VERSION: ${{ steps.discover.outputs.db_version }}
         run: |
           set -euo pipefail
-          # `-22` was silently clamped to 19: levels above 19 require --ultra,
-          # which this step never passed, so `-19` is BYTE-IDENTICAL to every
-          # seforim.db.zst this pipeline has ever published — no level change
-          # here, and no published digest moves.  The worker count is likewise
-          # byte-neutral (see "Dump lines snapshot for the linker" above); it
-          # only stops `-T0` from parking on 8 of the runner's 16 vCPUs.
-          . .pipeline-control/.github/scripts/zstd_workers.sh
           # seforim.db.zst names a schema <= 5 DB forever (old updaters match it);
-          # schema 6+ ships as seforim-schema<N>.db.zst. db_schema.json is this DB's dump.
+          # schema 6+ ships as seforim-schema<N>.zdb. db_schema.json is this DB's dump.
           . .pipeline-control/.github/scripts/db_asset_names.sh
-          FULL_DB_ASSET=$(full_db_asset_name "$(jq -er .db_schema_version build/db_schema.json)")
-          zstd -T"$(zstd_workers)" -19 -f -o "build/$FULL_DB_ASSET" build/seforim.db
+          DB_SCHEMA_VERSION=$(jq -er .db_schema_version build/db_schema.json)
+          FULL_DB_ASSET=$(full_db_asset_name "$DB_SCHEMA_VERSION")
           echo "FULL_DB_ASSET=$FULL_DB_ASSET" >> "$GITHUB_ENV"
+          if [ "$DB_SCHEMA_VERSION" -lt 6 ]; then
+            # `-22` was silently clamped to 19: levels above 19 require --ultra,
+            # which this step never passed, so `-19` is BYTE-IDENTICAL to every
+            # seforim.db.zst this pipeline has ever published — no level change
+            # here, and no published digest moves.  The worker count is likewise
+            # byte-neutral (see "Dump lines snapshot for the linker" above); it
+            # only stops `-T0` from parking on 8 of the runner's 16 vCPUs.
+            . .pipeline-control/.github/scripts/zstd_workers.sh
+            zstd -T"$(zstd_workers)" -19 -f -o "build/$FULL_DB_ASSET" build/seforim.db
+            exit 0
+          fi
+          gradle :generator-common:logicalContentHash \
+            -PdbPath=$PWD/build/seforim.db -Pout=$PWD/build/content_hash.txt \
+            --no-daemon --stacktrace
+          ROUNDTRIP="$RUNNER_TEMP/zdb-roundtrip-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          CONTENT_HASH=$(cat build/content_hash.txt) DB_SCHEMA_VERSION="$DB_SCHEMA_VERSION" \
+          PATCH_MANIFEST_DIR=patches \
+            bash .pipeline-control/.github/scripts/package_full_db_zdb.sh \
+              build/seforim.db build "$ROUNDTRIP"
+          rm -rf "$ROUNDTRIP"
+          cat "build/$FULL_DB_ASSET.manifest.json"
+          echo "FULL_DB_MANIFEST=$FULL_DB_ASSET.manifest.json" >> "$GITHUB_ENV"
 
       # ─── Library stats (advisory) ──────────────────────────────────────────
       # One line of JSON — {"schema_version":1,"db_version":N,"books":…,
@@ -2208,6 +2267,10 @@ jobs:
           # Full DB, compressed — canonical source of the DB.
           # Future releases reconstitute the prev DB from this.
           cp "build/$FULL_DB_ASSET" "$STAGE/"
+          # A zdb ships only together with its manifest (schema 6+).
+          if [ -n "${FULL_DB_MANIFEST:-}" ]; then
+            cp "build/$FULL_DB_MANIFEST" "$STAGE/"
+          fi
           # E1: the IdAllocator seed for the NEXT build, compressed (~2x).
           cp build/seforim.db.buildstate.zst "$STAGE/"
           # E2: lines_snapshot.db.zst is deliberately NOT staged. The identical
@@ -2276,7 +2339,11 @@ jobs:
           # the unpublished rebuild here would hand every consumer a 404.
           snapshot_sha256 = os.environ["EXPECTED_LINKER_SNAPSHOT_ZST_SHA256"]
           value = {
-              "schema_version": 5,
+              "schema_version": 6,
+              "zvfs_repository": os.environ["ZVFS_REPOSITORY"],
+              "zvfs_commit": os.environ["ZVFS_COMMIT"],
+              "zvfs_cli_sha256": os.environ["ZVFS_CLI_SHA256"],
+              "zdb_level": int(os.environ["ZDB_LEVEL"]),
               "snapshot_zst_sha256": snapshot_sha256,
               "snapshot_release_tag": "lines-snapshot-sha256-" + snapshot_sha256,
               "correlation_id": os.environ["CORRELATION_ID"],
@@ -2534,7 +2601,8 @@ jobs:
           # Ours first, unconditionally, with sizes so the log shows the reclaim.
           for leftover in \
             "$RUNNER_TEMP/lines-snapshot-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.db" \
-            "$RUNNER_TEMP/manual-links-inputs-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"; do
+            "$RUNNER_TEMP/manual-links-inputs-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
+            "$RUNNER_TEMP/zdb-roundtrip-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"; do
             [ -e "$leftover" ] || continue
             echo "removing $(du -sh "$leftover" 2>/dev/null | cut -f1) $leftover"
             rm -rf "$leftover" || true

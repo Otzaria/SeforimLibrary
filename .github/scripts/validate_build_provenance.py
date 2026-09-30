@@ -44,13 +44,18 @@ V4_KEYS = V3_KEYS | {"db_schema"}
 # bytes fail-closed. Older published provenances stay valid as v1..v4 — they carry the
 # asset itself instead.
 V5_KEYS = V4_KEYS | {"snapshot_zst_sha256", "snapshot_release_tag"}
+# v6 ships a schema-6+ DB as a page-compressed zdb plus its manifest, and names
+# the converter that made it: the pinned zvfs source (.github/contracts/zvfs.json),
+# the sha256 of the zvfs_cli built from it on this runner, and the level used.
+V6_KEYS = V5_KEYS | {"zvfs_repository", "zvfs_commit", "zvfs_cli_sha256", "zdb_level"}
+REPOSITORY = re.compile(r"[A-Za-z0-9-]+/[A-Za-z0-9._-]+")
 IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,127}")
 LEGACY_FULL_DB_ASSET = "seforim.db.zst"
 
 
 def full_db_asset_name(db_schema_version: int) -> str:
     """Mirror of db_asset_names.sh full_db_asset_name (a test pins the two)."""
-    return f"seforim-schema{db_schema_version}.db.zst" if db_schema_version >= 6 else LEGACY_FULL_DB_ASSET
+    return f"seforim-schema{db_schema_version}.zdb" if db_schema_version >= 6 else LEGACY_FULL_DB_ASSET
 
 
 def load(path: Path) -> dict:
@@ -67,9 +72,9 @@ def load(path: Path) -> dict:
     if not isinstance(value, dict):
         raise ValueError("build provenance must be an object")
     version = value.get("schema_version")
-    if type(version) is not int or version not in (1, 2, 3, 4, 5):
-        raise ValueError("schema_version must be integer 1, 2, 3, 4 or 5")
-    expected_keys = {1: V1_KEYS, 2: V2_KEYS, 3: V3_KEYS, 4: V4_KEYS, 5: V5_KEYS}[version]
+    if type(version) is not int or version not in (1, 2, 3, 4, 5, 6):
+        raise ValueError("schema_version must be integer 1, 2, 3, 4, 5 or 6")
+    expected_keys = {1: V1_KEYS, 2: V2_KEYS, 3: V3_KEYS, 4: V4_KEYS, 5: V5_KEYS, 6: V6_KEYS}[version]
     if set(value) != expected_keys:
         raise ValueError("unknown build provenance key set")
     canonical = json.dumps(
@@ -152,6 +157,15 @@ def validate(value: dict) -> None:
             raise ValueError("invalid snapshot_zst_sha256")
         if value["snapshot_release_tag"] != "lines-snapshot-sha256-" + snapshot_sha256:
             raise ValueError("snapshot release tag does not match the snapshot digest")
+    if version >= 6:
+        if not isinstance(value["zvfs_repository"], str) or not REPOSITORY.fullmatch(value["zvfs_repository"]):
+            raise ValueError("invalid zvfs_repository")
+        if not isinstance(value["zvfs_commit"], str) or not SHA40.fullmatch(value["zvfs_commit"]):
+            raise ValueError("invalid zvfs_commit")
+        if not isinstance(value["zvfs_cli_sha256"], str) or not SHA64.fullmatch(value["zvfs_cli_sha256"]):
+            raise ValueError("invalid zvfs_cli_sha256")
+        if type(value["zdb_level"]) is not int or not 1 <= value["zdb_level"] <= 22:
+            raise ValueError("zdb_level must be an integer 1..22")
     assets = value["assets"]
     if not isinstance(assets, list) or not assets:
         raise ValueError("assets must be a non-empty array")
@@ -176,6 +190,9 @@ def validate(value: dict) -> None:
     # The full DB is named by its schema (db_asset_names.sh); a provenance without a
     # db_schema block predates schema 6, i.e. its DB is seforim.db.zst.
     full_db = full_db_asset_name(value["db_schema"]["db_schema_version"]) if version >= 4 else LEGACY_FULL_DB_ASSET
+    # No release before v6 carried a schema-6+ DB; only v6 knows the zdb asset set.
+    if version < 6 and full_db != LEGACY_FULL_DB_ASSET:
+        raise ValueError("a schema 6+ DB requires build provenance v6")
     if version >= 5:
         required = {full_db, "seforim.db.buildstate.zst"}
         forbidden = {"seforim.db.buildstate", "lines_snapshot.db.zst"}
@@ -185,6 +202,8 @@ def validate(value: dict) -> None:
     # seforim.db.zst is matched by name by every released updater: never a schema-6+ DB.
     if full_db != LEGACY_FULL_DB_ASSET:
         forbidden = forbidden | {LEGACY_FULL_DB_ASSET}
+        # A zdb without its manifest fails client discovery: both or the build fails.
+        required = required | {full_db + ".manifest.json"}
     if not required.issubset(names):
         raise ValueError("required build assets are missing")
     if forbidden & set(names):

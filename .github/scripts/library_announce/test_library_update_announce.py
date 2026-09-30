@@ -866,13 +866,13 @@ class WorkflowContractTest(unittest.TestCase):
             root = Path(tmp)
             binaries = root / "bin"
             binaries.mkdir()
-            for tag, name, split in (("v5", "seforim.db.zst", False), ("v6", "seforim-schema6.db.zst", True)):
+            for tag, name, split in (("v5", "seforim.db.zst", False), ("v6", "seforim-schema6.zdb", True)):
                 release = root / tag
                 release.mkdir()
                 make_db(release / name, [(1, 2, 1, "book")], [(1, 0, "text")], split=split)
                 assets = [{"name": name}, {"name": "patch-v4-v6.db.zst"}]
                 if split:
-                    assets.append({"name": "seforim.db.zst"})
+                    assets += [{"name": "seforim.db.zst"}, {"name": name + ".manifest.json"}]
                 (release / "release.json").write_text(json.dumps({"assets": assets}), encoding="utf-8")
             gh = binaries / "gh"
             gh.write_text(f"#!{sys.executable}\n" + """
@@ -889,22 +889,31 @@ tag = args[2]
 name = args[args.index('-p') + 1]
 with (root / 'downloads.log').open('a') as log:
     log.write(f'{tag}/{name}\\n')
-sys.stdout.buffer.write((root / tag / name).read_bytes())
+out = args[args.index('-O') + 1]
+data = (root / tag / name).read_bytes()
+if out == '-':
+    sys.stdout.buffer.write(data)
+else:
+    Path(out).write_bytes(data)
 """, encoding="utf-8")
             zstd = binaries / "zstd"
             zstd.write_text("#!/bin/sh\nwhile [ $# -gt 0 ]; do\n"
                             "  if [ \"$1\" = -o ]; then out=$2; shift; fi\n  shift\ndone\ncat > \"$out\"\n", encoding="utf-8")
             python = binaries / "python"
             python.write_text(f"#!/bin/sh\nexec '{sys.executable}' \"$@\"\n", encoding="utf-8")
-            for path in (gh, zstd, python):
+            # Stands in for the pinned converter: this fixture "zdb" is the DB itself.
+            zvfs = binaries / "zvfs_cli"
+            zvfs.write_text("#!/bin/sh\n[ \"$1\" = export ] && cp \"$2\" \"$3\"\n", encoding="utf-8")
+            for path in (gh, zstd, python, zvfs):
                 path.chmod(0o755)
             result = subprocess.run([shutil.which("bash"), "-c", run], cwd=ROOT,
                                     env=dict(os.environ, PATH=f"{binaries}{os.pathsep}{os.environ['PATH']}",
                                              RUNNER_TEMP=tmp, PREVIOUS="v5", TAG="v6",
+                                             ZVFS_CLI=str(zvfs),
                                              GITHUB_REPOSITORY="Otzaria/SeforimLibrary", FIXTURES=tmp),
                                     capture_output=True, text=True)
             self.assertEqual(0, result.returncode, result.stdout + result.stderr)
-            self.assertEqual(["v5/seforim.db.zst", "v6/seforim-schema6.db.zst"],
+            self.assertEqual(["v5/seforim.db.zst", "v6/seforim-schema6.zdb"],
                              (root / "downloads.log").read_text().splitlines())
             self.assertEqual(json.loads((root / "announce/previous.json").read_text()),
                              json.loads((root / "announce/current.json").read_text()))

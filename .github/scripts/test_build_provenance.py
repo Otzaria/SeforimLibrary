@@ -24,20 +24,34 @@ class BuildProvenanceContractTest(unittest.TestCase):
         {"name": "seforim.db.zst", "size": 1, "sha256": "a" * 64},
     ]
 
+    # v27..v29 (provenance v5): the compressed buildstate, a schema <= 5 DB.
+    V5_ASSETS = [
+        {"name": "seforim.db.buildstate.zst", "size": 1, "sha256": "9" * 64},
+        {"name": "seforim.db.zst", "size": 1, "sha256": "a" * 64},
+    ]
+
     def downgrade(self, version):
         """A published document of an older schema version, assets and all."""
         value = self.value()
         value["schema_version"] = version
-        for key in contract.V5_KEYS - {1: contract.V1_KEYS, 2: contract.V2_KEYS,
-                                       3: contract.V3_KEYS, 4: contract.V4_KEYS}[version]:
+        for key in contract.V6_KEYS - {1: contract.V1_KEYS, 2: contract.V2_KEYS,
+                                       3: contract.V3_KEYS, 4: contract.V4_KEYS,
+                                       5: contract.V5_KEYS}[version]:
             del value[key]
-        value["assets"] = [dict(asset) for asset in self.LEGACY_ASSETS]
+        if "db_schema" in value:
+            value["db_schema"]["db_schema_version"] = 4
+        assets = self.V5_ASSETS if version == 5 else self.LEGACY_ASSETS
+        value["assets"] = [dict(asset) for asset in assets]
         return value
 
     def value(self):
         sha = "a" * 64
         return {
-            "schema_version": 5,
+            "schema_version": 6,
+            "zvfs_repository": "palmoni5/otzaria",
+            "zvfs_commit": "c" * 40,
+            "zvfs_cli_sha256": "d" * 64,
+            "zdb_level": 19,
             "snapshot_zst_sha256": "b" * 64,
             "snapshot_release_tag": "lines-snapshot-sha256-" + "b" * 64,
             "correlation_id": f"sefaria:1:2:export-v1:{sha}",
@@ -63,15 +77,16 @@ class BuildProvenanceContractTest(unittest.TestCase):
             "source_links_tree_sha256": "6" * 64,
             "packaged_links_tree_sha256": "7" * 64,
             "db_schema": {
-                "db_schema_version": 4,
+                "db_schema_version": 6,
                 "tables": {
                     "link": ["baseProvenance", "id", "sourceBookId"],
                     "schema_meta": ["key", "value"],
                 },
             },
             "assets": [
+                {"name": "seforim-schema6.zdb", "size": 1, "sha256": "a" * 64},
+                {"name": "seforim-schema6.zdb.manifest.json", "size": 1, "sha256": "b" * 64},
                 {"name": "seforim.db.buildstate.zst", "size": 1, "sha256": "9" * 64},
-                {"name": "seforim.db.zst", "size": 1, "sha256": "a" * 64},
             ],
         }
 
@@ -149,22 +164,23 @@ class BuildProvenanceContractTest(unittest.TestCase):
 
     def test_v5_names_the_snapshot_pre_release_instead_of_shipping_it(self):
         with tempfile.TemporaryDirectory() as tmp:
+            contract.validate(contract.load(self.write(tmp, self.downgrade(5))))
             # The tag must be the digest's own content-addressed release: a
             # consumer resolves the snapshot from here and verifies the bytes.
-            value = self.value()
+            value = self.downgrade(5)
             value["snapshot_release_tag"] = "lines-snapshot-sha256-" + "c" * 64
             with self.assertRaises(ValueError):
                 contract.validate(contract.load(self.write(tmp, value)))
 
             for broken in ("", "not-a-sha", "B" * 64, "b" * 63):
-                value = self.value()
+                value = self.downgrade(5)
                 value["snapshot_zst_sha256"] = broken
                 value["snapshot_release_tag"] = "lines-snapshot-sha256-" + broken
                 with self.assertRaises(ValueError):
                     contract.validate(contract.load(self.write(tmp, value)))
 
             # v5 requires the compressed buildstate…
-            value = self.value()
+            value = self.downgrade(5)
             value["assets"] = [
                 {"name": "seforim.db.buildstate", "size": 1, "sha256": "9" * 64},
                 {"name": "seforim.db.zst", "size": 1, "sha256": "a" * 64},
@@ -174,7 +190,7 @@ class BuildProvenanceContractTest(unittest.TestCase):
 
             # …and refuses to re-publish either superseded asset.
             for superseded in ("seforim.db.buildstate", "lines_snapshot.db.zst"):
-                value = self.value()
+                value = self.downgrade(5)
                 value["assets"] = sorted(
                     value["assets"] + [{"name": superseded, "size": 1, "sha256": "8" * 64}],
                     key=lambda asset: asset["name"].encode("utf-8"),
@@ -219,7 +235,7 @@ class BuildProvenanceContractTest(unittest.TestCase):
             self.assertEqual(len(lines), 1, lines)
             self.assertRegex(
                 lines[0],
-                r"^ok: build_provenance v5, \d+ fields, 2 assets, "
+                r"^ok: build_provenance v6, \d+ fields, 3 assets, "
                 r"source_commit=[0-9a-f]{12} \(.*build_provenance\.json\)$",
             )
 
@@ -246,26 +262,60 @@ class BuildProvenanceContractTest(unittest.TestCase):
                 contract.validate(contract.load(self.write(tmp, value)))
 
 
-    def test_a_schema_6_release_ships_the_schema_named_full_db_only(self):
+    def test_a_schema_6_release_ships_the_zdb_and_its_manifest_only(self):
         with tempfile.TemporaryDirectory() as tmp:
-            value = self.value()
-            value["db_schema"]["db_schema_version"] = 6
+            contract.validate(contract.load(self.write(tmp, self.value())))
+
             # The legacy name is what every released updater matches: never schema 6.
-            with self.assertRaises(ValueError):
-                contract.validate(contract.load(self.write(tmp, value)))
-
-            value["assets"] = [
-                {"name": "seforim-schema6.db.zst", "size": 1, "sha256": "a" * 64},
-                {"name": "seforim.db.buildstate.zst", "size": 1, "sha256": "9" * 64},
-            ]
-            contract.validate(contract.load(self.write(tmp, value)))
-
+            value = self.value()
             value["assets"] = sorted(
                 value["assets"] + [{"name": "seforim.db.zst", "size": 1, "sha256": "8" * 64}],
                 key=lambda asset: asset["name"].encode("utf-8"),
             )
             with self.assertRaises(ValueError):
                 contract.validate(contract.load(self.write(tmp, value)))
+
+            # Clients refuse a zdb they cannot match to its manifest, and a
+            # manifest alone names nothing: each one is required.
+            for missing in ("seforim-schema6.zdb", "seforim-schema6.zdb.manifest.json"):
+                value = self.value()
+                value["assets"] = [a for a in value["assets"] if a["name"] != missing]
+                with self.assertRaises(ValueError, msg=missing):
+                    contract.validate(contract.load(self.write(tmp, value)))
+
+            # No release before provenance v6 shipped a schema-6 DB.
+            value = self.downgrade(5)
+            value["db_schema"]["db_schema_version"] = 6
+            value["assets"] = [
+                {"name": "seforim-schema6.zdb", "size": 1, "sha256": "a" * 64},
+                {"name": "seforim-schema6.zdb.manifest.json", "size": 1, "sha256": "b" * 64},
+                {"name": "seforim.db.buildstate.zst", "size": 1, "sha256": "9" * 64},
+            ]
+            with self.assertRaises(ValueError):
+                contract.validate(contract.load(self.write(tmp, value)))
+
+    def test_v6_names_the_converter_strictly(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            for key, broken in (
+                ("zvfs_repository", "otzaria"),
+                ("zvfs_repository", "a/b c"),
+                ("zvfs_commit", "C" * 40),
+                ("zvfs_commit", "c" * 39),
+                ("zvfs_cli_sha256", "d" * 63),
+                ("zdb_level", 0),
+                ("zdb_level", 23),
+                ("zdb_level", True),
+                ("zdb_level", "19"),
+            ):
+                value = self.value()
+                value[key] = broken
+                with self.assertRaises(ValueError, msg=f"{key}={broken!r}"):
+                    contract.validate(contract.load(self.write(tmp, value)))
+            # …and a v5 document may not claim a converter.
+            value = self.downgrade(5)
+            value["zvfs_commit"] = "c" * 40
+            with self.assertRaises(ValueError):
+                contract.load(self.write(tmp, value))
 
     def test_the_full_db_name_has_one_definition_in_shell_and_python(self):
         import shutil
@@ -282,7 +332,7 @@ class BuildProvenanceContractTest(unittest.TestCase):
             self.assertEqual(shell.returncode, 0, shell.stderr)
             self.assertEqual(shell.stdout, contract.full_db_asset_name(schema), schema)
         self.assertEqual(contract.full_db_asset_name(5), "seforim.db.zst")
-        self.assertEqual(contract.full_db_asset_name(6), "seforim-schema6.db.zst")
+        self.assertEqual(contract.full_db_asset_name(6), "seforim-schema6.zdb")
 
 
 if __name__ == "__main__":

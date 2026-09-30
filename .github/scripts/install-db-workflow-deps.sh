@@ -14,7 +14,8 @@ OS_FAMILY="$OS_ID $OS_ID_LIKE"
 # reinstall attempts on every weekly run once the complete toolset is already
 # present; fresh/ephemeral runners still fall through to the installer below.
 all_present=true
-for tool in gh sqlite3 zstd unzstd jq curl unzip; do
+# cc builds the pinned zvfs_cli (build_zvfs_cli.sh).
+for tool in gh sqlite3 zstd unzstd jq curl unzip cc; do
   command -v "$tool" >/dev/null 2>&1 || all_present=false
 done
 if [ "$all_present" = true ]; then
@@ -24,12 +25,12 @@ fi
 
 if echo "$OS_FAMILY" | grep -qiE 'debian|ubuntu'; then
   sudo apt-get update
-  sudo apt-get install -y --no-install-recommends sqlite3 zstd jq curl unzip
+  sudo apt-get install -y --no-install-recommends sqlite3 zstd jq curl unzip gcc libc6-dev
   if ! command -v gh >/dev/null 2>&1 && apt-cache show gh >/dev/null 2>&1; then
     sudo apt-get install -y --no-install-recommends gh || true
   fi
 elif echo "$OS_FAMILY" | grep -qiE 'rhel|centos|fedora|oracle|almalinux|rocky'; then
-  sudo dnf install -y sqlite zstd jq curl unzip
+  sudo dnf install -y sqlite zstd jq curl unzip gcc glibc-devel
   if ! command -v gh >/dev/null 2>&1 && dnf info gh >/dev/null 2>&1; then
     sudo dnf install -y gh || true
   fi
@@ -68,3 +69,4 @@ command -v zstd
 command -v unzstd
 command -v jq
 command -v unzip
+command -v cc

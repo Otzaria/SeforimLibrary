@@ -552,13 +552,13 @@ jobs:
         run: |
           set -euo pipefail
           gh api "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" > "$WORK/release.json"
-          # The full DB is seforim.db.zst up to schema 5 and seforim-schema<N>.db.zst
+          # The full DB is seforim.db.zst up to schema 5 and seforim-schema<N>.zdb
           # from schema 6 on; the highest-schema one is the one to index.
           # shellcheck source=/dev/null
           . .github/scripts/db_asset_names.sh
           DB_ASSET=$(jq -r "$FULL_DB_ASSET_JQ | .name // empty" "$WORK/release.json")
           [ -n "$DB_ASSET" ] || {
-            echo "::error::release $RELEASE_TAG carries no seforim.db.zst or seforim-schema<N>.db.zst asset"
+            echo "::error::release $RELEASE_TAG carries no seforim.db.zst or seforim-schema<N>.zdb asset"
             exit 1
           }
           echo "full DB asset: $DB_ASSET"
@@ -586,11 +586,11 @@ jobs:
           disown "$WATCH" 2>/dev/null || true
           timeout --kill-after=60 60m \
             gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
-              -p "$DB_ASSET" -O "$WORK/seforim.db.zst"
+              -p "$DB_ASSET" -O "$WORK/$DB_ASSET"
           kill "$WATCH" 2>/dev/null || true
-          DB_BYTES=$(stat -c %s "$WORK/seforim.db.zst")
+          DB_BYTES=$(stat -c %s "$WORK/$DB_ASSET")
           echo "downloaded $DB_BYTES bytes in $(( $(date +%s) - PHASE_START ))s"
-          ACTUAL=$(sha256sum "$WORK/seforim.db.zst" | awk '{print $1}')
+          ACTUAL=$(sha256sum "$WORK/$DB_ASSET" | awk '{print $1}')
           [ "$ACTUAL" = "$EXPECTED" ] || {
             echo "::error::$DB_ASSET downloaded as $ACTUAL but the release publishes $EXPECTED"
             exit 1
@@ -600,13 +600,21 @@ jobs:
           # is NOT a budget for this job: it raises zstd's refusal threshold for
           # the 2 GiB decompression window the stream declares, and zstd rejects
           # the asset without it.
+          # A zdb is page-compressed SQLite: the pinned converter exports it back.
+          if [[ "$DB_ASSET" == *.zdb ]]; then
+            ZVFS_CLI=$(bash .github/scripts/build_zvfs_cli.sh .github/contracts/zvfs.json | tail -n1)
+          fi
           PHASE_START=$(date +%s)
           watch_growth expanding & WATCH=$!
           disown "$WATCH" 2>/dev/null || true
-          zstd -d -c --long=31 --memory=2048MB "$WORK/seforim.db.zst" > "$WORK/books/seforim.db"
+          if [[ "$DB_ASSET" == *.zdb ]]; then
+            "$ZVFS_CLI" export "$WORK/$DB_ASSET" "$WORK/books/seforim.db"
+          else
+            zstd -d -c --long=31 --memory=2048MB "$WORK/$DB_ASSET" > "$WORK/books/seforim.db"
+          fi
           kill "$WATCH" 2>/dev/null || true
           echo "expanded in $(( $(date +%s) - PHASE_START ))s"
-          rm -f "$WORK/seforim.db.zst"
+          rm -f "$WORK/$DB_ASSET"
           ls -l "$WORK/books/seforim.db"
 
       # The bundled Talmud Bavli volumes are NEVER indexed — IndexingRepository

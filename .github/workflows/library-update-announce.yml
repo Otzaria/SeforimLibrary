@@ -19,7 +19,7 @@ run-name: announce ${{ inputs.tag || format('after release run {0}:{1}', github.
 #
 # Nothing is uploaded back to either release: the reuse scan in
 # manual-generate-release.yml requires a release's asset count to match its
-# provenance exactly, so the catalogs are computed here from seforim.db.zst.
+# provenance exactly, so the catalogs are computed here from the full DB asset.
 
 on:
   workflow_run:
@@ -126,12 +126,22 @@ jobs:
           . .github/scripts/db_asset_names.sh
           # One DB on disk at a time (v28 is 10.9 GB unpacked), streamed with no .zst copy.
           # --long=31 --memory=2048MB: the limits the app expands this asset with.
+          # A zdb (schema 6+) cannot be streamed: it is downloaded, exported by the
+          # pinned converter and deleted, so it briefly sits on disk beside its DB.
           for side in previous:"$PREVIOUS" current:"$TAG"; do
             name="${side%%:*}" tag="${side#*:}" db="$work/$name.db"
             asset="$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$tag" \
               --jq "$FULL_DB_ASSET_JQ | .name // empty")"
             [ -n "$asset" ] || { echo "::error::release $tag has no full DB asset"; exit 1; }
-            gh release download "$tag" -R "$GITHUB_REPOSITORY" -p "$asset" -O - | zstd -d -q --long=31 --memory=2048MB -o "$db"
+            if [[ "$asset" == *.zdb ]]; then
+              [ -n "${ZVFS_CLI:-}" ] || ZVFS_CLI=$(bash .github/scripts/build_zvfs_cli.sh \
+                .github/contracts/zvfs.json "$RUNNER_TEMP/zvfs-cli" | tail -n1)
+              gh release download "$tag" -R "$GITHUB_REPOSITORY" -p "$asset" -O "$work/$asset"
+              "$ZVFS_CLI" export "$work/$asset" "$db"
+              rm -f "$work/$asset"
+            else
+              gh release download "$tag" -R "$GITHUB_REPOSITORY" -p "$asset" -O - | zstd -d -q --long=31 --memory=2048MB -o "$db"
+            fi
             df -h "$work" | tail -n1
             python .github/scripts/library_announce/library_update_announce.py \
               catalog "$db" "$work/$name.json"

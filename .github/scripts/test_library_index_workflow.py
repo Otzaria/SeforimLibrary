@@ -640,11 +640,20 @@ exit 0
             "::error::$DB_ASSET downloaded as $ACTUAL but the release publishes $EXPECTED",
             run,
         )
-        # The full DB of a schema 6+ release is seforim-schema<N>.db.zst: the
+        # The full DB of a schema 6+ release is seforim-schema<N>.zdb: the
         # highest-schema asset is chosen through the one shared definition.
         self.assertIn(". .github/scripts/db_asset_names.sh", run)
         self.assertIn('DB_ASSET=$(jq -r "$FULL_DB_ASSET_JQ | .name // empty" "$WORK/release.json")', run)
-        self.assertIn('-p "$DB_ASSET" -O "$WORK/seforim.db.zst"', run)
+        self.assertIn('-p "$DB_ASSET" -O "$WORK/$DB_ASSET"', run)
+        # A zdb is exported by the pinned converter, a .db.zst expanded by zstd.
+        self.assertIn(
+            'ZVFS_CLI=$(bash .github/scripts/build_zvfs_cli.sh .github/contracts/zvfs.json | tail -n1)',
+            run,
+        )
+        self.assertIn('"$ZVFS_CLI" export "$WORK/$DB_ASSET" "$WORK/books/seforim.db"', run)
+        self.assertIn(
+            'zstd -d -c --long=31 --memory=2048MB "$WORK/$DB_ASSET" > "$WORK/books/seforim.db"', run
+        )
         self.assertIn("seforimDbZstSha256: $seforimDbZstSha256", run)
 
     def test_the_provenance_pins_the_engine_that_built_the_index(self):
