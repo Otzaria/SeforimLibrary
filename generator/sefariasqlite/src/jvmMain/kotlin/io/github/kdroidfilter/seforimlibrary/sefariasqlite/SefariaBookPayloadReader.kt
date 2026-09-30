@@ -603,6 +603,7 @@ internal class SefariaBookPayloadReader(
                     childRefOffsets = indexOffsets?.children,
                     cleanShifts = cleanShifts,
                     lineKeyHashOverrides = lineKeyHashOverrides,
+                    numbersIntegerLeaf = numbersIntegerLeaf(node),
                 )
             }
         }
@@ -654,6 +655,7 @@ internal class SefariaBookPayloadReader(
                 childRefOffsets = indexOffsets?.children,
                 cleanShifts = cleanShifts,
                 lineKeyHashOverrides = lineKeyHashOverrides,
+                numbersIntegerLeaf = numbersIntegerLeaf(schemaObj),
             )
         }
 
@@ -686,6 +688,7 @@ internal class SefariaBookPayloadReader(
         // Sparse raw-offset bookkeeping (see BookPayload.cleanShiftByLineIndex).
         cleanShifts: MutableMap<Int, Int>? = null,
         lineKeyHashOverrides: MutableMap<Int, ByteArray>? = null,
+        numbersIntegerLeaf: Boolean = false,
     ) {
         // Leaf when depth reached zero, OR when the data is shallower than the
         // schema declares (e.g. Keter Malkhut: schema says depth=2 but most
@@ -751,11 +754,13 @@ internal class SefariaBookPayloadReader(
             0
         }
 
+        val prefixesLeaf = addressTypes.getOrNull(addressTypes.size - depth) != "Integer" || numbersIntegerLeaf
+
         // Prefixing a self-numbered array would double its printed markers.
         // Guarded by the same conditions as nextLinePrefix so no wasted scan.
         val sourceNumbered = depth == 1 && nonEmptyCount > 1 &&
             (referenceableSections.getOrNull(sectionNames.size - depth) ?: true) &&
-            addressTypes.getOrNull(addressTypes.size - depth) != "Integer" &&
+            prefixesLeaf &&
             when (sourceMarkerRun(text)) {
                 MarkerRun.CONSECUTIVE -> true
                 MarkerRun.BROKEN -> {
@@ -784,7 +789,7 @@ internal class SefariaBookPayloadReader(
 
             val sectionIndex = sectionNames.size - depth
             val isReferenceable = referenceableSections.getOrNull(sectionIndex) ?: true
-            val nextLinePrefix = if (depth == 1 && isReferenceable && currentAddressType != "Integer" && nonEmptyCount > 1 && !sourceNumbered) {
+            val nextLinePrefix = if (depth == 1 && isReferenceable && prefixesLeaf && nonEmptyCount > 1 && !sourceNumbered) {
                 "($letter) "
             } else {
                 ""
@@ -843,8 +848,18 @@ internal class SefariaBookPayloadReader(
                 refIndexOffset = nextRefIndexOffset,
                 cleanShifts = cleanShifts,
                 lineKeyHashOverrides = lineKeyHashOverrides,
+                numbersIntegerLeaf = numbersIntegerLeaf,
             )
         }
+    }
+
+    // "Integer" is Sefaria's default address type, not "unnumbered": the leaf is
+    // numbered unless its own Hebrew name is blank or paragraph/comment/line-like.
+    private fun numbersIntegerLeaf(node: JsonObject): Boolean {
+        val he = node["heSectionNames"]?.jsonArray ?: return false
+        val leafIndex = maxOf(he.size, node["sectionNames"]?.jsonArray?.size ?: 0) - 1
+        val leaf = he.getOrNull(leafIndex)?.jsonPrimitive?.contentOrNull?.trim().orEmpty()
+        return leaf.isNotEmpty() && leaf !in UNNUMBERED_INTEGER_LEAF_NAMES
     }
 
     /**
@@ -911,6 +926,10 @@ internal class SefariaBookPayloadReader(
         }
     }
 }
+
+// Integer leaves Sefaria names as paragraphs, comments or lines stay unprefixed;
+// "מדרש" too, since the Simanim alt-TOC already prints its letters.
+private val UNNUMBERED_INTEGER_LEAF_NAMES = setOf("פסקה", "פירוש", "פרשנות", "שורה", "מדרש")
 
 /** `match_templates[].scope` values that make an alt-struct node citable alone. */
 private val ALONE_MATCH_TEMPLATE_SCOPES = setOf("any", "alone")
