@@ -97,6 +97,9 @@ internal fun compressLineContent(
                 pool.submit<List<ByteArray>> {
                     val (compressor, decompressor) = local.get()
                     part.map { (key, text) ->
+                        check(text.size <= LineContentCompression.MAX_LINE_BYTES) {
+                            "row $key is ${text.size} bytes, over the reader cap ${LineContentCompression.MAX_LINE_BYTES}"
+                        }
                         val frame = compressor.compress(text)
                         check(decompressor.decompress(frame).contentEquals(text)) {
                             "zstd round trip failed for row $key"

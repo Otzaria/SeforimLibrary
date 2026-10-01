@@ -19,6 +19,9 @@ import java.sql.Connection
 object LineContentCompression {
     const val DICT_TABLE: String = "zstd_dict"
     const val LEVEL: Int = 19
+
+    /** Same cap as the app's LineContentCodec.maxLineBytes; a longer line fails the build. */
+    const val MAX_LINE_BYTES: Int = 16 * 1024 * 1024
     private const val DICT_RESOURCE = "/zstd/line_content.zdict"
 
     /** SHA-256 of the bundled dictionary; a mismatch means the resource changed. */

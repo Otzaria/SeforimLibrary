@@ -742,8 +742,8 @@ class PatchDbProducer(
     }
 
     /**
-     * `zstd_dict` is not a patch table: a client can only decode upserted rows made
-     * with the dictionary it already holds, so any change of it is a full rebase.
+     * `zstd_dict` never changes through a patch: a client can only decode upserted rows
+     * made with the dictionary it already holds, so any change of it is a full rebase.
      */
     private fun requireSameLineContentDictionary(conn: Connection) {
         val prev = LineContentCompression.storedDictionaries(conn, "prev")

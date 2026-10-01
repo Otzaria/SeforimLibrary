@@ -162,7 +162,8 @@ class LogicalContentHasher(
 
         /**
          * Schema 6 moves line text into line_content, hashed right after line, and the
-         * dictionary of its zstd frames (zstd_dict) right after that.
+         * dictionary of its zstd frames (zstd_dict) right after that. zstd_dict joined
+         * before any release shipped schema 6; from here on the list is frozen.
          */
         val TABLES_SCHEMA_6: List<String> = TABLES_SCHEMA_5.toMutableList().apply {
             add(indexOf("line") + 1, "line_content")
