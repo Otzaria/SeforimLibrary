@@ -4,6 +4,7 @@ import co.touchlab.kermit.Logger
 import co.touchlab.kermit.Severity
 import io.github.kdroidfilter.seforimlibrary.common.db.LineContentCompression
 import io.github.kdroidfilter.seforimlibrary.common.db.LineContentShape
+import io.github.kdroidfilter.seforimlibrary.common.linker.LinkerInputView
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.Paths
@@ -30,6 +31,11 @@ import kotlin.system.exitProcess
  * `context_ref` is the exact Sefaria location of the source line (falling back
  * to the canonical book title only for structural/non-Sefaria lines). The
  * linker may use it only for explicit relative citations such as לעיל/לקמן.
+ *
+ * One exception to "verbatim": a Sefaria line's opening structural label "(א) "
+ * is left out ([LinkerInputView]), because resolving it as a citation breaks the
+ * ibid context of the line's first real citation. Phase-2 applies the same view
+ * when it checks a record's source_hash and maps its offsets back.
  *
  * Usage:
  *   ./gradlew :packaging:dumpLines -PseforimDb=/path/to/seforim.db
@@ -146,7 +152,7 @@ fun main(args: Array<String>) {
                         val sourceName = rs.getString(1)
                         val title = rs.getString(2)
                         val lineIndex = rs.getLong(3)
-                        val content = rs.getString(4) ?: ""
+                        val content = LinkerInputView.linkerContent(sourceName, rs.getString(4) ?: "")
                         val contextRef = rs.getString(5) ?: title
                         insert.setString(1, sourceName)
                         insert.setString(2, title)
@@ -184,6 +190,7 @@ fun main(args: Array<String>) {
                 fun put(k: String, v: String) { m.setString(1, k); m.setString(2, v); m.executeUpdate() }
                 put("schema_version", "2")
                 put("context_policy", "explicit-relative-v1")
+                put("linker_input_policy", LinkerInputView.POLICY)
                 put("source_db", srcDb.fileName.toString())
                 put("book_count", books.toString())
                 put("line_count", lines.toString())
