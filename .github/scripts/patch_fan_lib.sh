@@ -104,16 +104,17 @@ record_skip() {  # <oversized|structural> <target-version> <reason>
 
 # The anchor's plain seforim.db from its release asset, whichever container it is.
 # A zdb is checked against its release manifest when the release has one.
-restore_anchor_db() {  # <asset-file> <out-db> <tag>
-  local ASSET="$1" OUT="$2" TAG="$3" NAME="${1##*/}" MANIFEST
+restore_anchor_db() {  # <asset-file> <out-db> <tag> <target-version>
+  local ASSET="$1" OUT="$2" TAG="$3" TARGET_VER="$4" NAME="${1##*/}" MANIFEST SCHEMA ATTEMPT
   case "$NAME" in
-    "$LEGACY_FULL_DB_ASSET")
+    # seforim-schema<N>.db.zst: schema-6 test builds published before the zdb.
+    "$LEGACY_FULL_DB_ASSET"|seforim-schema*.db.zst)
       unzstd -c "$ASSET" > "$OUT"
       return
       ;;
-    seforim-schema*.zdb) ;;
+    seforim-schema*.zdb) SCHEMA="${NAME#seforim-schema}"; SCHEMA="${SCHEMA%.zdb}" ;;
     *)
-      echo "$NAME is neither $LEGACY_FULL_DB_ASSET nor a seforim-schema<N>.zdb"
+      echo "$NAME is neither $LEGACY_FULL_DB_ASSET nor a seforim-schema<N>.db.zst/.zdb"
       return 1
       ;;
   esac
@@ -122,23 +123,41 @@ restore_anchor_db() {  # <asset-file> <out-db> <tag>
     return 1
   fi
   MANIFEST="$ASSET.manifest.json"
-  rm -f "$MANIFEST"
-  if gh release download "$TAG" --pattern "$NAME.manifest.json" \
-       --dir "$(dirname "$ASSET")" 2>"$MANIFEST.err"; then
-    python3 - "$MANIFEST" "$NAME" "$(stat -c %s "$ASSET")" "$(sha256sum "$ASSET" | cut -d' ' -f1)" <<'PY' || return 1
+  # Only gh's "no assets match" means the release has no manifest; anything else is retried.
+  for ATTEMPT in 1 2 3; do
+    rm -f "$MANIFEST"
+    if gh release download "$TAG" --pattern "$NAME.manifest.json" \
+         --dir "$(dirname "$ASSET")" 2>"$MANIFEST.err"; then
+      break
+    fi
+    if grep -q 'no assets match' "$MANIFEST.err"; then
+      echo "::warning::$TAG: release carries no $NAME.manifest.json — relying on zvfs_cli verify alone"
+      break
+    fi
+    echo "$TAG: downloading $NAME.manifest.json failed (attempt $ATTEMPT/3): $(tr -d '\r' < "$MANIFEST.err" | head -n1)"
+    if [ "$ATTEMPT" -eq 3 ]; then
+      rm -f "$MANIFEST" "$MANIFEST.err"
+      return 1
+    fi
+    sleep "$((ATTEMPT * ${PATCH_FAN_MANIFEST_RETRY_SECONDS:-10}))"
+  done
+  if [ -s "$MANIFEST" ]; then
+    python3 - "$MANIFEST" "$NAME" "$(stat -c %s "$ASSET")" "$(sha256sum "$ASSET" | cut -d' ' -f1)" \
+      "$TARGET_VER" "$SCHEMA" <<'PY' || return 1
 import json, sys
-path, name, size, sha = sys.argv[1:]
+path, name, size, sha, version, schema = sys.argv[1:]
 try:
     manifest = json.load(open(path, encoding="utf-8"))
 except (OSError, ValueError) as error:
     sys.exit(f"{name}.manifest.json is unreadable: {error}")
-got = (manifest.get("file"), manifest.get("size"), manifest.get("sha256"))
-if got != (name, int(size), sha):
-    sys.exit(f"{name} is {size} bytes sha256 {sha}; its manifest says file={got[0]} size={got[1]} sha256={got[2]}")
-print(f"{name}: size and sha256 match its release manifest")
+want = {"file": name, "size": int(size), "sha256": sha,
+        "dbVersion": int(version), "dbSchemaVersion": int(schema)}
+wrong = [f"{key}={manifest.get(key)!r} (expected {value!r})"
+         for key, value in want.items() if manifest.get(key) != value]
+if wrong:
+    sys.exit(f"{name} disagrees with its release manifest: " + ", ".join(wrong))
+print(f"{name}: file, size, sha256, dbVersion and dbSchemaVersion match its release manifest")
 PY
-  else
-    echo "::warning::$TAG: release carries no $NAME.manifest.json ($(tr -d '\r' < "$MANIFEST.err" | head -n1)) — relying on zvfs_cli verify alone"
   fi
   rm -f "$MANIFEST" "$MANIFEST.err"
   "$ZVFS_CLI" verify "$ASSET" && "$ZVFS_CLI" export "$ASSET" "$OUT"
@@ -247,7 +266,8 @@ produce_anchor() {  # <offset> <target-version> <tag>
   # The asset keeps its release name: the name is what says .zst or .zdb.
   ANCHOR_ASSET=""
   if [ "$PREFETCH_STATE" = ok ]; then
-    for CANDIDATE in "$PREFETCH_DIR/$TAG"/seforim-schema*.zdb "$PREFETCH_DIR/$TAG/$LEGACY_FULL_DB_ASSET"; do
+    for CANDIDATE in "$PREFETCH_DIR/$TAG"/seforim-schema*.zdb "$PREFETCH_DIR/$TAG"/seforim-schema*.db.zst \
+                     "$PREFETCH_DIR/$TAG/$LEGACY_FULL_DB_ASSET"; do
       [ -s "$CANDIDATE" ] || continue
       ANCHOR_ASSET="$ANCHOR_DIR/${CANDIDATE##*/}"
       mv "$CANDIDATE" "$ANCHOR_ASSET"
@@ -259,10 +279,9 @@ produce_anchor() {  # <offset> <target-version> <tag>
     # Under `set -e` a failed download used to end this subshell with
     # nothing but gh's own bare stderr, and the driver could only say
     # "exit code 1". Name the release, the asset and gh's reason.
-    # This build's own schema name first (a delta needs an equal schema),
+    # This build's own schema names first (a delta needs an equal schema),
     # then the legacy name every schema <= 5 release carries.
-    DB_ASSETS=$(full_db_asset_name "$THIS_SCHEMA") || return 1
-    [ "$DB_ASSETS" = "$LEGACY_FULL_DB_ASSET" ] || DB_ASSETS="$DB_ASSETS $LEGACY_FULL_DB_ASSET"
+    DB_ASSETS=$(anchor_db_asset_candidates "$THIS_SCHEMA") || return 1
     DB_ASSET=""
     for CANDIDATE in $DB_ASSETS; do
       if gh release download "$TAG" \
@@ -281,7 +300,7 @@ produce_anchor() {  # <offset> <target-version> <tag>
     ANCHOR_ASSET="$ANCHOR_DIR/$DB_ASSET"
   fi
   T_DOWNLOADED=$(date +%s)
-  if ! restore_anchor_db "$ANCHOR_ASSET" "$PREV_DB" "$TAG"; then
+  if ! restore_anchor_db "$ANCHOR_ASSET" "$PREV_DB" "$TAG" "$TARGET_VER"; then
     echo "::error::anchor v${TARGET_VER} ($TAG): the full DB from that release could not be restored from ${ANCHOR_ASSET##*/} — no patch can be produced against this anchor"
     rm -rf "$ANCHOR_DIR"
     return 1

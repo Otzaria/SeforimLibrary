@@ -25,8 +25,22 @@ full_db_asset_name() {  # <db_schema_version> -> the release asset name of that 
   fi
 }
 
-# jq over a release's JSON (`.assets[]`): the full-DB asset with the highest
-# schema, the legacy name counting as schema 0; null when the release has none.
-FULL_DB_ASSET_JQ='[.assets[] | select(.name == "seforim.db.zst" or (.name | test("^seforim-schema[1-9][0-9]*\\.zdb$")))]
-  | sort_by(if .name == "seforim.db.zst" then 0 else (.name | ltrimstr("seforim-schema") | rtrimstr(".zdb") | tonumber) end)
+# The full-DB assets an anchor release may carry for <schema>, preferred first. A
+# seforim-schema<N>.db.zst is a schema-6 test build published before the zdb.
+anchor_db_asset_candidates() {  # <db_schema_version>
+  local name
+  name=$(full_db_asset_name "$1") || return 1
+  if [ "$name" = "$LEGACY_FULL_DB_ASSET" ]; then
+    printf '%s' "$name"
+  else
+    printf '%s seforim-schema%s.db.zst %s' "$name" "$1" "$LEGACY_FULL_DB_ASSET"
+  fi
+}
+
+# jq over a release's JSON (`.assets[]`): its full-DB asset, preferring a zdb, then a
+# seforim-schema<N>.db.zst, then seforim.db.zst (highest schema within a kind); null when none.
+FULL_DB_ASSET_JQ='[.assets[] | select(.name == "seforim.db.zst" or (.name | test("^seforim-schema[1-9][0-9]*\\.(zdb|db\\.zst)$")))]
+  | sort_by(if .name == "seforim.db.zst" then [0, 0]
+      elif (.name | endswith(".zdb")) then [2, (.name | ltrimstr("seforim-schema") | rtrimstr(".zdb") | tonumber)]
+      else [1, (.name | ltrimstr("seforim-schema") | rtrimstr(".db.zst") | tonumber)] end)
   | last'

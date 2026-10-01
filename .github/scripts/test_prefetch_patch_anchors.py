@@ -184,6 +184,11 @@ STUB_GH = r"""
           echo "HTTP 503: server error" >&2
           exit 1
         fi
+        if [ "${DOWNLOAD_FAIL_ONCE_PATTERN:-}" = "$pattern" ] && [ ! -f "$ASSET_ROOT/.failed-once" ]; then
+          : > "$ASSET_ROOT/.failed-once"
+          echo "HTTP 502: bad gateway" >&2
+          exit 1
+        fi
         src="$ASSET_ROOT/$tag/$pattern"
         if [ ! -f "$src" ]; then
           echo "no assets match the file pattern $pattern" >&2
@@ -954,7 +959,7 @@ class AnchorCacheEdgeCaseSandboxTest(unittest.TestCase):
             executable=True,
         )
 
-        for tag in ("rp", "nd", "ln", "ro", "keep", "s6", "cs"):
+        for tag in ("rp", "nd", "ln", "ro", "keep", "s6", "cs", "v30"):
             write(root / f"a-{tag}.tsv", f"ANCHOR\t1\t26\tv-{tag}\n")
         write(root / "a-mix.tsv", "ANCHOR\t1\t26\tv-s6\nANCHOR\t2\t25\tv-mx\n")
         write(root / "a-dots.tsv", "ANCHOR\t1\t26\t..\nANCHOR\t2\t26\t.\n")
@@ -1093,6 +1098,20 @@ class AnchorCacheEdgeCaseSandboxTest(unittest.TestCase):
             echo "-- zdb delivered: $(ls d-mix/v-s6 | tr '\n' ' ')"
             echo "-- zst delivered: $(ls d-mix/v-mx | tr '\n' ' ')"
 
+            # A schema-6 test build from before the zdb (v30-20260930165019).
+            ./publish.sh v-v30 T
+            mv assets/v-v30/seforim.db.zst assets/v-v30/seforim-schema6.db.zst
+            printf '%s\n' seforim-schema6.db.zst > assets/v-v30/asset_name
+            printf 'sha256:%s\n' "$(sha256sum assets/v-v30/seforim-schema6.db.zst | cut -d' ' -f1)" > assets/v-v30/digest
+            phase V30_STYLE_COLD
+            run run a-v30.tsv d-v301 2>&1
+            marker d-v301/v-v30; fetched
+            echo "-- delivered files: $(ls d-v301/v-v30 | tr '\n' ' ')"
+            echo "-- cached files: $(ls cache/v-v30 | tr '\n' ' ')"
+            phase V30_STYLE_WARM
+            run run a-v30.tsv d-v302 2>&1
+            marker d-v302/v-v30; fetched
+
             # A tag cached as .zst never answers for the .zdb it now publishes.
             ./publish.sh v-cs Z
             run run a-cs.tsv d-cs1 > /dev/null 2>&1
@@ -1208,6 +1227,16 @@ class AnchorCacheEdgeCaseSandboxTest(unittest.TestCase):
         self.assertIn("-- zdb delivered: seforim-schema6.zdb \n", mixed)
         self.assertIn("-- zst delivered: seforim.db.zst \n", mixed)
 
+    def test_a_schema_named_db_zst_is_prefetched_and_cached_under_its_name(self):
+        cold = self.phase("V30_STYLE_COLD")
+        self.assertIn("anchor v-v30 (offset 1): seforim-schema6.db.zst 204800 bytes", cold)
+        self.assertIn("-- verdict ok", cold)
+        self.assertIn("-- delivered files: seforim-schema6.db.zst \n", cold)
+        self.assertIn("-- cached files: seforim-schema6.db.zst \n", cold)
+        warm = self.phase("V30_STYLE_WARM")
+        self.assertIn("reused v-v30 from cache (sha256 ok)", warm)
+        self.assertEqual(warm.split("-- downloaded:")[1].strip(), "")
+
     def test_a_zst_cache_entry_never_answers_for_a_zdb(self):
         changed = self.phase("CONTAINER_CHANGED_UNDER_THE_CACHE")
         self.assertIn("-- verdict ok", changed)
@@ -1305,7 +1334,8 @@ class PatchFanDriverSandboxTest(unittest.TestCase):
         ).replace("\r\n", "\n")
 
     def run_fan(self, publish_v25_asset=True, this_schema=5, anchor_provenance_schema=None,
-                zdb_anchors=(), prefetched=None, bad_manifest=(), corrupt_zdb=(), zvfs_cli=True):
+                zdb_anchors=(), prefetched=None, bad_manifest=(), corrupt_zdb=(), zvfs_cli=True,
+                v30_anchors=(), manifest_fields=None, no_manifest=(), extra_env=None):
         import tempfile
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -1348,7 +1378,11 @@ class PatchFanDriverSandboxTest(unittest.TestCase):
                 if not published:
                     continue
                 if tag in zdb_anchors:
-                    publish_stub_zdb(root / "assets" / tag, tag in bad_manifest, tag in corrupt_zdb)
+                    publish_stub_zdb(root / "assets" / tag, int(tag[1:3]), tag in bad_manifest,
+                                     tag in corrupt_zdb, (manifest_fields or {}).get(tag),
+                                     tag in no_manifest)
+                elif tag in v30_anchors:
+                    (root / "assets" / tag / "seforim-schema6.db.zst").write_bytes(b"schema6:" + b"v3" * 4096)
                 else:
                     (root / "assets" / tag / "seforim.db.zst").write_bytes(tag.encode() * 4096)
             # A prefetch that already ran: <tag> -> its verdict, the asset beside it.
@@ -1453,6 +1487,8 @@ class PatchFanDriverSandboxTest(unittest.TestCase):
                 STUB_THIS_SCHEMA=str(this_schema),
                 DOWNLOAD_LOG=str(root / "downloads.log"),
                 ZVFS_LOG=str(root / "zvfs.log"),
+                PATCH_FAN_MANIFEST_RETRY_SECONDS="0",
+                **(extra_env or {}),
             )
             if zvfs_cli:
                 env["ZVFS_CLI"] = str(root / "bin" / "zvfs_cli")
@@ -1566,7 +1602,7 @@ class PatchFanDriverSandboxTest(unittest.TestCase):
         self.assertIn("v26-x/seforim-schema6.zdb", result.downloads)
         self.assertIn("v26-x/seforim-schema6.zdb.manifest.json", result.downloads)
         self.assertIn("v25-x/seforim.db.zst", result.downloads)
-        self.assertIn("seforim-schema6.zdb: size and sha256 match its release manifest", out)
+        self.assertIn("seforim-schema6.zdb: file, size, sha256, dbVersion and dbSchemaVersion match its release manifest", out)
         verbs = [line.split()[0] for line in result.zvfs]
         self.assertEqual(verbs, ["verify", "export"], result.zvfs)
         self.assertTrue(result.zvfs[1].endswith("prev-dbs/anchor-1/seforim.db"), result.zvfs)
@@ -1600,14 +1636,70 @@ class PatchFanDriverSandboxTest(unittest.TestCase):
         result = self.run_fan(this_schema=6, zdb_anchors=("v26-x",), bad_manifest=("v26-x",))
         out = result.stdout + result.stderr
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("seforim-schema6.zdb is 12300 bytes sha256 ", out)
-        self.assertIn("its manifest says file=seforim-schema6.zdb size=12300 sha256=" + "0" * 64, out)
+        self.assertIn("seforim-schema6.zdb disagrees with its release manifest: sha256='" + "0" * 64, out)
         self.assertIn(
             "::error::anchor v26 (v26-x): the full DB from that release could not be restored"
             " from seforim-schema6.zdb — no patch can be produced against this anchor",
             out,
         )
         self.assertEqual(result.zvfs, [])
+
+    def test_a_manifest_for_another_version_or_schema_fails_the_anchor(self):
+        for fields, expected in (
+            ({"dbVersion": 25}, "dbVersion=25 (expected 26)"),
+            ({"dbSchemaVersion": 7}, "dbSchemaVersion=7 (expected 6)"),
+        ):
+            result = self.run_fan(this_schema=6, zdb_anchors=("v26-x",),
+                                  manifest_fields={"v26-x": fields})
+            out = result.stdout + result.stderr
+            self.assertNotEqual(result.returncode, 0, fields)
+            self.assertIn("seforim-schema6.zdb disagrees with its release manifest: " + expected, out)
+            self.assertEqual(result.zvfs, [], fields)
+
+    def test_a_release_without_a_manifest_warns_and_verifies(self):
+        result = self.run_fan(this_schema=6, zdb_anchors=("v26-x",), no_manifest=("v26-x",))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr[-2000:])
+        self.assertIn("::warning::v26-x: release carries no seforim-schema6.zdb.manifest.json"
+                      " — relying on zvfs_cli verify alone", result.stdout)
+        self.assertEqual([line.split()[0] for line in result.zvfs], ["verify", "export"])
+
+    def test_a_manifest_download_error_is_retried_not_taken_for_absence(self):
+        flaky = self.run_fan(this_schema=6, zdb_anchors=("v26-x",),
+                             extra_env={"DOWNLOAD_FAIL_ONCE_PATTERN": "seforim-schema6.zdb.manifest.json"})
+        self.assertEqual(flaky.returncode, 0, flaky.stdout + flaky.stderr[-2000:])
+        self.assertIn("downloading seforim-schema6.zdb.manifest.json failed (attempt 1/3): HTTP 502", flaky.stdout)
+        self.assertIn("match its release manifest", flaky.stdout)
+        self.assertNotIn("release carries no seforim-schema6.zdb.manifest.json", flaky.stdout)
+        broken = self.run_fan(this_schema=6, zdb_anchors=("v26-x",),
+                              extra_env={"DOWNLOAD_FAIL_PATTERN": "seforim-schema6.zdb.manifest.json"})
+        self.assertNotEqual(broken.returncode, 0)
+        self.assertIn("(attempt 3/3): HTTP 503: server error", broken.stdout)
+        self.assertIn("could not be restored from seforim-schema6.zdb", broken.stdout)
+        self.assertNotIn("release carries no seforim-schema6.zdb.manifest.json", broken.stdout)
+        self.assertEqual(broken.zvfs, [])
+
+    def test_a_v30_style_anchor_is_found_and_decompressed_in_a_mixed_chain(self):
+        # The pre-zdb schema-6 test build carries only seforim-schema6.db.zst.
+        result = self.run_fan(this_schema=6, zdb_anchors=("v26-x",), v30_anchors=("v25-x",))
+        out = result.stdout
+        self.assertEqual(result.returncode, 0, out + result.stderr[-2000:])
+        self.assertIn("v26-x/seforim-schema6.zdb", result.downloads)
+        self.assertIn("v25-x/seforim-schema6.db.zst", result.downloads)
+        self.assertNotIn("v25-x/seforim.db.zst", result.downloads)
+        # Only the zdb goes through the converter; both are 6 -> 6 deltas.
+        self.assertEqual(len([line for line in result.zvfs if line.startswith("export")]), 1)
+        for target in ("26", "25"):
+            self.assertIn(f"(PatchPipelineCli) Producing patch v{target} -> v27", out)
+        self.assertNotIn("full rebase", out)
+
+    def test_a_prefetched_v30_style_anchor_is_reused(self):
+        result = self.run_fan(this_schema=6, zdb_anchors=("v26-x",), v30_anchors=("v25-x",),
+                              prefetched={"v26-x": "ok", "v25-x": "ok"})
+        out = result.stdout
+        self.assertEqual(result.returncode, 0, out + result.stderr[-2000:])
+        self.assertIn("anchor v25 (v25-x): reused the prefetched seforim-schema6.db.zst", out)
+        self.assertIn("anchor v26 (v26-x): reused the prefetched seforim-schema6.zdb", out)
+        self.assertEqual(result.downloads, ["v26-x/seforim-schema6.zdb.manifest.json"])
 
     def test_a_zdb_that_fails_verify_is_never_exported(self):
         result = self.run_fan(this_schema=6, zdb_anchors=("v26-x",), corrupt_zdb=("v26-x",))
@@ -1639,7 +1731,53 @@ STUB_ZVFS_CLI = r"""
     """
 
 
-def publish_stub_zdb(release, bad_manifest=False, corrupt=False):
+class FullDbAssetSelectionTest(unittest.TestCase):
+    """FULL_DB_ASSET_JQ: zdb first, then seforim-schema<N>.db.zst, then seforim.db.zst."""
+
+    def pick(self, *names):
+        import json
+
+        jq = shutil.which("jq")
+        bash = sandbox_bash()
+        if jq is None or bash is None:
+            self.skipTest("jq or bash unavailable")
+        release = json.dumps({"assets": [{"name": n} for n in names]})
+        done = subprocess.run(
+            [bash, "-c", '. "$1" && jq -r "$FULL_DB_ASSET_JQ | .name // \\"none\\""', "sh",
+             ASSET_NAMES.as_posix()],
+            input=release, capture_output=True, text=True,
+        )
+        self.assertEqual(done.returncode, 0, done.stderr)
+        return done.stdout.strip()
+
+    def test_container_preference(self):
+        self.assertEqual(self.pick("seforim.db.zst"), "seforim.db.zst")
+        self.assertEqual(self.pick("seforim.db.zst", "seforim-schema6.db.zst"), "seforim-schema6.db.zst")
+        self.assertEqual(
+            self.pick("seforim-schema7.db.zst", "seforim-schema6.zdb", "seforim.db.zst"),
+            "seforim-schema6.zdb",
+        )
+        self.assertEqual(self.pick("seforim-schema6.zdb", "seforim-schema7.zdb"), "seforim-schema7.zdb")
+        self.assertEqual(self.pick("seforim-schema6.zdb.manifest.json", "seforim.db.buildstate.zst"), "none")
+
+    def test_anchor_candidates_follow_the_same_order(self):
+        bash = sandbox_bash()
+        if bash is None:
+            self.skipTest("bash unavailable")
+        out = {}
+        for schema in (5, 6):
+            done = subprocess.run(
+                [bash, "-c", '. "$1" && anchor_db_asset_candidates "$2"', "sh",
+                 ASSET_NAMES.as_posix(), str(schema)],
+                capture_output=True, text=True,
+            )
+            out[schema] = done.stdout
+        self.assertEqual(out[5], "seforim.db.zst")
+        self.assertEqual(out[6], "seforim-schema6.zdb seforim-schema6.db.zst seforim.db.zst")
+
+
+def publish_stub_zdb(release, db_version, bad_manifest=False, corrupt=False, fields=None,
+                     no_manifest=False):
     """A schema-6 release: seforim-schema6.zdb and its manifest."""
     import hashlib
     import json
@@ -1648,11 +1786,13 @@ def publish_stub_zdb(release, bad_manifest=False, corrupt=False):
     body = (b"XXXX" if corrupt else b"ZDB!") + b"schema6:" + b"z6" * 6144
     zdb = release / "seforim-schema6.zdb"
     zdb.write_bytes(body)
+    if no_manifest:
+        return
     sha = "0" * 64 if bad_manifest else hashlib.sha256(body).hexdigest()
-    (release / "seforim-schema6.zdb.manifest.json").write_text(
-        json.dumps({"manifestVersion": 1, "file": zdb.name, "size": len(body), "sha256": sha}),
-        encoding="utf-8",
-    )
+    manifest = {"manifestVersion": 1, "file": zdb.name, "size": len(body), "sha256": sha,
+                "dbVersion": db_version, "dbSchemaVersion": 6}
+    manifest.update(fields or {})
+    (release / "seforim-schema6.zdb.manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
 
 
 def _mkparents(path):
