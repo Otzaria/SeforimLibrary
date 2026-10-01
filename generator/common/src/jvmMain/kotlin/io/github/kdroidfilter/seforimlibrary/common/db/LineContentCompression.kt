@@ -73,20 +73,38 @@ object LineContentCompression {
         }
     }
 
-    /** Not thread-safe; use one per thread. */
-    class Decompressor(dictionary: ByteArray = bundledDictionary) : AutoCloseable {
-        private val dict = ZstdDictDecompress(dictionary)
+    /** Not thread-safe; use one per thread; threads may share one [ZstdDictDecompress]. */
+    class Decompressor private constructor(
+        private val dict: ZstdDictDecompress,
+        private val dictId: Long,
+        private val ownsDict: Boolean,
+    ) : AutoCloseable {
+        constructor(dictionary: ByteArray = bundledDictionary) :
+            this(ZstdDictDecompress(dictionary), Zstd.getDictIdFromDict(dictionary), true)
+
+        /** Borrows [dict] (whose id is [dictId]); the caller closes it after every Decompressor. */
+        constructor(dict: ZstdDictDecompress, dictId: Long) : this(dict, dictId, false)
+
         private val ctx = ZstdDecompressCtx().apply { loadDict(dict) }
 
+        /** Decodes [frame] only if the app would: exactly one frame, this dictionary's id, a known size within the cap. */
         fun decompress(frame: ByteArray): ByteArray {
             val size = Zstd.getFrameContentSize(frame)
-            check(size >= 0) { "zstd frame has no content size ($size)" }
-            return ctx.decompress(frame, Math.toIntExact(size))
+            check(size in 0..MAX_LINE_BYTES.toLong()) {
+                "zstd frame content size $size is unknown, invalid or over the reader cap $MAX_LINE_BYTES"
+            }
+            val frameDictId = Zstd.getDictIdFromFrame(frame)
+            check(frameDictId == dictId) { "zstd frame names dictionary $frameDictId, not $dictId" }
+            val frameSize = Zstd.findFrameCompressedSize(frame)
+            check(frameSize == frame.size.toLong()) { "zstd frame is $frameSize of ${frame.size} bytes" }
+            val bytes = ctx.decompress(frame, size.toInt())
+            check(bytes.size.toLong() == size) { "zstd frame decoded to ${bytes.size} bytes, not $size" }
+            return bytes
         }
 
         override fun close() {
             ctx.close()
-            dict.close()
+            if (ownsDict) dict.close()
         }
     }
 

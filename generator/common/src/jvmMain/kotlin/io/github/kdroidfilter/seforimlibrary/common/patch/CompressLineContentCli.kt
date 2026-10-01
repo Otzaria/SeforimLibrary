@@ -2,14 +2,22 @@ package io.github.kdroidfilter.seforimlibrary.common.patch
 
 import co.touchlab.kermit.Logger
 import co.touchlab.kermit.Severity
+import com.github.luben.zstd.Zstd
+import com.github.luben.zstd.ZstdDictDecompress
 import io.github.kdroidfilter.seforimlibrary.common.db.LineContentCompression
 import io.github.kdroidfilter.seforimlibrary.common.db.LineContentShape
+import java.nio.ByteBuffer
+import java.nio.charset.CharacterCodingException
+import java.nio.charset.CharsetDecoder
 import java.nio.file.Files
 import java.nio.file.Paths
 import java.sql.Connection
 import java.sql.DriverManager
 import java.util.concurrent.ConcurrentLinkedQueue
+import java.util.concurrent.ExecutionException
+import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
+import java.util.concurrent.Future
 import java.util.concurrent.TimeUnit
 
 /**
@@ -22,9 +30,9 @@ import java.util.concurrent.TimeUnit
  * before `compactSeforimDb`, which reclaims the space the shorter rows free.
  *
  * Every frame is decompressed and compared before it is written. Rows already
- * stored as BLOB are skipped, so an interrupted run resumes and a second run only
- * checks that no TEXT row is left. NULL in `version_line` (inherit the base text)
- * stays NULL. Compression keeps the schema version: readers decode when `zstd_dict` exists.
+ * stored as BLOB are skipped, so an interrupted run resumes; [validateCompressed]
+ * then decodes every frame, the skipped ones included. NULL in `version_line`
+ * (inherit the base text) stays NULL. Compression keeps the schema version: readers decode when `zstd_dict` exists.
  *
  * System properties: `dbPath` (required), `chunkRows` (default [COMPRESS_CHUNK_ROWS]),
  * `threads` (default: available processors).
@@ -54,13 +62,14 @@ internal data class CompressLineContentReport(
     val versionRowsCompressed: Long,
     val textBytes: Long,
     val frameBytes: Long,
+    val framesValidated: Long,
 ) {
     val alreadyCompressed: Boolean get() = lineRowsCompressed == 0L && versionRowsCompressed == 0L
 
     fun describe(): String =
         "line text compression ${if (alreadyCompressed) "already in place (validated)" else "done"}: " +
             "line_content=$lineRowsCompressed version_line=$versionRowsCompressed rows, " +
-            "$textBytes → $frameBytes bytes"
+            "$textBytes → $frameBytes bytes, $framesValidated frames decoded"
 }
 
 /** See [main]. [dictionary] is the bundled one in production; tests pass their own. */
@@ -125,12 +134,13 @@ internal fun compressLineContent(
             encode = encode,
         )
         logger.i { "version_line: ${version.rows} rows compressed" }
-        validateCompressed(conn)
+        val validated = validateCompressed(conn, dictionary, threads)
         return CompressLineContentReport(
             lineRowsCompressed = line.rows,
             versionRowsCompressed = version.rows,
             textBytes = line.textBytes + version.textBytes,
             frameBytes = line.frameBytes + version.frameBytes,
+            framesValidated = validated,
         )
     } finally {
         // A failed chunk leaves other tasks running; their contexts close only after they stop.
@@ -209,10 +219,26 @@ private fun compressColumn(
     return ColumnResult(rows, textBytes, frameBytes)
 }
 
-/** No line text is left as TEXT and there is one dictionary; throws on the first violation. */
-internal fun validateCompressed(conn: Connection) {
+internal const val VALIDATE_CHUNK_ROWS: Int = 20_000
+
+/**
+ * The DB holds only [approvedDictionary], and every line text is a frame the app
+ * decodes: that dictionary's id, a known size within the reader cap, strict UTF-8.
+ * Decodes every row and throws on the first bad one, naming it. Returns the frames decoded.
+ */
+internal fun validateCompressed(
+    conn: Connection,
+    approvedDictionary: ByteArray = LineContentCompression.bundledDictionary,
+    threads: Int = Runtime.getRuntime().availableProcessors(),
+    chunkRows: Int = VALIDATE_CHUNK_ROWS,
+): Long {
     val dictionaries = LineContentCompression.storedDictionaries(conn)
     check(dictionaries.size == 1) { "expected one dictionary in ${LineContentCompression.DICT_TABLE}, found ${dictionaries.keys}" }
+    val (storedId, stored) = dictionaries.entries.single()
+    val approvedId = Zstd.getDictIdFromDict(approvedDictionary)
+    check(storedId == approvedId && stored.contentEquals(approvedDictionary)) {
+        "${LineContentCompression.DICT_TABLE} holds dictionary $storedId, not the approved $approvedId"
+    }
     fun count(sql: String): Long =
         conn.createStatement().use { st -> st.executeQuery(sql).use { rs -> rs.next(); rs.getLong(1) } }
     // A BLOB that is not a zstd frame (wrong magic) would pass a typeof check alone.
@@ -221,4 +247,89 @@ internal fun validateCompressed(conn: Connection) {
     check(plainLines == 0L) { "$plainLines line_content rows are not zstd frames" }
     val plainVersions = count("SELECT COUNT(*) FROM version_line WHERE content IS NOT NULL AND $notFrame")
     check(plainVersions == 0L) { "$plainVersions version_line rows are not zstd frames" }
+
+    val ddict = ZstdDictDecompress(approvedDictionary)
+    val checkers = ConcurrentLinkedQueue<FrameChecker>()
+    val local = ThreadLocal.withInitial {
+        FrameChecker(LineContentCompression.Decompressor(ddict, approvedId)).also(checkers::add)
+    }
+    val pool = Executors.newFixedThreadPool(threads)
+    try {
+        return decodeColumn(
+            conn, "line_content",
+            "SELECT id, content FROM line_content WHERE id > ? ORDER BY id LIMIT $chunkRows",
+            pool, threads, local,
+        ) + decodeColumn(
+            conn, "version_line",
+            "SELECT rowid, content FROM version_line WHERE rowid > ? AND content IS NOT NULL ORDER BY rowid LIMIT $chunkRows",
+            pool, threads, local,
+        )
+    } finally {
+        // Contexts close only after every task stopped using them.
+        pool.shutdownNow()
+        pool.awaitTermination(1, TimeUnit.MINUTES)
+        checkers.forEach { it.decompressor.close() }
+        ddict.close()
+    }
+}
+
+private class FrameChecker(val decompressor: LineContentCompression.Decompressor) {
+    // newDecoder() reports malformed input; String(bytes, UTF_8) would replace it silently.
+    private val utf8: CharsetDecoder = Charsets.UTF_8.newDecoder()
+
+    fun check(table: String, key: Long, frame: ByteArray) {
+        val text = try {
+            decompressor.decompress(frame)
+        } catch (failure: RuntimeException) {
+            throw IllegalStateException("$table row $key: ${failure.message}", failure)
+        }
+        try {
+            utf8.decode(ByteBuffer.wrap(text))
+        } catch (failure: CharacterCodingException) {
+            throw IllegalStateException("$table row $key does not decode to valid UTF-8", failure)
+        }
+    }
+}
+
+/** Reads the next chunk while the previous one decodes, so at most two chunks are in memory. */
+private fun decodeColumn(
+    conn: Connection,
+    table: String,
+    selectSql: String,
+    pool: ExecutorService,
+    threads: Int,
+    local: ThreadLocal<FrameChecker>,
+): Long {
+    var lastKey = Long.MIN_VALUE
+    var rows = 0L
+    var pending: List<Future<*>> = emptyList()
+    while (true) {
+        val chunk = conn.prepareStatement(selectSql).use { ps ->
+            ps.setLong(1, lastKey)
+            ps.executeQuery().use { rs -> buildList { while (rs.next()) add(rs.getLong(1) to rs.getBytes(2)) } }
+        }
+        awaitAll(pending)
+        if (chunk.isEmpty()) return rows
+        val slice = maxOf((chunk.size + threads - 1) / threads, 1)
+        pending = chunk.chunked(slice).map { part ->
+            pool.submit {
+                val checker = local.get()
+                for ((key, frame) in part) checker.check(table, key, frame)
+            }
+        }
+        rows += chunk.size
+        lastKey = chunk.last().first
+    }
+}
+
+private fun awaitAll(futures: List<Future<*>>) {
+    var first: Throwable? = null
+    for (future in futures) {
+        try {
+            future.get()
+        } catch (failure: ExecutionException) {
+            if (first == null) first = failure.cause ?: failure
+        }
+    }
+    first?.let { throw it }
 }

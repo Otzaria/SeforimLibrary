@@ -107,6 +107,53 @@ class CompressLineContentCliTest {
     }
 
     @Test
+    fun `a frame that is only the zstd magic fails validation with its row`() {
+        val error = corruptAfterCompress(line = 3, frame = byteArrayOf(0x28, 0xB5.toByte(), 0x2F, 0xFD.toByte()))
+        assertTrue("line_content row 3" in error.message.orEmpty(), error.message)
+    }
+
+    @Test
+    fun `a version frame made with another dictionary id fails validation`() {
+        val other = LineContentCompression.bundledDictionary.copyOf().also { it[4] = (it[4] + 1).toByte() }
+        val frame = LineContentCompression.Compressor(other).use { it.compress("גרסה אחרת".toByteArray()) }
+        val db = schemaSixDb("dictid.db")
+        val error = connect(db).use { conn ->
+            compressLineContent(conn, threads = 1)
+            conn.prepareStatement("UPDATE version_line SET content = ? WHERE lineId = 2").use { ps ->
+                ps.setBytes(1, frame); ps.executeUpdate()
+            }
+            assertFailsWith<IllegalStateException> { validateCompressed(conn) }
+        }
+        assertTrue("version_line row" in error.message.orEmpty() && "dictionary" in error.message.orEmpty(), error.message)
+    }
+
+    @Test
+    fun `a frame that decodes past the reader cap fails validation`() {
+        val huge = LineContentCompression.Compressor().use {
+            it.compress(ByteArray(LineContentCompression.MAX_LINE_BYTES + 1) { 'a'.code.toByte() })
+        }
+        val error = corruptAfterCompress(line = 4, frame = huge)
+        assertTrue("line_content row 4" in error.message.orEmpty() && "cap" in error.message.orEmpty(), error.message)
+    }
+
+    @Test
+    fun `a frame that decodes to invalid UTF-8 fails validation`() {
+        val frame = LineContentCompression.Compressor().use { it.compress(byteArrayOf(0x61, 0xFF.toByte(), 0x62)) }
+        val error = corruptAfterCompress(line = 2, frame = frame)
+        assertTrue("line_content row 2" in error.message.orEmpty() && "UTF-8" in error.message.orEmpty(), error.message)
+    }
+
+    @Test
+    fun `a resumed run decodes the BLOBs it skips`() {
+        val db = schemaSixDb("resume-corrupt.db")
+        connect(db).use { conn ->
+            conn.createStatement().use { it.execute("UPDATE line_content SET content = x'28B52FFD' WHERE id = 5") }
+        }
+        val error = assertFailsWith<IllegalStateException> { connect(db).use { compressLineContent(it, threads = 2) } }
+        assertTrue("line_content row 5" in error.message.orEmpty(), error.message)
+    }
+
+    @Test
     fun `a DB that already holds another dictionary is refused`() {
         val db = schemaSixDb("other.db")
         connect(db).use { conn ->
@@ -198,6 +245,17 @@ class CompressLineContentCliTest {
             splitLineContent(conn)
         }
         return db
+    }
+
+    private fun corruptAfterCompress(line: Long, frame: ByteArray): IllegalStateException {
+        val db = schemaSixDb("corrupt-$line.db")
+        return connect(db).use { conn ->
+            compressLineContent(conn, threads = 1)
+            conn.prepareStatement("UPDATE line_content SET content = ? WHERE id = ?").use { ps ->
+                ps.setBytes(1, frame); ps.setLong(2, line); ps.executeUpdate()
+            }
+            assertFailsWith<IllegalStateException> { validateCompressed(conn) }
+        }
     }
 
     private fun connect(db: Path): Connection = DriverManager.getConnection("jdbc:sqlite:${db.toAbsolutePath()}")
