@@ -32,6 +32,9 @@ class HavroutaUnmatchedTractateTest {
         }
     }
 
+    /** The CI annotations the run would print, in order. */
+    private val annotations = mutableListOf<String>()
+
     private fun run(havroutaTitles: List<String>, talmudTitles: List<String>): Capture = runBlocking {
         val driver = JdbcSqliteDriver(url = "jdbc:sqlite::memory:")
         SeforimDb.Schema.create(driver)
@@ -53,7 +56,9 @@ class HavroutaUnmatchedTractateTest {
         ConnectionType.entries.forEach { bindings.upsertConnectionType(it.name) }
 
         val capture = Capture()
-        generateHavroutaLinks(repo, bindings, Logger(StaticConfig(Severity.Verbose, listOf(capture)), "t"))
+        generateHavroutaLinks(repo, bindings, Logger(StaticConfig(Severity.Verbose, listOf(capture)), "t")) {
+            annotations += it
+        }
         capture
     }
 
@@ -76,6 +81,7 @@ class HavroutaUnmatchedTractateTest {
             warnings.single { it.startsWith("Havrouta-Talmud:") },
             "the found-vs-processed gap must be closed explicitly, not left to be inferred",
         )
+        assertEquals(warnings, annotations, "both warnings must reach the CI annotations too")
     }
 
     @Test
