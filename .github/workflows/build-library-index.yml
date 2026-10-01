@@ -563,6 +563,11 @@ jobs:
           }
           echo "full DB asset: $DB_ASSET"
           EXPECTED=$(jq -r "$FULL_DB_ASSET_JQ | .digest // empty" "$WORK/release.json")
+          # Above the GitHub limit the DB ships in parts; their manifest carries the whole's digest.
+          SPLIT_MANIFEST=$(jq -r "$FULL_DB_ASSET_JQ | .manifest // empty" "$WORK/release.json")
+          if [ -n "$SPLIT_MANIFEST" ]; then
+            EXPECTED=$(split_full_db_meta "$RELEASE_TAG" "$DB_ASSET" "$GITHUB_REPOSITORY" | cut -f2)
+          fi
           EXPECTED="${EXPECTED#sha256:}"
           printf '%s' "$EXPECTED" | grep -Eq '^[0-9a-f]{64}$' || {
             echo "::error::release $RELEASE_TAG publishes no sha256 digest for $DB_ASSET"
@@ -584,9 +589,18 @@ jobs:
           PHASE_START=$(date +%s)
           watch_growth downloading & WATCH=$!
           disown "$WATCH" 2>/dev/null || true
-          timeout --kill-after=60 60m \
-            gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
-              -p "$DB_ASSET" -O "$WORK/seforim.db.zst"
+          if [ -n "$SPLIT_MANIFEST" ]; then
+            mkdir -p "$WORK/split-db"
+            timeout --kill-after=60 60m \
+              bash -c '. .github/scripts/db_asset_names.sh && download_full_db_by_name "$@"' _ \
+                "$RELEASE_TAG" "$DB_ASSET" "$WORK/split-db" "$GITHUB_REPOSITORY"
+            mv "$WORK/split-db/$DB_ASSET" "$WORK/seforim.db.zst"
+            rm -rf "$WORK/split-db"
+          else
+            timeout --kill-after=60 60m \
+              gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
+                -p "$DB_ASSET" -O "$WORK/seforim.db.zst"
+          fi
           kill "$WATCH" 2>/dev/null || true
           DB_BYTES=$(stat -c %s "$WORK/seforim.db.zst")
           echo "downloaded $DB_BYTES bytes in $(( $(date +%s) - PHASE_START ))s"

@@ -66,7 +66,8 @@ jobs:
             test_ci_workflows \
             test_patch_anchor_schema \
             test_library_index_workflow \
-            test_prefetch_patch_anchors; do
+            test_prefetch_patch_anchors \
+            test_split_full_db; do
             log="$RUNNER_TEMP/$suite.log"
             if ! python3 ".github/scripts/$suite.py" > "$log" 2>&1; then
               cat "$log"

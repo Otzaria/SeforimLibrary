@@ -215,9 +215,8 @@ produce_anchor() {  # <offset> <target-version> <tag>
     [ "$DB_ASSETS" = "$LEGACY_FULL_DB_ASSET" ] || DB_ASSETS="$DB_ASSETS $LEGACY_FULL_DB_ASSET"
     DB_ASSET=""
     for CANDIDATE in $DB_ASSETS; do
-      if gh release download "$TAG" \
-           --pattern "$CANDIDATE" \
-           --dir "$ANCHOR_DIR" 2>"$ANCHOR_DIR/gh.err"; then
+      if download_full_db_by_name "$TAG" "$CANDIDATE" "$ANCHOR_DIR" \
+           2>"$ANCHOR_DIR/gh.err"; then
         DB_ASSET="$CANDIDATE"
         break
       fi

@@ -370,7 +370,7 @@ class ManualReleaseWorkflowContractTest(unittest.TestCase):
         # The per-anchor body is produce_anchor, in patch_fan_lib.sh.
         lib = self.fan_lib
         precheck_at = lib.index("patch_anchor_schema.py check")
-        db_download_at = lib.index('--pattern "$CANDIDATE"')
+        db_download_at = lib.index('download_full_db_by_name "$TAG" "$CANDIDATE"')
         self.assertLess(precheck_at, db_download_at)
         # Only the tiny provenance asset is fetched to decide.
         self.assertLess(
@@ -795,7 +795,7 @@ class ManualReleaseWorkflowContractTest(unittest.TestCase):
         )
         self.assertLess(
             script.index('[ "${verdict%% *}" = UNPATCHABLE ]'),
-            script.index('--pattern "$expected_name"'),
+            script.index('download_full_db_by_name "$tag" "$expected_name"'),
         )
         # Verified against the release asset's own published size and digest.
         self.assertIn("size mismatch", script)
@@ -825,7 +825,7 @@ class ManualReleaseWorkflowContractTest(unittest.TestCase):
         self.assertIn("falling back to the serial download", lib)
         self.assertIn("prefetch_patch_anchors.sh abort", lib)
         self.assertLess(
-            lib.index("PREFETCH_STATE=absent"), lib.index('--pattern "$CANDIDATE"')
+            lib.index("PREFETCH_STATE=absent"), lib.index('download_full_db_by_name "$TAG" "$CANDIDATE"')
         )
         # A prefetch timing line per anchor, like the fan's own, and it now says
         # whether the bytes came off the network or out of the durable cache.
@@ -2659,6 +2659,7 @@ class ManualReleaseWorkflowContractTest(unittest.TestCase):
             "test_patch_anchor_schema",
             "test_library_index_workflow",
             "test_prefetch_patch_anchors",
+            "test_split_full_db",
         ]
         positions = [step.index(suite) for suite in suites]
         self.assertEqual(positions, sorted(positions))
