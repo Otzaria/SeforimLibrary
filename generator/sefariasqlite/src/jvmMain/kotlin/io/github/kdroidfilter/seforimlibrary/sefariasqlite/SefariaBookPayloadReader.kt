@@ -764,7 +764,7 @@ internal class SefariaBookPayloadReader(
             when (sourceMarkerRun(text)) {
                 MarkerRun.CONSECUTIVE -> true
                 MarkerRun.BROKEN -> {
-                    logger.d { "Partially numbered leaf array in '$bookHeTitle' ($refPrefix); keeping generated prefixes" }
+                    logger.d { "Partially numbered leaf array in '$bookHeTitle' ($refPrefix); keeping generated prefixes except on self-labelled items" }
                     false
                 }
                 MarkerRun.NONE -> false
@@ -789,7 +789,11 @@ internal class SefariaBookPayloadReader(
 
             val sectionIndex = sectionNames.size - depth
             val isReferenceable = referenceableSections.getOrNull(sectionIndex) ?: true
-            val nextLinePrefix = if (depth == 1 && isReferenceable && prefixesLeaf && nonEmptyCount > 1 && !sourceNumbered) {
+            // An item that already opens with its own label for this very number
+            // (a partially numbered array) keeps that label alone: "(ג) [ג]" is noise.
+            val nextLinePrefix = if (depth == 1 && isReferenceable && prefixesLeaf && nonEmptyCount > 1 && !sourceNumbered &&
+                !(currentAddressType != "Talmud" && ownLabelValue(item) == idx + 1)
+            ) {
                 "($letter) "
             } else {
                 ""
@@ -934,8 +938,27 @@ private val UNNUMBERED_INTEGER_LEAF_NAMES = setOf("פסקה", "פירוש", "פ�
 /** `match_templates[].scope` values that make an alt-struct node citable alone. */
 private val ALONE_MATCH_TEMPLATE_SCOPES = setOf("any", "alone")
 
-// Leading printed marker of a line: "(אות) " or "{אות} ".
-private val SOURCE_MARKER_REGEX = Regex("""^\s*[({]([א-ת"׳״]{1,5})[)}]\s""")
+// Leading printed label of a segment, in every shape Sefaria texts use, after
+// any opening tags: "(אות) ", "{אות} ", "[אות] " (אליה רבה; bracketed labels may
+// also be glued to a tag or take a colon, "[ב]:"), "אות) " (ביאור על
+// ספר המצוות לרס"ג; also glued, "נה)עינוי"), "אות. " / "אות: " (איסור והיתר
+// הארוך, קשר גודל, תשובות רש"י) and a bold bare numeral "<b>אות</b> " (פרקי אבות
+// in סידור ספרד). Exactly one capture group matches.
+private const val MARKER_TOKEN = """([א-ת"׳״]{1,5})"""
+private val SOURCE_MARKER_REGEX = Regex(
+    """^\s*(?:<[^>]+>\s*)*(?:(?:\($MARKER_TOKEN\)|\{$MARKER_TOKEN\}|\[$MARKER_TOKEN\])(?=[\s<:.]|$)|""" +
+        """$MARKER_TOKEN\)|$MARKER_TOKEN[.:](?=\s)|<b>$MARKER_TOKEN</b>(?=\s))"""
+)
+
+/** The label token of [content] (gershayim kept), or null when it opens with none. */
+private fun sourceMarkerToken(content: String): String? =
+    SOURCE_MARKER_REGEX.find(content)?.groupValues?.drop(1)?.first { it.isNotEmpty() }
+
+private fun markerValue(token: String): Int? = gematriaToInt[token.filter { it !in "\"׳״" }]
+
+/** Numeric value of the label a leaf item opens with, or null. */
+private fun ownLabelValue(item: JsonElement): Int? =
+    (item as? JsonPrimitive)?.takeIf { it.isString }?.content?.let(::sourceMarkerToken)?.let(::markerValue)
 
 // Inverse of toGematria, for validating printed markers.
 private val gematriaToInt: Map<String, Int> = (1..999).associateBy { toGematria(it) }
@@ -952,14 +975,13 @@ private fun sourceMarkerRun(items: JsonArray): MarkerRun {
     items.forEachIndexed { idx, item ->
         val content = (item as? JsonPrimitive)?.contentOrNull ?: return@forEachIndexed
         if (content.isBlank()) return@forEachIndexed
-        val match = SOURCE_MARKER_REGEX.find(content)
-        if (match == null) {
+        val token = sourceMarkerToken(content)
+        if (token == null) {
             if (block == 0) pre++ else post++
             return@forEachIndexed
         }
         if (post > 0) return MarkerRun.BROKEN
-        val value = gematriaToInt[match.groupValues[1].filter { it !in "\"׳״" }]
-            ?: return MarkerRun.BROKEN
+        val value = markerValue(token) ?: return MarkerRun.BROKEN
         when {
             next < 0 -> if (value > idx + 1) return MarkerRun.BROKEN else next = value + 1
             value != next -> return MarkerRun.BROKEN

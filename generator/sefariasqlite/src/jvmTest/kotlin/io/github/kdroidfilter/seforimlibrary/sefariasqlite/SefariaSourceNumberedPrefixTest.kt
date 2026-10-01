@@ -50,8 +50,9 @@ class SefariaSourceNumberedPrefixTest {
         // 6. ציטוט (כה) בפסקה ראשונה — לא רצף תקין, ה-prefix נשאר
         assertContains(lines, "(א) (כה) ציטוט מסימן אחר")
         assertContains(lines, "(ב) המשך אחרי ציטוט")
-        // 7. רצף שבור א,ב,ד — ה-prefix נשאר
-        assertContains(lines, "(א) (א) רצף שבור")
+        // 7. רצף שבור א,ב,ד — ה-prefix נשאר רק במקום שהסימון שבמקור אינו המספר שלו
+        assertContains(lines, "(א) רצף שבור")
+        assertContains(lines, "(ב) המשך תקין")
         assertContains(lines, "(ג) (ד) קפיצה ברצף")
         // 8. פריט ריק ראשון ואז א,ב — בלי prefix
         assertContains(lines, "(א) אחד אחרי ריק")
