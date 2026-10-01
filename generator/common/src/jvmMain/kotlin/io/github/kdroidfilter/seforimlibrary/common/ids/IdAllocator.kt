@@ -34,10 +34,10 @@ interface IdAllocator {
      * Forgets the id cached for [canonicalPath] and hands out a fresh one.
      *
      * Only for the case where the reserved id turns out to be already occupied in
-     * the DB by a row this allocator never created — categories inserted with an
-     * implicit rowid outside the allocator, e.g. `renameCategories`' leaf
-     * auto-creation for book_moves.csv. The default implementation cannot
-     * reallocate and keeps the current id.
+     * the DB by a row this allocator never created — categories inserted outside the
+     * allocator. `renameCategories`' leaf auto-creation for book_moves.csv used to be
+     * one (implicit rowid, v19 and v30); it now takes its ids from the build state.
+     * The default implementation cannot reallocate and keeps the current id.
      */
     fun reallocateCategoryId(canonicalPath: String): Long = categoryId(canonicalPath)
 
