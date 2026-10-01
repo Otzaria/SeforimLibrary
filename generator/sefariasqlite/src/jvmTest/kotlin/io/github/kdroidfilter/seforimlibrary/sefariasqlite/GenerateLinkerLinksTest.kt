@@ -486,9 +486,13 @@ class GenerateLinkerLinksTest {
         assertEquals(0, linkerOffsetShift("Sefaria", stored, linkerContentHash(stored)))
         assertEquals(null, linkerOffsetShift("Sefaria", stored, linkerContentHash("other")))
         assertEquals(5, linkerOffsetShift("Sefaria", stored, null))
-        // Other sources are handed to the linker verbatim.
-        assertEquals(null, linkerOffsetShift("MoreBooks", stored, linkerContentHash(view)))
+        // Any source: the hash, not the book's view, says which text the offsets index.
+        assertEquals(5, linkerOffsetShift("MoreBooks", stored, linkerContentHash(view)))
         assertEquals(0, linkerOffsetShift("MoreBooks", stored, linkerContentHash(stored)))
+        assertEquals(0, linkerOffsetShift("MoreBooks", stored, null))
+        val tagged = "<b>(א)</b> <b>במג\"א</b> סק\"ו"
+        assertEquals(11, linkerOffsetShift("DictaToOtzaria", tagged, linkerContentHash("<b>במג\"א</b> סק\"ו")))
+        assertEquals(0, linkerOffsetShift("DictaToOtzaria", tagged, linkerContentHash(tagged)))
     }
 
     @Test

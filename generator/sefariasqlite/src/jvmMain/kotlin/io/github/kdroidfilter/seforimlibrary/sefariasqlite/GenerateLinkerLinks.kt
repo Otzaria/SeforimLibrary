@@ -459,18 +459,22 @@ fun main(args: Array<String>) = runBlocking {
 
 /**
  * How far a record's offsets sit from the stored line [content], or null when its
- * [sourceHash] matches neither text (the line changed since the snapshot).
+ * [sourceHash] matches neither the line nor a view of it (the line changed since
+ * the snapshot).
  *
- * The linker digests and indexes [LinkerInputView.linkerContent], which leaves a
- * Sefaria line's opening "(א) " out. A record made before that view (a full-line
- * hash) still indexes the stored line, so it is taken as is. A record with no hash
- * cannot be checked and is read in the current view; -PlinkerStrict counts it.
+ * The linker digests and indexes [LinkerInputView.linkerContent], which may leave
+ * a line's opening "(א) " (or "<b>(א)</b> ") out; the hash proves which text it
+ * was, so the book's view needs no second decision here. A record made before any
+ * view (a whole-line hash) still indexes the stored line and is taken as is. A
+ * record with no hash cannot be checked: it is read as a Sefaria line's plain view
+ * and as the whole line elsewhere; -PlinkerStrict counts it.
  */
 internal fun linkerOffsetShift(sourceName: String, content: String, sourceHash: String?): Int? {
-    val strip = LinkerInputView.strippedPrefixLength(sourceName, content)
-    if (sourceHash == null) return strip
-    if (strip > 0 && linkerContentHash(content.substring(strip)) == sourceHash) return strip
-    return if (linkerContentHash(content) == sourceHash) 0 else null
+    if (sourceHash == null) {
+        val mode = if (sourceName == "Sefaria") LinkerInputView.Mode.PLAIN else LinkerInputView.Mode.NONE
+        return LinkerInputView.strippedPrefixLength(mode, content)
+    }
+    return LinkerInputView.offsetShift(content) { linkerContentHash(it) == sourceHash }
 }
 
 /** SHA-1(UTF-8(content)) truncated to 16 hex chars. MUST equal linker_artifact.content_hash. */
