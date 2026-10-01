@@ -246,7 +246,7 @@ internal suspend fun generateHavroutaLinks(
         processedBooks++
         logger.i { "Processing: ${havroutaBook.title} -> ${talmudBook.title}" }
 
-        val linksForBook = processBookPair(
+        val stats = processBookPair(
             repository = repository,
             bindings = bindings,
             ctCommentary = ctCommentary,
@@ -257,8 +257,9 @@ internal suspend fun generateHavroutaLinks(
             logger = logger
         )
 
-        logger.i { "  Created $linksForBook links" }
-        totalLinksCreated += linksForBook
+        logger.i { "  Created ${stats.links} links" }
+        havroutaFormattingWarnings(havroutaBook.title, stats).forEach { warning -> logger.w { warning } }
+        totalLinksCreated += stats.links
     }
 
     if (unmatched.isEmpty()) {
@@ -274,6 +275,60 @@ internal suspend fun generateHavroutaLinks(
 }
 
 /**
+ * What one book pair produced, for the formatting sanity check.
+ *
+ * @property links links created
+ * @property boldLines text lines (after the first daf heading, not section headers) that contain `<b>`
+ * @property wholeLineBoldLines of those, long lines that are bold from start to end
+ */
+internal data class HavroutaPairStats(val links: Int, val boldLines: Int, val wholeLineBoldLines: Int)
+
+/** Below this many bold lines a book is too small for the shares below to mean anything. */
+private const val MIN_BOLD_LINES_FOR_CHECK = 100
+
+/** Every healthy Chavruta tractate links over 94% of its bold lines (v29: 0.945-0.97). */
+private const val MIN_LINKED_SHARE = 0.8
+
+/** Healthy tractates have up to 8% whole-line bold lines; a leaked `<b>` gave 29% (חולין, v30). */
+private const val MAX_WHOLE_LINE_BOLD_SHARE = 0.2
+
+/**
+ * Warnings for a Havrouta book whose formatting stopped the matcher from working.
+ *
+ * The Talmud text is found through `<b>` spans, so a formatting tag that leaked over
+ * thousands of lines does not fail anything: `<b><small>…</small></b>` is not read
+ * at all (חברותא על זבחים, v30: 391 links instead of 6400), and a bold that covers
+ * whole paragraphs mixes the explanation into the quote (חברותא על חולין: -494).
+ * Both stayed an INFO "Created N links" line, inside the global drift gate.
+ */
+internal fun havroutaFormattingWarnings(title: String, stats: HavroutaPairStats): List<String> {
+    if (stats.boldLines < MIN_BOLD_LINES_FOR_CHECK) return emptyList()
+    val warnings = mutableListOf<String>()
+    fun pct(n: Int) = "${n * 100 / stats.boldLines}%"
+    if (stats.links < stats.boldLines * MIN_LINKED_SHARE) {
+        warnings += "$title: only ${stats.links} of ${stats.boldLines} lines with bold Talmud text were " +
+            "linked (${pct(stats.links)}; a sound Chavruta book links over 90%). A <b> span holding " +
+            "another tag (<b><small>…</small></b>) is not read: look for formatting left open over " +
+            "many lines in the book file"
+    }
+    if (stats.wholeLineBoldLines > stats.boldLines * MAX_WHOLE_LINE_BOLD_SHARE) {
+        warnings += "$title: ${stats.wholeLineBoldLines} of ${stats.boldLines} bold lines " +
+            "(${pct(stats.wholeLineBoldLines)}; usually under 10%) are bold from start to end, so the " +
+            "explanation is matched as Talmud text: look for an unclosed <b> in the book file"
+    }
+    return warnings
+}
+
+private val anyTagPattern = Regex("<[^>]*>")
+
+/** A long line whose bold text is (nearly) all of its text. */
+private fun isWholeLineBold(content: String, boldText: String): Boolean {
+    val plain = content.replace(anyTagPattern, "").trim()
+    if (plain.length < 40) return false
+    return normalizeText(boldText).length >= 0.9 * normalizeText(plain).length
+}
+
+/**
  * Processes a single Havrouta-Talmud book pair and creates links.
  */
 private suspend fun processBookPair(
@@ -285,7 +340,7 @@ private suspend fun processBookPair(
     havroutaTotalLines: Int,
     talmudTotalLines: Int,
     logger: Logger
-): Int {
+): HavroutaPairStats {
     // Load all lines for both books
     val havroutaLines = repository.getLines(havroutaBookId, 0, havroutaTotalLines - 1)
     val talmudLines = repository.getLines(talmudBookId, 0, talmudTotalLines - 1)
@@ -307,6 +362,8 @@ private suspend fun processBookPair(
     val talmudLineIdByIndex = talmudLines.associate { it.lineIndex to it.id }
 
     var linksCreated = 0
+    var boldLines = 0
+    var wholeLineBoldLines = 0
     val linkBatch = mutableListOf<Link>()
 
     // Process each Havrouta line
@@ -329,6 +386,10 @@ private suspend fun processBookPair(
 
         // Extract bold text
         val boldText = extractBoldText(havroutaLine.content)
+        if (havroutaLine.content.contains("<b>")) {
+            boldLines++
+            if (isWholeLineBold(havroutaLine.content, boldText)) wholeLineBoldLines++
+        }
         if (boldText.isBlank()) continue
 
         val normalizedBold = normalizeText(boldText)
@@ -371,7 +432,7 @@ private suspend fun processBookPair(
         repository.insertLinksBatch(linkBatch)
     }
 
-    return linksCreated
+    return HavroutaPairStats(linksCreated, boldLines, wholeLineBoldLines)
 }
 
 /**
