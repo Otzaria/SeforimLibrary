@@ -55,8 +55,9 @@ class CompressLineContentCliTest {
                 assertEquals("גרסה אחרת", d.text(v.getValue(2L)!!))
                 assertEquals("שורה ריקה בבסיס", d.text(v.getValue(3L)!!))
             }
-            stampSchemaVersion(conn, dbVersion = 31, dbSchemaVersion = 7)
-            assertFailsWith<IllegalArgumentException> { stampSchemaVersion(conn, dbVersion = 31, dbSchemaVersion = 6) }
+            stampSchemaVersion(conn, dbVersion = 31, dbSchemaVersion = 6)
+            conn.createStatement().use { it.execute("UPDATE line_content SET content = 'plain' WHERE id = 1") }
+            assertFailsWith<IllegalStateException> { stampSchemaVersion(conn, dbVersion = 31, dbSchemaVersion = 6) }
         }
     }
 

@@ -24,7 +24,7 @@ import java.util.concurrent.TimeUnit
  * Every frame is decompressed and compared before it is written. Rows already
  * stored as BLOB are skipped, so an interrupted run resumes and a second run only
  * checks that no TEXT row is left. NULL in `version_line` (inherit the base text)
- * stays NULL. A stamped DB is re-stamped as schema [LINE_CONTENT_COMPRESSED_SCHEMA_VERSION].
+ * stays NULL. Compression keeps the schema version: readers decode when `zstd_dict` exists.
  *
  * System properties: `dbPath` (required), `chunkRows` (default [COMPRESS_CHUNK_ROWS]),
  * `threads` (default: available processors).
@@ -123,7 +123,6 @@ internal fun compressLineContent(
         )
         logger.i { "version_line: ${version.rows} rows compressed" }
         validateCompressed(conn)
-        stampedDbVersion(conn)?.let { stampSchemaVersion(conn, it, LINE_CONTENT_COMPRESSED_SCHEMA_VERSION) }
         return CompressLineContentReport(
             lineRowsCompressed = line.rows,
             versionRowsCompressed = version.rows,
@@ -205,18 +204,6 @@ private fun compressColumn(
         lastKey = chunk.last().first
     }
     return ColumnResult(rows, textBytes, frameBytes)
-}
-
-private fun stampedDbVersion(conn: Connection): Int? {
-    val hasMeta = conn.createStatement().use { st ->
-        st.executeQuery("SELECT 1 FROM sqlite_master WHERE type='table' AND name='schema_meta'").use { it.next() }
-    }
-    if (!hasMeta) return null
-    return conn.createStatement().use { st ->
-        st.executeQuery("SELECT value FROM schema_meta WHERE key = 'db_version'").use { rs ->
-            if (rs.next()) rs.getString(1).toIntOrNull() else null
-        }
-    }
 }
 
 /** No line text is left as TEXT and there is one dictionary; throws on the first violation. */

@@ -1780,12 +1780,12 @@ jobs:
       # One frame per line_content / version_line row. Runs after Phase-2, the
       # last reader of plain text, and before compaction reclaims the freed space.
       # Byte-deterministic for a given input regardless of -Pthreads. A
-      # source_commit from before this step keeps schema 6, which the fan handles.
+      # source_commit from before this step stays uncompressed; readers handle both.
       - name: Compress line text (zstd dictionary)
         run: |
           set -euo pipefail
           if ! grep -q 'register<JavaExec>("compressLineContent")' generator/common/build.gradle.kts; then
-            echo "::notice::source_commit predates compressLineContent; the DB stays schema 6"
+            echo "::notice::source_commit predates compressLineContent; the DB stays uncompressed"
             exit 0
           fi
           gradle :generator-common:compressLineContent \

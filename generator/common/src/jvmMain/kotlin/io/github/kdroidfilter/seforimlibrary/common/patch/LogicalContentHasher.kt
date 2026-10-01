@@ -160,18 +160,17 @@ class LogicalContentHasher(
         /** Schema 5 changes line_dh columns, not the set or order of tables. */
         val TABLES_SCHEMA_5: List<String> = TABLES_SCHEMA_4
 
-        /** Schema 6 moves line text into line_content, hashed right after line. */
+        /**
+         * Schema 6 moves line text into line_content, hashed right after line, and the
+         * dictionary of its zstd frames (zstd_dict) right after that.
+         */
         val TABLES_SCHEMA_6: List<String> = TABLES_SCHEMA_5.toMutableList().apply {
             add(indexOf("line") + 1, "line_content")
-        }
-
-        /** Schema 7 compresses line text; its dictionary is hashed right after line_content. */
-        val TABLES_SCHEMA_7: List<String> = TABLES_SCHEMA_6.toMutableList().apply {
             add(indexOf("line_content") + 1, "zstd_dict")
         }
 
         /** Current-schema default for build-time diagnostics and current DB tests. */
-        val DEFAULT_TABLES: List<String> = TABLES_SCHEMA_7
+        val DEFAULT_TABLES: List<String> = TABLES_SCHEMA_6
 
         fun tablesForSchemaVersion(schemaVersion: Int): List<String> = when (schemaVersion) {
             1 -> TABLES_SCHEMA_1
@@ -180,7 +179,6 @@ class LogicalContentHasher(
             4 -> TABLES_SCHEMA_4
             5 -> TABLES_SCHEMA_5
             6 -> TABLES_SCHEMA_6
-            7 -> TABLES_SCHEMA_7
             else -> error("Unsupported logical-hash schema version $schemaVersion")
         }
 

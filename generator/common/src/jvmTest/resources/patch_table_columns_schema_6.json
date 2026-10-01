@@ -22,6 +22,7 @@
     "tocEntry": ["bookId", "hasChildren", "id", "isLastChild", "level", "lineId", "parentId", "textId"],
     "line": ["bookId", "charCount", "heRef", "id", "lineIndex", "tocEntryId"],
     "line_content": ["content", "id"],
+    "zstd_dict": ["dict", "id"],
     "line_toc": ["lineId", "tocEntryId"],
     "line_ref": ["bookId", "lineIndex", "refKeyHash"],
     "line_dh": ["bookId", "dhDisplay", "dhText", "lineIndex"],

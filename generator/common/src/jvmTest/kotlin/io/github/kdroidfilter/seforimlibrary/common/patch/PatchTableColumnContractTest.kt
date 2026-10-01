@@ -39,11 +39,6 @@ class PatchTableColumnContractTest {
     }
 
     @Test
-    fun `the split shape before compression still matches the frozen schema 6 expectation`() {
-        assertColumns(6, PATCH_TABLES_SCHEMA_6, split = true)
-    }
-
-    @Test
     fun `the generator working shape still matches the frozen schema 5 expectation`() {
         assertColumns(5, PATCH_TABLES_SCHEMA_5, split = false)
     }

@@ -123,7 +123,7 @@ def book_editions(conn, split=False):
 
 
 def line_text_decoder(conn):
-    """Schema 7 stores line text as zstd frames of the one dictionary in zstd_dict."""
+    """A DB with zstd_dict stores line text as zstd frames of its one dictionary."""
     if not conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='zstd_dict'").fetchone():
         return lambda value: value
     import zstandard

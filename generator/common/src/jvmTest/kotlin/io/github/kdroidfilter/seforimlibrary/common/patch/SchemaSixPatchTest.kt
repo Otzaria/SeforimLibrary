@@ -79,8 +79,8 @@ class SchemaSixPatchTest {
             )
         }
         assertEquals("line", refusal.table)
-        assertTrue(requiresFullRebase(1, 6) && requiresFullRebase(5, 7) && requiresFullRebase(6, 7))
-        assertFalse(requiresFullRebase(4, 5) || requiresFullRebase(6, 6) || requiresFullRebase(7, 7))
+        assertTrue(requiresFullRebase(1, 6) && requiresFullRebase(5, 7))
+        assertFalse(requiresFullRebase(4, 5) || requiresFullRebase(6, 6) || requiresFullRebase(6, 7))
     }
 
     @Test

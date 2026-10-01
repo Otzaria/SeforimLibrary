@@ -73,8 +73,8 @@ class PatchDbProducer(
             throw UnpatchableAnchorException(
                 table = "line",
                 columns = listOf("content"),
-                message = "schema $fromSchemaVersion -> $toSchemaVersion crosses a full-rebase schema " +
-                    "$FULL_REBASE_SCHEMA_VERSIONS (line_content split or compression); no delta exists",
+                message = "schema $fromSchemaVersion -> $toSchemaVersion moves line text into line_content; " +
+                    "a delta cannot drop line.content, so this transition is a full rebase only",
             )
         }
         val fromTables = patchTablesForSchemaVersion(fromSchemaVersion)
