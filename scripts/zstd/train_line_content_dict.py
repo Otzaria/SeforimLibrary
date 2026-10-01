@@ -10,6 +10,18 @@ Requires `pip install zstandard` (bundles zstd 1.5.7, the version zstd-jni 1.5.7
 
 Measured on v30 (schema 6), held-out 50K rows at level 19: no dictionary 2.54x,
 64K 3.44x, 256K 3.58x, 1M 3.72x, 2M 3.80x; level 22 adds nothing over 19.
+
+Provenance of the frozen line_content.zdict (dict id 908519771 = 0x3626e95b,
+SHA-256 1e5c9d66...3f6c). Recorded, in the commit that added it (1b991830) and in
+SL PR #62: 2MB, fastcover k=2000 d=8, 200K random line_content rows of a v30
+(schema 6) seforim.db, level 19. Not recorded anywhere in the repo: which v30 file
+(build), the zstandard / Python versions, and f, accel, seed or sample selection.
+
+This script does NOT reproduce it. Run 2026-10-02 on a local v30 (db_version 30,
+db_schema_version 6, 6,908,090 TEXT rows) with python-zstandard 0.25.0 (zstd 1.5.7)
+on Python 3.14.4, Windows x64: 198,177 samples, dict id 2129175477, SHA-256
+f3eb1b97a74d9c604d3ae9d6fdc0382fbc7f8374df1271e0813661bc69c06d62. Treat the
+committed file as the source of truth; this script is the method, not a rebuild.
 """
 import random
 import sqlite3
