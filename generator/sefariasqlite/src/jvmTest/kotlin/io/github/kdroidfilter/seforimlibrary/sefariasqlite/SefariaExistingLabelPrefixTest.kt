@@ -40,16 +40,17 @@ class SefariaExistingLabelPrefixTest {
     @Test
     fun bareParenthesisLabelsAreNotDoubledEvenWhenGlued() {
         val lines = readBook().lines
-        assertContains(lines, "<b>פרטי המצות</b>")
+        // The unlabelled intro is segment א and keeps its generated number.
+        assertContains(lines, "(א) <b>פרטי המצות</b>")
         assertContains(lines, "ב) תפלה")
         assertContains(lines, "ג)ק\"ש ערבית")
-        assertFalse(lines.any { it.startsWith("(ב) ב)") || it.startsWith("(ג) ג)") || it.startsWith("(א) <b>פרטי") })
+        assertFalse(lines.any { it.startsWith("(ב) ב)") || it.startsWith("(ג) ג)") })
     }
 
     @Test
     fun boldBareNumeralAfterAnIntroIsALabel() {
         val lines = readBook().lines
-        assertContains(lines, "<big><b>פרקי אבות</b></big>")
+        assertContains(lines, "(א) <big><b>פרקי אבות</b></big>")
         assertContains(lines, "<b>ב</b> שמעון הצדיק")
         assertContains(lines, "<b>ג</b> אנטיגנוס")
     }
@@ -73,6 +74,31 @@ class SefariaExistingLabelPrefixTest {
         assertContains(lines, "(א) פתיחה בלי סימון")
         assertContains(lines, "(ג) גוף בלי סימון")
         assertContains(lines, "(ה) [ח] סימון של מספר אחר")
+    }
+
+    @Test
+    fun aSourceRunShiftedByAnIntroKeepsTheGeneratedNumbers() {
+        // כף אחת כ"ד: segment ב opens "א." — another number, so nothing is dropped.
+        val lines = readBook().lines
+        assertContains(lines, "(א) קצת אזהרות לחג הסוכות:")
+        assertContains(lines, "(ב) א. יטבול ערב סוכות")
+        assertContains(lines, "(ג) ב. ישתדל בסוכה")
+        // The same for a shifted run of square-bracket labels.
+        assertContains(lines, "(א) <b>שאלה:</b><br>המנהג בקהלתנו")
+        assertContains(lines, "(ב) [א] תחלה יש לברר")
+    }
+
+    @Test
+    fun aLabelRightAfterAnOpeningHeadingCounts() {
+        // קשר גודל: "<big><strong>סימן א. …</strong></big><br>א. מיד".
+        val lines = readBook().lines
+        assertContains(lines, "<big><strong>סימן א. לקום באשמורת.</strong></big><br>א. מיד כשנעור")
+        assertContains(lines, "ב. שיעור הטלית")
+        // A lone label after a heading, in an array with no other self-labelled item, is a
+        // summary list (תלמוד עשר הספירות), not the segment's label.
+        assertContains(lines, "(א) <b><big>מבאר ד' בחינות. ובו ח' ענינים:</big></b><br><small>א. בכל העולמות</small>")
+        // A bold dibbur with its comment is no heading: the later label is another segment's.
+        assertContains(lines, "(א) <b>פלגש כו'. </b> דכאן ל\"ל<br> <b>א) י\"א כו'</b>")
     }
 
     @Test
@@ -100,6 +126,8 @@ class SefariaExistingLabelPrefixTest {
                ${node("Bold", """["Integer","Integer"]""", """["פרק","משנה"]""")},
                ${node("Dotted", """["Siman","Seif"]""", """["סימן","סעיף"]""")},
                ${node("Partial", """["Siman","Seif"]""", """["סימן","סעיף"]""")},
+               ${node("Shifted", """["Siman","Seif"]""", """["סימן","סעיף"]""")},
+               ${node("Heading", """["Siman","Seif"]""", """["סימן","סעיף"]""")},
                ${node("Dibbur", """["Siman","Seif"]""", """["סימן","סעיף קטן"]""")}
              ]}}
         """.trimIndent()
@@ -111,6 +139,8 @@ class SefariaExistingLabelPrefixTest {
               "Bold": [["<big><b>פרקי אבות</b></big>", "<b>ב</b> שמעון הצדיק", "<b>ג</b> אנטיגנוס"]],
               "Dotted": [["א. אמר שמואל", "ב. מיד יטול"], ["[א]: תשובה ראשונה", "[ב]: תשובה שנייה"]],
               "Partial": [["פתיחה בלי סימון", "[ב] שני ממוספר", "גוף בלי סימון", "[ד] רביעי ממוספר", "[ח] סימון של מספר אחר"]],
+              "Shifted": [["קצת אזהרות לחג הסוכות:", "א. יטבול ערב סוכות", "ב. ישתדל בסוכה"], ["<b>שאלה:</b><br>המנהג בקהלתנו", "[א] תחלה יש לברר", "[ב] אמנם"]],
+              "Heading": [["<big><strong>סימן א. לקום באשמורת.</strong></big><br>א. מיד כשנעור", "ב. שיעור הטלית"], ["<b>פלגש כו'. </b> דכאן ל\"ל<br> <b>א) י\"א כו'</b>", "<b>שני כו'. </b> טעם"], ["<b><big>מבאר ד' בחינות. ובו ח' ענינים:</big></b><br><small>א. בכל העולמות</small>", "<small>תקון המסך</small>"]],
               "Dibbur": [["<b>א' פעמים. </b> ב\"ח", "<b>ב' פעמים. </b> ומ\"א", "<b>ט'. </b> וכתב בש\"ך", "לא יקשור הקמיע"]]
             }}
         """.trimIndent()
