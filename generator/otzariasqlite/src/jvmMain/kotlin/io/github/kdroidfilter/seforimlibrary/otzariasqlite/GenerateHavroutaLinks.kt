@@ -209,6 +209,18 @@ private fun isSectionHeader(content: String): Boolean {
 }
 
 /**
+ * Tractates the Shas prints with no Bavli Gemara. The Vilna Shas carries the Yerushalmi of
+ * שקלים in its place, and חברותא על שקלים explains that text by the Yerushalmi's own
+ * division: the same eight chapters and 32 halachot as Sefaria's "תלמוד ירושלמי שקלים", in
+ * the same order. Its daf headings follow the Shas pagination (ב.–כב:), which neither
+ * Sefaria structure has (the "Vilna" alt structure is the Yerushalmi edition's א.–לג:), so
+ * the book is linked by perek and halacha instead, see [processYerushalmiPair].
+ */
+private val yerushalmiOnlyTractates = setOf("שקלים")
+
+private const val YERUSHALMI_PREFIX = "תלמוד ירושלמי "
+
+/**
  * Generates links between Havrouta books and their corresponding Talmud tractates.
  *
  * `internal` rather than private so the found-vs-processed accounting can be
@@ -238,6 +250,8 @@ internal suspend fun generateHavroutaLinks(
             !book.title.startsWith("תלמוד ירושלמי") &&
             !book.title.startsWith("תוספתא")
     }.associateBy { it.title }
+    val yerushalmiBooks = allBooks.filter { it.sourceId == 1L && it.title.startsWith(YERUSHALMI_PREFIX) }
+        .associateBy { it.title }
 
     fun warn(message: String) {
         logger.w { message }
@@ -269,32 +283,58 @@ internal suspend fun generateHavroutaLinks(
         val talmudTractateName = tractateNameMapping[tractateName] ?: tractateName
 
         val talmudBook = talmudBooks[talmudTractateName]
-        if (talmudBook == null) {
+        val yerushalmiBook = if (talmudBook == null && talmudTractateName in yerushalmiOnlyTractates) {
+            yerushalmiBooks[YERUSHALMI_PREFIX + talmudTractateName]
+        } else {
+            null
+        }
+        if (talmudBook == null && yerushalmiBook == null) {
             unmatched += havroutaBook.title
             warn(
-                "No Talmud match for: ${havroutaBook.title} — no book titled '$talmudTractateName' " +
-                    "among the Bavli tractates (sourceId=1, excluding משנה / תלמוד ירושלמי / תוספתא); " +
-                    "no links created for it"
+                if (talmudTractateName in yerushalmiOnlyTractates) {
+                    "No Talmud match for: ${havroutaBook.title} — '$talmudTractateName' has no Bavli Gemara, " +
+                        "and no Sefaria book is titled '$YERUSHALMI_PREFIX$talmudTractateName'; no links created for it"
+                } else {
+                    "No Talmud match for: ${havroutaBook.title} — no book titled '$talmudTractateName' " +
+                        "among the Bavli tractates (sourceId=1, excluding משנה / תלמוד ירושלמי / תוספתא); " +
+                        "no links created for it"
+                }
             )
             continue
         }
 
         processedBooks++
-        logger.i { "Processing: ${havroutaBook.title} -> ${talmudBook.title}" }
-
-        val stats = processBookPair(
-            repository = repository,
-            bindings = bindings,
-            ctCommentary = ctCommentary,
-            havroutaBookId = havroutaBook.id,
-            talmudBookId = talmudBook.id,
-            havroutaTotalLines = havroutaBook.totalLines,
-            talmudTotalLines = talmudBook.totalLines,
-            logger = logger
-        )
+        val stats = if (talmudBook != null) {
+            logger.i { "Processing: ${havroutaBook.title} -> ${talmudBook.title}" }
+            processBookPair(
+                repository = repository,
+                bindings = bindings,
+                ctCommentary = ctCommentary,
+                havroutaBookId = havroutaBook.id,
+                talmudBookId = talmudBook.id,
+                havroutaTotalLines = havroutaBook.totalLines,
+                talmudTotalLines = talmudBook.totalLines,
+                logger = logger
+            )
+        } else {
+            val yerushalmi = yerushalmiBook!!
+            logger.i {
+                "Processing: ${havroutaBook.title} -> ${yerushalmi.title} " +
+                    "(by perek and halacha: '$talmudTractateName' has no Bavli Gemara)"
+            }
+            processYerushalmiPair(
+                repository = repository,
+                bindings = bindings,
+                ctCommentary = ctCommentary,
+                havroutaBookId = havroutaBook.id,
+                yerushalmiBookId = yerushalmi.id,
+                havroutaTotalLines = havroutaBook.totalLines,
+                yerushalmiTotalLines = yerushalmi.totalLines,
+            )
+        }
 
         logger.i { "  Created ${stats.links} links" }
-        havroutaFormattingWarnings(havroutaBook.title, talmudBook.title, stats)
+        havroutaFormattingWarnings(havroutaBook.title, (talmudBook ?: yerushalmiBook)!!.title, stats)
             .forEach { warn(it) }
         totalLinksCreated += stats.links
     }
@@ -333,10 +373,11 @@ internal enum class HavroutaSectionKind(
     val talmudHeading: String,
 ) {
     DAF("daf", "dafs", "<h3>דף …</h3>", "<h2>דף …</h2>"),
+    HALACHA("halacha", "halachot", "<big><b>הלכה …</b></big> under <h2>פרק …</h2>", "<h3>הלכה …</h3> under <h2>פרק …</h2>"),
 }
 
 /**
- * The sections (dafs) a book pair was matched by.
+ * The sections (dafs, or halachot) a book pair was matched by.
  *
  * @property inBook distinct sections the Havrouta book has a heading for
  * @property inTalmud distinct sections of the Talmud book
@@ -374,7 +415,7 @@ private const val MAX_WHOLE_LINE_BOLD_SHARE = 0.2
 /** A book whose headings stopped matching loses whole sections; healthy books share 99.6%+ of them. */
 private const val MIN_SHARED_SECTION_SHARE = 0.9
 
-/** The fewest links per daf of any healthy book is 21 (חברותא על מעילה). */
+/** The fewest links per daf of any healthy book is 21 (חברותא על מעילה); שקלים has 68 per halacha. */
 private const val MIN_LINKS_PER_SECTION = 5
 
 /** Below this many lines a book is a fixture, not a tractate: the smallest Chavruta book (תמיד) has 708. */
@@ -587,6 +628,202 @@ private suspend fun insertQuoteLinks(
         repository.insertLinksBatch(linkBatch)
     }
     return linksCreated
+}
+
+private val hebrewLetterValues: Map<Char, Int> = "אבגדהוזחטיכלמנסעפצקרשת".toList()
+    .zip(listOf(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 200, 300, 400))
+    .toMap()
+
+private val hebrewOrdinals = mapOf(
+    "ראשון" to 1, "שני" to 2, "שלישי" to 3, "רביעי" to 4, "חמישי" to 5, "שישי" to 6, "ששי" to 6,
+    "שביעי" to 7, "שמיני" to 8, "תשיעי" to 9, "עשירי" to 10,
+)
+
+/**
+ * `א` → 1, `טו` → 15, `כ"ג` → 23; an ordinal word (`ראשון`, `שמיני`) as its number; anything
+ * else null. A numeral's letters fall in value (save טו and טז), so a word is not one.
+ */
+internal fun hebrewNumber(text: String): Int? {
+    hebrewOrdinals[text]?.let { return it }
+    val letters = text.filterNot { it in "'\"׳״" }
+    if (letters.isEmpty() || letters.any { it !in hebrewLetterValues }) return null
+    val values = letters.map { hebrewLetterValues.getValue(it) }
+    val ordered = values.zipWithNext().withIndex().all { (i, pair) ->
+        pair.first >= pair.second || (i == values.size - 2 && pair.first == 9 && pair.second in setOf(6, 7))
+    }
+    return if (ordered) values.sum() else null
+}
+
+private val yerushalmiPerekPattern = Regex("""<h2>\s*פרק\s+([^<]+?)\s*</h2>""")
+private val yerushalmiHalachaPattern = Regex("""<h3>\s*הלכה\s+([^<]+?)\s*</h3>""")
+private val anyHeadingPattern = Regex("""<h[1-6][\s>]""")
+private val havroutaPerekPattern = Regex("""<h2>\s*פרק\s+([^\s<]+)""")
+private val havroutaHalachaPattern = Regex("""^\s*<big><b>\s*הלכה\s+([^\s<:\-–]+)""")
+private val finalLetters = mapOf('ך' to 'כ', 'ם' to 'מ', 'ן' to 'נ', 'ף' to 'פ', 'ץ' to 'צ')
+
+/**
+ * The words of a Yerushalmi quote or line, spelling aside: [enhancedNormalize], final
+ * letters as plain ones, and ו and י dropped. The Shas text of שקלים and Sefaria's Yerushalmi
+ * are the same text in two spellings (משמיעין / משמעין, בחדש / בחודש, תתרם / תיתרם), so
+ * only 30% of the quotes are found verbatim. One-letter words (a stray ו, ה) are dropped.
+ */
+internal fun yerushalmiWords(text: String): List<String> =
+    enhancedNormalize(text).replace("‌", "").replace("‍", "")
+        .map { finalLetters[it] ?: it }.joinToString("")
+        .split(' ')
+        .map { it.replace("ו", "").replace("י", "") }
+        .filter { it.length > 1 }
+
+private fun wordPairs(words: List<String>): Set<Pair<String, String>> = words.zipWithNext().toHashSet()
+
+/** Fixed-point weight of a full match in [alignYerushalmiQuotes]. */
+private const val FULL_MATCH_WEIGHT = 10_000
+
+/**
+ * Links the quotes of one halacha to the lines of the same halacha in the Yerushalmi.
+ *
+ * Returns, per quote, the index into [lineWords] it is linked to, or null.
+ *
+ * 1. A quote *matches* a line when at least half of its word pairs (in [yerushalmiWords]
+ *    form) are word pairs of that line. The Chavruta reads the halacha in order, so the
+ *    quotes are linked to non-decreasing lines: of all such assignments the one with the
+ *    largest sum of matched shares is taken, and on a tie the earlier line.
+ * 2. A quote left unlinked whose linked neighbours before and after it are on one line, and
+ *    half of whose words are words of that line, is linked to it too: a variant reading
+ *    the word pairs miss, between two quotes the line holds.
+ */
+internal fun alignYerushalmiQuotes(quotes: List<List<String>>, lineWords: List<List<String>>): List<Int?> {
+    val m = lineWords.size
+    val result = arrayOfNulls<Int>(quotes.size)
+    if (m == 0) return result.toList()
+    val linePairs = lineWords.map { wordPairs(it) }
+    // best[t]: the largest total over the quotes so far with the last link on a line <= t.
+    var best = LongArray(m)
+    val how = Array(quotes.size) { ByteArray(m) } // 0 = quote unlinked, 1 = linked to t, 2 = see t-1
+    for ((k, quote) in quotes.withIndex()) {
+        val pairs = wordPairs(quote)
+        val cur = best.copyOf()
+        if (pairs.isNotEmpty()) {
+            for (t in 0 until m) {
+                val hit = pairs.count { it in linePairs[t] }
+                if (hit == 0 || hit * 2 < pairs.size) continue
+                val total = best[t] + hit.toLong() * FULL_MATCH_WEIGHT / pairs.size
+                if (total > cur[t]) {
+                    cur[t] = total
+                    how[k][t] = 1
+                }
+            }
+        }
+        for (t in 1 until m) {
+            if (cur[t - 1] >= cur[t]) {
+                cur[t] = cur[t - 1]
+                how[k][t] = 2
+            }
+        }
+        best = cur
+    }
+    var t = m - 1
+    for (k in quotes.indices.reversed()) {
+        while (how[k][t] == 2.toByte()) t--
+        if (how[k][t] == 1.toByte()) result[k] = t
+    }
+    val aligned = result.copyOf()
+    for (k in quotes.indices) {
+        if (aligned[k] != null || quotes[k].isEmpty()) continue
+        val before = (k - 1 downTo 0).firstNotNullOfOrNull { aligned[it] } ?: continue
+        val after = (k + 1 until quotes.size).firstNotNullOfOrNull { aligned[it] } ?: continue
+        if (before != after) continue
+        val words = lineWords[before].toHashSet()
+        if (quotes[k].count { it in words } * 2 >= quotes[k].size) result[k] = before
+    }
+    return result.toList()
+}
+
+/**
+ * Links a Havrouta book to the Yerushalmi tractate it explains, for a tractate with no Bavli
+ * Gemara ([yerushalmiOnlyTractates]).
+ *
+ * The Yerushalmi is divided by `<h2>פרק א</h2>` and `<h3>הלכה א</h3>`; the Havrouta book by
+ * `<h2>פרק ראשון - …</h2>` and a `<big><b>הלכה א - מתניתין:</b></big>` line. Each halacha's
+ * bold quotes are linked to the lines of the same halacha by [alignYerushalmiQuotes]. The
+ * daf headings of the Havrouta book are skipped like any other header.
+ */
+private suspend fun processYerushalmiPair(
+    repository: SeforimRepository,
+    bindings: IdAllocatorBindings,
+    ctCommentary: Long,
+    havroutaBookId: Long,
+    yerushalmiBookId: Long,
+    havroutaTotalLines: Int,
+    yerushalmiTotalLines: Int,
+): HavroutaPairStats {
+    val havroutaLines = repository.getLines(havroutaBookId, 0, havroutaTotalLines - 1)
+    val yerushalmiLines = repository.getLines(yerushalmiBookId, 0, yerushalmiTotalLines - 1)
+
+    // Halacha "perek:halacha" -> the Yerushalmi's text lines under it.
+    val halachaLines = LinkedHashMap<String, MutableList<Line>>()
+    var perek: Int? = null
+    var current: MutableList<Line>? = null
+    for (line in yerushalmiLines) {
+        if (anyHeadingPattern.containsMatchIn(line.content)) {
+            current = null
+            yerushalmiPerekPattern.find(line.content)?.let { perek = hebrewNumber(it.groupValues[1]) }
+            val halacha = yerushalmiHalachaPattern.find(line.content)?.let { hebrewNumber(it.groupValues[1]) }
+            val p = perek
+            if (halacha != null && p != null) current = halachaLines.getOrPut("$p:$halacha") { mutableListOf() }
+            continue
+        }
+        current?.add(line)
+    }
+
+    var boldLines = 0
+    var wholeLineBoldLines = 0
+    val rows = mutableListOf<QuoteRow>()
+    val rowWords = mutableListOf<List<String>>()
+    val bookHalachot = mutableSetOf<String>()
+    var havroutaPerek: Int? = null
+    var key: String? = null
+    for (havroutaLine in havroutaLines) {
+        val content = havroutaLine.content
+        val perekMatch = havroutaPerekPattern.find(content)
+        if (perekMatch != null) {
+            havroutaPerek = hebrewNumber(perekMatch.groupValues[1])
+            key = null
+            continue
+        }
+        val halachaMatch = havroutaHalachaPattern.find(content)
+        if (halachaMatch != null) {
+            val halacha = hebrewNumber(halachaMatch.groupValues[1])
+            val p = havroutaPerek
+            key = if (p != null && halacha != null) "$p:$halacha" else null
+            key?.let { bookHalachot += it }
+            continue
+        }
+        val section = key ?: continue
+        if (isSectionHeader(content)) continue
+
+        val boldText = extractBoldText(content)
+        if (boldOpenerPattern.containsMatchIn(content)) {
+            boldLines++
+            if (isWholeLineBold(content, boldText)) wholeLineBoldLines++
+        }
+        if (boldText.isBlank()) continue
+        if (normalizeText(boldText).length < 5) continue
+        rows += QuoteRow(havroutaLine, section, boldText, null)
+        rowWords += yerushalmiWords(boldText)
+    }
+
+    val rowsByHalacha = LinkedHashMap<String, MutableList<Int>>()
+    rows.forEachIndexed { k, row -> rowsByHalacha.getOrPut(row.dafRef) { mutableListOf() }.add(k) }
+    for ((halacha, ks) in rowsByHalacha) {
+        val lines = halachaLines[halacha] ?: continue
+        val aligned = alignYerushalmiQuotes(ks.map { rowWords[it] }, lines.map { yerushalmiWords(it.content) })
+        ks.forEachIndexed { i, k -> rows[k].talmudLineIndex = aligned[i]?.let { lines[it].lineIndex } }
+    }
+
+    val links = insertQuoteLinks(repository, bindings, ctCommentary, rows, yerushalmiLines, yerushalmiBookId, havroutaBookId)
+    val sections = sectionsOf(HavroutaSectionKind.HALACHA, bookHalachot, halachaLines.keys)
+    return HavroutaPairStats(links, havroutaLines.size, boldLines, wholeLineBoldLines, sections)
 }
 
 /** A Havrouta line with a bold quote, and the Talmud line (index) it is linked to, if any. */
