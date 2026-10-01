@@ -2,6 +2,7 @@ package io.github.kdroidfilter.seforimlibrary.common.patch
 
 import co.touchlab.kermit.Logger
 import co.touchlab.kermit.Severity
+import io.github.kdroidfilter.seforimlibrary.common.db.LineContentCompression
 import java.nio.file.Files
 import java.nio.file.Paths
 import java.sql.Connection
@@ -18,7 +19,9 @@ import java.sql.DriverManager
  *   - `dbVersion`      integer release version (matches release_meta.json
  *                      `latestVersion` and `deltas[].toVersion`)
  *   - `dbSchemaVersion` integer SQLDelight schema version (optional, defaults
- *                      to [CURRENT_DB_SCHEMA_VERSION]); matches the
+ *                      to [LINE_CONTENT_SPLIT_SCHEMA_VERSION], the shape before
+ *                      `compressLineContent`, which stamps
+ *                      [CURRENT_DB_SCHEMA_VERSION] itself); matches the
  *                      manifest's `toSchemaVersion`
  *
  * Idempotent: re-running with the same values is a no-op
@@ -32,7 +35,7 @@ fun main() {
     val dbVersion = System.getProperty("dbVersion")?.toIntOrNull()
         ?: error("-PdbVersion= missing or not an integer")
     val dbSchemaVersion = System.getProperty("dbSchemaVersion")?.toIntOrNull()
-        ?: CURRENT_DB_SCHEMA_VERSION
+        ?: LINE_CONTENT_SPLIT_SCHEMA_VERSION
 
     val path = Paths.get(dbPath)
     require(Files.isRegularFile(path)) { "Database file not found: $dbPath" }
@@ -56,6 +59,7 @@ internal fun stampSchemaVersion(conn: Connection, dbVersion: Int, dbSchemaVersio
     val requiredTables = when (dbSchemaVersion) {
         4, 5 -> setOf("line_ref", "line_dh")
         6 -> setOf("line_ref", "line_dh", "line_content", "version_line")
+        7 -> setOf("line_ref", "line_dh", "line_content", "version_line", LineContentCompression.DICT_TABLE)
         else -> emptySet()
     }
     val existingTables = if (requiredTables.isEmpty()) {
@@ -95,6 +99,14 @@ internal fun stampSchemaVersion(conn: Connection, dbVersion: Int, dbSchemaVersio
         val versionContent = PatchDbSchema.readTableInfo(conn, "main", "version_line").find { it.name == "content" }
         require(versionContent != null && !versionContent.notNull) {
             "Cannot stamp DB as schema $dbSchemaVersion; version_line.content must be nullable"
+        }
+    }
+
+    if (dbSchemaVersion >= LINE_CONTENT_COMPRESSED_SCHEMA_VERSION) {
+        validateCompressed(conn)
+    } else {
+        require(!LineContentCompression.isCompressed(conn)) {
+            "Cannot stamp DB as schema $dbSchemaVersion; its line text is compressed (schema 7)"
         }
     }
 

@@ -1,5 +1,5 @@
 {
-  "schemaVersion": 7,
+  "schemaVersion": 6,
   "fkOrder": [
     { "table": "source", "pk": ["id"], "updatable": true },
     { "table": "author", "pk": ["id"], "updatable": true },
@@ -22,7 +22,6 @@
     { "table": "tocEntry", "pk": ["id"], "updatable": true },
     { "table": "line", "pk": ["id"], "updatable": true },
     { "table": "line_content", "pk": ["id"], "updatable": true },
-    { "table": "zstd_dict", "pk": ["id"], "updatable": true },
     { "table": "line_toc", "pk": ["lineId"], "updatable": true },
     { "table": "line_ref", "pk": ["bookId", "refKeyHash", "lineIndex"], "updatable": false },
     { "table": "line_dh", "pk": ["bookId", "dhText", "lineIndex"], "updatable": true },
@@ -62,7 +61,6 @@
     "tocEntry",
     "line",
     "line_content",
-    "zstd_dict",
     "line_toc",
     "line_ref",
     "line_dh",

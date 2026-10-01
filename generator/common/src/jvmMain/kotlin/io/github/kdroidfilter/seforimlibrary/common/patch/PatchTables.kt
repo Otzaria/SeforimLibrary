@@ -19,17 +19,24 @@ internal data class PatchTable(
 )
 
 /** Current `seforim.db` schema produced by this revision. */
-internal const val CURRENT_DB_SCHEMA_VERSION: Int = 6
+internal const val CURRENT_DB_SCHEMA_VERSION: Int = 7
 
 /** First schema that keeps line text in `line_content` (see SplitLineContentCli). */
 internal const val LINE_CONTENT_SPLIT_SCHEMA_VERSION: Int = 6
 
+/** First schema whose line text is zstd frames of the `zstd_dict` dictionary (see CompressLineContentCli). */
+internal const val LINE_CONTENT_COMPRESSED_SCHEMA_VERSION: Int = 7
+
 /**
- * A delta cannot carry a DB across the line_content split: it would have to drop
- * `line.content`. Such a transition is a full rebase, announced by a schema barrier.
+ * Schemas no delta can cross: the split would have to drop `line.content`, and
+ * compression changes the bytes of every row. Such a transition is a full rebase,
+ * announced by a schema barrier.
  */
+internal val FULL_REBASE_SCHEMA_VERSIONS: List<Int> =
+    listOf(LINE_CONTENT_SPLIT_SCHEMA_VERSION, LINE_CONTENT_COMPRESSED_SCHEMA_VERSION)
+
 internal fun requiresFullRebase(fromSchemaVersion: Int, toSchemaVersion: Int): Boolean =
-    fromSchemaVersion < LINE_CONTENT_SPLIT_SCHEMA_VERSION && toSchemaVersion >= LINE_CONTENT_SPLIT_SCHEMA_VERSION
+    FULL_REBASE_SCHEMA_VERSIONS.any { fromSchemaVersion < it && toSchemaVersion >= it }
 
 /**
  * Canonical table order — parents (referenced) come before children
@@ -73,6 +80,8 @@ internal val PATCH_TABLES_IN_FK_ORDER: List<PatchTable> = listOf(
     PatchTable("line",               listOf("id"),       updatable = true),
     // Schema 6. The text of each line, split out of `line`.
     PatchTable("line_content",       listOf("id"),       updatable = true),
+    // Schema 7. The dictionary of the line text frames; any change of it is a full rebase.
+    PatchTable("zstd_dict",          listOf("id"),       updatable = true),
     PatchTable("line_toc",           listOf("lineId"),   updatable = true),
     // Schema 4. Canonical line-reference index — pure key table (PK == all
     // columns), so there is nothing to update on conflict.
@@ -106,9 +115,13 @@ internal val PATCH_TABLES_IN_FK_ORDER: List<PatchTable> = listOf(
     PatchTable("schema_meta",        listOf("key"),      updatable = true),
 )
 
+/** Schema-6 contract, frozen: line text in `line_content`, uncompressed. */
+internal val PATCH_TABLES_SCHEMA_6: List<PatchTable> =
+    PATCH_TABLES_IN_FK_ORDER.filterNot { it.name == "zstd_dict" }
+
 /** Schema-5 contract, frozen: line text still lived in `line.content`. */
 internal val PATCH_TABLES_SCHEMA_5: List<PatchTable> =
-    PATCH_TABLES_IN_FK_ORDER.filterNot { it.name == "line_content" }
+    PATCH_TABLES_SCHEMA_6.filterNot { it.name == "line_content" }
 
 /** Schema-4 contract shipped in v26, before line_dh gained dhDisplay. */
 internal val PATCH_TABLES_SCHEMA_4: List<PatchTable> =
@@ -135,6 +148,7 @@ internal fun patchTablesForSchemaVersion(schemaVersion: Int): List<PatchTable> =
     3 -> PATCH_TABLES_SCHEMA_3
     4 -> PATCH_TABLES_SCHEMA_4
     5 -> PATCH_TABLES_SCHEMA_5
-    6 -> PATCH_TABLES_IN_FK_ORDER
+    6 -> PATCH_TABLES_SCHEMA_6
+    7 -> PATCH_TABLES_IN_FK_ORDER
     else -> error("Unsupported patch-table schema version $schemaVersion")
 }

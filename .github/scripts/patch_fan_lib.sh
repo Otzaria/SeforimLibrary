@@ -40,10 +40,10 @@ use_token "${RELEASE_TOKEN_KIND:-}" || {
 # shellcheck source=db_asset_names.sh
 . "$(dirname "${BASH_SOURCE[0]}")/db_asset_names.sh"
 
-# Mirrors PatchTables.kt requiresFullRebase: no delta crosses the line_content
-# split (schema 6), because it would have to drop line.content.
+# Mirrors PatchTables.kt FULL_REBASE_SCHEMA_VERSIONS: no delta crosses the
+# line_content split (6, drops line.content) or its compression (7, every row).
 requires_full_rebase() {  # <anchor-schema> <this-schema>
-  [ "$1" -lt 6 ] && [ "$2" -ge 6 ]
+  { [ "$1" -lt 6 ] && [ "$2" -ge 6 ]; } || { [ "$1" -lt 7 ] && [ "$2" -ge 7 ]; }
 }
 
 # The schema barrier for an anchor no delta can leave: a placeholder patch every

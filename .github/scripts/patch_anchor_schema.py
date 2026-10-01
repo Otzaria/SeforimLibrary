@@ -82,8 +82,10 @@ UNPATCHABLE = "UNPATCHABLE"
 # The line is "BARRIER <anchor db schema> <reason>".
 BARRIER = "BARRIER"
 
-# Mirrors PatchTables.kt LINE_CONTENT_SPLIT_SCHEMA_VERSION: no delta crosses it.
+# Mirrors PatchTables.kt LINE_CONTENT_SPLIT_SCHEMA_VERSION (asset naming starts there).
 LINE_CONTENT_SPLIT_SCHEMA = 6
+# Mirrors PatchTables.kt FULL_REBASE_SCHEMA_VERSIONS: no delta crosses any of them.
+FULL_REBASE_SCHEMAS = (LINE_CONTENT_SPLIT_SCHEMA, 7)
 
 
 def _one_line(text: str) -> str:
@@ -243,10 +245,11 @@ def check(
                 f"the anchor's db schema is unknown ({why or 'no db_schema_version'}) - the fan "
                 "reads it from the downloaded DB"
             )
-        if anchor_db_schema < LINE_CONTENT_SPLIT_SCHEMA:
+        crossed = [s for s in FULL_REBASE_SCHEMAS if anchor_db_schema < s <= this_version]
+        if crossed:
             return BARRIER, (
                 f"{anchor_db_schema} the anchor is db schema {anchor_db_schema}; schema "
-                f"{this_version} keeps line text in line_content, so no delta reaches it - "
+                f"{this_version} crosses full-rebase schema {crossed[-1]}, so no delta reaches it - "
                 "publishing the full-rebase barrier"
             )
     elif anchor_version in LEGACY_UNPATCHABLE_DB_VERSIONS:

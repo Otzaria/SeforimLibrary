@@ -608,6 +608,19 @@ jobs:
           echo "expanded in $(( $(date +%s) - PHASE_START ))s"
           rm -f "$WORK/seforim.db.zst"
           ls -l "$WORK/books/seforim.db"
+          # An application ref that cannot read this schema would index garbage
+          # (schema 7 line text is zstd frames) instead of failing.
+          READABLE=$(sed -n 's/.*static const int readableDbSchemaVersion = \([0-9]*\);.*/\1/p' \
+            "$WORK/otzaria-src/lib/data/constants/database_constants.dart")
+          DB_SCHEMA=$(python3 -c 'import sqlite3, sys
+          c = sqlite3.connect(f"file:{sys.argv[1]}?mode=ro", uri=True)
+          row = c.execute("SELECT value FROM schema_meta WHERE key = ?", ("db_schema_version",)).fetchone()
+          print(row[0] if row else 0)' "$WORK/books/seforim.db")
+          echo "db schema $DB_SCHEMA, application reads up to ${READABLE:-5}"
+          [ "$DB_SCHEMA" -le "${READABLE:-5}" ] || {
+            echo "::error::$DB_ASSET is db schema $DB_SCHEMA but the application ref reads up to ${READABLE:-5}"
+            exit 1
+          }
 
       # The bundled Talmud Bavli volumes are NEVER indexed — IndexingRepository
       # .isIndexableBook excludes them outright (their text is already in the

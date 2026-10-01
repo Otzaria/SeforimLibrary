@@ -2,6 +2,7 @@ package io.github.kdroidfilter.seforimlibrary.packaging
 
 import co.touchlab.kermit.Logger
 import co.touchlab.kermit.Severity
+import io.github.kdroidfilter.seforimlibrary.common.db.LineContentCompression
 import io.github.kdroidfilter.seforimlibrary.common.db.LineContentShape
 import java.nio.file.Files
 import java.nio.file.Path
@@ -118,6 +119,9 @@ fun main(args: Array<String>) {
             // Stream forward-only; ordering by (book, lineIndex) keeps per-book lines contiguous
             // and in index order — the linker relies on this to slice books cheaply.
             val split = LineContentShape.isSplit(src)
+            check(!LineContentCompression.isCompressed(src)) {
+                "lines snapshot needs plain line text; dump before compressLineContent"
+            }
             var books = 0L
             var lines = 0L
             var lastKey: Pair<String, String>? = null

@@ -1,6 +1,7 @@
 package io.github.kdroidfilter.seforimlibrary.common.patch
 
 import co.touchlab.kermit.Logger
+import io.github.kdroidfilter.seforimlibrary.common.db.LineContentCompression
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.StandardCopyOption
@@ -72,8 +73,8 @@ class PatchDbProducer(
             throw UnpatchableAnchorException(
                 table = "line",
                 columns = listOf("content"),
-                message = "schema $fromSchemaVersion -> $toSchemaVersion moves line text into line_content; " +
-                    "a delta cannot drop line.content, so this transition is a full rebase only",
+                message = "schema $fromSchemaVersion -> $toSchemaVersion crosses a full-rebase schema " +
+                    "$FULL_REBASE_SCHEMA_VERSIONS (line_content split or compression); no delta exists",
             )
         }
         val fromTables = patchTablesForSchemaVersion(fromSchemaVersion)
@@ -99,6 +100,7 @@ class PatchDbProducer(
             writeMetadata(conn, fromVersion, toVersion)
             attach(conn, "prev", prevDb)
             attach(conn, "new", newDb)
+            requireSameLineContentDictionary(conn)
             val nextMigrationVersion = (migrations.maxOfOrNull { it.first } ?: 0) + 1
             val createTableMigrations = inferCreateTableMigrations(
                 conn = conn,
@@ -737,6 +739,24 @@ class PatchDbProducer(
             out += cols
         }
         return out
+    }
+
+    /**
+     * `zstd_dict` is not a patch table: a client can only decode upserted rows made
+     * with the dictionary it already holds, so any change of it is a full rebase.
+     */
+    private fun requireSameLineContentDictionary(conn: Connection) {
+        val prev = LineContentCompression.storedDictionaries(conn, "prev")
+        val new = LineContentCompression.storedDictionaries(conn, "new")
+        val same = prev.keys == new.keys && prev.all { (id, dict) -> dict.contentEquals(new.getValue(id)) }
+        if (!same) {
+            throw UnpatchableAnchorException(
+                table = LineContentCompression.DICT_TABLE,
+                columns = listOf("dict"),
+                message = "line text dictionary changed (prev ${prev.keys}, new ${new.keys}); " +
+                    "rows compressed with it cannot reach clients that hold the old one",
+            )
+        }
     }
 
     private fun tableExists(conn: Connection, schema: String, name: String): Boolean {

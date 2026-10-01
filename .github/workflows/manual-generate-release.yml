@@ -1776,6 +1776,22 @@ jobs:
             -PlinkerStrict=true \
             --no-daemon --stacktrace
 
+      # ─── Compress line text (zstd + bundled dictionary) ───────────────────
+      # One frame per line_content / version_line row. Runs after Phase-2, the
+      # last reader of plain text, and before compaction reclaims the freed space.
+      # Byte-deterministic for a given input regardless of -Pthreads. A
+      # source_commit from before this step keeps schema 6, which the fan handles.
+      - name: Compress line text (zstd dictionary)
+        run: |
+          set -euo pipefail
+          if ! grep -q 'register<JavaExec>("compressLineContent")' generator/common/build.gradle.kts; then
+            echo "::notice::source_commit predates compressLineContent; the DB stays schema 6"
+            exit 0
+          fi
+          gradle :generator-common:compressLineContent \
+            -PdbPath=$PWD/build/seforim.db \
+            --no-daemon --stacktrace
+
       # ─── Compact the finished DB ───────────────────────────────────────────
       # splitLineContent (schema 6) leaves the pages it freed on the freelist
       # (18% of the file on a 70-book subset). They are zeroed, so the .zst

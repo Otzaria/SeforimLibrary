@@ -28,7 +28,11 @@ class PatchTablesContractTest {
             PATCH_TABLES_SCHEMA_3,
         )
         assertEquals(
-            PATCH_TABLES_IN_FK_ORDER.filterNot { it.name == "line_content" },
+            PATCH_TABLES_IN_FK_ORDER.filterNot { it.name == "zstd_dict" },
+            PATCH_TABLES_SCHEMA_6,
+        )
+        assertEquals(
+            PATCH_TABLES_SCHEMA_6.filterNot { it.name == "line_content" },
             PATCH_TABLES_SCHEMA_5,
         )
         assertEquals(
@@ -80,7 +84,14 @@ class PatchTablesContractTest {
             },
             LogicalContentHasher.TABLES_SCHEMA_6,
         )
-        assertEquals(PATCH_TABLES_IN_FK_ORDER, patchTablesForSchemaVersion(6))
+        assertEquals(
+            LogicalContentHasher.TABLES_SCHEMA_6.toMutableList().apply {
+                add(indexOf("line_content") + 1, "zstd_dict")
+            },
+            LogicalContentHasher.TABLES_SCHEMA_7,
+        )
+        assertEquals(PATCH_TABLES_IN_FK_ORDER, patchTablesForSchemaVersion(7))
+        assertEquals(PATCH_TABLES_SCHEMA_6, patchTablesForSchemaVersion(6))
         assertEquals(PATCH_TABLES_SCHEMA_5, patchTablesForSchemaVersion(5))
     }
 
@@ -121,6 +132,13 @@ class PatchTablesContractTest {
             LogicalContentHasher.DEFAULT_TABLES,
             CURRENT_DB_SCHEMA_VERSION,
         )
+        assertEquals(expected, actual)
+    }
+
+    @Test
+    fun `schema 6 canonical contract remains byte frozen`() {
+        val expected = fixture("/patch_tables_contract_schema_6.json")
+        val actual = canonicalContract(PATCH_TABLES_SCHEMA_6, LogicalContentHasher.TABLES_SCHEMA_6, 6)
         assertEquals(expected, actual)
     }
 
