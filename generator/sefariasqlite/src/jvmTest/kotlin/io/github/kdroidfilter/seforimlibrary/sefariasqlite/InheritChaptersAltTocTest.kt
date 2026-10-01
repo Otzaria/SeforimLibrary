@@ -116,6 +116,10 @@ class InheritChaptersParsingTest {
         assertEquals(ChaptersBaseChoice(2L, ChaptersBaseRule.LINKS, setOf(2L, 20L)), credited)
     }
 
+    /** The daf partition of [layoutChapters] without pagination. */
+    private fun buildDafChildren(anchors: List<ChapterAnchor>, headings: List<ChaptersHeading>) =
+        layoutChapters(chapters, anchors, headings)!!.dafs
+
     @Test
     fun `daf children fall in their chapter by line`() {
         val anchors = listOf(ChapterAnchor(chapters[0], 1, 0), ChapterAnchor(chapters[1], 6, 1))
@@ -141,7 +145,7 @@ class InheritChaptersParsingTest {
     }
 
     @Test
-    fun `daf headings above the first anchor go to the first chapter`() {
+    fun `daf headings above the base's first chapter open it`() {
         // Book-title heading, then dafs; the first linked line comes after "דף לח.".
         val anchors = listOf(ChapterAnchor(chapters[0], 3, 0), ChapterAnchor(chapters[1], 6, 1))
         val headings = listOf(
@@ -150,10 +154,19 @@ class InheritChaptersParsingTest {
             ChaptersHeading(4, "דף לט.", id = 3, parentId = 1),
             ChaptersHeading(7, "דף מ.", id = 4, parentId = 1),
         )
-        assertEquals(
-            listOf(listOf(DafNode("דף לח.", 1), DafNode("דף לט.", 4)), listOf(DafNode("דף מ.", 7))),
-            buildDafChildren(anchors, headings),
-        )
+        val layout = layoutChapters(chapters, anchors, headings)!!
+        assertEquals(listOf(1L, 6L), layout.anchors.map { it.lineIndex }, "the anchor is never below its first daf")
+        assertEquals(listOf(listOf(DafNode("דף לח.", 1), DafNode("דף לט.", 4)), listOf(DafNode("דף מ.", 7))), layout.dafs)
+    }
+
+    @Test
+    fun `without pagination dafs above a later first chapter leave the book unstructured`() {
+        // הגהות הב"ח על רי"ף מכות: "דף א." above "אלו הן הלוקין", the Rif's third chapter.
+        val anchors = listOf(ChapterAnchor(chapters[2], 5, 2))
+        val headings = listOf(ChaptersHeading(0, "הגהות", id = 1), ChaptersHeading(2, "דף א.", id = 2, parentId = 1), ChaptersHeading(4, "דף ד:", id = 3, parentId = 1))
+        assertNull(layoutChapters(chapters, anchors, headings))
+        // Nothing above it: nothing to place.
+        assertEquals(listOf(listOf(DafNode("דף ד:", 4))), layoutChapters(chapters, listOf(ChapterAnchor(chapters[2], 4, 2)), headings.drop(2))!!.dafs)
     }
 
     @Test
@@ -222,14 +235,18 @@ class InheritChaptersParsingTest {
         val rif = chapters.mapIndexed { i, c -> c.copy(amud = listOf(2, 14, 20)[i]) }
         val headings = listOf(ChaptersHeading(10, "דף ב."), ChaptersHeading(20, "דף ז."), ChaptersHeading(30, "דף י."), ChaptersHeading(40, "דף יג."), ChaptersHeading(50, "דף יז:"))
         assertEquals(listOf(10L, 40L, 50L), computeChapterAnchors(rif, (0L..55L).toList(), headings, mapOf(11L to 0), bavli).map { it.lineIndex })
-        assertEquals(listOf(11L), computeChapterAnchors(rif, (0L..55L).toList(), headings, mapOf(11L to 0)).map { it.lineIndex }, "without pagination evidence neither fallback nor snap-back is allowed")
+        assertEquals(listOf(12L), computeChapterAnchors(rif, (0L..55L).toList(), headings, mapOf(12L to 0)).map { it.lineIndex }, "without pagination evidence neither fallback nor snap-back is allowed")
+        // No line stands between "דף ב." and the first linked line: the heading opens that material.
+        assertEquals(listOf(10L), computeChapterAnchors(rif, (0L..55L).toList(), headings, mapOf(11L to 0)).map { it.lineIndex })
     }
 
     @Test
     fun `link evidence vetoes title pagination before both fallback and snap-back`() {
         val bavli = chapters.mapIndexed { i, c -> c.copy(amud = listOf(4, 26, 35)[i]) }
         val headings = listOf(ChaptersHeading(10, "דף ב."), ChaptersHeading(20, "דף ז."), ChaptersHeading(30, "דף יג."), ChaptersHeading(40, "דף יז:"))
-        assertEquals(listOf(11L, 21L), computeChapterAnchors(bavli, (0L..45L).toList(), headings, mapOf(11L to 0, 21L to 1), bavli).map { it.lineIndex })
+        assertEquals(listOf(12L, 22L), computeChapterAnchors(bavli, (0L..45L).toList(), headings, mapOf(12L to 0, 22L to 1), bavli).map { it.lineIndex })
+        // A daf heading right above a chapter's first linked line opens it with or without pagination.
+        assertEquals(listOf(10L, 20L), computeChapterAnchors(bavli, (0L..45L).toList(), headings, mapOf(11L to 0, 21L to 1), bavli).map { it.lineIndex })
     }
 
     @Test
@@ -305,6 +322,139 @@ class InheritChaptersParsingTest {
         val headings = listOf(ChaptersHeading(1, "דף ב."), ChaptersHeading(2, "דף ד."), ChaptersHeading(3, "דף ה"))
         val anchors = computeChapterAnchors(chapters, (0L..4L).toList(), headings, emptyMap(), dafChapters = chapters)
         assertEquals(listOf("מאימתי" to 1L, "מי שמתו" to 2L), anchors.map { it.chapter.text to it.lineIndex })
+    }
+
+    /** רי"ף שבת: יציאות השבת (1a), במה מדליקין (8b), כירה (15b). */
+    private val rifShabbat = listOf(
+        BaseChapter("יציאות השבת", lineIndex = 3, amud = 2),
+        BaseChapter("במה מדליקין", lineIndex = 132, amud = 17),
+        BaseChapter("כירה", lineIndex = 260, amud = 31),
+    )
+
+    @Test
+    fun `links from the base prove its pagination only when they land on the heading's amud`() {
+        val headings = listOf(ChaptersHeading(2, "דף ד."), ChaptersHeading(8, "דף י."), ChaptersHeading(12, "דף טו."))
+        assertTrue(linksProvePagination(headings, mapOf(9L to listOf(20), 13L to listOf(30))))
+        assertFalse(linksProvePagination(headings, mapOf(9L to listOf(20))), "one link is not proof")
+        // A commentary headed by Bavli pages that links to the Rif.
+        assertFalse(linksProvePagination(headings, mapOf(9L to listOf(20), 13L to listOf(30), 14L to listOf(17))))
+        assertFalse(linksProvePagination(emptyList(), mapOf(9L to listOf(20), 13L to listOf(30))))
+    }
+
+    @Test
+    fun `Rif pagination places the chapter links miss and the dafs in each gap`() {
+        // חידושי אנשי שם על שבת: the Rif links start at "דף יא." in במה מדליקין; the
+        // dafs above it are יציאות השבת's, which only the Ran's links touch.
+        val headings = listOf(
+            ChaptersHeading(0, "חידושי אנשי שם על שבת", id = 1),
+            ChaptersHeading(2, "דף ד.", id = 2, parentId = 1),
+            ChaptersHeading(4, "דף ד:", id = 3, parentId = 1),
+            ChaptersHeading(6, "דף ז:", id = 4, parentId = 1),
+            ChaptersHeading(8, "דף י.", id = 5, parentId = 1),
+            ChaptersHeading(10, "דף יא.", id = 6, parentId = 1),
+            ChaptersHeading(12, "דף טו.", id = 7, parentId = 1),
+            ChaptersHeading(14, "דף יח.", id = 8, parentId = 1),
+            ChaptersHeading(16, "דף יט.", id = 9, parentId = 1),
+            ChaptersHeading(18, "דף כא.", id = 10, parentId = 1),
+        )
+        val links = mapOf(11L to 1, 13L to 1, 19L to 2)
+        val lines = (0L..20L).toList()
+        // Before: במה מדליקין at its first linked line, with the dafs of יציאות השבת under it.
+        val unproven = computeChapterAnchors(rifShabbat, lines, headings, links)
+        assertEquals(listOf(1 to 10L, 2 to 18L), unproven.map { it.index to it.lineIndex })
+        assertNull(layoutChapters(rifShabbat, unproven, headings), "nothing tells which chapter ד. is in")
+
+        val anchors = computeChapterAnchors(rifShabbat, lines, headings, links, linkPagination = rifShabbat)
+        assertEquals(listOf(0 to 2L, 1 to 8L, 2 to 14L), anchors.map { it.index to it.lineIndex })
+        val layout = layoutChapters(rifShabbat, anchors, headings, rifShabbat)!!
+        assertEquals(anchors, layout.anchors)
+        assertEquals(
+            listOf(listOf("דף ד.", "דף ד:", "דף ז:"), listOf("דף י.", "דף יא.", "דף טו."), listOf("דף יח.", "דף יט.", "דף כא.")),
+            layout.dafs.map { dafs -> dafs.map { it.text } },
+        )
+    }
+
+    @Test
+    fun `a daf heading right above a chapter's first linked line opens it without pagination`() {
+        // הגהות הב"ח על רי"ף שבת: "דף ט." at 111, the Rif's במה מדליקין from 112; "דף ח:" keeps
+        // יציאות השבת's line 109. "דף א." at 2 opens the book's first chapter.
+        val headings = listOf(ChaptersHeading(2, "דף א."), ChaptersHeading(108, "דף ח:"), ChaptersHeading(111, "דף ט."))
+        val anchors = computeChapterAnchors(rifShabbat, (0L..115L).toList(), headings, mapOf(3L to 0, 109L to 0, 112L to 1))
+        assertEquals(listOf(0 to 2L, 1 to 111L), anchors.map { it.index to it.lineIndex })
+        assertEquals(
+            listOf(listOf("דף א.", "דף ח:"), listOf("דף ט.")),
+            layoutChapters(rifShabbat, anchors, headings)!!.dafs.map { dafs -> dafs.map { it.text } },
+        )
+    }
+
+    /** סוכה: סוכה (2a), הישן (20b), לולב הגזול (29b), לולב וערבה (42b). */
+    private val sukkah = listOf(
+        BaseChapter("סוכה", 1, 4), BaseChapter("הישן", 2, 41), BaseChapter("לולב הגזול", 3, 59), BaseChapter("לולב וערבה", 4, 85),
+    )
+
+    @Test
+    fun `an out-of-order daf above the first chapter joins its own chapter`() {
+        // קרן לדוד על סוכה opens with "דף לח." (לולב הגזול), then "דף יא.".
+        val headings = listOf(
+            ChaptersHeading(0, "קרן לדוד על סוכה", id = 1),
+            ChaptersHeading(2, "דף לח.", id = 2, parentId = 1),
+            ChaptersHeading(4, "(לעיל) דף לא.", id = 3, parentId = 1),
+            ChaptersHeading(6, "(לעיל) דף ט.", id = 4, parentId = 1),
+            ChaptersHeading(9, "דף יא.", id = 5, parentId = 1),
+            ChaptersHeading(12, "דף לא:", id = 6, parentId = 1),
+            ChaptersHeading(14, "דף מב.", id = 7, parentId = 1),
+        )
+        val anchors = computeChapterAnchors(sukkah, (0L..15L).toList(), headings, emptyMap(), dafChapters = sukkah)
+        assertEquals(listOf(0 to 9L, 2 to 12L), anchors.map { it.index to it.lineIndex })
+        val layout = layoutChapters(sukkah, anchors, headings, sukkah)!!
+        assertEquals(listOf("סוכה" to 9L, "לולב הגזול" to 2L), layout.anchors.map { it.chapter.text to it.lineIndex })
+        assertEquals(
+            listOf(listOf("דף יא." to 9L), listOf("דף לח." to 2L, "דף לא:" to 12L, "דף מב." to 14L)),
+            layout.dafs.map { dafs -> dafs.map { it.text to it.lineIndex } },
+        )
+    }
+
+    @Test
+    fun `out-of-order dafs above the first chapter open chapters nothing else reaches`() {
+        // קרן לדוד על שבת opens with "דף קלה." (רבי אליעזר דמילה) and "דף קנג:" (מי שהחשיך).
+        val shabbat = listOf(
+            BaseChapter("יציאות השבת", 1, 4), BaseChapter("במה מדליקין", 2, 41), BaseChapter("כירה", 3, 73),
+            BaseChapter("רבי אליעזר דמילה", 4, 260), BaseChapter("מי שהחשיך", 5, 300),
+        )
+        val headings = listOf(
+            ChaptersHeading(0, "קרן לדוד על שבת", id = 1),
+            ChaptersHeading(2, "דף קלה.", id = 2, parentId = 1),
+            ChaptersHeading(3, "הערה", id = 3, parentId = 2),
+            ChaptersHeading(4, "דף קנג:", id = 4, parentId = 1),
+            ChaptersHeading(8, "דף כא:", id = 5, parentId = 1),
+            ChaptersHeading(24, "דף כה.", id = 6, parentId = 1),
+            ChaptersHeading(33, "דף נד:", id = 7, parentId = 1),
+        )
+        val anchors = computeChapterAnchors(shabbat, (0L..40L).toList(), headings, emptyMap(), dafChapters = shabbat)
+        assertEquals(listOf(1 to 8L, 2 to 33L), anchors.map { it.index to it.lineIndex })
+        val layout = layoutChapters(shabbat, anchors, headings, shabbat)!!
+        assertEquals(listOf(1 to 8L, 2 to 33L, 3 to 2L, 4 to 4L), layout.anchors.map { it.index to it.lineIndex })
+        assertEquals(
+            listOf(
+                listOf(DafNode("דף כא:", 8), DafNode("דף כה.", 24)),
+                listOf(DafNode("דף נד:", 33)),
+                listOf(DafNode("דף קלה.", 2, listOf(DafNode("הערה", 3)))),
+                listOf(DafNode("דף קנג:", 4)),
+            ),
+            layout.dafs,
+        )
+    }
+
+    @Test
+    fun `a gap heading past the chapter's amud interval is not its opening`() {
+        // A cross-reference "דף צ." between two chapters stays where its line puts it.
+        val headings = listOf(ChaptersHeading(1, "דף ב."), ChaptersHeading(5, "דף צ."), ChaptersHeading(7, "דף ג."))
+        val anchors = computeChapterAnchors(chapters, (0L..10L).toList(), headings, mapOf(2L to 0, 4L to 0, 8L to 1), dafChapters = chapters)
+        assertEquals(listOf(0 to 1L, 1 to 7L), anchors.map { it.index to it.lineIndex })
+        assertEquals(
+            listOf(listOf("דף ב.", "דף צ."), listOf("דף ג.")),
+            layoutChapters(chapters, anchors, headings, chapters)!!.dafs.map { dafs -> dafs.map { it.text } },
+        )
     }
 
     @Test
@@ -538,6 +688,46 @@ class InheritChaptersAltTocIntegrationTest {
             assertTrue(Files.exists(state))
         }
         assertEquals(listOf("מאימתי" to 1L, "היה קורא" to 4L, "מי שמתו" to 7L), chapters(target))
+    }
+
+    @Test
+    fun `Rif links prove Rif page headings and place the chapter they miss`() = runBlocking {
+        val seeded = seed()
+        val base = repo.getBook(seeded.baseId)!!
+        val rifId = repo.insertBook(Book(categoryId = base.categoryId, sourceId = base.sourceId, title = "רי״ף ברכות", heRef = "רי״ף ברכות"))
+        val rifRefs = listOf("א., א", "א., ב", "א:, א", "ב., א", "ב:, א", "ג., א", "ג., ב")
+        val rifLines = rifRefs.mapIndexed { i, ref -> repo.insertLine(Line(bookId = rifId, lineIndex = i, content = "רי״ף $i", heRef = "רי״ף ברכות, $ref")) }
+        val structure = repo.upsertAltTocStructure(AltTocStructure(bookId = rifId, key = "Chapters"))
+        listOf("מאימתי" to 0, "היה קורא" to 3, "מי שמתו" to 5).forEach { (text, line) ->
+            repo.insertAltTocEntry(AltTocEntry(structureId = structure, text = text, level = 0, lineId = rifLines[line]))
+        }
+        // Rif-page headings; only chapters 2 and 3 are linked.
+        val target = repo.insertBook(Book(categoryId = base.categoryId, sourceId = base.sourceId, title = "הגהות על רי״ף ברכות"))
+        repo.insertBookBaseText(target, rifId)
+        val targetLines = (0 until 9).map { repo.insertLine(Line(bookId = target, lineIndex = it, content = "הגה $it")) }
+        listOf(1 to "דף א.", 3 to "דף א:", 5 to "דף ב.", 7 to "דף ג.").forEach { (i, text) ->
+            repo.insertTocEntry(TocEntry(bookId = target, text = text, level = 1, lineId = targetLines[i]))
+        }
+        fun link(rifLine: Int, line: Int) = runBlocking {
+            repo.insertLink(Link(sourceBookId = rifId, targetBookId = target, sourceLineId = rifLines[rifLine], targetLineId = targetLines[line], targetLineIndex = line, connectionType = ConnectionType.COMMENTARY))
+        }
+        link(3, 6)
+        DriverManager.getConnection("jdbc:sqlite:$dbFile").use { conn ->
+            val stats = InheritChaptersStats()
+            assertTrue(readInheritChaptersSnapshots(conn, stats).none { it.bookId == target }, "one link proves nothing")
+            assertEquals(listOf(target), stats.skippedBooks["unplaced-leading-dafs"]?.toList())
+        }
+        link(5, 8)
+        DriverManager.getConnection("jdbc:sqlite:$dbFile").use { conn ->
+            val snapshot = readInheritChaptersSnapshots(conn).single { it.bookId == target }
+            assertEquals(rifId, snapshot.baseId)
+            assertNull(snapshot.dafBaseId)
+            assertEquals(listOf("מאימתי" to 1L, "היה קורא" to 5L, "מי שמתו" to 7L), snapshot.anchors.map { it.chapter.text to it.lineIndex })
+            assertEquals(
+                listOf(listOf("דף א." to 1L, "דף א:" to 3L), listOf("דף ב." to 5L), listOf("דף ג." to 7L)),
+                snapshot.dafs.map { dafs -> dafs.map { it.text to it.lineIndex } },
+            )
+        }
     }
 
     @Test

@@ -35,15 +35,23 @@ import kotlin.system.exitProcess
  * come separately from a full, curated base book explicitly identified by the
  * title or declared bases, with no conflicting pagination. Same chapter names
  * never establish identical pagination; a commentary's first represented amud
- * is not a chapter boundary. Without such a donor only links place chapters.
- * Linked lines that contradict the donor's amud intervals veto both heading
- * fallback and daf snap-back. Otherwise whichever method places more chapters
- * wins (links on a tie — sparse links place only the chapters they touch):
+ * is not a chapter boundary. Without such a donor the link base's own
+ * pagination serves when its links prove it: nine in ten of them, and at
+ * least two, land on the amud of the daf heading above them (Rif commentaries
+ * headed by Rif pages). Linked lines that contradict the pagination's amud
+ * intervals veto it. Without pagination only links place chapters. Otherwise
+ * whichever method places more chapters wins (links on a tie — sparse links
+ * place only the chapters they touch; only a donor places chapters from daf
+ * headings alone):
  * - links: each linked line maps to the lowest chapter it is linked to;
  *   strays are dropped by keeping the longest non-decreasing run of
  *   chapters. A chapter opens at its first line in that run, moved back onto
- *   an earlier daf heading in the gap that already reaches the chapter's amud,
- *   or onto the non-daf heading lines right above it.
+ *   an earlier daf heading in the gap that already reaches the chapter's amud
+ *   (not past it: a heading beyond the chapter is a cross-reference), or onto
+ *   the heading lines right above it — a daf heading too, unless pagination
+ *   puts it in the previous chapter: no line of that chapter stands under it.
+ *   With pagination, a chapter no link touches opens at the first daf heading
+ *   of its amud interval in the gap where it belongs.
  * - daf headings: the first one ("דף יג.", "יג:", "דף יג ע"א", "דף יג עמוד
  *   ב", "דף יג") whose amud reaches the chapter start. A chapter starting
  *   mid-amud therefore opens at that amud's heading, taking the previous
@@ -51,12 +59,17 @@ import kotlin.system.exitProcess
  * Chapters with no material are dropped.
  *
  * Under each chapter hang the book's own daf headings (text copied verbatim)
- * whose line is in [its anchor, the next chapter's anchor) — the first chapter
- * also takes the dafs above its anchor — with their main-TOC sub-headings below
- * them. Subheadings crossing a chapter boundary are promoted into their own
- * chapter so they also survive exactly once. The app's find-ref resolves "<book> דף ה:" through the alt-TOC as soon
- * as a book has one, so every daf must be there. A daf heading on a chapter's
- * first amud but above its anchor stays in the previous chapter, as its lines do.
+ * whose line is in [its anchor, the next chapter's anchor), with their
+ * main-TOC sub-headings below them. Subheadings crossing a chapter boundary
+ * are promoted into their own chapter so they also survive exactly once. The
+ * app's find-ref resolves "<book> דף ה:" through the alt-TOC as soon as a book
+ * has one, so every daf must be there. A daf heading on a chapter's first amud
+ * but above its anchor stays in the previous chapter, as its lines do.
+ * The dafs above the first anchor belong to no chapter's range
+ * ([layoutChapters]): with pagination each goes to its amud's chapter (an
+ * out-of-order one opens or joins its chapter where it stands); without, they
+ * open the first chapter if it is the base's first, else the book is skipped.
+ * A chapter's anchor is never below its first daf.
  *
  * A book whose own TOC has "פרק <n>" on a line the inherited structure gives
  * to another chapter is rejected (and gives no credit): the anchors are wrong.
@@ -170,6 +183,11 @@ internal data class InheritChaptersSnapshot(
     val credited: Boolean = false,
     /** Independently identified complete pagination donor, never a sparse commentary. */
     val dafBaseId: Long? = null,
+    /**
+     * The line-ordered anchors the chapters of linked lines come from when
+     * this book is credited; [anchors] may open an out-of-order chapter above.
+     */
+    val lineAnchors: List<ChapterAnchor> = anchors,
 )
 
 internal data class InheritChaptersResult(val structures: Int, val entries: Int)
@@ -384,15 +402,62 @@ internal fun computeChapterAnchors(
     headings: List<ChaptersHeading>,
     chapterByLine: Map<Long, Int>,
     dafChapters: List<BaseChapter>? = null,
+    linkPagination: List<BaseChapter>? = null,
 ): List<ChapterAnchor> {
     if (chapters.isEmpty()) return emptyList()
     require(dafChapters == null || dafChapters.map { it.text.trim() } == chapters.map { it.text.trim() })
-    val pagination = dafChapters?.takeIf { dafHeadingsAgreeWithLinks(it, headings, chapterByLine) }
+    val donor = dafChapters?.takeIf { dafHeadingsAgreeWithLinks(it, headings, chapterByLine) }
+    val pagination = chapterPagination(chapters, headings, chapterByLine, dafChapters, linkPagination)
     val byLinks = anchorsFromLinks(chapters, lineIndices, headings, chapterByLine, pagination)
-    val byDaf = pagination?.let { anchorsFromDafHeadings(it, headings) }
+    // Only a named donor places chapters from daf headings alone.
+    val byDaf = donor?.let { anchorsFromDafHeadings(it, headings) }
         ?.map { it.copy(chapter = chapters[it.index]) }.orEmpty()
     // Sparse links place only the chapters they touch; full daf headings then place more.
-    return if (byDaf.size > byLinks.size) byDaf else byLinks
+    if (byDaf.size > byLinks.size) return byDaf
+    return if (pagination == null) byLinks.map { it.anchor } else fillUnlinkedChapters(chapters, byLinks, headings, pagination)
+}
+
+/**
+ * The amud intervals daf headings may be read against: the named donor, else
+ * the link base's own pagination when the links prove it ([linkPagination],
+ * see [linksProvePagination]); either is vetoed by a contradicting link.
+ */
+internal fun chapterPagination(
+    chapters: List<BaseChapter>,
+    headings: List<ChaptersHeading>,
+    chapterByLine: Map<Long, Int>,
+    dafChapters: List<BaseChapter>?,
+    linkPagination: List<BaseChapter>?,
+): List<BaseChapter>? =
+    listOfNotNull(dafChapters, linkPagination).firstOrNull { pagination ->
+        pagination.map { it.text.trim() } == chapters.map { it.text.trim() } &&
+            pagination.all { it.amud != null } &&
+            dafHeadingsAgreeWithLinks(pagination, headings, chapterByLine)
+    }
+
+private const val MIN_PAGINATION_LINKS = 2
+
+/**
+ * True when the commentary's daf headings use its link base's pagination: of
+ * the links from that base whose base line names an amud ([baseAmudByLine]:
+ * commentary lineIndex → those amuds), at least [MIN_PAGINATION_LINKS] and
+ * nine in ten fall on the amud of the daf heading above them. Rif commentaries
+ * headed by Rif pages pass; a commentary headed by Bavli pages that links
+ * to the Rif does not.
+ */
+internal fun linksProvePagination(headings: List<ChaptersHeading>, baseAmudByLine: Map<Long, List<Int>>): Boolean {
+    val dafs = headings.mapNotNull { h -> parseDafHeading(h.text)?.let { h.lineIndex to it } }.sortedBy { it.first }
+    if (dafs.isEmpty()) return false
+    var agree = 0
+    var disagree = 0
+    var cursor = 0
+    var preceding: AmudSpan? = null
+    for ((line, amuds) in baseAmudByLine.entries.sortedBy { it.key }) {
+        while (cursor < dafs.size && dafs[cursor].first <= line) preceding = dafs[cursor++].second
+        val span = preceding ?: continue
+        for (amud in amuds) if (amud in span.start..span.end) agree++ else disagree++
+    }
+    return agree >= MIN_PAGINATION_LINKS && disagree * 10 <= agree + disagree
 }
 
 /** A linked chapter outside its heading's proven amud interval vetoes daf inference. */
@@ -427,9 +492,12 @@ internal fun chapterOfBaseLine(chapters: List<BaseChapter>, baseLineIndex: Long)
     return lo - 1
 }
 
-/** Chapter number of a commentary line from its own anchors, -1 before the first. */
+/** Chapter number of a commentary line from its own line-ordered anchors, -1 before the first. */
 private fun chapterOfAnchoredLine(anchors: List<ChapterAnchor>, lineIndex: Long): Int =
     anchors.lastOrNull { it.lineIndex <= lineIndex }?.index ?: -1
+
+/** A chapter placed by links, with the last linked line that keeps it open. */
+private data class LinkedChapter(val anchor: ChapterAnchor, val lastLine: Long)
 
 private fun anchorsFromLinks(
     chapters: List<BaseChapter>,
@@ -437,7 +505,7 @@ private fun anchorsFromLinks(
     headings: List<ChaptersHeading>,
     chapterByLine: Map<Long, Int>,
     dafChapters: List<BaseChapter>?,
-): List<ChapterAnchor> {
+): List<LinkedChapter> {
     val linked = chapterByLine.entries
         .map { it.key to it.value }
         .filter { it.second in chapters.indices }
@@ -452,7 +520,7 @@ private fun anchorsFromLinks(
         lineIndices.forEachIndexed { position, lineIndex -> put(lineIndex, position) }
     }
 
-    val anchors = mutableListOf<ChapterAnchor>()
+    val anchors = mutableListOf<LinkedChapter>()
     var cursor = 0
     var previousLine = -1L
     for ((k, chapter) in chapters.withIndex()) {
@@ -465,25 +533,81 @@ private fun anchorsFromLinks(
 
         var anchor = firstLine
         val dafAnchor = dafChapters?.get(k)?.amud?.let { start ->
-            dafHeadings.firstOrNull { (line, span) -> line > previousLine && line < firstLine && span.end >= start }
+            val nextStart = dafChapters.getOrNull(k + 1)?.amud ?: Int.MAX_VALUE
+            // A heading past the chapter is a stray (a cross-reference), not its
+            // opening; one on the next chapter's first amud may still open it.
+            dafHeadings.firstOrNull { (line, span) ->
+                line > previousLine && line < firstLine && span.end >= start && span.start <= nextStart
+            }
         }
         if (dafAnchor != null) {
             anchor = dafAnchor.first
         } else {
-            // Heading lines directly above the first line open the same material.
+            // Heading lines directly above the first line open the same material,
+            // a daf heading too: no line of the previous chapter stands under it.
+            // With pagination the search above took every daf heading that can
+            // open the chapter; one left here is the previous chapter's.
             var position = positionOfLine[firstLine] ?: -1
             while (position > 0) {
                 val candidate = lineIndices[position - 1]
                 if (candidate <= previousLine) break
                 val lineHeadings = headingByLine[candidate] ?: break
-                if (lineHeadings.any { parseDafHeading(it.text) != null }) break
+                if (dafChapters != null && lineHeadings.any { parseDafHeading(it.text) != null }) break
                 anchor = candidate
                 position--
             }
         }
-        anchors += ChapterAnchor(chapter, anchor, k)
+        anchors += LinkedChapter(ChapterAnchor(chapter, anchor, k), lastLine)
         previousLine = lastLine
     }
+    return anchors
+}
+
+/**
+ * The amud's chapter in [pagination]: the last chapter starting at or before
+ * it (a chapter starting mid-amud owns its first amud), the first chapter for
+ * an amud before it.
+ */
+private fun chapterOfAmud(pagination: List<BaseChapter>, amud: Int): Int =
+    (pagination.indexOfLast { it.amud!! <= amud }).coerceAtLeast(0)
+
+/**
+ * Adds the chapters no link touches but a daf heading reaches, between (and
+ * before or after) the linked ones: the first daf heading after the previous
+ * chapter's last linked line, inside this chapter's amud interval, as
+ * [anchorsFromDafHeadings] does. Gaps keep their order: an anchor never passes
+ * the next placed chapter, and each fill is after the one before it.
+ */
+private fun fillUnlinkedChapters(
+    chapters: List<BaseChapter>,
+    placed: List<LinkedChapter>,
+    headings: List<ChaptersHeading>,
+    pagination: List<BaseChapter>,
+): List<ChapterAnchor> {
+    val dafHeadings = headings.mapNotNull { h -> parseDafHeading(h.text)?.let { h.lineIndex to it } }
+        .sortedBy { it.first }
+    val anchors = mutableListOf<ChapterAnchor>()
+    var lowerLine = -1L
+    var nextChapter = 0
+    fun fill(untilChapter: Int, upperLine: Long) {
+        var after = lowerLine
+        for (j in nextChapter until untilChapter) {
+            val start = pagination[j].amud!!
+            val nextStart = pagination.getOrNull(j + 1)?.amud ?: Int.MAX_VALUE
+            val heading = dafHeadings.firstOrNull { (line, span) ->
+                line > after && line < upperLine && span.end >= start && span.start < nextStart
+            } ?: continue
+            anchors += ChapterAnchor(chapters[j], heading.first, j)
+            after = heading.first
+        }
+    }
+    for (chapter in placed) {
+        fill(chapter.anchor.index, chapter.anchor.lineIndex)
+        anchors += chapter.anchor
+        lowerLine = chapter.lastLine
+        nextChapter = chapter.anchor.index + 1
+    }
+    fill(chapters.size, Long.MAX_VALUE)
     return anchors
 }
 
@@ -517,16 +641,8 @@ private fun isDafEntryHeading(text: String): Boolean =
 
 private val DAF_WORD_HEADING = Regex("""^דף(?=\s)""")
 
-/**
- * Partitions the book's daf subtrees by chapter, preserving each original
- * heading exactly once. A descendant whose parent belongs to another chapter
- * is promoted into its own chapter, including non-daf subheadings. The first
- * chapter also retains headings above its anchor. Unrelated main-TOC headings
- * are not copied. Traversal visits each edge once, even for malformed cycles.
- */
-internal fun buildDafChildren(anchors: List<ChapterAnchor>, headings: List<ChaptersHeading>): List<List<DafNode>> {
-    if (anchors.isEmpty()) return emptyList()
-    val byId = headings.withIndex().filter { it.value.id != 0L }.associate { it.value.id to it.index }
+/** The daf-entry headings and every main-TOC descendant of one. */
+private fun relevantDafHeadings(headings: List<ChaptersHeading>): BooleanArray {
     val originalChildren = headings.withIndex().groupBy { it.value.parentId }
     val relevant = BooleanArray(headings.size)
     val pending = java.util.ArrayDeque<Int>()
@@ -537,16 +653,92 @@ internal fun buildDafChildren(anchors: List<ChapterAnchor>, headings: List<Chapt
         relevant[i] = true
         if (headings[i].id != 0L) originalChildren[headings[i].id].orEmpty().forEach { pending.addLast(it.index) }
     }
-    fun owner(line: Long): Int {
-        var lo = 0
-        var hi = anchors.size
-        while (lo < hi) {
-            val mid = (lo + hi) ushr 1
-            if (anchors[mid].lineIndex <= line) lo = mid + 1 else hi = mid
-        }
-        return (lo - 1).coerceAtLeast(0)
+    return relevant
+}
+
+private val HEADING_ORDER = compareBy<IndexedValue<ChaptersHeading>>({ it.value.lineIndex }, { it.value.id }, { it.index })
+
+/** Position of the anchor whose line range holds [line] in line-ordered [anchors], -1 above the first. */
+private fun lineOwner(anchors: List<ChapterAnchor>, line: Long): Int {
+    var lo = 0
+    var hi = anchors.size
+    while (lo < hi) {
+        val mid = (lo + hi) ushr 1
+        if (anchors[mid].lineIndex <= line) lo = mid + 1 else hi = mid
     }
-    val owners = IntArray(headings.size) { owner(headings[it].lineIndex) }
+    return lo - 1
+}
+
+/** The chapters as written: [anchors] in chapter order, [dafs] below each. */
+internal data class ChaptersLayout(val anchors: List<ChapterAnchor>, val dafs: List<List<DafNode>>)
+
+/**
+ * Places the daf headings above the first anchor, which no chapter's line
+ * range holds, then partitions the daf subtrees ([partitionDafs]).
+ *
+ * With [pagination] each of those headings belongs to its amud's chapter (a
+ * non-daf one to the chapter of the daf heading above it). The first chapter
+ * opens at the first of its own, so it takes no heading of an earlier
+ * chapter; a heading of another chapter is out of order (קרן לדוד על שבת opens
+ * on קלה. and קנג:) and opens that chapter where it stands, or joins it when
+ * links place it further down. Without pagination they are the first
+ * chapter's when it is the base's first chapter; otherwise nothing tells
+ * which earlier chapter they belong to, and the book gets no structure (null).
+ *
+ * [anchors] are the line-ordered chapter anchors; a written anchor moves up
+ * to the first heading it receives here, so it never sits below its dafs.
+ */
+internal fun layoutChapters(
+    chapters: List<BaseChapter>,
+    anchors: List<ChapterAnchor>,
+    headings: List<ChaptersHeading>,
+    pagination: List<BaseChapter>? = null,
+): ChaptersLayout? {
+    if (anchors.isEmpty()) return ChaptersLayout(emptyList(), emptyList())
+    val relevant = relevantDafHeadings(headings)
+    val first = anchors.first()
+    val leading = headings.withIndex()
+        .filter { relevant[it.index] && it.value.lineIndex < first.lineIndex }
+        .sortedWith(HEADING_ORDER)
+    val leadingChapter = HashMap<Int, Int>()
+    if (leading.isNotEmpty()) {
+        if (pagination == null && first.index > 0) return null
+        var current = first.index
+        for ((i, heading) in leading) {
+            val span = if (pagination == null) null else parseDafHeading(heading.text)
+            if (span != null) current = chapterOfAmud(pagination!!, span.start)
+            leadingChapter[i] = current
+        }
+    }
+    val opened = HashMap<Int, Long>()
+    for ((i, chapter) in leadingChapter) opened.merge(chapter, headings[i].lineIndex, ::minOf)
+    val main = anchors.associateBy { it.index }
+    val written = (main.keys + opened.keys).sorted().map { k ->
+        val line = listOfNotNull(main[k]?.lineIndex, opened[k]).min()
+        ChapterAnchor(main[k]?.chapter ?: chapters[k], line, k)
+    }
+    val position = written.withIndex().associate { it.value.index to it.index }
+    val owners = IntArray(headings.size) { i ->
+        val chapter = leadingChapter[i] ?: anchors[lineOwner(anchors, headings[i].lineIndex).coerceAtLeast(0)].index
+        position.getValue(chapter)
+    }
+    return ChaptersLayout(written, partitionDafs(written.size, headings, relevant, owners))
+}
+
+/**
+ * Partitions the daf subtrees into [chapterCount] chapters by [owners] (a
+ * position per heading), preserving each original heading exactly once. A
+ * descendant whose parent belongs to another chapter is promoted into its own
+ * chapter, including non-daf subheadings. Unrelated main-TOC headings are not
+ * copied. Traversal visits each edge once, even for malformed cycles.
+ */
+private fun partitionDafs(
+    chapterCount: Int,
+    headings: List<ChaptersHeading>,
+    relevant: BooleanArray,
+    owners: IntArray,
+): List<List<DafNode>> {
+    val byId = headings.withIndex().filter { it.value.id != 0L }.associate { it.value.id to it.index }
     val keptParent = Array<Int?>(headings.size) { i ->
         headings[i].parentId?.let(byId::get)?.takeIf { parent ->
             relevant[parent] && owners[parent] == owners[i] && headings[parent].lineIndex <= headings[i].lineIndex
@@ -564,7 +756,7 @@ internal fun buildDafChildren(anchors: List<ChapterAnchor>, headings: List<Chapt
             if (emitted[it]) null else subtree(it)
         })
     }
-    return anchors.indices.map { chapter ->
+    return (0 until chapterCount).map { chapter ->
         val local = byChapter[chapter].orEmpty()
         buildList {
             local.filter { keptParent[it] == null }.forEach { if (!emitted[it]) add(subtree(it)) }
@@ -715,7 +907,7 @@ internal fun readInheritChaptersSnapshots(
             for (snapshot in snapshots.values) {
                 groupOfSource[snapshot.bookId] = bases.getValue(snapshot.baseId).groupKey
                 baseOfSource[snapshot.bookId] = snapshot.baseId
-                anchorsOfSource[snapshot.bookId] = snapshot.anchors
+                anchorsOfSource[snapshot.bookId] = snapshot.lineAnchors
             }
         }
         for (candidate in todo) {
@@ -745,12 +937,17 @@ internal fun readInheritChaptersSnapshots(
                 }
             }
             val dafBase = chooseDafBoundaryBase(candidate.titleBaseId, candidate.declared, base, bases)
+            val linkPagination = base.chapters.takeIf { chapters ->
+                choice.rule == ChaptersBaseRule.LINKS && chapters.all { it.amud != null } &&
+                    linksProvePagination(headings, readBaseAmudByLine(conn, candidate.bookId, choice.baseId))
+            }
             val anchors = computeChapterAnchors(
                 chapters = base.chapters,
                 lineIndices = readBookLineIndex(conn, candidate.bookId).map { it.second },
                 headings = headings,
                 chapterByLine = chapterByLine,
                 dafChapters = dafBase?.chapters,
+                linkPagination = linkPagination,
             )
             if (anchors.isEmpty()) {
                 stats.skip("no-anchor", candidate.bookId)
@@ -760,6 +957,12 @@ internal fun readInheritChaptersSnapshots(
                 stats.skip("perek-mismatch", candidate.bookId)
                 continue
             }
+            val pagination = chapterPagination(base.chapters, headings, chapterByLine, dafBase?.chapters, linkPagination)
+            val layout = layoutChapters(base.chapters, anchors, headings, pagination)
+            if (layout == null) {
+                stats.skip("unplaced-leading-dafs", candidate.bookId)
+                continue
+            }
             stats.take(choice.rule)
             if (pass == 2) stats.recoveredByCredit++
             snapshots[candidate.bookId] = InheritChaptersSnapshot(
@@ -767,11 +970,12 @@ internal fun readInheritChaptersSnapshots(
                 title = candidate.title,
                 baseId = choice.baseId,
                 rule = choice.rule,
-                anchors = anchors,
+                anchors = layout.anchors,
                 chapterCount = base.chapters.size,
-                dafs = buildDafChildren(anchors, headings),
+                dafs = layout.dafs,
                 credited = pass == 2,
                 dafBaseId = dafBase?.bookId,
+                lineAnchors = anchors,
             )
         }
     }
@@ -823,6 +1027,31 @@ private fun readChapterByLine(
                 val chapter = chapterOf(rs.getLong(2), rs.getLong(3))
                 if (chapter < 0) continue
                 byLine.merge(rs.getLong(1), chapter, ::minOf)
+            }
+        }
+    }
+    return byLine
+}
+
+/** Commentary lineIndex → the amuds of the [baseId] lines linked to it (heRefs naming one). */
+private fun readBaseAmudByLine(conn: Connection, bookId: Long, baseId: Long): Map<Long, List<Int>> {
+    val byLine = HashMap<Long, MutableList<Int>>()
+    conn.prepareStatement(
+        """
+        SELECT ml.lineIndex, bl.heRef
+        FROM link k INDEXED BY idx_link_target_book
+        JOIN connection_type c ON c.id = k.connectionTypeId
+        JOIN line ml ON ml.id = k.targetLineId
+        JOIN line bl ON bl.id = k.sourceLineId
+        WHERE k.targetBookId = ? AND k.sourceBookId = ? AND c.name = 'COMMENTARY'
+        """.trimIndent(),
+    ).use { st ->
+        st.setLong(1, bookId)
+        st.setLong(2, baseId)
+        st.executeQuery().use { rs ->
+            while (rs.next()) {
+                val amud = parseHeRefAmud(rs.getString(2)) ?: continue
+                byLine.getOrPut(rs.getLong(1)) { mutableListOf() } += amud
             }
         }
     }
