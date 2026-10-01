@@ -58,7 +58,7 @@ class HavroutaFormattingWarningTest {
         }
     }
 
-    /** The generator counts the lines itself: a book file whose Talmud quotes are all `<b><small>`. */
+    /** The generator counts the lines itself, on a book whose quotes are written by [quote]. */
     private fun run(quote: (String) -> String): Capture = runBlocking {
         val driver = JdbcSqliteDriver(url = "jdbc:sqlite::memory:")
         SeforimDb.Schema.create(driver)
@@ -83,10 +83,17 @@ class HavroutaFormattingWarningTest {
     }
 
     @Test
-    fun `the generator warns when the book's bold is unreadable`() {
-        val capture = run { "<b><small>$it</small></b>" }
+    fun `the generator warns when the bold quotes are not in the Talmud`() {
+        val capture = run { "<b>${it.reversed()}</b>" }
         val warn = capture.lines.filter { it.first == Severity.Warn }.map { it.second }
         assertContains(warn.single(), "חברותא על זבחים: only 0 of 120 lines with bold Talmud text were linked")
+    }
+
+    @Test
+    fun `bold that holds another tag is read, so the v30 זבחים shape links in full`() {
+        val capture = run { "<b><small>$it</small></b>" }
+        assertTrue(capture.lines.any { it.second == "  Created 120 links" }, capture.lines.toString())
+        assertTrue(capture.lines.none { it.first == Severity.Warn }, capture.lines.toString())
     }
 
     @Test
