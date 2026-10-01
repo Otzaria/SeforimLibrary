@@ -9,6 +9,7 @@ import io.github.kdroidfilter.seforimlibrary.common.ids.IdAllocatorBindings
 import io.github.kdroidfilter.seforimlibrary.common.ids.InMemoryIdAllocator
 import io.github.kdroidfilter.seforimlibrary.core.models.ConnectionType
 import io.github.kdroidfilter.seforimlibrary.core.models.DefaultCommentatorPosition
+import io.github.kdroidfilter.seforimlibrary.core.models.Line
 import io.github.kdroidfilter.seforimlibrary.core.models.Link
 import io.github.kdroidfilter.seforimlibrary.dao.repository.SeforimRepository
 import kotlinx.coroutines.runBlocking
@@ -123,7 +124,7 @@ fun main(args: Array<String>) = runBlocking {
 /**
  * Data class representing a daf section with its line range.
  */
-private data class DafSection(
+internal data class DafSection(
     val dafRef: String,
     val startLineIndex: Int,
     val endLineIndex: Int  // exclusive
@@ -145,6 +146,7 @@ private val boldPattern = Regex("""<b>([^<]+)</b>""")
  * Regex to extract daf headers.
  */
 private val havroutaDafPattern = Regex("""<h3>\s*דף\s+([^<]+)</h3>""")
+private val anyTagPattern = Regex("<[^>]*>")
 private val talmudDafPattern = Regex("""<h2>דף\s*([^<]+)</h2>""")
 
 /**
@@ -162,13 +164,36 @@ private fun normalizeText(text: String): String {
         .lowercase()
 }
 
+/** A parenthesised marker in small print: a note number `(12)`, `(תחילת העמוד)`, an editor's `(משמע)`. */
+private val smallMarkerPattern = Regex("""(?:<small>)+\s*\([^()<>]*\)\s*(?:</small>)+""")
+
+/** Any tag other than `<b>`/`</b>`. */
+private val nonBoldTagPattern = Regex("""</?(?!b>)(?!/b>)[a-zA-Z][^>]*>""")
+
 /**
  * Extracts bold text from a Havrouta line.
+ *
+ * [boldPattern] reads only a bold span with no tag inside, so `<b><small>quote</small></b>`
+ * and `<b>quote <small>(12)</small> quote</b>` used to give nothing (חברותא על ערכין 1057,
+ * פסחים 1837, and the 6000 lines of זבחים in v30). Small parenthesised markers are dropped
+ * first, being no Talmud text, and then every other tag is unwrapped. `<b>` inside `<b>` is
+ * left alone: there the inner spans are the quotes and the outer one wraps explanation too.
  */
-private fun extractBoldText(content: String): String {
-    val matches = boldPattern.findAll(content)
-    return matches.map { it.groupValues[1] }.joinToString(" ")
+internal fun extractBoldText(content: String): String {
+    val cleaned = content.replace(smallMarkerPattern, " ").replace(nonBoldTagPattern, "")
+    return boldPattern.findAll(cleaned).map { it.groupValues[1] }.joinToString(" ")
 }
+
+private val brPattern = Regex("""<br\s*/?>""", RegexOption.IGNORE_CASE)
+private val dashPattern = Regex("[\u2013\u2014\u2026\u200e\u200f-]")
+
+/**
+ * [normalizeText] for the containment checks of [realignQuotes]: tags out (`<br>` as a
+ * space) and dashes out. A Sefaria line opens with `<big><strong>word</strong></big>` and
+ * puts '–'/'—' between clauses, so the plain normalization misses a quote that is there.
+ */
+internal fun enhancedNormalize(text: String): String =
+    normalizeText(text.replace(brPattern, " ").replace(anyTagPattern, "").replace(dashPattern, " "))
 
 /**
  * Checks if a line is a section header (מתניתין, גמרא, etc.)
@@ -307,9 +332,8 @@ internal fun havroutaFormattingWarnings(title: String, stats: HavroutaPairStats)
     fun pct(n: Int) = "${n * 100 / stats.boldLines}%"
     if (stats.links < stats.boldLines * MIN_LINKED_SHARE) {
         warnings += "$title: only ${stats.links} of ${stats.boldLines} lines with bold Talmud text were " +
-            "linked (${pct(stats.links)}; a sound Chavruta book links over 90%). A <b> span holding " +
-            "another tag (<b><small>…</small></b>) is not read: look for formatting left open over " +
-            "many lines in the book file"
+            "linked (${pct(stats.links)}; a sound Chavruta book links over 90%): look for formatting " +
+            "left open over many lines in the book file, or bold that is not Talmud text"
     }
     if (stats.wholeLineBoldLines > stats.boldLines * MAX_WHOLE_LINE_BOLD_SHARE) {
         warnings += "$title: ${stats.wholeLineBoldLines} of ${stats.boldLines} bold lines " +
@@ -318,8 +342,6 @@ internal fun havroutaFormattingWarnings(title: String, stats: HavroutaPairStats)
     }
     return warnings
 }
-
-private val anyTagPattern = Regex("<[^>]*>")
 
 /** A long line whose bold text is (nearly) all of its text. */
 private fun isWholeLineBold(content: String, boldText: String): Boolean {
@@ -365,6 +387,7 @@ private suspend fun processBookPair(
     var boldLines = 0
     var wholeLineBoldLines = 0
     val linkBatch = mutableListOf<Link>()
+    val rows = mutableListOf<QuoteRow>()
 
     // Process each Havrouta line
     var currentDafRef: String? = null
@@ -400,10 +423,18 @@ private suspend fun processBookPair(
 
         // Find the best matching line
         val matchingLineIndex = findBestMatch(normalizedBold, talmudLinesInDaf, lastMatchedIndex)
-        if (matchingLineIndex == null) continue
+        if (matchingLineIndex != null) lastMatchedIndex = matchingLineIndex  // Update for sequential reading
+        rows += QuoteRow(havroutaLine, currentDafRef, boldText, matchingLineIndex)
+    }
 
-        lastMatchedIndex = matchingLineIndex  // Update for sequential reading
+    // Second pass: a link whose Talmud line does not hold its quote is moved to the
+    // line that does, when that line fits between its neighbours.
+    val realigned = realignQuotes(rows, talmudLines, talmudDafs, logger)
+    if (realigned > 0) logger.i { "  Realigned $realigned links to the Talmud line that holds their quote" }
 
+    for (row in rows) {
+        val havroutaLine = row.havroutaLine
+        val matchingLineIndex = row.talmudLineIndex ?: continue
         val talmudLineId = talmudLineIdByIndex[matchingLineIndex] ?: continue
 
         // Single canonical direction Talmud → Havrouta (base → commentary).
@@ -433,6 +464,106 @@ private suspend fun processBookPair(
     }
 
     return HavroutaPairStats(linksCreated, boldLines, wholeLineBoldLines)
+}
+
+/** A Havrouta line with a bold quote, and the Talmud line (index) it is linked to, if any. */
+internal class QuoteRow(
+    val havroutaLine: Line,
+    val dafRef: String,
+    val boldText: String,
+    var talmudLineIndex: Int?,
+)
+
+/** Shorter quotes are too common to move a link on the strength of a containing line. */
+private const val MIN_REALIGN_QUOTE_LENGTH = 15
+
+/** Rows on each side whose links bound the window when the two nearest anchors disagree. */
+private const val ANCHOR_SPREAD = 5
+
+/**
+ * Moves links whose Talmud line does not hold the full bold quote to a line of the same
+ * daf that does. Returns how many links it moved or added.
+ *
+ * The first pass reads forward from the last match and falls back to the first three
+ * words or a 12-character overlap, so one weak match sends the following lines to the
+ * wrong line too, even when the exact quote sits a line before (about 430 links, e.g.
+ * חברותא על כתובות 9379 → 2500 instead of 2499). That pass is left as it was; this one only
+ * corrects its result, so a link that already holds its quote never moves:
+ *
+ * - An *anchor* is a row whose linked line holds its quote (after [enhancedNormalize]),
+ *   alone or together with the text line before or after it — a quote may run over two
+ *   Talmud lines, also across a daf heading (כתובות 4217 → 996).
+ * - Another row with a quote of [MIN_REALIGN_QUOTE_LENGTH]+ characters moves to a line
+ *   that holds the quote (or, if no line does, one it runs over), but only between the
+ *   lines of the nearest anchor before it and after it. Outside that window the quote is a
+ *   repetition — the Mishnah quoted again in the Gemara, an "איכא דאמרי" version, "אמר מר"
+ *   — and the first pass, which follows the reading order, is kept. When the two anchors
+ *   are out of order, the window spans them and the anchors [ANCHOR_SPREAD] rows around.
+ * - Among several lines in the window, the one nearest the first-pass line wins (the
+ *   lower on a tie); a row the first pass left unlinked starts from the window's start.
+ */
+internal fun realignQuotes(
+    rows: List<QuoteRow>,
+    talmudLines: List<Line>,
+    talmudDafs: List<DafSection>,
+    logger: Logger? = null,
+): Int {
+    if (talmudLines.withIndex().any { (i, l) -> l.lineIndex != i }) {
+        logger?.w { "Talmud lines are not indexed 0..n-1; links are not realigned" }
+        return 0
+    }
+    val text = talmudLines.map { enhancedNormalize(it.content) }
+    val heading = talmudLines.map { talmudDafPattern.containsMatchIn(it.content) }
+    val sections = talmudDafs.associateBy { it.dafRef }
+
+    fun prevText(i: Int): Int {
+        var j = i - 1
+        while (j >= 0 && heading[j]) j--
+        return j
+    }
+    fun nextText(i: Int): Int {
+        var j = i + 1
+        while (j < text.size && heading[j]) j++
+        return if (j < text.size) j else -1
+    }
+    fun runsOver(q: String, a: Int, b: Int): Boolean =
+        a >= 0 && b >= 0 && !text[a].contains(q) && !text[b].contains(q) && "${text[a]} ${text[b]}".contains(q)
+    fun covers(q: String, i: Int): Boolean =
+        text[i].contains(q) || runsOver(q, prevText(i), i) || runsOver(q, i, nextText(i))
+
+    var moved = 0
+    val byDaf = LinkedHashMap<String, MutableList<QuoteRow>>()
+    for (row in rows) byDaf.getOrPut(row.dafRef) { mutableListOf() }.add(row)
+    for ((dafRef, rs) in byDaf) {
+        val daf = sections[dafRef] ?: continue
+        val start = daf.startLineIndex
+        val end = daf.endLineIndex
+        val quotes = rs.map { enhancedNormalize(it.boldText) }
+        // Anchors and their lines are fixed before any row moves: the result does not
+        // depend on the order the rows are repaired in.
+        val anchorLine = rs.indices.map { k -> rs[k].talmudLineIndex?.takeIf { covers(quotes[k], it) } }
+        for (k in rs.indices) {
+            val q = quotes[k]
+            if (anchorLine[k] != null || q.length < MIN_REALIGN_QUOTE_LENGTH) continue
+            var candidates = (start until end).filter { !heading[it] && text[it].contains(q) }
+            if (candidates.isEmpty()) candidates = (start until end).filter { !heading[it] && covers(q, it) }
+            if (candidates.isEmpty()) continue
+            var lo = (k - 1 downTo 0).firstNotNullOfOrNull { anchorLine[it] } ?: start
+            var hi = (k + 1 until rs.size).firstNotNullOfOrNull { anchorLine[it] } ?: (end - 1)
+            if (lo > hi) {
+                val near = listOf(lo, hi) + (maxOf(0, k - ANCHOR_SPREAD) until minOf(rs.size, k + ANCHOR_SPREAD + 1))
+                    .filter { it != k }.mapNotNull { anchorLine[it] }
+                lo = near.min()
+                hi = near.max()
+            }
+            val inWindow = candidates.filter { it in lo..hi }
+            if (inWindow.isEmpty()) continue
+            val ref = rs[k].talmudLineIndex ?: lo
+            rs[k].talmudLineIndex = inWindow.minWith(compareBy<Int>({ kotlin.math.abs(it - ref) }, { it }))
+            moved++
+        }
+    }
+    return moved
 }
 
 /**
