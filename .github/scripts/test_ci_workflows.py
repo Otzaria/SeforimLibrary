@@ -15,6 +15,7 @@ import json
 import os
 import re
 import shutil
+import sqlite3
 import subprocess
 import tempfile
 import unittest
@@ -357,6 +358,94 @@ class CiWorkflowTest(unittest.TestCase):
         self.assertIn('echo "$EXPECTED_SHA  $INPUTS/sefaria-archive.tar.zst" | sha256sum -c -', body)
         # The pairing runs in both inputs_from modes.
         self.assertNotIn("if", named_step(doc, "Stage the Otzaria source"))
+
+    COMPRESS_STEP = "Compress v1 + v2 line text (zstd dictionary)"
+    FRAMES_STEP = "Verify both DBs hold only zstd frames of one dictionary"
+
+    def test_delta_compresses_both_builds_before_the_patch(self):
+        doc = yaml.safe_load(DELTA.read_text(encoding="utf-8"))
+        names = [step.get("name") for _, _, step in steps_of(doc)]
+        order = [names.index(n) for n in (
+            "Build v2 with the production pipeline", "Verify v2 stamp",
+            self.COMPRESS_STEP, self.FRAMES_STEP,
+            "producePatchAndVerify (strict invariant)")]
+        self.assertEqual(order, sorted(order))
+        self.assertNotIn("if", named_step(doc, self.COMPRESS_STEP))
+        body = named_step(doc, self.COMPRESS_STEP)["run"]
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(os.path.realpath(tmp))
+            stub = root / "gradle"
+            stub.write_text('#!/usr/bin/env bash\nprintf "%s\\n" "$*" >> "$CALLS"\n', encoding="utf-8")
+            stub.chmod(0o755)
+            run = subprocess.run(
+                ["bash", "-c", body], cwd=root, capture_output=True, text=True,
+                env={"PATH": os.environ["PATH"], "GRADLE": str(stub), "CALLS": str(root / "calls")},
+            )
+            self.assertEqual(run.returncode, 0, run.stderr + run.stdout)
+            calls = (root / "calls").read_text(encoding="utf-8").splitlines()
+        self.assertEqual(calls, [
+            f":generator-common:compressLineContent -PdbPath={root}/build/{db} --no-daemon --stacktrace"
+            for db in ("seforim.db.v1", "seforim.db")
+        ])
+
+    def test_delta_callers_inherit_the_compressed_pipeline(self):
+        # The dry run and the ARM button run this file, not their own copy.
+        for caller in ("delta-pipeline-dryrun.yml", "delta-real-diff-arm.yml"):
+            with self.subTest(caller):
+                doc = yaml.safe_load((WORKFLOWS / caller).read_text(encoding="utf-8"))
+                uses = [job.get("uses") for job in doc["jobs"].values()]
+                self.assertEqual(uses, ["./.github/workflows/delta-real-diff-test.yml"])
+
+    def frames_check(self, mutate=None):
+        """Run the frames step for real on two fixture DBs; [mutate] edits v2."""
+        doc = yaml.safe_load(DELTA.read_text(encoding="utf-8"))
+        body = named_step(doc, self.FRAMES_STEP)["run"]
+        for tool in ("bash", "sqlite3", "sha256sum"):
+            self.assertIsNotNone(shutil.which(tool), f"{tool} is required")
+        frame = b"\x28\xb5\x2f\xfd" + b"frame"
+        with tempfile.TemporaryDirectory() as tmp:
+            build = Path(tmp) / "build"
+            build.mkdir()
+            for name in ("seforim.db.v1", "seforim.db"):
+                conn = sqlite3.connect(build / name)
+                conn.executescript(
+                    "CREATE TABLE zstd_dict (id INTEGER PRIMARY KEY, dict BLOB);"
+                    "CREATE TABLE line_content (id INTEGER PRIMARY KEY, content TEXT);"
+                    "CREATE TABLE version_line (versionId INTEGER, lineId INTEGER, content TEXT);")
+                conn.execute("INSERT INTO zstd_dict VALUES (32768, ?)", (b"dict",))
+                conn.executemany("INSERT INTO line_content VALUES (?, ?)", [(1, frame), (2, frame)])
+                conn.executemany("INSERT INTO version_line VALUES (1, ?, ?)", [(1, None), (2, frame)])
+                if mutate and name == "seforim.db":
+                    mutate(conn)
+                conn.commit()
+                conn.close()
+            return subprocess.run(
+                ["bash", "-c", body], cwd=tmp, capture_output=True, text=True,
+                env={"PATH": os.environ["PATH"]},
+            )
+
+    def test_delta_frames_step_accepts_two_compressed_dbs(self):
+        ok = self.frames_check()
+        self.assertEqual(ok.returncode, 0, ok.stderr + ok.stdout)
+        self.assertIn("✓ build/seforim.db.v1: 2 line_content frames, dictionary 32768", ok.stdout)
+        self.assertIn("✓ build/seforim.db: 2 line_content frames", ok.stdout)
+
+    def test_delta_frames_step_refuses_what_the_patch_would_not_cover(self):
+        cases = {
+            "plain line": ("UPDATE line_content SET content = 'text' WHERE id = 2", "not zstd frames"),
+            "plain edition line": ("UPDATE version_line SET content = 'text' WHERE lineId = 2", "not zstd frames"),
+            "blob that is no frame": ("UPDATE line_content SET content = x'00010203' WHERE id = 1", "not zstd frames"),
+            "other dictionary": ("UPDATE zstd_dict SET dict = x'00'", "different zstd dictionaries"),
+            "two dictionaries": ("INSERT INTO zstd_dict VALUES (1, x'00')", "2 zstd_dict rows"),
+            "no line rows": ("DELETE FROM line_content", "no line_content rows"),
+        }
+        for what, (sql, message) in cases.items():
+            with self.subTest(what):
+                bad = self.frames_check(lambda conn, sql=sql: conn.execute(sql))
+                self.assertNotEqual(bad.returncode, 0, f"{what} passed")
+                self.assertIn(message, bad.stdout)
+        uncompressed = self.frames_check(lambda conn: conn.execute("DROP TABLE zstd_dict"))
+        self.assertNotEqual(uncompressed.returncode, 0, "a DB without zstd_dict passed")
 
     # ─── every hosted job in the repository ────────────────────────────────
 

@@ -3,6 +3,12 @@ package io.github.kdroidfilter.seforimlibrary.common.patch
 import app.cash.sqldelight.driver.jdbc.sqlite.JdbcSqliteDriver
 import io.github.kdroidfilter.seforimlibrary.common.db.LineContentCompression
 import io.github.kdroidfilter.seforimlibrary.db.SeforimDb
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.addJsonObject
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
+import kotlinx.serialization.json.putJsonArray
 import org.junit.Rule
 import org.junit.Test
 import org.junit.rules.TemporaryFolder
@@ -10,6 +16,7 @@ import java.nio.file.Files
 import java.nio.file.Path
 import java.sql.Connection
 import java.sql.DriverManager
+import java.util.Base64
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
@@ -261,6 +268,30 @@ class CompressLineContentCliTest {
         val digest = LineContentCompression.sha256(frames.fold(ByteArray(0)) { acc, f -> acc + f })
         assertEquals(FROZEN_FRAMES_SHA256, digest)
         assertEquals(LineContentCompression.DICT_SHA256, LineContentCompression.sha256(LineContentCompression.bundledDictionary))
+
+        val expected = goldenVector(lines.toSortedMap().values.zip(frames))
+        val stored = requireNotNull(javaClass.getResourceAsStream(GOLDEN_VECTOR)) { "missing $GOLDEN_VECTOR" }
+            .bufferedReader(Charsets.UTF_8).readText().replace("\r\n", "\n")
+        assertEquals(expected, stored, "regenerate $GOLDEN_VECTOR (the app decodes it) with:\n$expected")
+    }
+
+    /** The frames above as a test vector the app decodes with the same dictionary. */
+    private fun goldenVector(frames: List<Pair<String, ByteArray>>): String {
+        val vector = buildJsonObject {
+            put("dictId", LineContentCompression.bundledDictionaryId)
+            put("dictSha256", LineContentCompression.DICT_SHA256)
+            put("level", LineContentCompression.LEVEL)
+            put("framesSha256", FROZEN_FRAMES_SHA256)
+            putJsonArray("frames") {
+                for ((text, frame) in frames) {
+                    addJsonObject {
+                        put("text", text)
+                        put("frame", Base64.getEncoder().encodeToString(frame))
+                    }
+                }
+            }
+        }
+        return Json { prettyPrint = true }.encodeToString(JsonObject.serializer(), vector) + "\n"
     }
 
     /** Ids 32768..65535 take a 2-byte Dictionary_ID field in every frame; ≤32767 is reserved by zdict.h. */
@@ -368,5 +399,6 @@ class CompressLineContentCliTest {
 
     private companion object {
         const val FROZEN_FRAMES_SHA256 = "262dbd7fe3fc9395582e83c2d3b69dcb789c19e64d102b3b02614263716018fe"
+        const val GOLDEN_VECTOR = "/zstd/line_content_golden_frames.json"
     }
 }
