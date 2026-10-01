@@ -91,51 +91,75 @@ class BookMoveLeafIdsTest {
         assertEquals(second.paths, third.paths)
     }
 
+    /** The real v30 build state around the hijack, in the ids that matter. */
+    private val v30SefariaIds = linkedMapOf(
+        "שו״ת" to 1L, "שו״ת/אחרונים" to 2L, "קבלה" to 3L, "מדרש" to 4L, "מדרש/אגדה" to 5L,
+        "מחשבת ישראל" to 6L, "מחשבת ישראל/אחרונים" to 7L, "מחשבת ישראל/ראשונים" to 8L,
+        "תלמוד בבלי" to 12L, "תלמוד בבלי/אחרונים" to 420L, "תלמוד בבלי/ראשונים" to 1471L,
+    )
+    private val piskeiRabbeinuMendel = "תלמוד בבלי/ראשונים/פסקי רבינו מענדל קלויזנער"
+    private val v30Otzaria = listOf(sederNashim, piskeiRabbeinuMendel)
+
+    /** Sefaria ends at 1471, the shipped leaves sit on 1472-1478 with no key, סדר נשים on 1526. */
+    private fun realV30Seed(): Path = seed(
+        categories = v30SefariaIds + mapOf(ohrHayashar to 1385L, sederNashim to 1526L, piskeiRabbeinuMendel to 1479L),
+        nextId = 1536,
+    )
+
+    private val v30Moves = (PUBLISHED_BOOK_MOVE_LEAF_IDS.keys + klaleiHashas).mapIndexed { i, dest ->
+        BookMove("ספר $i", "תלמוד בבלי/ראשונים", dest)
+    }
+
+    private fun realV30Build(name: String, seed: Path, moves: List<BookMove>) = runBuild(
+        name, seed, moves,
+        sefaria = v30SefariaIds.keys.toList(),
+        books = v30Moves.map { it.name } + moveToKlalei.name,
+        publishedIds = PUBLISHED_BOOK_MOVE_LEAF_IDS,
+        otzariaFolders = v30Otzaria,
+        restores = CATEGORY_ID_RESTORES,
+    )
+
     @Test
-    fun `the first keyed build keeps the real v30 leaf ids and leaves סדר נשים alone`() {
-        // The real v30 build state around the hijack: Sefaria ends at 1471, the shipped
-        // leaves sit on 1472-1478 with no key, סדר נשים was reallocated to 1526.
-        val sefariaIds = linkedMapOf(
-            "שו״ת" to 1L, "שו״ת/אחרונים" to 2L, "קבלה" to 3L, "מדרש" to 4L, "מדרש/אגדה" to 5L,
-            "מחשבת ישראל" to 6L, "מחשבת ישראל/אחרונים" to 7L, "מחשבת ישראל/ראשונים" to 8L,
-            "תלמוד בבלי" to 12L, "תלמוד בבלי/אחרונים" to 420L, "תלמוד בבלי/ראשונים" to 1471L,
-        )
-        val state = seed(
-            categories = sefariaIds + mapOf(
-                ohrHayashar to 1385L,
-                sederNashim to 1526L,
-                "תלמוד בבלי/ראשונים/פסקי רבינו מענדל קלויזנער" to 1479L,
-            ),
-            nextId = 1536,
-        )
-        val moves = PUBLISHED_BOOK_MOVE_LEAF_IDS.keys.mapIndexed { i, dest ->
-            BookMove("ספר $i", "תלמוד בבלי/ראשונים", dest)
-        }
-        val books = moves.map { it.name } + moveToKlalei.name
-        val otzaria = listOf(sederNashim, "תלמוד בבלי/ראשונים/פסקי רבינו מענדל קלויזנער")
-        val first = runBuild(
-            "v31", state, moves, sefaria = sefariaIds.keys.toList(), books = books,
-            publishedIds = PUBLISHED_BOOK_MOVE_LEAF_IDS, otzariaFolders = otzaria,
-        )
+    fun `the first keyed build keeps the shipped leaf ids and gives סדר נשים back 1478`() {
+        val first = realV30Build("v31", realV30Seed(), v30Moves)
         for ((dest, id) in PUBLISHED_BOOK_MOVE_LEAF_IDS) {
             assertEquals(id, first.paths.getValue(dest), dest)
         }
-        assertEquals(1526L, first.paths.getValue(sederNashim))
-        assertEquals(1479L, first.paths.getValue("תלמוד בבלי/ראשונים/פסקי רבינו מענדל קלויזנער"))
+        assertEquals(1478L, first.paths.getValue(sederNashim), "back on its v28/v29 id")
+        assertEquals(1536L, first.paths.getValue(klaleiHashas), "the v30-only leaf moves to a fresh id")
+        assertEquals(1479L, first.paths.getValue(piskeiRabbeinuMendel))
+        assertEquals(1385L, first.paths.getValue(ohrHayashar))
         assertEquals(0L, first.otzariaFreshCategories, "nothing was reallocated")
 
-        // A leaf added afterwards lands above the counter, not on 1479.
+        // Next build, rows reordered and a new leaf added: every id holds, the new leaf
+        // lands above the counter (not on 1479), and the restore does not run again.
         val newLeaf = "תלמוד בבלי/ראשונים/חדש"
-        val second = runBuild(
-            "v32", first.state, moves.reversed() + BookMove(moveToKlalei.name, "תלמוד בבלי/ראשונים", newLeaf),
-            sefaria = sefariaIds.keys.toList(), books = books, publishedIds = PUBLISHED_BOOK_MOVE_LEAF_IDS,
-            otzariaFolders = otzaria,
+        val second = realV30Build(
+            "v32", first.state,
+            v30Moves.reversed() + BookMove(moveToKlalei.name, "תלמוד בבלי/ראשונים", newLeaf),
         )
-        for ((dest, id) in PUBLISHED_BOOK_MOVE_LEAF_IDS) {
-            assertEquals(id, second.paths.getValue(dest), dest)
+        assertEquals(first.paths - newLeaf, second.paths - newLeaf)
+        assertEquals(1537L, second.paths.getValue(newLeaf))
+        assertEquals(0L, second.otzariaFreshCategories)
+    }
+
+    @Test
+    fun `the restore keeps the reallocated id when the published one is taken`() {
+        // A key already holds 1478: the restore must not take it.
+        val state = seed(
+            categories = v30SefariaIds + mapOf(
+                ohrHayashar to 1385L, sederNashim to 1526L, piskeiRabbeinuMendel to 1479L, "אחר" to 1478L,
+            ),
+            nextId = 1536,
+        )
+        val db = dir.resolve("taken.db")
+        sefariaStage(db, state, v30SefariaIds.keys.toList(), books)
+        withAttached(db, state) { conn ->
+            conn.autoCommit = false
+            assertEquals(0, BookMoveLeafIds(conn).restore(CATEGORY_ID_RESTORES, logger))
+            conn.commit()
         }
-        assertEquals(1536L, second.paths.getValue(newLeaf))
-        assertEquals(1479L, second.paths.getValue("תלמוד בבלי/ראשונים/פסקי רבינו מענדל קלויזנער"))
+        assertEquals(1526L, BuildStateReader().read(state).lookups.getValue(IdTable.CATEGORY).getValue(sederNashim))
     }
 
     @Test
@@ -221,6 +245,7 @@ class BookMoveLeafIdsTest {
         publishedIds: Map<String, Long> = emptyMap(),
         foreignRows: Map<Long, String> = emptyMap(),
         otzariaFolders: List<String> = listOf(sederNashim),
+        restores: List<CategoryIdRestore> = emptyList(),
     ): Build {
         val db = dir.resolve("$name.db")
         val state = dir.resolve("$name.db.buildstate")
@@ -246,6 +271,7 @@ class BookMoveLeafIdsTest {
             conn.rollback()
 
             val leafIds = BookMoveLeafIds(conn, publishedIds = publishedIds)
+            leafIds.restore(restores, logger)
             for (move in moves) applyBookMove(conn, move, logger, leafIds)
             conn.commit()
         }

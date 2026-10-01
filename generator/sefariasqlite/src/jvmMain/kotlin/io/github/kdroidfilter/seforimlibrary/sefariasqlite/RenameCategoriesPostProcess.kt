@@ -162,6 +162,9 @@ fun main(args: Array<String>) {
             }
             logger.i { "ForDB preflight passed — applying for real" }
 
+            // Before any leaf is created, so a restored id is never handed to a leaf.
+            leafIds.restore(CATEGORY_ID_RESTORES, logger)
+
             var totalRenamed = 0
             var totalMerged = 0
             runSection("Category renames", categoryRenames, logger) { rule ->
@@ -789,6 +792,10 @@ internal const val BOOK_MOVE_LEAF_KEY_PREFIX = "book_moves:"
  * their per-book settings and saved tabs; the next build finds it under its key.
  * Applied only while no key holds the id and the DB does not use it, so it can never
  * take an id from anything else. Leaves added later are not listed: they get fresh ids.
+ *
+ * `תלמוד בבלי/כללי הש״ס` is deliberately absent: it first shipped in v30 (pre-release
+ * only) on 1478, the id it took from `אור הישר/סדר נשים`. That id goes back to סדר
+ * נשים (see [CATEGORY_ID_RESTORES]) and כללי הש״ס gets a fresh one.
  */
 internal val PUBLISHED_BOOK_MOVE_LEAF_IDS: Map<String, Long> = mapOf(
     "שו״ת/אחרונים/שות מהרשם" to 1472L,
@@ -797,7 +804,22 @@ internal val PUBLISHED_BOOK_MOVE_LEAF_IDS: Map<String, Long> = mapOf(
     "מדרש/אגדה/תנא דבי אליהו" to 1475L,
     "מחשבת ישראל/אחרונים/רמחל" to 1476L,
     "מחשבת ישראל/ראשונים/מורה נבוכים" to 1477L,
-    "תלמוד בבלי/כללי הש״ס" to 1478L,
+)
+
+/**
+ * An Otzaria folder that a book_moves leaf pushed off its id, and the id to give back.
+ * [key] is the folder's build-state key (its Otzaria canonical path).
+ */
+internal data class CategoryIdRestore(val key: String, val reallocatedId: Long, val publishedId: Long)
+
+/**
+ * v30 renumbered `אור הישר/סדר נשים` 1478 -> 1526 (see [BookMoveLeafIds]). v28, the
+ * stable release, and v29 have it on 1478, and clients key per-book settings, hidden
+ * books, note drafts, user links and saved tabs on (title, categoryId). Moving it back
+ * costs only the v30 pre-release one more change.
+ */
+internal val CATEGORY_ID_RESTORES: List<CategoryIdRestore> = listOf(
+    CategoryIdRestore("תלמוד בבלי/אחרונים/אור הישר/סדר נשים", reallocatedId = 1526L, publishedId = 1478L),
 )
 
 /**
@@ -824,6 +846,37 @@ internal class BookMoveLeafIds(
     private val publishedIds: Map<String, Long> = PUBLISHED_BOOK_MOVE_LEAF_IDS,
 ) {
     private val kind = IdTable.CATEGORY.lookupKind!!
+
+    /**
+     * Points each restore's key back at its published id, before any leaf is created.
+     * Runs only while the key still holds the reallocated id and nothing (no key, no DB
+     * row) uses the published one, so it applies once and is a no-op afterwards. The
+     * reallocated id is left unheld; fresh ids only grow, so nothing is handed it again.
+     */
+    fun restore(restores: List<CategoryIdRestore>, logger: Logger): Int {
+        var restored = 0
+        for (restore in restores) {
+            if (lookupId(restore.key) != restore.reallocatedId) continue
+            if (lookupHoldsId(restore.publishedId) || dbHoldsId(restore.publishedId)) {
+                logger.w {
+                    "Category id ${restore.publishedId} for '${restore.key}' is taken; " +
+                        "keeping ${restore.reallocatedId}"
+                }
+                continue
+            }
+            conn.prepareStatement(
+                "UPDATE $schema.id_lookup SET id = ? WHERE kind = ? AND natural_key = ?",
+            ).use { st ->
+                st.setLong(1, restore.publishedId)
+                st.setString(2, kind)
+                st.setString(3, restore.key)
+                check(st.executeUpdate() == 1) { "Failed to restore category id for '${restore.key}'" }
+            }
+            logger.i { "Restored category id for '${restore.key}': ${restore.reallocatedId} -> ${restore.publishedId}" }
+            restored++
+        }
+        return restored
+    }
 
     fun leafId(destSegments: List<String>): Long {
         val path = destSegments.joinToString("/")
