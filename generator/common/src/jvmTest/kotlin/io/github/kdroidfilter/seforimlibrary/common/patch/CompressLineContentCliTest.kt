@@ -190,6 +190,14 @@ class CompressLineContentCliTest {
         assertEquals(LineContentCompression.DICT_SHA256, LineContentCompression.sha256(LineContentCompression.bundledDictionary))
     }
 
+    /** Ids 32768..65535 take a 2-byte Dictionary_ID field in every frame; ≤32767 is reserved by zdict.h. */
+    @Test
+    fun `the dictionary id fits the 2-byte frame header field`() {
+        assertTrue(LineContentCompression.bundledDictionaryId in 32768L..65535L, "${LineContentCompression.bundledDictionaryId}")
+        val frame = LineContentCompression.Compressor().use { it.compress("בראשית".toByteArray()) }
+        assertEquals(2, frame[4].toInt() and 0x03, "Frame_Header_Descriptor Dictionary_ID_flag")
+    }
+
     @Test
     fun `a delta between DBs with the same dictionary carries frames and reproduces the hash`() {
         val prev = schemaSixDb("prev.db").also { db -> connect(db).use { compressLineContent(it) } }
@@ -286,6 +294,6 @@ class CompressLineContentCliTest {
         }
 
     private companion object {
-        const val FROZEN_FRAMES_SHA256 = "1663035dda0397b1664dae380546d3661644696346f55a818acb86f5f2118360"
+        const val FROZEN_FRAMES_SHA256 = "262dbd7fe3fc9395582e83c2d3b69dcb789c19e64d102b3b02614263716018fe"
     }
 }

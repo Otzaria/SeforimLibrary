@@ -25,7 +25,7 @@ object LineContentCompression {
     private const val DICT_RESOURCE = "/zstd/line_content.zdict"
 
     /** SHA-256 of the bundled dictionary; a mismatch means the resource changed. */
-    const val DICT_SHA256: String = "1e5c9d66ab76f72640e2f18f2c81a0c5869a03c7218dc57e37384897a82c3f6c"
+    const val DICT_SHA256: String = "7b08b7c3534c9f9cd0e8f18414b4326aeeb64cfd574cc0f12d83b6f92bd6a396"
 
     val bundledDictionary: ByteArray by lazy {
         val bytes = checkNotNull(LineContentCompression::class.java.getResourceAsStream(DICT_RESOURCE)) {

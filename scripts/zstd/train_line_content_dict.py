@@ -11,8 +11,8 @@ Requires `pip install zstandard` (bundles zstd 1.5.7, the version zstd-jni 1.5.7
 Measured on v30 (schema 6), held-out 50K rows at level 19: no dictionary 2.54x,
 64K 3.44x, 256K 3.58x, 1M 3.72x, 2M 3.80x; level 22 adds nothing over 19.
 
-Provenance of the frozen line_content.zdict (dict id 908519771 = 0x3626e95b,
-SHA-256 1e5c9d66...3f6c). Recorded, in the commit that added it (1b991830) and in
+Provenance of the frozen line_content.zdict (dict id 32768 = 0x8000,
+SHA-256 7b08b7c3...a396). Recorded, in the commit that added it (1b991830) and in
 SL PR #62: 2MB, fastcover k=2000 d=8, 200K random line_content rows of a v30
 (schema 6) seforim.db, level 19. Not recorded anywhere in the repo: which v30 file
 (build), the zstandard / Python versions, and f, accel, seed or sample selection.
@@ -22,6 +22,13 @@ db_schema_version 6, 6,908,090 TEXT rows) with python-zstandard 0.25.0 (zstd 1.5
 on Python 3.14.4, Windows x64: 198,177 samples, dict id 2129175477, SHA-256
 f3eb1b97a74d9c604d3ae9d6fdc0382fbc7f8374df1271e0813661bc69c06d62. Treat the
 committed file as the source of truth; this script is the method, not a rebuild.
+
+Dict id re-issued before the format froze: the trained file had id 908519771
+(0x3626e95b, SHA-256 1e5c9d66...3f6c). Only header bytes 4-7 (the little-endian id)
+were rewritten to 32768; the other 2,097,148 bytes are unchanged, and so is every
+frame body. An id in 32768..65535 takes a 2-byte Dictionary_ID field in each frame
+header instead of 4 (<=32767 and >=2^31 are reserved by zdict.h): 2 bytes per row,
+~14.6MB over 7.3M frames. DICT_ID below makes a retrain use the same id.
 """
 import random
 import sqlite3
@@ -32,6 +39,7 @@ import zstandard
 DICT_SIZE = 2 * 1024 * 1024
 TRAIN_ROWS = 200_000
 SEED = 1
+DICT_ID = 32768
 
 
 def main(db_path: str, out_path: str) -> None:
@@ -47,7 +55,7 @@ def main(db_path: str, out_path: str) -> None:
         samples += [r[0] for r in conn.execute(sql % ",".join("?" * len(chunk)), chunk)]
     rnd.shuffle(samples)
     samples = samples[:TRAIN_ROWS]
-    d = zstandard.train_dictionary(DICT_SIZE, samples, k=2000, d=8, f=20, accel=1, threads=-1, level=19)
+    d = zstandard.train_dictionary(DICT_SIZE, samples, k=2000, d=8, f=20, accel=1, dict_id=DICT_ID, threads=-1, level=19)
     with open(out_path, "wb") as f:
         f.write(d.as_bytes())
     print(f"{len(samples)} samples -> {out_path} (dict id {d.dict_id()})")
