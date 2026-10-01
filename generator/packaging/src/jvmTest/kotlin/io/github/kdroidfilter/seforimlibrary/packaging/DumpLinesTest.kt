@@ -16,7 +16,30 @@ class DumpLinesTest {
         assertEquals(legacy, split)
     }
 
-    private fun dump(split: Boolean): List<String> {
+    @Test
+    fun `a Sefaria line reaches the linker without its opening seif label`() {
+        val rows = dump(
+            split = true,
+            sourceName = "Sefaria",
+            lines = listOf("(ח)  <b>כפרן. </b> כמ\"ש בסי' ע\"ט", "(שם) כמבואר", "ראה (נח) שם"),
+        )
+        assertEquals(
+            listOf(
+                "Sefaria|Book|0| <b>כפרן. </b> כמ\"ש בסי' ע\"ט|Book 1",
+                "Sefaria|Book|1|(שם) כמבואר|Book",
+                "Sefaria|Book|2|ראה (נח) שם|Book",
+            ),
+            rows,
+        )
+        // Other sources keep the text verbatim.
+        assertEquals("(ח) כפרן", dump(split = false, lines = listOf("(ח) כפרן", "x")).first().split("|")[3])
+    }
+
+    private fun dump(
+        split: Boolean,
+        sourceName: String = "src",
+        lines: List<String> = listOf("first", "second"),
+    ): List<String> {
         val dir = Files.createTempDirectory("dumpLines")
         try {
             val db = dir.resolve("seforim.db")
@@ -29,9 +52,19 @@ class DumpLinesTest {
                         "CREATE TABLE line (id INTEGER PRIMARY KEY, bookId INTEGER, lineIndex INTEGER, " +
                             "content TEXT NOT NULL, heRef TEXT)",
                     )
-                    st.execute("INSERT INTO source VALUES (1, 'src')")
+                    st.execute("INSERT INTO source VALUES (1, '$sourceName')")
                     st.execute("INSERT INTO book VALUES (1, 1, 'Book', NULL)")
-                    st.execute("INSERT INTO line VALUES (7, 1, 0, 'first', 'Book 1'), (3, 1, 1, 'second', NULL)")
+                }
+                c.prepareStatement("INSERT INTO line VALUES (?, 1, ?, ?, ?)").use { ins ->
+                    lines.forEachIndexed { index, content ->
+                        ins.setInt(1, if (index == 0) 7 else index + 2)
+                        ins.setInt(2, index)
+                        ins.setString(3, content)
+                        if (index == 0) ins.setString(4, "Book 1") else ins.setNull(4, java.sql.Types.VARCHAR)
+                        ins.executeUpdate()
+                    }
+                }
+                c.createStatement().use { st ->
                     if (split) {
                         st.execute("CREATE TABLE line_content (id INTEGER PRIMARY KEY NOT NULL, content TEXT NOT NULL)")
                         st.execute("INSERT INTO line_content SELECT id, content FROM line")
@@ -44,6 +77,13 @@ class DumpLinesTest {
                 Class.forName("io.github.kdroidfilter.seforimlibrary.packaging.DumpLinesKt")
                     .getMethod("main", Array<String>::class.java)
                     .invoke(null, arrayOf<String>() as Any)
+            }
+            DriverManager.getConnection("jdbc:sqlite:$out").use { c ->
+                c.createStatement().use { st ->
+                    st.executeQuery("SELECT value FROM lines_snapshot_meta WHERE key = 'linker_input_policy'").use { rs ->
+                        check(rs.next() && rs.getString(1) == "sefaria-leading-numeral-label-stripped-v1")
+                    }
+                }
             }
             return rows(out)
         } finally {

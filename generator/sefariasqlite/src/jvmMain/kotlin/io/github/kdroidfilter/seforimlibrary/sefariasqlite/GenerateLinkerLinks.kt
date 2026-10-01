@@ -6,6 +6,7 @@ import co.touchlab.kermit.Logger
 import co.touchlab.kermit.Severity
 import io.github.kdroidfilter.seforimlibrary.common.countVisibleChars
 import io.github.kdroidfilter.seforimlibrary.common.ids.DiskBackedLinkIdAllocator
+import io.github.kdroidfilter.seforimlibrary.common.linker.LinkerInputView
 import io.github.kdroidfilter.seforimlibrary.core.models.ConnectionType
 import io.github.kdroidfilter.seforimlibrary.core.models.Link
 import io.github.kdroidfilter.seforimlibrary.core.models.LinkAnchor
@@ -328,12 +329,17 @@ fun main(args: Array<String>) = runBlocking {
                     // fatal under -PlinkerStrict (every engine-produced record carries one).
                     val content = srcLine.content
                     if (isHeadingContent(content)) { headingSource++; continue }
-                    if (rec.source_hash != null && linkerContentHash(content) != rec.source_hash) { staleSource++; continue }
+                    // The offsets index the text the linker was handed (LinkerInputView), not
+                    // necessarily the stored line; the hash says which of the two it was.
+                    val shift = linkerOffsetShift(rec.book_key.source_name, content, rec.source_hash)
+                    if (shift == null) { staleSource++; continue }
                     if (rec.context_ref != null && srcLine.contextRef != rec.context_ref) { staleContext++; continue }
+                    val start = rec.start + shift
+                    val end = rec.end + shift
                     // Content is now hash-verified, so the offsets must index it exactly.
-                    check(rec.end <= content.length) {
+                    check(end <= content.length) {
                         "Out-of-range LINKER offsets in ${file.path}: [${rec.start}, ${rec.end}) " +
-                            "exceeds source line length ${content.length} for " +
+                            "+ $shift exceeds source line length ${content.length} for " +
                             "${rec.book_key.canonical_he_title} line ${rec.line_index}"
                     }
 
@@ -347,8 +353,8 @@ fun main(args: Array<String>) = runBlocking {
                     ))
                     // A separate clickable anchor for EACH citation occurrence (same line may cite
                     // the same ref twice at different offsets → one link, two anchors).
-                    val cs = countVisibleChars(content, rec.start)
-                    val ce = countVisibleChars(content, rec.end)
+                    val cs = countVisibleChars(content, start)
+                    val ce = countVisibleChars(content, end)
                     if (ce > cs) {
                         anchorBatch.add(LinkAnchor(linkId = linkId, side = 0, charStart = cs, charEnd = ce))
                     }
@@ -449,6 +455,22 @@ fun main(args: Array<String>) = runBlocking {
         allocator.close()
         repository.close()
     }
+}
+
+/**
+ * How far a record's offsets sit from the stored line [content], or null when its
+ * [sourceHash] matches neither text (the line changed since the snapshot).
+ *
+ * The linker digests and indexes [LinkerInputView.linkerContent], which leaves a
+ * Sefaria line's opening "(א) " out. A record made before that view (a full-line
+ * hash) still indexes the stored line, so it is taken as is. A record with no hash
+ * cannot be checked and is read in the current view; -PlinkerStrict counts it.
+ */
+internal fun linkerOffsetShift(sourceName: String, content: String, sourceHash: String?): Int? {
+    val strip = LinkerInputView.strippedPrefixLength(sourceName, content)
+    if (sourceHash == null) return strip
+    if (strip > 0 && linkerContentHash(content.substring(strip)) == sourceHash) return strip
+    return if (linkerContentHash(content) == sourceHash) 0 else null
 }
 
 /** SHA-1(UTF-8(content)) truncated to 16 hex chars. MUST equal linker_artifact.content_hash. */
