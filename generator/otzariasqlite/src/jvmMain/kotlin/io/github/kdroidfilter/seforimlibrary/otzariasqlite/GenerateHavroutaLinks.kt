@@ -214,24 +214,35 @@ private fun isSectionHeader(content: String): Boolean {
  * `internal` rather than private so the found-vs-processed accounting can be
  * tested: the audited build found 38 Havrouta books and processed 37 without
  * saying which one it dropped or why.
+ *
+ * Every warning goes to [logger] and to [annotate], which in GitHub Actions prints it as a
+ * `::warning::` annotation: a `Warn:` line is one of dozens in the Gradle log of a release
+ * build, and v30 lost 6000 links of one book behind an INFO line nobody read.
  */
 internal suspend fun generateHavroutaLinks(
     repository: SeforimRepository,
     bindings: IdAllocatorBindings,
-    logger: Logger
+    logger: Logger,
+    annotate: (String) -> Unit = ::printGithubWarning,
 ): Int {
     val ctCommentary = bindings.upsertConnectionType(ConnectionType.COMMENTARY.name)
+    val allBooks = repository.getAllBooks()
     // Find all Havrouta books
-    val havroutaBooks = repository.getAllBooks().filter { it.title.startsWith("חברותא על ") }
+    val havroutaBooks = allBooks.filter { it.title.startsWith("חברותא על ") }
     logger.i { "Found ${havroutaBooks.size} Havrouta books" }
 
     // Find all Talmud Bavli tractates
-    val talmudBooks = repository.getAllBooks().filter { book ->
+    val talmudBooks = allBooks.filter { book ->
         book.sourceId == 1L &&
             !book.title.startsWith("משנה") &&
             !book.title.startsWith("תלמוד ירושלמי") &&
             !book.title.startsWith("תוספתא")
     }.associateBy { it.title }
+
+    fun warn(message: String) {
+        logger.w { message }
+        annotate(message)
+    }
 
     var totalLinksCreated = 0
 
@@ -260,11 +271,11 @@ internal suspend fun generateHavroutaLinks(
         val talmudBook = talmudBooks[talmudTractateName]
         if (talmudBook == null) {
             unmatched += havroutaBook.title
-            logger.w {
+            warn(
                 "No Talmud match for: ${havroutaBook.title} — no book titled '$talmudTractateName' " +
                     "among the Bavli tractates (sourceId=1, excluding משנה / תלמוד ירושלמי / תוספתא); " +
                     "no links created for it"
-            }
+            )
             continue
         }
 
@@ -283,30 +294,73 @@ internal suspend fun generateHavroutaLinks(
         )
 
         logger.i { "  Created ${stats.links} links" }
-        havroutaFormattingWarnings(havroutaBook.title, stats).forEach { warning -> logger.w { warning } }
+        havroutaFormattingWarnings(havroutaBook.title, talmudBook.title, stats)
+            .forEach { warn(it) }
         totalLinksCreated += stats.links
     }
 
     if (unmatched.isEmpty()) {
         logger.i { "Havrouta-Talmud: $processedBooks/${havroutaBooks.size} books processed" }
     } else {
-        logger.w {
+        warn(
             "Havrouta-Talmud: $processedBooks/${havroutaBooks.size} books processed, " +
                 "${unmatched.size} skipped with no matching Talmud tractate: ${unmatched.joinToString()}"
-        }
+        )
     }
 
     return totalLinksCreated
 }
 
 /**
- * What one book pair produced, for the formatting sanity check.
+ * The GitHub Actions workflow command for a warning annotation. The runner reads it from a
+ * line of its own, which kermit's `Warn: (tag) …` prefix would break, so it is printed apart.
+ */
+internal fun githubWarningCommand(title: String, message: String): String {
+    fun data(s: String) = s.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+    fun property(s: String) = data(s).replace(":", "%3A").replace(",", "%2C")
+    return "::warning title=${property(title)}::${data(message)}"
+}
+
+private fun printGithubWarning(message: String) {
+    if (System.getenv("GITHUB_ACTIONS") == "true") println(githubWarningCommand("Havrouta links", message))
+}
+
+/** How a Havrouta book is divided, and the headings each side marks the division with. */
+internal enum class HavroutaSectionKind(
+    val singular: String,
+    val plural: String,
+    val bookHeading: String,
+    val talmudHeading: String,
+) {
+    DAF("daf", "dafs", "<h3>דף …</h3>", "<h2>דף …</h2>"),
+}
+
+/**
+ * The sections (dafs) a book pair was matched by.
+ *
+ * @property inBook distinct sections the Havrouta book has a heading for
+ * @property inTalmud distinct sections of the Talmud book
+ * @property shared sections both have, the only ones whose lines can be linked
+ */
+internal data class HavroutaSections(val kind: HavroutaSectionKind, val inBook: Int, val inTalmud: Int, val shared: Int)
+
+/**
+ * What one book pair produced, for the sanity checks of [havroutaFormattingWarnings].
  *
  * @property links links created
- * @property boldLines text lines (after the first daf heading, not section headers) that contain `<b>`
+ * @property bookLines lines of the Havrouta book
+ * @property boldLines text lines (after the first section heading, not section headers) with a
+ *   bold opener: `<b>`, `<b …>` or `<strong>` — the last two are not read as quotes, so they
+ *   count as bold lines that were not linked instead of vanishing from the count
  * @property wholeLineBoldLines of those, long lines that are bold from start to end
  */
-internal data class HavroutaPairStats(val links: Int, val boldLines: Int, val wholeLineBoldLines: Int)
+internal data class HavroutaPairStats(
+    val links: Int,
+    val bookLines: Int,
+    val boldLines: Int,
+    val wholeLineBoldLines: Int,
+    val sections: HavroutaSections,
+)
 
 /** Below this many bold lines a book is too small for the shares below to mean anything. */
 private const val MIN_BOLD_LINES_FOR_CHECK = 100
@@ -317,6 +371,15 @@ private const val MIN_LINKED_SHARE = 0.8
 /** Healthy tractates have up to 8% whole-line bold lines; a leaked `<b>` gave 29% (חולין, v30). */
 private const val MAX_WHOLE_LINE_BOLD_SHARE = 0.2
 
+/** A book whose headings stopped matching loses whole sections; healthy books share 99.6%+ of them. */
+private const val MIN_SHARED_SECTION_SHARE = 0.9
+
+/** The fewest links per daf of any healthy book is 21 (חברותא על מעילה). */
+private const val MIN_LINKS_PER_SECTION = 5
+
+/** Below this many lines a book is a fixture, not a tractate: the smallest Chavruta book (תמיד) has 708. */
+private const val MIN_LINES_FOR_LINK_DENSITY = 100
+
 /**
  * Warnings for a Havrouta book whose formatting stopped the matcher from working.
  *
@@ -325,17 +388,53 @@ private const val MAX_WHOLE_LINE_BOLD_SHARE = 0.2
  * at all (חברותא על זבחים, v30: 391 links instead of 6400), and a bold that covers
  * whole paragraphs mixes the explanation into the quote (חברותא על חולין: -494).
  * Both stayed an INFO "Created N links" line, inside the global drift gate.
+ *
+ * Lines are only read inside a section the two books share, so a book whose headings
+ * changed level or wording (`<h4>דף ב.</h4>`) collapses to 0 links with 0 bold lines
+ * counted. That is checked first, from the headings themselves; then a link count far
+ * below the book's sections catches bold markup the matcher does not know at all.
  */
-internal fun havroutaFormattingWarnings(title: String, stats: HavroutaPairStats): List<String> {
-    if (stats.boldLines < MIN_BOLD_LINES_FOR_CHECK) return emptyList()
+internal fun havroutaFormattingWarnings(title: String, talmudTitle: String, stats: HavroutaPairStats): List<String> {
+    val sections = stats.sections
+    val kind = sections.kind
+    if (stats.bookLines == 0) return emptyList()
+    if (sections.inBook == 0) {
+        return listOf(
+            "$title: none of its ${stats.bookLines} lines is a ${kind.bookHeading} heading, so nothing in it " +
+                "was matched to $talmudTitle and ${stats.links} links were created: look for a heading level " +
+                "or wording that changed in the book file"
+        )
+    }
+    if (sections.inTalmud == 0) {
+        return listOf(
+            "$title: $talmudTitle has no ${kind.talmudHeading} heading, so nothing in the book was matched " +
+                "to it and ${stats.links} links were created"
+        )
+    }
     val warnings = mutableListOf<String>()
+    val sectionsLost = sections.shared < sections.inTalmud * MIN_SHARED_SECTION_SHARE
+    if (sectionsLost) {
+        warnings += "$title: only ${sections.shared} of the ${sections.inTalmud} ${kind.plural} of $talmudTitle " +
+            "have a heading of the same name in the book (${sections.inBook} headed there), and only those are " +
+            "linked: compare the ${kind.bookHeading} headings of the book with the ${kind.talmudHeading} of the Talmud"
+    }
     fun pct(n: Int) = "${n * 100 / stats.boldLines}%"
-    if (stats.links < stats.boldLines * MIN_LINKED_SHARE) {
+    var shareWarned = false
+    if (!sectionsLost && stats.boldLines >= MIN_BOLD_LINES_FOR_CHECK && stats.links < stats.boldLines * MIN_LINKED_SHARE) {
+        shareWarned = true
         warnings += "$title: only ${stats.links} of ${stats.boldLines} lines with bold Talmud text were " +
             "linked (${pct(stats.links)}; a sound Chavruta book links over 90%): look for formatting " +
-            "left open over many lines in the book file, or bold that is not Talmud text"
+            "left open over many lines in the book file, bold that is not Talmud text, or bold written " +
+            "other than <b>…</b> (<b class=…>, <strong>), which is not read"
     }
-    if (stats.wholeLineBoldLines > stats.boldLines * MAX_WHOLE_LINE_BOLD_SHARE) {
+    if (!sectionsLost && !shareWarned && stats.bookLines >= MIN_LINES_FOR_LINK_DENSITY &&
+        stats.links < sections.shared * MIN_LINKS_PER_SECTION
+    ) {
+        warnings += "$title: only ${stats.links} links over the ${sections.shared} ${kind.plural} it shares with " +
+            "$talmudTitle (a sound Chavruta book has over 20 per ${kind.singular}), with ${stats.boldLines} bold lines " +
+            "counted: look for Talmud quotes no longer marked <b>…</b> in the book file"
+    }
+    if (stats.boldLines >= MIN_BOLD_LINES_FOR_CHECK && stats.wholeLineBoldLines > stats.boldLines * MAX_WHOLE_LINE_BOLD_SHARE) {
         warnings += "$title: ${stats.wholeLineBoldLines} of ${stats.boldLines} bold lines " +
             "(${pct(stats.wholeLineBoldLines)}; usually under 10%) are bold from start to end, so the " +
             "explanation is matched as Talmud text: look for an unclosed <b> in the book file"
@@ -343,12 +442,19 @@ internal fun havroutaFormattingWarnings(title: String, stats: HavroutaPairStats)
     return warnings
 }
 
+/** A bold opener: `<b>`, `<b class=…>` or `<strong>`. Only the first is read as a quote. */
+private val boldOpenerPattern = Regex("""<b>|<b\s[^>]*>|<strong\b[^>]*>""")
+
 /** A long line whose bold text is (nearly) all of its text. */
 private fun isWholeLineBold(content: String, boldText: String): Boolean {
     val plain = content.replace(anyTagPattern, "").trim()
     if (plain.length < 40) return false
     return normalizeText(boldText).length >= 0.9 * normalizeText(plain).length
 }
+
+/** Distinct section names of each side and how many they share. */
+private fun sectionsOf(kind: HavroutaSectionKind, inBook: Set<String>, inTalmud: Set<String>) =
+    HavroutaSections(kind, inBook.size, inTalmud.size, inBook.count { it in inTalmud })
 
 /**
  * Processes a single Havrouta-Talmud book pair and creates links.
@@ -380,13 +486,8 @@ private suspend fun processBookPair(
         talmudLinesByDaf[daf.dafRef] = linesInDaf
     }
 
-    // Create map of lineIndex -> lineId for Talmud
-    val talmudLineIdByIndex = talmudLines.associate { it.lineIndex to it.id }
-
-    var linksCreated = 0
     var boldLines = 0
     var wholeLineBoldLines = 0
-    val linkBatch = mutableListOf<Link>()
     val rows = mutableListOf<QuoteRow>()
 
     // Process each Havrouta line
@@ -409,7 +510,7 @@ private suspend fun processBookPair(
 
         // Extract bold text
         val boldText = extractBoldText(havroutaLine.content)
-        if (havroutaLine.content.contains("<b>")) {
+        if (boldOpenerPattern.containsMatchIn(havroutaLine.content)) {
             boldLines++
             if (isWholeLineBold(havroutaLine.content, boldText)) wholeLineBoldLines++
         }
@@ -432,6 +533,29 @@ private suspend fun processBookPair(
     val realigned = realignQuotes(rows, talmudLines, talmudDafs, logger)
     if (realigned > 0) logger.i { "  Realigned $realigned links to the Talmud line that holds their quote" }
 
+    val links = insertQuoteLinks(repository, bindings, ctCommentary, rows, talmudLines, talmudBookId, havroutaBookId)
+    val sections = sectionsOf(
+        HavroutaSectionKind.DAF,
+        havroutaDafs.mapTo(HashSet()) { it.dafRef },
+        talmudDafs.mapTo(HashSet()) { it.dafRef },
+    )
+    return HavroutaPairStats(links, havroutaLines.size, boldLines, wholeLineBoldLines, sections)
+}
+
+/** Writes one Talmud → Havrouta link per [rows] entry that found a Talmud line; returns how many. */
+private suspend fun insertQuoteLinks(
+    repository: SeforimRepository,
+    bindings: IdAllocatorBindings,
+    ctCommentary: Long,
+    rows: List<QuoteRow>,
+    talmudLines: List<Line>,
+    talmudBookId: Long,
+    havroutaBookId: Long,
+): Int {
+    // Create map of lineIndex -> lineId for Talmud
+    val talmudLineIdByIndex = talmudLines.associate { it.lineIndex to it.id }
+    var linksCreated = 0
+    val linkBatch = mutableListOf<Link>()
     for (row in rows) {
         val havroutaLine = row.havroutaLine
         val matchingLineIndex = row.talmudLineIndex ?: continue
@@ -462,8 +586,7 @@ private suspend fun processBookPair(
     if (linkBatch.isNotEmpty()) {
         repository.insertLinksBatch(linkBatch)
     }
-
-    return HavroutaPairStats(linksCreated, boldLines, wholeLineBoldLines)
+    return linksCreated
 }
 
 /** A Havrouta line with a bold quote, and the Talmud line (index) it is linked to, if any. */
