@@ -7,6 +7,8 @@ import io.github.kdroidfilter.seforimlibrary.common.buildstate.BuildStateSnapsho
 import io.github.kdroidfilter.seforimlibrary.common.buildstate.BuildStateVerifier
 import io.github.kdroidfilter.seforimlibrary.common.buildstate.BuildStateWriter
 import io.github.kdroidfilter.seforimlibrary.common.buildstate.IdTable
+import io.github.kdroidfilter.seforimlibrary.common.ids.BOOK_MOVE_LEAF_KEY_PREFIX
+import io.github.kdroidfilter.seforimlibrary.common.ids.CategoryLabels
 import io.github.kdroidfilter.seforimlibrary.common.ids.IdAllocatorBindings
 import io.github.kdroidfilter.seforimlibrary.common.ids.InMemoryIdAllocator
 import io.github.kdroidfilter.seforimlibrary.dao.repository.SeforimRepository
@@ -23,6 +25,7 @@ import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertNotEquals
 import kotlin.test.assertNull
+import kotlin.test.assertTrue
 
 /**
  * book_moves.csv destination leaves created by renameCategories take stable ids from
@@ -223,6 +226,219 @@ class BookMoveLeafIdsTest {
         }
     }
 
+    // ─── Folders that are both a book_moves leaf and an Otzaria folder ──────────
+
+    private val yadDavid = "תלמוד בבלי/אחרונים/יד דוד"
+    private val shared = "תלמוד בבלי/אחרונים/משותף"
+
+    @Test
+    fun `adding a book move into an existing Otzaria folder keeps that folder's id`() {
+        val seed = seed(
+            categories = sefaria.withIndex().associate { (i, path) -> path to i + 1L } +
+                mapOf(ohrHayashar to 4L, sederNashim to 5L, yadDavid to 6L),
+            nextId = 7,
+        )
+        val folders = listOf(sederNashim, yadDavid)
+        val first = runBuild("q1", seed, listOf(moveToKlalei), otzariaFolders = folders)
+        assertEquals(6L, first.paths.getValue(yadDavid))
+
+        val second = runBuild(
+            "q2", first.state,
+            listOf(BookMove("מבוא התלמוד", "תלמוד בבלי/ראשונים", yadDavid), moveToKlalei),
+            otzariaFolders = folders,
+        )
+        assertEquals(6L, second.paths.getValue(yadDavid), "the leaf takes the Otzaria folder's id")
+        assertEquals(first.paths - yadDavid, second.paths - yadDavid)
+        assertEquals(6L, leafKeys(second.state).getValue(yadDavid))
+        assertEquals(0L, second.otzariaFreshCategories)
+    }
+
+    @Test
+    fun `removing the last book move into a shared folder keeps that folder's id`() {
+        val folders = listOf(sederNashim, shared)
+        val first = runBuild(
+            "r1", v30LikeSeed(),
+            listOf(BookMove("מבוא התלמוד", "תלמוד בבלי/ראשונים", shared), moveToKlalei),
+            otzariaFolders = folders,
+        )
+        val sharedId = first.paths.getValue(shared)
+
+        val second = runBuild("r2", first.state, listOf(moveToKlalei), otzariaFolders = folders)
+        assertEquals(sharedId, second.paths.getValue(shared))
+        assertEquals(first.paths, second.paths)
+        assertEquals(0L, second.otzariaFreshCategories)
+        assertEquals(sharedId, plainKeys(first.state).getValue(shared), "the Otzaria key follows the leaf")
+    }
+
+    @Test
+    fun `a shared leaf whose Otzaria key holds an older id keeps the leaf id when its rows go`() {
+        // The real v30 state of מחשבת ישראל/אחרונים/רמחל: shipped on 1476 as a book_moves
+        // leaf, while the build state still holds its Otzaria key on 1322.
+        val ramchal = "מחשבת ישראל/אחרונים/רמחל"
+        val seed = seed(
+            categories = v30SefariaIds + mapOf(
+                ohrHayashar to 1385L, sederNashim to 1526L, piskeiRabbeinuMendel to 1479L, ramchal to 1322L,
+            ),
+            nextId = 1536,
+        )
+        val folders = v30Otzaria + ramchal
+        fun build(name: String, state: Path, moves: List<BookMove>) = runBuild(
+            name, state, moves,
+            sefaria = v30SefariaIds.keys.toList(),
+            books = v30Moves.map { it.name } + moveToKlalei.name,
+            publishedIds = PUBLISHED_BOOK_MOVE_LEAF_IDS,
+            otzariaFolders = folders,
+            restores = CATEGORY_ID_RESTORES,
+        )
+        val first = build("m1", seed, v30Moves)
+        assertEquals(1476L, first.paths.getValue(ramchal))
+
+        val withoutRamchal = v30Moves.filter { it.destPath != ramchal }
+        val second = build("m2", first.state, withoutRamchal)
+        assertEquals(1476L, second.paths.getValue(ramchal), "not back to the stale 1322")
+        assertEquals(first.paths, second.paths)
+        assertEquals(0L, second.otzariaFreshCategories)
+        // The first build moved the Otzaria key onto 1476 ...
+        assertEquals(1476L, plainKeys(first.state).getValue(ramchal))
+
+        // ... and even a key still on 1322 (no build aligned it) does not win over the leaf id.
+        val unaligned = seed(
+            categories = v30SefariaIds + mapOf(
+                ohrHayashar to 1385L, sederNashim to 1478L, piskeiRabbeinuMendel to 1479L, ramchal to 1322L,
+                BOOK_MOVE_LEAF_KEY_PREFIX + ramchal to 1476L,
+            ),
+            nextId = 1537,
+        )
+        val third = build("m3", unaligned, withoutRamchal)
+        assertEquals(1476L, third.paths.getValue(ramchal), "the leaf id wins over the stale Otzaria key")
+        assertEquals(1476L, plainKeys(third.state).getValue(ramchal))
+    }
+
+    @Test
+    fun `a folder id survives book_moves rows added, removed and reordered over many builds`() {
+        val reserved = "תלמוד בבלי/אחרונים/שמור"
+        val leafOnly = "תלמוד בבלי/ראשונים/ליקוטים"
+        val seed = seed(
+            categories = sefaria.withIndex().associate { (i, path) -> path to i + 1L } +
+                mapOf(ohrHayashar to 4L, sederNashim to 5L, yadDavid to 6L, reserved to 7L),
+            nextId = 8,
+        )
+        val toYadDavid = BookMove("מבוא התלמוד", "תלמוד בבלי/ראשונים", yadDavid)
+        val toShared = BookMove("כללי הגמרא", "תלמוד בבלי/ראשונים", shared)
+        val toLeafOnly = BookMove("סדר הדורות", "תלמוד בבלי/ראשונים", leafOnly)
+        val baseFolders = listOf(sederNashim, yadDavid, shared)
+        // (moves, Otzaria folders, extra Sefaria categories) per build.
+        val plan = listOf(
+            Triple(listOf(moveToKlalei, toShared, toLeafOnly), baseFolders, emptyList()),
+            Triple(listOf(toYadDavid, toLeafOnly, moveToKlalei, toShared), baseFolders, emptyList()),
+            Triple(listOf(moveToKlalei), baseFolders, listOf("תלמוד בבלי/מפרשים")),
+            // The leaf-only folder is gone from book_moves.csv, and Otzaria now has a folder there.
+            Triple(listOf(toShared, toYadDavid), baseFolders + leafOnly, listOf("תלמוד בבלי/מפרשים")),
+            Triple(emptyList(), baseFolders + leafOnly, listOf("תלמוד בבלי/מפרשים", "תלמוד בבלי/עזר")),
+            Triple(listOf(toLeafOnly, toShared, moveToKlalei, toYadDavid), baseFolders, emptyList()),
+            Triple(listOf(toYadDavid, toShared, moveToKlalei, toLeafOnly), baseFolders, emptyList()),
+        )
+        val seen = HashMap<String, Long>()
+        var state = seed
+        for ((i, step) in plan.withIndex()) {
+            val (moves, folders, extra) = step
+            val build = runBuild(
+                "s$i", state, moves,
+                extraSefaria = extra,
+                books = books + "סדר הדורות",
+                otzariaFolders = folders,
+            )
+            for ((path, id) in build.paths) {
+                assertEquals(seen.getOrPut(path) { id }, id, "build $i moved '$path'")
+            }
+            for (move in moves) assertEquals(build.paths.getValue(move.destPath), bookCategoryOf(build, move.name))
+            assertEquals(5L, build.paths.getValue(sederNashim))
+            assertEquals(6L, build.paths.getValue(yadDavid))
+            assertNull(build.paths.entries.firstOrNull { it.value == 7L }, "the reserved id is never handed out")
+            state = build.state
+        }
+        // Every folder the plan touches was seen, and each kept one id throughout.
+        for (path in listOf(klaleiHashas, shared, leafOnly, yadDavid, sederNashim)) assertTrue(path in seen, path)
+        assertEquals(seen.size, seen.values.toSet().size, "two folders shared an id over the builds")
+    }
+
+    @Test
+    fun `the leaf finds the Otzaria folder whatever quote mark either one spells`() {
+        val otzariaSpelling = "תלמוד בבלי/אחרונים/חידושי הרי״ם"
+        val csvSpelling = "תלמוד בבלי/אחרונים/חידושי הרי\"ם"
+        val seed = seed(
+            categories = sefaria.withIndex().associate { (i, path) -> path to i + 1L } +
+                mapOf(ohrHayashar to 4L, sederNashim to 5L, otzariaSpelling to 6L),
+            nextId = 7,
+        )
+        val folders = listOf(sederNashim, otzariaSpelling)
+        val first = runBuild("g1", seed, listOf(moveToKlalei), otzariaFolders = folders)
+        assertEquals(6L, first.paths.getValue(otzariaSpelling))
+
+        val moves = listOf(BookMove("מבוא התלמוד", "תלמוד בבלי/ראשונים", csvSpelling), moveToKlalei)
+        val second = runBuild("g2", first.state, moves, otzariaFolders = folders)
+        assertEquals(6L, second.paths.getValue(csvSpelling), "the leaf (CSV spelling) takes the folder's id")
+        assertNull(second.paths[otzariaSpelling], "one folder, not two")
+        assertEquals(0L, second.otzariaFreshCategories)
+
+        val third = runBuild("g3", second.state, listOf(moveToKlalei), otzariaFolders = folders)
+        assertEquals(6L, third.paths.getValue(otzariaSpelling))
+    }
+
+    @Test
+    fun `an Otzaria key whose id a DB row holds is not given to the leaf`() {
+        // The Otzaria key for the destination holds 6, but a row written outside the
+        // allocator sits on 6: the leaf gets a fresh id, and the key is not moved onto it.
+        val seed = seed(
+            categories = sefaria.withIndex().associate { (i, path) -> path to i + 1L } +
+                mapOf(ohrHayashar to 4L, sederNashim to 5L, yadDavid to 6L),
+            nextId = 7,
+        )
+        val build = runBuild(
+            "f1", seed,
+            listOf(BookMove("מבוא התלמוד", "תלמוד בבלי/ראשונים", yadDavid)),
+            foreignRows = mapOf(6L to "זר"),
+            otzariaFolders = listOf(sederNashim, yadDavid),
+        )
+        assertEquals(7L, build.paths.getValue(yadDavid))
+        assertEquals(6L, build.paths.getValue("זר"))
+        assertEquals(6L, plainKeys(build.state).getValue(yadDavid), "a key on a live row is left alone")
+    }
+
+    @Test
+    fun `an Otzaria key that another folder's key also holds is not given to the leaf`() {
+        val other = "תלמוד בבלי/אחרונים/אחר"
+        val seed = seed(
+            categories = sefaria.withIndex().associate { (i, path) -> path to i + 1L } +
+                mapOf(ohrHayashar to 4L, sederNashim to 5L, yadDavid to 6L, other to 6L),
+            nextId = 7,
+        )
+        val build = runBuild(
+            "h1", seed,
+            listOf(BookMove("מבוא התלמוד", "תלמוד בבלי/ראשונים", yadDavid)),
+            otzariaFolders = listOf(sederNashim),
+        )
+        assertEquals(7L, build.paths.getValue(yadDavid))
+    }
+
+    private fun bookCategoryOf(build: Build, title: String): Long =
+        DriverManager.getConnection("jdbc:sqlite:${build.state.toString().removeSuffix(".buildstate")}").use { conn ->
+            conn.prepareStatement("SELECT categoryId FROM book WHERE title = ?").use { st ->
+                st.setString(1, title)
+                st.executeQuery().use { rs -> rs.next(); rs.getLong(1) }
+            }
+        }
+
+    private fun categoryKeys(state: Path): Map<String, Long> =
+        BuildStateReader().read(state).lookups[IdTable.CATEGORY].orEmpty()
+
+    private fun plainKeys(state: Path): Map<String, Long> =
+        categoryKeys(state).filterKeys { !it.startsWith(BOOK_MOVE_LEAF_KEY_PREFIX) }
+
+    private fun leafKeys(state: Path): Map<String, Long> =
+        categoryKeys(state).filterKeys { it.startsWith(BOOK_MOVE_LEAF_KEY_PREFIX) }
+            .mapKeys { it.key.removePrefix(BOOK_MOVE_LEAF_KEY_PREFIX) }
+
     private val books = listOf("דרכי התלמוד", "מבוא התלמוד", "כללי הגמרא")
 
     // ─── Simulated build ──────────────────────────────────────────────────────
@@ -266,9 +482,11 @@ class BookMoveLeafIdsTest {
         withAttached(db, state) { conn ->
             conn.autoCommit = false
             // What the old code did: the dry-run path still uses the implicit rowid.
-            applyBookMove(conn, moves.last(), logger)
-            implicitLeafId = categoryIdByTitle(conn, moves.last().destPath.substringAfterLast('/'))!!
-            conn.rollback()
+            moves.lastOrNull()?.let { last ->
+                applyBookMove(conn, last, logger)
+                implicitLeafId = categoryIdByTitle(conn, last.destPath.substringAfterLast('/'))!!
+                conn.rollback()
+            }
 
             val leafIds = BookMoveLeafIds(conn, publishedIds = publishedIds)
             leafIds.restore(restores, logger)
@@ -321,9 +539,10 @@ class BookMoveLeafIdsTest {
     }
 
     /**
-     * The Otzaria stage as GenerateLines + Generator run it: reuse an existing folder
-     * by (parent, title), otherwise upsertCategory. Returns the fresh category count,
-     * i.e. how many folders were new or reallocated.
+     * The Otzaria stage as GenerateLines + Generator.ensureCategoryHierarchy run it:
+     * reuse an existing folder by (parent, comparable title) and align its key with a
+     * book_moves leaf, otherwise upsertOtzariaCategory. Returns the fresh category
+     * count, i.e. how many folders were new or reallocated.
      */
     private fun otzariaStage(db: Path, state: Path, folders: List<String>): Long = runBlocking {
         val driver = JdbcSqliteDriver("jdbc:sqlite:$db")
@@ -336,11 +555,19 @@ class BookMoveLeafIdsTest {
             for (folder in folders) {
                 var parentId: Long? = null
                 var path = ""
-                for ((level, title) in folder.split('/').withIndex()) {
+                for ((level, rawTitle) in folder.split('/').withIndex()) {
+                    val title = CategoryLabels.normalize(rawTitle)
                     path = if (path.isEmpty()) title else "$path/$title"
                     val children = if (parentId == null) repo.getRootCategories() else repo.getCategoryChildren(parentId)
-                    parentId = children.firstOrNull { it.title == title }?.id
-                        ?: bindings.upsertCategory(path, parentId, title, level, 999)
+                    val existing = children.firstOrNull {
+                        CategoryLabels.comparable(it.title) == CategoryLabels.comparable(title)
+                    }
+                    parentId = if (existing != null) {
+                        bindings.alignWithBookMoveLeaf(path, existing.id)
+                        existing.id
+                    } else {
+                        bindings.upsertOtzariaCategory(path, parentId, title, level, 999)
+                    }
                 }
             }
             allocator.snapshotTo(state, mapOf("generator" to "test-otzaria"))

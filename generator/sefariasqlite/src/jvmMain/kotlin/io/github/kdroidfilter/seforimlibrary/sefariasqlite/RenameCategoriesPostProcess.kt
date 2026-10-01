@@ -5,6 +5,8 @@ import co.touchlab.kermit.Severity
 import io.github.kdroidfilter.seforimlibrary.common.OptimizedHttpClient
 import io.github.kdroidfilter.seforimlibrary.common.buildstate.BuildStateVerifier
 import io.github.kdroidfilter.seforimlibrary.common.buildstate.IdTable
+import io.github.kdroidfilter.seforimlibrary.common.ids.BOOK_MOVE_LEAF_KEY_PREFIX
+import io.github.kdroidfilter.seforimlibrary.common.ids.CategoryLabels
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
@@ -779,14 +781,6 @@ private fun createCategory(conn: Connection, title: String, parentId: Long?, id:
 internal const val BOOK_MOVE_STATE_SCHEMA = "rename_state"
 
 /**
- * Namespace of the build-state keys for book_moves.csv destination leaves. It keeps
- * them apart from the plain-path keys of the Sefaria and Otzaria stages: a Sefaria key
- * is its pre-rename path, and an Otzaria folder may already hold a key for the same
- * path under another id, so sharing that namespace could renumber a live category.
- */
-internal const val BOOK_MOVE_LEAF_KEY_PREFIX = "book_moves:"
-
-/**
  * Ids the leaves below shipped with (v20 to v30), before they were keyed in the build
  * state. A leaf's first keyed build takes its published id from here, so clients keep
  * their per-book settings and saved tabs; the next build finds it under its key.
@@ -834,8 +828,16 @@ internal val CATEGORY_ID_RESTORES: List<CategoryIdRestore> = listOf(
  *
  * Now each leaf is keyed by its destination path in the build state's `id_lookup`
  * (kind `category`, prefix [BOOK_MOVE_LEAF_KEY_PREFIX]), so it keeps its id across
- * builds. A new key takes its published id from [publishedIds] when that id is free,
- * otherwise a fresh id above both the counter and the DB, never an id another key holds.
+ * builds. A new key takes, in this order: its published id from [publishedIds] when
+ * that id is free; the id of the Otzaria folder already at that path (see
+ * [otzariaFolderId]); otherwise a fresh id above both the counter and the DB, never an
+ * id another key holds.
+ *
+ * The Otzaria step matters for a folder that holds Otzaria books too. The Otzaria stage
+ * runs after this one and puts its books into the leaf it finds, so a leaf on a new id
+ * would renumber that folder the first time a book_moves row targets it. When the last
+ * row into the folder is removed, the Otzaria stage recreates it on the leaf id
+ * (IdAllocatorBindings.upsertOtzariaCategory), so it does not move back either.
  *
  * The build state must be ATTACHed to [conn] as [schema], so the id rows commit or
  * roll back together with the category rows.
@@ -886,7 +888,7 @@ internal class BookMoveLeafIds(
         val nextId = categoryNextId()
         val dbMax = queryMaxId(conn, "category")
         val published = publishedIds[path]?.takeIf { !lookupHoldsId(it) && !dbHoldsId(it) }
-        val id = published ?: maxOf(nextId, dbMax + 1)
+        val id = published ?: otzariaFolderId(path) ?: maxOf(nextId, dbMax + 1)
 
         conn.prepareStatement(
             "INSERT INTO $schema.id_lookup(kind, natural_key, id) VALUES (?, ?, ?)",
@@ -899,6 +901,50 @@ internal class BookMoveLeafIds(
         if (id >= nextId) setCategoryNextId(id + 1)
         return id
     }
+
+    /**
+     * The id the Otzaria stage keeps for the folder at [path], when the leaf may take it:
+     * a plain key (not [BOOK_MOVE_LEAF_KEY_PREFIX]) for the same folder holds it, no DB
+     * row does, and every key that holds it is for that folder. "The same folder" is the
+     * Otzaria stage's own test (Generator.findExistingCategory), segment by segment
+     * [CategoryLabels.comparablePath]; a key spelled exactly as [path] wins a tie.
+     */
+    private fun otzariaFolderId(path: String): Long? {
+        val comparable = CategoryLabels.comparablePath(path)
+        val matches = plainKeys().filterKeys { CategoryLabels.comparablePath(it) == comparable }
+        if (matches.isEmpty()) return null
+        val id = matches[path] ?: matches.values.toSet().singleOrNull() ?: return null
+        if (dbHoldsId(id)) return null
+        val holders = keysHolding(id)
+        val sameFolder = holders.all { key ->
+            !key.startsWith(BOOK_MOVE_LEAF_KEY_PREFIX) && CategoryLabels.comparablePath(key) == comparable
+        }
+        return id.takeIf { sameFolder }
+    }
+
+    private fun plainKeys(): Map<String, Long> =
+        conn.prepareStatement(
+            "SELECT natural_key, id FROM $schema.id_lookup WHERE kind = ?",
+        ).use { st ->
+            st.setString(1, kind)
+            st.executeQuery().use { rs ->
+                buildMap {
+                    while (rs.next()) {
+                        val key = rs.getString(1)
+                        if (!key.startsWith(BOOK_MOVE_LEAF_KEY_PREFIX)) put(key, rs.getLong(2))
+                    }
+                }
+            }
+        }
+
+    private fun keysHolding(id: Long): List<String> =
+        conn.prepareStatement(
+            "SELECT natural_key FROM $schema.id_lookup WHERE kind = ? AND id = ?",
+        ).use { st ->
+            st.setString(1, kind)
+            st.setLong(2, id)
+            st.executeQuery().use { rs -> buildList { while (rs.next()) add(rs.getString(1)) } }
+        }
 
     private fun lookupId(key: String): Long? =
         conn.prepareStatement(

@@ -59,6 +59,29 @@ class InMemoryIdAllocatorTest {
     }
 
     @Test
+    fun `pointCategoryKey moves a key onto an id another key holds and persists it`() {
+        val allocator = InMemoryIdAllocator.load(path = null)
+        val path = "מחשבת ישראל/אחרונים/רמחל"
+        val leafKey = BOOK_MOVE_LEAF_KEY_PREFIX + path
+        assertNull(allocator.peekCategoryId(path))
+        val stale = allocator.categoryId(path)
+        val leaf = allocator.categoryId(leafKey)
+        assertNull(allocator.peekCategoryId("אחר"), "peek does not allocate")
+
+        assertTrue(allocator.pointCategoryKey(path, leaf))
+        assertEquals(leaf, allocator.categoryId(path))
+        assertEquals(mapOf(path to leaf, leafKey to leaf), allocator.categoryKeys())
+        // The id the key left is not handed out again.
+        assertNotEquals(stale, allocator.categoryId("חדש"))
+
+        val file = tmp.root.toPath().resolve("point.buildstate")
+        allocator.snapshotTo(file)
+        val reloaded = InMemoryIdAllocator.load(file)
+        assertEquals(leaf, reloaded.peekCategoryId(path))
+        assertEquals(leaf, reloaded.peekCategoryId(leafKey))
+    }
+
+    @Test
     fun `same natural key returns same id across calls`() {
         val allocator = InMemoryIdAllocator.load(path = null)
         val first = allocator.bookId("Sefaria", "בראשית")

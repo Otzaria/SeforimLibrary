@@ -6,6 +6,7 @@ import io.github.kdroidfilter.seforimlibrary.common.buildstate.BookSourceHash
 import io.github.kdroidfilter.seforimlibrary.common.changes.OtzariaSourceHashComputer
 import io.github.kdroidfilter.seforimlibrary.common.changes.TouchedBookDetector
 import io.github.kdroidfilter.seforimlibrary.common.countVisibleChars
+import io.github.kdroidfilter.seforimlibrary.common.ids.CategoryLabels
 import io.github.kdroidfilter.seforimlibrary.common.ids.IdAllocator
 import io.github.kdroidfilter.seforimlibrary.common.ids.IdAllocatorBindings
 import io.github.kdroidfilter.seforimlibrary.common.ids.altTocChildPath
@@ -236,35 +237,11 @@ class DatabaseGenerator(
     )
 
     // Normalization helpers for categories/titles
-    private fun normalizeHebrewLabel(raw: String): String {
-        var s = raw.trim()
-        // Normalize common quote variants to Hebrew gershayim/geresh
-        s = s.replace('\u201C', '"').replace('\u201D', '"')
-        s = s.replace('\u2018', '\'').replace('\u2019', '\'')
-        s = s.replace("\"", "״")
-        s = s.replace("''", "״")
-        s = s.replace("׳׳", "״")
-        s = s.replace("`", "׳")
-        s = s.replace("\u05f3", "׳")
-        s = s.replace("\\s+".toRegex(), " ").trim()
-        return s
-    }
+    // Shared with renameCategories, which must match a book_moves leaf to the Otzaria
+    // folder that findExistingCategory would put into it.
+    private fun normalizeHebrewLabel(raw: String): String = CategoryLabels.normalize(raw)
 
-    private fun comparableLabel(raw: String): String {
-        fun stripCorpusSuffix(s: String): String {
-            val pattern = "(?i)\\s+על\\s+(התנ\"ך|התורה|התלמוד|המשנה|תנך|תורה|תלמוד|משנה)$".toRegex()
-            return s.replace(pattern, "").trim()
-        }
-
-        val base = normalizeHebrewLabel(raw)
-            .replace("״", "")
-            .replace("\"", "")
-            .replace("׳", "")
-            .replace("'", "")
-            .replace("\\s+".toRegex(), " ")
-            .trim()
-        return stripCorpusSuffix(base)
-    }
+    private fun comparableLabel(raw: String): String = CategoryLabels.comparable(raw)
 
     private fun normalizeCategorySegments(rawTitle: String): List<String> {
         val cleaned = normalizeHebrewLabel(rawTitle)
@@ -302,13 +279,20 @@ class DatabaseGenerator(
             if (pathSoFar.isNotEmpty()) pathSoFar.append('/')
             pathSoFar.append(title)
             val existing = findExistingCategory(currentParent, title)
-            val categoryId = existing?.id ?: bindings.upsertCategory(
-                canonicalPath = pathSoFar.toString(),
-                parentId = currentParent,
-                title = title,
-                level = currentLevel,
-                orderIndex = 999,
-            )
+            // A folder that is also a book_moves.csv leaf keeps one id under both of its
+            // keys, so it does not move when the book_moves rows into it come or go.
+            val categoryId = if (existing != null) {
+                bindings.alignWithBookMoveLeaf(pathSoFar.toString(), existing.id)
+                existing.id
+            } else {
+                bindings.upsertOtzariaCategory(
+                    canonicalPath = pathSoFar.toString(),
+                    parentId = currentParent,
+                    title = title,
+                    level = currentLevel,
+                    orderIndex = 999,
+                )
+            }
             lastId = categoryId
             currentParent = categoryId
             currentLevel += 1

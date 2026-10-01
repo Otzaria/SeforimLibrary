@@ -41,6 +41,19 @@ interface IdAllocator {
      */
     fun reallocateCategoryId(canonicalPath: String): Long = categoryId(canonicalPath)
 
+    /** The id [canonicalPath] already holds, without allocating one; null when it has none. */
+    fun peekCategoryId(canonicalPath: String): Long? = null
+
+    /** Every category key and the id it holds, as of this call. */
+    fun categoryKeys(): Map<String, Long> = emptyMap()
+
+    /**
+     * Points [canonicalPath] at [id], an id that is already allocated to the same folder
+     * under another key (a book_moves.csv leaf, see [BOOK_MOVE_LEAF_KEY_PREFIX]). The id
+     * the key held before is left unheld. Returns false if this allocator cannot do it.
+     */
+    fun pointCategoryKey(canonicalPath: String, id: Long): Boolean = false
+
     /** Stable id for a book edition; natural key = (bookId, versionTitle). */
     fun bookVersionId(bookId: Long, versionTitle: String): Long
 
