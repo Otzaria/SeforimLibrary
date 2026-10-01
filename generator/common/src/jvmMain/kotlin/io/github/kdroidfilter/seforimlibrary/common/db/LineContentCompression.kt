@@ -54,9 +54,17 @@ object LineContentCompression {
         }
     }
 
-    /** Not thread-safe; use one per thread. */
-    class Compressor(dictionary: ByteArray = bundledDictionary) : AutoCloseable {
-        private val dict = ZstdDictCompress(dictionary, LEVEL)
+    /**
+     * Not thread-safe; use one per thread. Workers share one [ZstdDictCompress]: a CDict
+     * is immutable and costs ~50MiB, so one per worker multiplies native memory.
+     */
+    class Compressor private constructor(private val dict: ZstdDictCompress, private val ownsDict: Boolean) :
+        AutoCloseable {
+        constructor(dictionary: ByteArray = bundledDictionary) : this(ZstdDictCompress(dictionary, LEVEL), true)
+
+        /** Borrows [dict]; the caller closes it after every Compressor that uses it. */
+        constructor(dict: ZstdDictCompress) : this(dict, false)
+
         private val ctx = ZstdCompressCtx().apply {
             setLevel(LEVEL)
             setChecksum(false)
@@ -69,11 +77,11 @@ object LineContentCompression {
 
         override fun close() {
             ctx.close()
-            dict.close()
+            if (ownsDict) dict.close()
         }
     }
 
-    /** Not thread-safe; use one per thread; threads may share one [ZstdDictDecompress]. */
+    /** Not thread-safe; use one per thread. Like [Compressor], workers may share one [ZstdDictDecompress]. */
     class Decompressor private constructor(
         private val dict: ZstdDictDecompress,
         private val dictId: Long,

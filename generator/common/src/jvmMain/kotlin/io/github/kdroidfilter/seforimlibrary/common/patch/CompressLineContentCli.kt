@@ -3,6 +3,7 @@ package io.github.kdroidfilter.seforimlibrary.common.patch
 import co.touchlab.kermit.Logger
 import co.touchlab.kermit.Severity
 import com.github.luben.zstd.Zstd
+import com.github.luben.zstd.ZstdDictCompress
 import com.github.luben.zstd.ZstdDictDecompress
 import io.github.kdroidfilter.seforimlibrary.common.db.LineContentCompression
 import io.github.kdroidfilter.seforimlibrary.common.db.LineContentShape
@@ -93,9 +94,12 @@ internal fun compressLineContent(
     val switchJournal = journalMode.equals("wal", ignoreCase = true)
     if (switchJournal) conn.createStatement().use { it.execute("PRAGMA journal_mode=DELETE") }
 
+    val dictId = Zstd.getDictIdFromDict(dictionary)
+    val cdict = ZstdDictCompress(dictionary, LineContentCompression.LEVEL)
+    val ddict = ZstdDictDecompress(dictionary)
     val workers = ConcurrentLinkedQueue<Pair<LineContentCompression.Compressor, LineContentCompression.Decompressor>>()
     val local = ThreadLocal.withInitial {
-        (LineContentCompression.Compressor(dictionary) to LineContentCompression.Decompressor(dictionary))
+        (LineContentCompression.Compressor(cdict) to LineContentCompression.Decompressor(ddict, dictId))
             .also(workers::add)
     }
     val pool = Executors.newFixedThreadPool(threads)
@@ -147,6 +151,8 @@ internal fun compressLineContent(
         pool.shutdownNow()
         pool.awaitTermination(1, TimeUnit.MINUTES)
         workers.forEach { (c, d) -> c.close(); d.close() }
+        cdict.close()
+        ddict.close()
         if (switchJournal) conn.createStatement().use { it.execute("PRAGMA journal_mode=$journalMode") }
     }
 }

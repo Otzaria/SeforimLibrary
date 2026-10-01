@@ -153,6 +153,16 @@ class CompressLineContentCliTest {
         assertTrue("line_content row 5" in error.message.orEmpty(), error.message)
     }
 
+    /** Shared dictionaries must not change a byte: the stored frames match the frozen contract. */
+    @Test
+    fun `frames written by the parallel run are byte-identical to the frozen contract`() {
+        val db = schemaSixDb("frozen.db")
+        connect(db).use { compressLineContent(it, chunkRows = 2, threads = 3) }
+        val stored = connect(db).use { blobs(it, "SELECT id, content FROM line_content ORDER BY id") }
+        val digest = LineContentCompression.sha256(stored.toSortedMap().values.fold(ByteArray(0)) { acc, f -> acc + f })
+        assertEquals(FROZEN_FRAMES_SHA256, digest)
+    }
+
     @Test
     fun `a DB that already holds another dictionary is refused`() {
         val db = schemaSixDb("other.db")
