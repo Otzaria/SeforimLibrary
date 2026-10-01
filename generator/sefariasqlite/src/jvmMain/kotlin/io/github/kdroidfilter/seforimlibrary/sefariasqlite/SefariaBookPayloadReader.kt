@@ -770,6 +770,16 @@ internal class SefariaBookPayloadReader(
                 MarkerRun.NONE -> false
             }
 
+        // Items that open with their own label, by index. A label found only after an
+        // opening heading counts when at least one item of the array opens with its own
+        // label: a lone "<br>א." is more often a summary list (תלמוד עשר הספירות).
+        val selfLabelled = if (depth == 1 && nonEmptyCount > 1 && prefixesLeaf && !sourceNumbered) {
+            text.mapIndexed { idx, item -> ownLabelValue(item, afterHeading = false) == idx + 1 }
+        } else {
+            null
+        }
+        val arrayHasSelfLabels = selfLabelled?.any { it } == true
+
         // גרסה חלקית מותרת (מערך קצר); פרק בלי הסטה — לא.
         if (childRefOffsets != null && childRefOffsets.size < text.size) {
             throw SefariaSchemaException(
@@ -789,10 +799,11 @@ internal class SefariaBookPayloadReader(
 
             val sectionIndex = sectionNames.size - depth
             val isReferenceable = referenceableSections.getOrNull(sectionIndex) ?: true
-            // An item that already opens with its own label for this very number
-            // (a partially numbered array) keeps that label alone: "(ג) [ג]" is noise.
+            // An item that already carries its own label for this very number keeps
+            // that label alone: "(נח) [נח]" is noise. Any other number keeps the prefix.
             val nextLinePrefix = if (depth == 1 && isReferenceable && prefixesLeaf && nonEmptyCount > 1 && !sourceNumbered &&
-                !(currentAddressType != "Talmud" && ownLabelValue(item) == idx + 1)
+                !(currentAddressType != "Talmud" && (selfLabelled?.get(idx) == true ||
+                    (arrayHasSelfLabels && ownLabelValue(item, afterHeading = true) == idx + 1)))
             ) {
                 "($letter) "
             } else {
@@ -938,27 +949,47 @@ private val UNNUMBERED_INTEGER_LEAF_NAMES = setOf("פסקה", "פירוש", "פ�
 /** `match_templates[].scope` values that make an alt-struct node citable alone. */
 private val ALONE_MATCH_TEMPLATE_SCOPES = setOf("any", "alone")
 
-// Leading printed label of a segment, in every shape Sefaria texts use, after
-// any opening tags: "(אות) ", "{אות} ", "[אות] " (אליה רבה; bracketed labels may
-// also be glued to a tag or take a colon, "[ב]:"), "אות) " (ביאור על
-// ספר המצוות לרס"ג; also glued, "נה)עינוי"), "אות. " / "אות: " (איסור והיתר
-// הארוך, קשר גודל, תשובות רש"י) and a bold bare numeral "<b>אות</b> " (פרקי אבות
-// in סידור ספרד). Exactly one capture group matches.
-private const val MARKER_TOKEN = """([א-ת"׳״]{1,5})"""
-private val SOURCE_MARKER_REGEX = Regex(
-    """^\s*(?:<[^>]+>\s*)*(?:(?:\($MARKER_TOKEN\)|\{$MARKER_TOKEN\}|\[$MARKER_TOKEN\])(?=[\s<:.]|$)|""" +
-        """$MARKER_TOKEN\)|$MARKER_TOKEN[.:](?=\s)|<b>$MARKER_TOKEN</b>(?=\s))"""
+// Leading printed marker that makes a whole array self-numbered: "(אות) " or
+// "{אות} " (unchanged since 491a4619; an intro-shifted run of these still counts).
+private val SOURCE_MARKER_REGEX = Regex("""^\s*[({]([א-ת"׳״]{1,5})[)}]\s""")
+
+// A label an item may open with, in every shape Sefaria texts use, after any
+// opening tags: "(אות)", "{אות}", "[אות]" (אליה רבה; may be glued to a tag or take
+// a colon, "[ב]:"), "אות)" (ביאור על ספר המצוות לרס"ג; also glued, "נה)עינוי"),
+// "אות. " / "אות: " (איסור והיתר הארוך, קשר גודל, תשובות רש"י) and a bold bare
+// numeral "<b>אות</b> " (פרקי אבות in סידור ספרד). It only ever cancels the
+// generated prefix of its own item, and only for the same number: a source run
+// shifted by an intro ("(ב) א.", כף אחת) keeps the generated numbering.
+private const val LABEL_TOKEN = """([א-ת"׳״]{1,5})"""
+private val OWN_LABEL_REGEX = Regex(
+    """^\s*(?:<[^>]+>\s*)*(?:(?:\($LABEL_TOKEN\)|\{$LABEL_TOKEN\}|\[$LABEL_TOKEN\])(?=[\s<:.]|$)|""" +
+        """$LABEL_TOKEN\)|$LABEL_TOKEN[.:](?=\s)|<b>$LABEL_TOKEN</b>(?=\s))"""
 )
 
-/** The label token of [content] (gershayim kept), or null when it opens with none. */
-private fun sourceMarkerToken(content: String): String? =
-    SOURCE_MARKER_REGEX.find(content)?.groupValues?.drop(1)?.first { it.isNotEmpty() }
+// A heading the item opens with: tag-wrapped text alone on its first line, the
+// label right after the break ("<big><strong>סימן א. …</strong></big><br>א. מיד",
+// קשר גודל). Text outside the tags before the break (a bold dibbur and its
+// comment, ביאור הגר"א) means the label belongs to a merged later segment.
+private val LEADING_HEADING_REGEX = Regex(
+    """^\s*(?:<[a-z][^>]*>\s*)+[^<]*(?:</[a-z]+>\s*)+<br\s*/?>""",
+    RegexOption.IGNORE_CASE,
+)
+
+private fun labelToken(regex: Regex, content: String): String? =
+    regex.find(content)?.groupValues?.drop(1)?.first { it.isNotEmpty() }
 
 private fun markerValue(token: String): Int? = gematriaToInt[token.filter { it !in "\"׳״" }]
 
-/** Numeric value of the label a leaf item opens with, or null. */
-private fun ownLabelValue(item: JsonElement): Int? =
-    (item as? JsonPrimitive)?.takeIf { it.isString }?.content?.let(::sourceMarkerToken)?.let(::markerValue)
+/** Numeric value of the label the item opens with ([afterHeading]: the one right after its opening heading). */
+private fun ownLabelValue(item: JsonElement, afterHeading: Boolean): Int? {
+    val content = (item as? JsonPrimitive)?.takeIf { it.isString }?.content ?: return null
+    val token = if (afterHeading) {
+        LEADING_HEADING_REGEX.find(content)?.let { labelToken(OWN_LABEL_REGEX, content.substring(it.range.last + 1)) }
+    } else {
+        labelToken(OWN_LABEL_REGEX, content)
+    }
+    return token?.let(::markerValue)
+}
 
 // Inverse of toGematria, for validating printed markers.
 private val gematriaToInt: Map<String, Int> = (1..999).associateBy { toGematria(it) }
@@ -975,7 +1006,7 @@ private fun sourceMarkerRun(items: JsonArray): MarkerRun {
     items.forEachIndexed { idx, item ->
         val content = (item as? JsonPrimitive)?.contentOrNull ?: return@forEachIndexed
         if (content.isBlank()) return@forEachIndexed
-        val token = sourceMarkerToken(content)
+        val token = labelToken(SOURCE_MARKER_REGEX, content)
         if (token == null) {
             if (block == 0) pre++ else post++
             return@forEachIndexed
