@@ -114,10 +114,7 @@ fun main(args: Array<String>) {
     // Parse every remaining ForDB consumer before opening a writable DB. A malformed
     // generations/metadata file can therefore never pass this gate merely because
     // the rename/move subset was valid.
-    val generations = parseGenerations(
-        downloadRequiredForDbFile(FOR_DB_CSV_FILES.getValue("generations"), logger),
-        logger,
-    )
+    val generations = loadGenerationRows(logger)
     val bulkMetadata = parseBulkMetadata(downloadRequiredForDbFile("all_metadata.json", logger))
     val descriptionOverrides = parseDescriptionOverrides(
         downloadRequiredForDbFile("sefaria_metadata_changes.csv", logger),
