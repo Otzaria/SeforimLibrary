@@ -239,7 +239,7 @@ internal class SefariaBookPayloadReader(
             val description = extractDescription(schemaJson, schemaObj)
             val heShortDesc = extractShortDescription(schemaJson, schemaObj)
             val pubDates = extractPubDates(schemaJson, schemaObj)
-            val altStructures = parseAltStructures(schemaJson)
+            val altStructures = SefariaAltNodeNameFixes.apply(englishTitle, parseAltStructures(schemaJson), logger)
             val rawDependence = extractRawDependence(schemaJson, schemaObj)
             val dependence = rawDependence?.let(::mapDependence)
             val declaredBaseTextTitleKeys = extractBaseTextTitleKeys(schemaJson, schemaObj)
