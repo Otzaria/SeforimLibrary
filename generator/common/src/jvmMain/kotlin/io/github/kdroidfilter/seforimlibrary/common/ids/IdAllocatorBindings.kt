@@ -1,5 +1,6 @@
 package io.github.kdroidfilter.seforimlibrary.common.ids
 
+import co.touchlab.kermit.Logger
 import io.github.kdroidfilter.seforimlibrary.core.models.Book
 import io.github.kdroidfilter.seforimlibrary.core.models.Line
 import io.github.kdroidfilter.seforimlibrary.core.models.TocEntry
@@ -129,6 +130,92 @@ class IdAllocatorBindings(
             }
         }
         return id
+    }
+
+    // ─── book_moves.csv leaves that are also Otzaria folders ────────────────────
+
+    private val logger = Logger.withTag("IdAllocatorBindings")
+
+    // Comparable path -> ids of the book_moves leaf keys. Built on first use: those keys
+    // are written by renameCategories, before the Otzaria stage, which never writes one.
+    private val bookMoveLeafIdsByPath: Map<String, Set<Long>> by lazy {
+        val byPath = HashMap<String, MutableSet<Long>>()
+        for ((key, id) in allocator.categoryKeys()) {
+            if (!key.startsWith(BOOK_MOVE_LEAF_KEY_PREFIX)) continue
+            val path = CategoryLabels.comparablePath(key.removePrefix(BOOK_MOVE_LEAF_KEY_PREFIX))
+            byPath.getOrPut(path) { HashSet() } += id
+        }
+        byPath
+    }
+
+    private val bookMoveLeafIds: Set<Long> by lazy { bookMoveLeafIdsByPath.values.flatten().toSet() }
+
+    /**
+     * Otzaria stage, for a folder already in the DB as [existingId] (the Generator's
+     * findExistingCategory hit). When that row is a book_moves.csv leaf, points the
+     * folder's own key [canonicalPath] at it, so that once the book_moves rows into the
+     * folder are gone, [upsertOtzariaCategory] recreates it on the same id rather than
+     * on the id the key held before or a fresh one. Returns whether the key changed.
+     *
+     * A key whose id another live category holds is left alone: Sefaria keys (pre-rename
+     * paths) share this namespace, and moving one would renumber that category.
+     */
+    suspend fun alignWithBookMoveLeaf(canonicalPath: String, existingId: Long): Boolean {
+        if (existingId !in bookMoveLeafIds) return false
+        val held = allocator.peekCategoryId(canonicalPath)
+        if (held == existingId) return false
+        if (held != null && repo.getCategory(held) != null) {
+            logger.w {
+                "Category key '$canonicalPath' holds $held, a live category; " +
+                    "not pointing it at the book_moves leaf $existingId"
+            }
+            return false
+        }
+        return allocator.pointCategoryKey(canonicalPath, existingId)
+    }
+
+    /**
+     * Otzaria stage, for a folder the DB does not hold yet: [upsertCategory], except that
+     * a folder that was a book_moves.csv leaf gets the leaf's id back. That happens when
+     * the last book_moves row into a folder that also holds Otzaria books is removed;
+     * without it the folder would move to the id its own key held (or a fresh one).
+     *
+     * The leaf id is taken only while no DB row holds it and no key of another folder
+     * does; otherwise this is plain [upsertCategory].
+     */
+    suspend fun upsertOtzariaCategory(
+        canonicalPath: String,
+        parentId: Long?,
+        title: String,
+        level: Int,
+        orderIndex: Int,
+    ): Long {
+        if (canonicalPath !in categoriesInserted) reuseBookMoveLeafId(canonicalPath)
+        return upsertCategory(canonicalPath, parentId, title, level, orderIndex)
+    }
+
+    private suspend fun reuseBookMoveLeafId(canonicalPath: String) {
+        val comparable = CategoryLabels.comparablePath(canonicalPath)
+        val candidates = bookMoveLeafIdsByPath[comparable] ?: return
+        val leafId = allocator.peekCategoryId(BOOK_MOVE_LEAF_KEY_PREFIX + canonicalPath)
+            ?: candidates.singleOrNull()
+            ?: run {
+                logger.w { "Folder '$canonicalPath' matches several book_moves leaves $candidates; not reusing one" }
+                return
+            }
+        if (allocator.peekCategoryId(canonicalPath) == leafId) return
+        if (repo.getCategory(leafId) != null) {
+            logger.w { "book_moves leaf id $leafId for '$canonicalPath' is held by another category; not reusing it" }
+            return
+        }
+        val foreignKeys = allocator.categoryKeys().filter { (key, id) ->
+            id == leafId && CategoryLabels.comparablePath(key.removePrefix(BOOK_MOVE_LEAF_KEY_PREFIX)) != comparable
+        }.keys
+        if (foreignKeys.isNotEmpty()) {
+            logger.w { "book_moves leaf id $leafId for '$canonicalPath' is also held by $foreignKeys; not reusing it" }
+            return
+        }
+        allocator.pointCategoryKey(canonicalPath, leafId)
     }
 
     private suspend fun storedCategoryMatches(id: Long, parentId: Long?, title: String): Boolean {

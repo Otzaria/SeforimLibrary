@@ -210,10 +210,11 @@ fun main(args: Array<String>) = runBlocking {
     val allocator = InMemoryIdAllocator.load(prev, Logger.withTag("IdAllocator"))
 
     // renameCategories runs BEFORE this stage and auto-creates the leaf of every
-    // book_moves.csv destination with an implicit rowid — i.e. at max(id)+1, right
-    // inside the range this allocator is about to hand out. insertCategoryWithId is
-    // INSERT OR IGNORE, so a collision silently drops our folder and dumps its books
-    // into that unrelated category. Raise the counter past whatever the DB holds.
+    // book_moves.csv destination. Those leaves now take their ids from the build
+    // state (BookMoveLeafIds), so they can no longer sit on an id reserved here.
+    // Kept as a floor for any row written outside the allocator: insertCategoryWithId
+    // is INSERT OR IGNORE, and upsertCategory's verify-after-insert is the last net.
+    // It only guards FRESH ids; a reused id that is taken still has to be reallocated.
     run {
         var maxCategoryId = 0L
         driver.executeQuery(null, "SELECT COALESCE(MAX(id), 0) FROM category",

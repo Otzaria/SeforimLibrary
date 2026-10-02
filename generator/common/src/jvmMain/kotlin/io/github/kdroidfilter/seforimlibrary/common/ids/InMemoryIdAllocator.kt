@@ -153,6 +153,20 @@ class InMemoryIdAllocator private constructor(
         return fresh
     }
 
+    override fun peekCategoryId(canonicalPath: String): Long? =
+        lookupMaps.getValue(IdTable.CATEGORY)[canonicalPath]
+
+    override fun categoryKeys(): Map<String, Long> = lookupMaps.getValue(IdTable.CATEGORY).toMap()
+
+    override fun pointCategoryKey(canonicalPath: String, id: Long): Boolean {
+        require(id > 0) { "Category id must be positive, got $id for '$canonicalPath'" }
+        val stale = lookupMaps.getValue(IdTable.CATEGORY).put(canonicalPath, id)
+        // The id came from the build state, so the counter is normally past it already.
+        counters.getValue(IdTable.CATEGORY).updateAndGet { maxOf(it, id + 1) }
+        logger.i { "Category key '$canonicalPath' now holds $id (was ${stale ?: "unset"})" }
+        return true
+    }
+
     // bookId is itself build-stable, so the encoded string key is stable too.
     override fun bookVersionId(bookId: Long, versionTitle: String): Long =
         allocateLookup(IdTable.BOOK_VERSION, "$bookId $versionTitle")

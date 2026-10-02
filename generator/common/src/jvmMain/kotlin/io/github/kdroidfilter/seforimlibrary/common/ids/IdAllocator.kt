@@ -34,12 +34,25 @@ interface IdAllocator {
      * Forgets the id cached for [canonicalPath] and hands out a fresh one.
      *
      * Only for the case where the reserved id turns out to be already occupied in
-     * the DB by a row this allocator never created — categories inserted with an
-     * implicit rowid outside the allocator, e.g. `renameCategories`' leaf
-     * auto-creation for book_moves.csv. The default implementation cannot
-     * reallocate and keeps the current id.
+     * the DB by a row this allocator never created — categories inserted outside the
+     * allocator. `renameCategories`' leaf auto-creation for book_moves.csv used to be
+     * one (implicit rowid, v19 and v30); it now takes its ids from the build state.
+     * The default implementation cannot reallocate and keeps the current id.
      */
     fun reallocateCategoryId(canonicalPath: String): Long = categoryId(canonicalPath)
+
+    /** The id [canonicalPath] already holds, without allocating one; null when it has none. */
+    fun peekCategoryId(canonicalPath: String): Long? = null
+
+    /** Every category key and the id it holds, as of this call. */
+    fun categoryKeys(): Map<String, Long> = emptyMap()
+
+    /**
+     * Points [canonicalPath] at [id], an id that is already allocated to the same folder
+     * under another key (a book_moves.csv leaf, see [BOOK_MOVE_LEAF_KEY_PREFIX]). The id
+     * the key held before is left unheld. Returns false if this allocator cannot do it.
+     */
+    fun pointCategoryKey(canonicalPath: String, id: Long): Boolean = false
 
     /** Stable id for a book edition; natural key = (bookId, versionTitle). */
     fun bookVersionId(bookId: Long, versionTitle: String): Long

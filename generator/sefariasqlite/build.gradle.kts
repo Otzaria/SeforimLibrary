@@ -311,6 +311,11 @@ tasks.register<JavaExec>("renameCategories") {
         val defaultDbPath = rootProject.layout.buildDirectory.file("seforim.db").get().asFile.absolutePath
         systemProperty("seforimDb", defaultDbPath)
     }
+    // Destination leaves of book_moves.csv take their ids from the build state,
+    // which is ATTACHed (not loaded), so the small heap stays enough.
+    if (project.hasProperty("buildStatePath")) {
+        systemProperty("buildStatePath", project.property("buildStatePath") as String)
+    }
 
     jvmArgs = listOf("-Xmx1g", "-XX:+UseG1GC")
 }
