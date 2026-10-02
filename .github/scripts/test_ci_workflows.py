@@ -60,6 +60,7 @@ SELF_HOSTED_JOBS = {
     ("manual-generate-release.yml", "build-and-release"),
     ("delta-real-diff-test.yml", "real-diff"),
     ("build-library-index.yml", "index"),
+    ("build-library-vectors.yml", "vectors"),
 }
 
 
