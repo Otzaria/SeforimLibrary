@@ -3,6 +3,7 @@ package io.github.kdroidfilter.seforimlibrary.sefariasqlite
 import app.cash.sqldelight.driver.jdbc.sqlite.JdbcSqliteDriver
 import io.github.kdroidfilter.seforimlibrary.common.buildstate.BuildStateSnapshot
 import io.github.kdroidfilter.seforimlibrary.common.buildstate.BuildStateWriter
+import io.github.kdroidfilter.seforimlibrary.common.ids.altTocChildPath
 import io.github.kdroidfilter.seforimlibrary.core.models.AltTocEntry
 import io.github.kdroidfilter.seforimlibrary.core.models.AltTocStructure
 import io.github.kdroidfilter.seforimlibrary.core.models.Book
@@ -22,6 +23,7 @@ import kotlin.test.AfterTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlin.test.assertNotEquals
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
@@ -734,7 +736,7 @@ class InheritChaptersAltTocIntegrationTest {
             }
         }
 
-    private fun dump(): List<String> = DriverManager.getConnection("jdbc:sqlite:$dbFile").use { conn ->
+    private fun dump(file: Path = dbFile): List<String> = DriverManager.getConnection("jdbc:sqlite:$file").use { conn ->
         listOf(
             "SELECT * FROM alt_toc_structure ORDER BY id",
             "SELECT * FROM alt_toc_entry ORDER BY id",
@@ -1009,7 +1011,7 @@ class InheritChaptersAltTocIntegrationTest {
     }
 
     @Test
-    fun `a chapter's later run is written after every reserved chapter`() = runBlocking {
+    fun `a chapter's later run is keyed after every reserved chapter and listed by line`() = runBlocking {
         val seeded = seed()
         val base = repo.getBook(seeded.baseId)!!
         val book = repo.insertBook(Book(categoryId = base.categoryId, sourceId = base.sourceId, title = "קרן על ברכות"))
@@ -1035,8 +1037,11 @@ class InheritChaptersAltTocIntegrationTest {
             synthesizeInheritedChapters(conn, listOf(snapshot), AttachedBuildStateIds(conn))
         }
         val roots = entries(book).filter { it.parentId == null }
-        assertEquals(listOf("מאימתי" to 4L, "מי שמתו" to 0L, "מי שמתו" to 6L), roots.map { it.text to lineIndexOf(it) })
+        // מי שמתו opens the book above מאימתי: the reader lists the chapters by line.
+        assertEquals(listOf("מי שמתו" to 0L, "מאימתי" to 4L, "מי שמתו" to 6L), roots.map { it.text to lineIndexOf(it) })
+        assertEquals(listOf(false, false, true), roots.map { it.isLastChild })
         assertTrue(roots.last().id > entries(book).filter { it.parentId != null }.minOf { it.id }, "after the reserved chapters")
+        assertReaderOrder(book)
         assertEquals(
             mapOf(0L to "דף ד.", 1L to "דף ד.", 2L to "דף ד.", 3L to "דף ד.", 4L to "דף ב.", 5L to "דף ב.", 6L to "דף ד:", 7L to "דף ד:"),
             lineOwners(book),
@@ -1118,4 +1123,470 @@ class InheritChaptersAltTocIntegrationTest {
         val rebuilt = dump().filterNot { it.startsWith("9000|") }
         assertEquals(first, rebuilt)
     }
+
+    private val berakhot = listOf(BaseChapter("מאימתי", 2, 4), BaseChapter("היה קורא", 8, 6), BaseChapter("מי שמתו", 12, 8))
+
+    private fun bookWithLines(baseId: Long, title: String, count: Int): Long = runBlocking {
+        val base = repo.getBook(baseId)!!
+        repo.insertBook(Book(categoryId = base.categoryId, sourceId = base.sourceId, title = title, heRef = title)).also { id ->
+            (0 until count).forEach { repo.insertLine(Line(bookId = id, lineIndex = it, content = "שורה $it")) }
+        }
+    }
+
+    private fun emptyBuildState(): Path = Files.createTempFile("inherit-order-buildstate", ".db").also {
+        Files.delete(it)
+        BuildStateWriter().write(BuildStateSnapshot.empty(), it)
+        tempFiles.add(it)
+    }
+
+    private fun write(snapshots: List<InheritChaptersSnapshot>, state: Path?, file: Path = dbFile) =
+        DriverManager.getConnection("jdbc:sqlite:$file").use { conn ->
+            val ids = state?.let { attachEmptyBuildState(conn, it); AttachedBuildStateIds(conn) }
+            synthesizeInheritedChapters(conn, snapshots, ids)
+        }
+
+    private fun dropInheritedStructures(file: Path = dbFile) = DriverManager.getConnection("jdbc:sqlite:$file").use { conn ->
+        conn.createStatement().use { st ->
+            val ours = "SELECT id FROM alt_toc_structure WHERE title = '$INHERITED_CHAPTERS_TITLE_EN'"
+            st.executeUpdate("DELETE FROM line_alt_toc WHERE structureId IN ($ours)")
+            st.executeUpdate("DELETE FROM alt_toc_entry WHERE structureId IN ($ours)")
+            st.executeUpdate("UPDATE book SET hasAltStructures = 0 WHERE id IN (SELECT bookId FROM alt_toc_structure WHERE id IN ($ours))")
+            st.executeUpdate("DELETE FROM alt_toc_structure WHERE id IN ($ours)")
+        }
+    }
+
+    /** Every row of every table of a build state, sorted. */
+    private fun dumpState(state: Path): List<String> = DriverManager.getConnection("jdbc:sqlite:$state").use { conn ->
+        val tables = conn.createStatement().use { st ->
+            st.executeQuery("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name").use { rs ->
+                buildList { while (rs.next()) add(rs.getString(1)) }
+            }
+        }
+        tables.flatMap { table ->
+            conn.createStatement().use { st ->
+                st.executeQuery("SELECT * FROM \"$table\"").use { rs ->
+                    val columns = rs.metaData.columnCount
+                    buildList { while (rs.next()) add("$table|" + (1..columns).joinToString("|") { "${rs.getObject(it)}" }) }
+                }
+            }.sorted()
+        }
+    }
+
+    /** A consistent copy of the test DB, also of what its open driver holds. */
+    private fun copyOfDb(): Path = Files.createTempFile("inherit-order-copy", ".db").also { copy ->
+        Files.delete(copy)
+        tempFiles.add(copy)
+        DriverManager.getConnection("jdbc:sqlite:$dbFile").use { conn ->
+            conn.prepareStatement("VACUUM INTO ?").use { st ->
+                st.setString(1, copy.toString())
+                st.execute()
+            }
+        }
+    }
+
+    /**
+     * What the reader relies on, for every entry of [bookId]'s inherited
+     * structure: siblings in id order are in line order, the last of them by id
+     * is the one flagged last, and hasChildren and level match the tree.
+     */
+    private fun assertReaderOrder(bookId: Long) {
+        data class Row(val id: Long, val parentId: Long?, val level: Int, val lineIndex: Long, val isLastChild: Boolean, val hasChildren: Boolean)
+        val rows = DriverManager.getConnection("jdbc:sqlite:$dbFile").use { conn ->
+            conn.prepareStatement(
+                """
+                SELECT e.id, e.parentId, e.level, l.lineIndex, e.isLastChild, e.hasChildren
+                FROM alt_toc_entry e
+                JOIN alt_toc_structure s ON s.id = e.structureId
+                JOIN line l ON l.id = e.lineId
+                WHERE s.bookId = ? AND s.title = ?
+                ORDER BY e.id
+                """.trimIndent(),
+            ).use { st ->
+                st.setLong(1, bookId)
+                st.setString(2, INHERITED_CHAPTERS_TITLE_EN)
+                st.executeQuery().use { rs ->
+                    buildList {
+                        while (rs.next()) {
+                            val parentId = rs.getLong(2).let { if (rs.wasNull()) null else it }
+                            add(Row(rs.getLong(1), parentId, rs.getInt(3), rs.getLong(4), rs.getInt(5) == 1, rs.getInt(6) == 1))
+                        }
+                    }
+                }
+            }
+        }
+        assertTrue(rows.isNotEmpty())
+        val byId = rows.associateBy { it.id }
+        for ((parentId, siblings) in rows.groupBy { it.parentId }) {
+            val lines = siblings.map { it.lineIndex }
+            assertEquals(lines.sorted(), lines, "siblings of $parentId in id order are in line order")
+            assertEquals(siblings.map { it == siblings.last() }, siblings.map { it.isLastChild }, "last sibling of $parentId")
+        }
+        for (row in rows) {
+            assertEquals(rows.any { it.parentId == row.id }, row.hasChildren, "hasChildren of ${row.id}")
+            assertEquals(row.parentId?.let { byId.getValue(it).level + 1 } ?: 0, row.level, "level of ${row.id}")
+        }
+    }
+
+    @Test
+    fun `a chapter the commentary comes back to is listed by line and only the last by line is flagged last`() = runBlocking {
+        val seeded = seed()
+        val book = bookWithLines(seeded.baseId, "קרן על ברכות", 12)
+        // The reviewer's repro: line order מאימתי, מאימתי, היה קורא; the
+        // reserved ids alone list מאימתי, היה קורא, מאימתי.
+        val snapshot = InheritChaptersSnapshot(
+            bookId = book, title = "קרן על ברכות", baseId = seeded.baseId, rule = ChaptersBaseRule.TITLE,
+            anchors = listOf(
+                ChapterAnchor(berakhot[0], 0, 0),
+                ChapterAnchor(berakhot[0], 4, 0, occurrence = 1),
+                ChapterAnchor(berakhot[1], 8, 1),
+            ),
+            chapterCount = 3,
+            dafs = listOf(listOf(DafNode("דף ב.", 0)), listOf(DafNode("(לעיל) דף ב:", 4)), listOf(DafNode("דף ג.", 8), DafNode("דף ג:", 10))),
+        )
+        val expectedOwners = buildMap {
+            (0L..3L).forEach { put(it, "דף ב.") }
+            (4L..7L).forEach { put(it, "(לעיל) דף ב:") }
+            (8L..9L).forEach { put(it, "דף ג.") }
+            (10L..11L).forEach { put(it, "דף ג:") }
+        }
+        for (state in listOf(emptyBuildState(), null)) {
+            dropInheritedStructures()
+            write(listOf(snapshot), state)
+            val roots = entries(book).filter { it.parentId == null }
+            assertEquals(listOf("מאימתי" to 0L, "מאימתי" to 4L, "היה קורא" to 8L), roots.map { it.text to lineIndexOf(it) })
+            assertEquals(listOf(false, false, true), roots.map { it.isLastChild })
+            assertEquals(listOf(true, true, true), roots.map { it.hasChildren })
+            assertEquals(
+                listOf(listOf("דף ב."), listOf("(לעיל) דף ב:"), listOf("דף ג.", "דף ג:")),
+                roots.map { root -> entries(book).filter { it.parentId == root.id }.map { it.text } },
+            )
+            assertReaderOrder(book)
+            assertEquals(expectedOwners, lineOwners(book))
+        }
+    }
+
+    @Test
+    fun `the Keren LeDavid on Sukkah shape lists its chapters in reading order with the ids it reserved`() = runBlocking {
+        val seeded = seed()
+        val sukkah = listOf(
+            BaseChapter("סוכה", 1, 4), BaseChapter("הישן", 2, 41), BaseChapter("לולב הגזול", 3, 59), BaseChapter("לולב וערבה", 4, 85),
+        )
+        // As in the layout test: לח. and "(לעיל) לא." (לולב הגזול), "(לעיל) ט." and יא. (סוכה), then לא: and מב.
+        val headings = listOf(
+            ChaptersHeading(0, "קרן לדוד על סוכה", id = 1),
+            ChaptersHeading(2, "דף לח.", id = 2, parentId = 1),
+            ChaptersHeading(4, "(לעיל) דף לא.", id = 3, parentId = 1),
+            ChaptersHeading(6, "(לעיל) דף ט.", id = 4, parentId = 1),
+            ChaptersHeading(9, "דף יא.", id = 5, parentId = 1),
+            ChaptersHeading(12, "דף לא:", id = 6, parentId = 1),
+            ChaptersHeading(14, "דף מב.", id = 7, parentId = 1),
+        )
+        val book = bookWithLines(seeded.baseId, "קרן לדוד על סוכה", 16)
+        val anchors = computeChapterAnchors(sukkah, (0L..15L).toList(), headings, emptyMap(), dafChapters = sukkah)
+        val layout = layoutChapters(sukkah, anchors, headings, sukkah)!!
+        val snapshot = InheritChaptersSnapshot(
+            bookId = book, title = "קרן לדוד על סוכה", baseId = seeded.baseId, rule = ChaptersBaseRule.TITLE,
+            anchors = layout.anchors, chapterCount = sukkah.size, dafs = layout.dafs, lineAnchors = anchors,
+        )
+        val state = emptyBuildState()
+        write(listOf(snapshot), state)
+
+        val all = entries(book)
+        val roots = all.filter { it.parentId == null }
+        assertEquals(listOf("לולב הגזול" to 2L, "סוכה" to 6L, "לולב הגזול" to 12L), roots.map { it.text to lineIndexOf(it) })
+        assertEquals(listOf(false, false, true), roots.map { it.isLastChild })
+        assertEquals(
+            listOf(listOf("דף לח.", "(לעיל) דף לא."), listOf("(לעיל) דף ט.", "דף יא."), listOf("דף לא:", "דף מב.")),
+            roots.map { root -> all.filter { it.parentId == root.id }.map { it.text } },
+        )
+        assertReaderOrder(book)
+        assertEquals(
+            buildMap {
+                (2L..3L).forEach { put(it, "דף לח.") }
+                (4L..5L).forEach { put(it, "(לעיל) דף לא.") }
+                (6L..8L).forEach { put(it, "(לעיל) דף ט.") }
+                (9L..11L).forEach { put(it, "דף יא.") }
+                (12L..13L).forEach { put(it, "דף לא:") }
+                (14L..15L).forEach { put(it, "דף מב.") }
+            },
+            lineOwners(book),
+        )
+
+        // The chapters keep the ids keyed to them — סוכה (1), לולב הגזול (3), its later run (5) — in line
+        // order, and every daf keeps the id of its own key.
+        val keyed = DriverManager.getConnection("jdbc:sqlite:$state").use { conn ->
+            conn.createStatement().use { st ->
+                st.executeQuery("SELECT ancestor_path, id FROM id_alt_toc_entry").use { rs ->
+                    buildMap { while (rs.next()) put(rs.getString(1), rs.getLong(2)) }
+                }
+            }
+        }
+        assertEquals(listOf("1", "3", "5").map { keyed.getValue(it) }.sorted(), roots.map { it.id })
+        val daf = all.associate { it.text to it.id }
+        assertEquals(keyed["1/1"], daf["(לעיל) דף ט."])
+        assertEquals(keyed["3/2"], daf["(לעיל) דף לא."])
+        assertEquals(keyed["5/2"], daf["דף מב."])
+
+        // The next build, from the same state, writes the same rows.
+        val first = dump()
+        dropInheritedStructures()
+        write(listOf(snapshot), state)
+        assertEquals(first, dump())
+    }
+
+    @Test
+    fun `out-of-order chapters opened above the first are listed where they stand`() = runBlocking {
+        val seeded = seed()
+        // As in the layout test: קרן לדוד על שבת opens with "דף קלה." and "דף קנג:", then כא: and נד:.
+        val shabbat = listOf(
+            BaseChapter("יציאות השבת", 1, 4), BaseChapter("במה מדליקין", 2, 41), BaseChapter("כירה", 3, 73),
+            BaseChapter("רבי אליעזר דמילה", 4, 260), BaseChapter("מי שהחשיך", 5, 300),
+        )
+        val headings = listOf(
+            ChaptersHeading(0, "קרן לדוד על שבת", id = 1),
+            ChaptersHeading(2, "דף קלה.", id = 2, parentId = 1),
+            ChaptersHeading(3, "הערה", id = 3, parentId = 2),
+            ChaptersHeading(4, "דף קנג:", id = 4, parentId = 1),
+            ChaptersHeading(8, "דף כא:", id = 5, parentId = 1),
+            ChaptersHeading(24, "דף כה.", id = 6, parentId = 1),
+            ChaptersHeading(33, "דף נד:", id = 7, parentId = 1),
+        )
+        val book = bookWithLines(seeded.baseId, "קרן לדוד על שבת", 41)
+        val anchors = computeChapterAnchors(shabbat, (0L..40L).toList(), headings, emptyMap(), dafChapters = shabbat)
+        val layout = layoutChapters(shabbat, anchors, headings, shabbat)!!
+        assertTrue(layout.anchors.all { it.occurrence == 0 }, "no chapter is split")
+        write(
+            listOf(
+                InheritChaptersSnapshot(
+                    bookId = book, title = "קרן לדוד על שבת", baseId = seeded.baseId, rule = ChaptersBaseRule.TITLE,
+                    anchors = layout.anchors, chapterCount = shabbat.size, dafs = layout.dafs, lineAnchors = anchors,
+                ),
+            ),
+            emptyBuildState(),
+        )
+        assertEquals(
+            listOf("רבי אליעזר דמילה" to 2L, "מי שהחשיך" to 4L, "במה מדליקין" to 8L, "כירה" to 33L),
+            chapters(book),
+        )
+        assertEquals(listOf(false, false, false, true), entries(book).filter { it.parentId == null }.map { it.isLastChild })
+        assertReaderOrder(book)
+        assertEquals("הערה", lineOwners(book)[3])
+        assertEquals("דף כה.", lineOwners(book)[30])
+    }
+
+    @Test
+    fun `a commentary that comes back to a chapter from the DB is listed by line`() = runBlocking {
+        val seeded = seed()
+        // אמת ליעקב על ברכות: מאימתי (ב:), היה קורא (ג., ג:), and a "(לעיל) דף ב:" section back in מאימתי.
+        val tail = (7 until 9).map { i ->
+            repo.insertLine(Line(bookId = seeded.dafId, lineIndex = i, content = if (i == 7) "(לעיל) דף ב:" else "פירוש $i"))
+        }
+        repo.insertTocEntry(TocEntry(bookId = seeded.dafId, parentId = null, text = "(לעיל) דף ב:", level = 1, lineId = tail[0]))
+        run(emptyBuildState())
+        assertEquals(listOf("מאימתי" to 1L, "היה קורא" to 3L, "מאימתי" to 7L), chapters(seeded.dafId))
+        assertEquals(listOf(false, false, true), entries(seeded.dafId).filter { it.parentId == null }.map { it.isLastChild })
+        assertReaderOrder(seeded.dafId)
+        assertReaderOrder(seeded.linkedId)
+        assertEquals("(לעיל) דף ב:", lineOwners(seeded.dafId)[8])
+    }
+
+    @Test
+    fun `structures whose chapters are in line order are written exactly as before`() = runBlocking {
+        val seeded = seed()
+        // Besides the two seeded books: nested dafs, a daf on its chapter's line, chapters
+        // without material or without dafs, and a book opening on its second chapter.
+        val nested = bookWithLines(seeded.baseId, "נטוע על ברכות", 12)
+        val sparse = bookWithLines(seeded.baseId, "דליל על ברכות", 6)
+        val synthetic = listOf(
+            InheritChaptersSnapshot(
+                bookId = nested, title = "נטוע על ברכות", baseId = seeded.baseId, rule = ChaptersBaseRule.TITLE,
+                anchors = listOf(ChapterAnchor(berakhot[0], 1, 0), ChapterAnchor(berakhot[1], 5, 1), ChapterAnchor(berakhot[2], 9, 2)),
+                chapterCount = 3,
+                dafs = listOf(
+                    listOf(DafNode("דף ב.", 1, listOf(DafNode("הערה", 2), DafNode("עוד הערה", 3))), DafNode("דף ב:", 4)),
+                    listOf(DafNode("דף ג.", 5, listOf(DafNode("סימן", 6, listOf(DafNode("פרט", 7)))))),
+                    emptyList(),
+                ),
+            ),
+            InheritChaptersSnapshot(
+                bookId = sparse, title = "דליל על ברכות", baseId = seeded.baseId, rule = ChaptersBaseRule.TITLE,
+                anchors = listOf(ChapterAnchor(berakhot[1], 0, 1), ChapterAnchor(berakhot[2], 3, 2)),
+                chapterCount = 3,
+                dafs = listOf(listOf(DafNode("דף ג.", 0)), listOf(DafNode("דף ד.", 3), DafNode("דף ד:", 5))),
+            ),
+        )
+        val seededSnapshots = DriverManager.getConnection("jdbc:sqlite:$dbFile").use { readInheritChaptersSnapshots(it) }
+        assertEquals(setOf(seeded.linkedId, seeded.dafId), seededSnapshots.map { it.bookId }.toSet())
+        val ordinary = (seededSnapshots + synthetic).sortedBy { it.bookId }
+        assertTrue(ordinary.all { s -> s.anchors.all { it.occurrence == 0 } && s.anchors.zipWithNext().all { (a, b) -> a.lineIndex <= b.lineIndex } })
+
+        /** (DB rows, build-state rows) of [build] writing [snapshots] on a fresh copy, then rebuilding from its state. */
+        fun outcome(snapshots: List<InheritChaptersSnapshot>, stable: Boolean, build: (Connection, List<InheritChaptersSnapshot>, AttachedBuildStateIds?) -> Unit): List<List<String>> {
+            val copy = copyOfDb()
+            val state = if (stable) emptyBuildState() else null
+            fun once() = DriverManager.getConnection("jdbc:sqlite:$copy").use { conn ->
+                val ids = state?.let { attachEmptyBuildState(conn, it); AttachedBuildStateIds(conn) }
+                build(conn, snapshots, ids)
+            }
+            once()
+            val first = dump(copy)
+            dropInheritedStructures(copy)
+            once()
+            return listOf(first, dump(copy), state?.let(::dumpState).orEmpty())
+        }
+        val current: (Connection, List<InheritChaptersSnapshot>, AttachedBuildStateIds?) -> Unit = { conn, s, ids -> synthesizeInheritedChapters(conn, s, ids) }
+        val before: (Connection, List<InheritChaptersSnapshot>, AttachedBuildStateIds?) -> Unit = { conn, s, ids -> legacySynthesizeInheritedChapters(conn, s, ids) }
+
+        for (stable in listOf(true, false)) {
+            val expected = outcome(ordinary, stable, before)
+            assertTrue(expected[0].any { it.contains(INHERITED_CHAPTERS_TITLE_EN) }, "the structures were written")
+            assertEquals(expected, outcome(ordinary, stable, current), "stable ids: $stable")
+        }
+
+        // The comparison sees the change where there is one: a later run listed before a reserved chapter.
+        val split = synthetic[1].copy(
+            anchors = listOf(ChapterAnchor(berakhot[0], 0, 0), ChapterAnchor(berakhot[0], 2, 0, occurrence = 1), ChapterAnchor(berakhot[1], 4, 1)),
+            dafs = listOf(listOf(DafNode("דף ב.", 0)), listOf(DafNode("(לעיל) דף ב.", 2)), listOf(DafNode("דף ג.", 4))),
+        )
+        assertNotEquals(outcome(listOf(split), true, before)[0], outcome(listOf(split), true, current)[0])
+    }
+}
+
+/**
+ * The writer as of 0aeb0df4, before a sibling group's ids followed line order:
+ * the oracle ordinary structures must still match row for row.
+ */
+private fun legacySynthesizeInheritedChapters(
+    conn: Connection,
+    snapshots: List<InheritChaptersSnapshot>,
+    stableIds: AttachedBuildStateIds?,
+) {
+    conn.autoCommit = false
+    try {
+        for (snapshot in snapshots) legacyWriteInheritedChapters(conn, snapshot, stableIds)
+        conn.prepareStatement(
+            """
+            UPDATE book SET hasAltStructures = 1
+            WHERE hasAltStructures = 0
+              AND EXISTS (SELECT 1 FROM alt_toc_structure s WHERE s.bookId = book.id AND s.key = ? AND s.title = ?)
+            """.trimIndent(),
+        ).use { st ->
+            st.setString(1, CHAPTERS_STRUCTURE_KEY)
+            st.setString(2, INHERITED_CHAPTERS_TITLE_EN)
+            st.executeUpdate()
+        }
+        conn.commit()
+    } finally {
+        conn.autoCommit = true
+    }
+}
+
+private fun legacyWriteInheritedChapters(conn: Connection, snapshot: InheritChaptersSnapshot, stableIds: AttachedBuildStateIds?) {
+    val structureId = stableIds?.altTocStructureId(snapshot.bookId, CHAPTERS_STRUCTURE_KEY)
+        ?: (legacyMaxId(conn, "alt_toc_structure") + 1)
+    conn.prepareStatement(
+        "INSERT INTO alt_toc_structure (id, bookId, key, title, heTitle) VALUES (?, ?, ?, ?, ?)",
+    ).use { st ->
+        st.setLong(1, structureId)
+        st.setLong(2, snapshot.bookId)
+        st.setString(3, CHAPTERS_STRUCTURE_KEY)
+        st.setString(4, INHERITED_CHAPTERS_TITLE_EN)
+        st.setString(5, SefariaAltStructureNames.forKey(CHAPTERS_STRUCTURE_KEY) ?: snapshot.title)
+        st.executeUpdate()
+    }
+
+    data class Pending(
+        val id: Long,
+        val parentId: Long?,
+        val text: String,
+        val level: Int,
+        val lineIndex: Long,
+        val hasChildren: Boolean,
+        val isLastChild: Boolean,
+    )
+
+    var nextEntryId = legacyMaxId(conn, "alt_toc_entry")
+    fun entryId(path: String): Long = stableIds?.altTocEntryId(structureId, path) ?: ++nextEntryId
+
+    val chapterIds = (0 until snapshot.chapterCount).map { entryId(altTocChildPath("", it + 1)) }
+    var laterRuns = 0
+    val pending = mutableListOf<Pending>()
+    fun addDafs(nodes: List<DafNode>, parentId: Long, parentPath: String, level: Int) {
+        nodes.forEachIndexed { i, node ->
+            val path = altTocChildPath(parentPath, i + 1)
+            val id = entryId(path)
+            pending += Pending(id, parentId, node.text, level, node.lineIndex, node.children.isNotEmpty(), i == nodes.lastIndex)
+            addDafs(node.children, id, path, level + 1)
+        }
+    }
+    snapshot.anchors.forEachIndexed { i, anchor ->
+        val path = altTocChildPath("", if (anchor.occurrence == 0) anchor.index + 1 else snapshot.chapterCount + ++laterRuns)
+        val id = if (anchor.occurrence == 0) chapterIds[anchor.index] else entryId(path)
+        val dafs = snapshot.dafs[i]
+        pending += Pending(id, null, anchor.chapter.text, 0, anchor.lineIndex, dafs.isNotEmpty(), i == snapshot.anchors.lastIndex)
+        addDafs(dafs, id, path, 1)
+    }
+
+    val lines = mutableListOf<Pair<Long, Long>>()
+    conn.prepareStatement("SELECT id, lineIndex FROM line WHERE bookId = ? ORDER BY lineIndex").use { st ->
+        st.setLong(1, snapshot.bookId)
+        st.executeQuery().use { rs -> while (rs.next()) lines += rs.getLong(1) to rs.getLong(2) }
+    }
+    val lineIdByIndex = lines.associate { it.second to it.first }
+    conn.prepareStatement(
+        """
+        INSERT INTO alt_toc_entry
+            (id, structureId, parentId, textId, level, lineId, isLastChild, hasChildren)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """.trimIndent(),
+    ).use { st ->
+        for (entry in pending) {
+            st.setLong(1, entry.id)
+            st.setLong(2, structureId)
+            if (entry.parentId != null) st.setLong(3, entry.parentId) else st.setNull(3, java.sql.Types.INTEGER)
+            st.setLong(4, legacyTocTextIdFor(conn, entry.text, stableIds))
+            st.setInt(5, entry.level)
+            st.setLong(6, lineIdByIndex.getValue(entry.lineIndex))
+            st.setInt(7, if (entry.isLastChild) 1 else 0)
+            st.setInt(8, if (entry.hasChildren) 1 else 0)
+            st.addBatch()
+        }
+        st.executeBatch()
+    }
+
+    val owners = pending.sortedWith(compareBy({ it.lineIndex }, { it.level }))
+    conn.prepareStatement(
+        "INSERT OR REPLACE INTO line_alt_toc (lineId, structureId, altTocEntryId) VALUES (?, ?, ?)",
+    ).use { st ->
+        var next = 0
+        var owner: Long? = null
+        for ((lineId, lineIndex) in lines) {
+            while (next < owners.size && owners[next].lineIndex <= lineIndex) owner = owners[next++].id
+            val entryId = owner ?: continue
+            st.setLong(1, lineId)
+            st.setLong(2, structureId)
+            st.setLong(3, entryId)
+            st.addBatch()
+        }
+        st.executeBatch()
+    }
+}
+
+private fun legacyMaxId(conn: Connection, table: String): Long =
+    conn.prepareStatement("SELECT COALESCE(MAX(id), 0) FROM $table").use { st ->
+        st.executeQuery().use { rs -> rs.next(); rs.getLong(1) }
+    }
+
+private fun legacyTocTextIdFor(conn: Connection, text: String, stableIds: AttachedBuildStateIds?): Long {
+    conn.prepareStatement("SELECT id FROM tocText WHERE text = ?").use { st ->
+        st.setString(1, text)
+        st.executeQuery().use { rs -> if (rs.next()) return rs.getLong(1) }
+    }
+    val id = stableIds?.tocTextId(text) ?: (legacyMaxId(conn, "tocText") + 1)
+    conn.prepareStatement("INSERT INTO tocText (id, text) VALUES (?, ?)").use { st ->
+        st.setLong(1, id)
+        st.setString(2, text)
+        st.executeUpdate()
+    }
+    return id
 }

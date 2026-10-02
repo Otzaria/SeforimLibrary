@@ -98,9 +98,14 @@ import kotlin.system.exitProcess
  * chapter's key is its base chapter number, and every base chapter's id is
  * reserved in order when the structure is first built, so a chapter that gains
  * or loses material keeps its siblings' ids and order (the reader sorts
- * siblings by id). A chapter's later runs follow every reserved chapter, in
- * chapter and line order. Daf entries are keyed by ordinal within their run: a
- * heading added to the commentary's TOC renumbers only that run's dafs.
+ * siblings by id). A chapter's later runs are keyed after every reserved
+ * chapter, in chapter and line order. Daf entries are keyed by ordinal within
+ * their run: a heading added to the commentary's TOC renumbers only that run's
+ * dafs. The reader's order is the line order, so a sibling group whose chapter
+ * order is not (a later run, or an out-of-order chapter opened above the first:
+ * קרן לדוד על סוכה is לולב הגזול, סוכה, לולב הגזול) hands its keyed ids out
+ * again, ascending, by line; its dafs keep theirs. Any other group keeps
+ * exactly the ids of its keys.
  *
  * Usage:
  *   ./gradlew :sefariasqlite:inheritChaptersAltToc -PseforimDb=/path/to/seforim.db
@@ -752,7 +757,10 @@ private fun lineOwner(anchors: List<ChapterAnchor>, line: Long): Int {
     return lo - 1
 }
 
-/** The chapters as written: [anchors] in chapter order (each chapter's runs in line order), [dafs] below each. */
+/**
+ * The chapters as written: [anchors] in chapter order (each chapter's runs in
+ * line order), [dafs] below each. The writer gives the reader their line order.
+ */
 internal data class ChaptersLayout(val anchors: List<ChapterAnchor>, val dafs: List<List<DafNode>>)
 
 /**
@@ -1525,15 +1533,17 @@ private fun writeInheritedChapters(
     fun entryId(path: String): Long = stableIds?.altTocEntryId(structureId, path) ?: ++nextEntryId
 
     // Every base chapter's id first, in chapter order — see the file KDoc. A
-    // chapter's later runs come after them, in chapter and line order.
+    // chapter's later runs come after them, in chapter and line order. These
+    // are the ids drawn; [inLineOrder] decides which entry of a sibling group
+    // gets which of them.
     val chapterIds = (0 until snapshot.chapterCount).map { entryId(altTocChildPath("", it + 1)) }
     var laterRuns = 0
-    val pending = mutableListOf<Pending>()
+    val drawn = mutableListOf<Pending>()
     fun addDafs(nodes: List<DafNode>, parentId: Long, parentPath: String, level: Int) {
         nodes.forEachIndexed { i, node ->
             val path = altTocChildPath(parentPath, i + 1)
             val id = entryId(path)
-            pending += Pending(id, parentId, node.text, level, node.lineIndex, node.children.isNotEmpty(), i == nodes.lastIndex)
+            drawn += Pending(id, parentId, node.text, level, node.lineIndex, node.children.isNotEmpty(), i == nodes.lastIndex)
             addDafs(node.children, id, path, level + 1)
         }
     }
@@ -1541,9 +1551,41 @@ private fun writeInheritedChapters(
         val path = altTocChildPath("", if (anchor.occurrence == 0) anchor.index + 1 else snapshot.chapterCount + ++laterRuns)
         val id = if (anchor.occurrence == 0) chapterIds[anchor.index] else entryId(path)
         val dafs = snapshot.dafs[i]
-        pending += Pending(id, null, anchor.chapter.text, 0, anchor.lineIndex, dafs.isNotEmpty(), i == snapshot.anchors.lastIndex)
+        drawn += Pending(id, null, anchor.chapter.text, 0, anchor.lineIndex, dafs.isNotEmpty(), i == snapshot.anchors.lastIndex)
         addDafs(dafs, id, path, 1)
     }
+
+    /**
+     * The reader lists siblings by id, so each sibling group hands the ids it
+     * drew out again, ascending, in the line order of its entries (a shared
+     * line keeps the written order), and flags the last of them by line.
+     * Chapters are written in chapter order and dafs in line order, so this
+     * only moves ids where chapter order is not the line order: a chapter's
+     * later run, or an out-of-order chapter opened above the first one (and
+     * dafs only past a cyclic TOC's break, [partitionDafs]). Everywhere else
+     * every id stays the one drawn for its entry's path, and the rows are those
+     * written before.
+     */
+    fun inLineOrder(entries: List<Pending>): List<Pending> {
+        val renamed = HashMap<Long, Long>(entries.size)
+        val last = HashSet<Long>()
+        for (siblings in entries.groupBy { it.parentId }.values) {
+            val ids = siblings.map { it.id }.sorted()
+            val byLine = siblings.sortedBy { it.lineIndex }
+            byLine.forEachIndexed { rank, entry -> renamed[entry.id] = ids[rank] }
+            last += byLine.last().id
+        }
+        return entries.map { entry ->
+            entry.copy(
+                id = renamed.getValue(entry.id),
+                parentId = entry.parentId?.let(renamed::getValue),
+                isLastChild = entry.id in last,
+            )
+        }
+    }
+    // Still in the written order: parents before children, and the line
+    // owners below break a shared line's tie the same way.
+    val pending = inLineOrder(drawn)
 
     // Lines are re-read here so the snapshots of a whole library stay small.
     val lines = readBookLineIndex(conn, snapshot.bookId)
