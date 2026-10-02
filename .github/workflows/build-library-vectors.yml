@@ -95,8 +95,9 @@ jobs:
     if: needs.gate.outputs.proceed == 'true'
     # The build machine: the label the index workflow's local runner carries, and its GPU.
     runs-on: [self-hosted, otzaria-db, amd-gpu]
-    # An empty warehouse means the whole library on the GPU (~1 h) plus the index and the
-    # assembly; a weekly release embeds only its new texts.
+    # On a runner with no warehouse yet, the first build plans and embeds the whole library
+    # on the GPU (~1 h), plus the index and the assembly, and its first add creates the
+    # warehouse; a later release embeds only the texts the warehouse lacks.
     timeout-minutes: 360
     env:
       GH_TOKEN: ${{ secrets.PIPELINE_TOKEN }}
