@@ -16,8 +16,10 @@ import struct
 import sys
 import tempfile
 import threading
+import types
 import unittest
 from pathlib import Path
+from unittest import mock
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
@@ -26,9 +28,12 @@ import vector_shard as vs  # noqa: E402
 
 try:
     import numpy as np
+except ImportError:  # the CI image has neither NumPy nor PyTorch; their tests skip
+    np = None
+try:
     import torch
-except ImportError:  # the CI image has neither; those tests skip
-    np = torch = None
+except ImportError:
+    torch = None
 
 DIM = 4
 PINS = dict(line.split("=", 1) for line in (HERE / "pins.env").read_text().splitlines()
@@ -205,6 +210,86 @@ class Shards(Plan):
         self.assertEqual(m["records"], 0)
 
 
+GOLDEN = json.loads((HERE / "parity_golden_texts.json").read_text(encoding="utf-8"))["cases"]
+SMALL_PLANS = ((1, False), (100, False), (958, False), (959, True))   # texts, and whether a GPU shard can be certified
+
+
+class ParitySample(unittest.TestCase):
+    """The real sample selection and acceptance rule, with no stand-in certificate."""
+
+    def test_a_certificate_reaches_1000_samples_only_from_a_plan_of_959_texts(self):
+        need = vs.PARITY_MIN_SAMPLES - len(GOLDEN)
+        self.assertEqual(need, 959)
+        for records, certifiable in SMALL_PLANS:
+            samples = len(GOLDEN) + len(vs.sample_positions("ab" * 32, records, need))
+            self.assertEqual(samples, len(GOLDEN) + min(records, need))
+            parity = {"samples": samples, "min_cosine": 1.0}
+            if certifiable:
+                vs.check_parity(parity)
+            else:
+                with self.assertRaisesRegex(vs.ContractError, "fewer than 1000"):
+                    vs.check_parity(parity)
+
+
+@unittest.skipIf(np is None, "NumPy is not installed")
+class WorkerOnSmallPlans(unittest.TestCase):
+    """embed_worker.main on plans of 1, 100, 958 and 959 texts: its own sample selection, parity
+    certificate and shard writer. Only the numbers are stood in for: the GPU and the ONNX Runtime
+    reference both return the same unit vectors, so parity is perfect."""
+
+    def run_worker(self, texts):
+        import embed_worker
+        loads = []
+        unit = lambda ids: np.tile(np.array([[1.0, 0.0, 0.0, 0.0]], dtype=np.float32), (len(ids), 1))
+        torch = types.SimpleNamespace(backends=types.SimpleNamespace(cuda=types.SimpleNamespace(matmul=types.SimpleNamespace())),
+                                      version=types.SimpleNamespace(hip=None))
+        torch_bert = types.SimpleNamespace(load_weights=lambda path: loads.append(path) or {},
+                                           MeivinTorch=lambda *a, **k: types.SimpleNamespace(dim=DIM),
+                                           embed_id_lists=lambda model, ids, *a: unit(ids))
+        tok = types.SimpleNamespace(encode_batch=lambda texts, **k: [types.SimpleNamespace(ids=[1, 2]) for _ in texts])
+        reference = types.SimpleNamespace(load_tokenizer=lambda *a: tok, version=lambda: "stand-in",
+                                          embed_reference=lambda graph, ids, procs: unit(ids),
+                                          cosines=lambda a, b: np.einsum("ij,ij->i", a, b))
+        with tempfile.TemporaryDirectory() as t, \
+                mock.patch.dict(sys.modules, {"torch": torch, "torch_bert": torch_bert, "reference": reference}), \
+                mock.patch.object(embed_worker.model_package, "check_family", lambda *a: None):
+            root = Path(t)
+            fam = family()
+            vs.write_embed_plan(root / "plan", [f"[PASSAGE] text {i}" for i in range(texts)], fam, fam["query_packages"][1])
+            err = io.StringIO()
+            try:
+                with contextlib.redirect_stderr(err):
+                    embed_worker.main(["--plan", str(root / "plan"), "--out", str(root / "shard"),
+                                       "--model-dir", str(root), "--device", "cpu"])
+                error = None
+            except vs.ContractError as e:
+                error = str(e)
+            shard = root / "shard"
+            files = sorted(p.name for p in shard.iterdir()) if shard.exists() else []
+            manifest = json.loads((shard / vs.SHARD_MANIFEST_FILE).read_text()) if vs.SHARD_MANIFEST_FILE in files else None
+            return error, files, manifest, loads
+
+    def test_a_plan_its_sample_cannot_certify_is_refused_before_any_work(self):
+        for texts, certifiable in SMALL_PLANS:
+            if certifiable:
+                continue
+            with self.subTest(texts=texts):
+                error, files, manifest, loads = self.run_worker(texts)
+                self.assertIsNotNone(error)
+                self.assertIn(f"{texts} text(s)", error)
+                self.assertIn("embed-shard", error)     # where a plan this small goes instead
+                self.assertEqual((files, manifest, loads), ([], None, []))   # nothing loaded, nothing written
+
+    def test_a_plan_of_959_texts_is_certified_with_1000_samples_and_its_shard_written(self):
+        error, files, manifest, loads = self.run_worker(959)
+        self.assertIsNone(error)
+        self.assertEqual(len(loads), 1)
+        self.assertEqual(manifest["records"], 959)
+        self.assertEqual(manifest["parity"]["samples"], 1000)
+        self.assertEqual(manifest["parity"]["min_cosine"], 1.0)
+        self.assertIn(vs.PARITY_DOCUMENT_FILE, files)
+
+
 class PackageChecksum(unittest.TestCase):
     def test_the_documented_manifest_is_what_is_hashed(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -318,6 +403,27 @@ class Fetch(unittest.TestCase):
         rev = PINS["MODEL_REVISION"]
         self.assertEqual([s[1] for s in Hub.seen], [f"/org/model/resolve/{rev}/g.onnx", f"/org/model/resolve/{rev}/tokenizer.json"])
 
+    def run_cli(self, *extra):
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rc = mp.main(["fetch", "--cache", self.tmp.name, "--checksum", self.checksum, "--graph", "g.onnx",
+                          "--repo", "org/model", "--token-env", "TEST_HF_TOKEN", "--hub", f"http://127.0.0.1:{self.port}",
+                          *extra])
+        self.assertNotIn("s3cr3t", out.getvalue() + err.getvalue())
+        return rc, out.getvalue(), err.getvalue()
+
+    def test_the_command_line_fetch_prints_the_package_directory_and_nothing_else(self):
+        rc, out, err = self.run_cli("--revision", "abc1234")
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(out, str(Path(self.tmp.name) / self.checksum) + "\n")
+        self.assertEqual([s[1] for s in Hub.seen], ["/org/model/resolve/abc1234/g.onnx", "/org/model/resolve/abc1234/tokenizer.json"])
+
+    def test_the_command_line_fetch_fails_with_status_2_and_says_why(self):
+        del Hub.files["tokenizer.json"]
+        rc, out, err = self.run_cli()
+        self.assertEqual((rc, out), (2, ""))
+        self.assertIn("HTTP 404", err)
+
     def test_a_cached_copy_that_no_longer_hashes_is_fetched_again(self):
         root, _ = self.fetch()
         (root / "g.onnx").write_bytes(b"tampered")
@@ -393,7 +499,7 @@ class Bridge(unittest.TestCase):
                 bridge.main(args[:-4] + ["--out", str(root / "shard2")])
 
 
-@unittest.skipIf(torch is None, "PyTorch and NumPy are not installed")
+@unittest.skipIf(torch is None or np is None, "PyTorch and NumPy are not installed")
 class Reimplementation(unittest.TestCase):
     def weights(self, hidden=32, layers=2, out=16, vocab=50, ffn=64, seed=0):
         rng = np.random.default_rng(seed)
