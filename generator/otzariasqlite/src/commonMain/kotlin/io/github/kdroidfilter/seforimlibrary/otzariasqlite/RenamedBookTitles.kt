@@ -9,7 +9,6 @@ internal data class LibraryBook(
     val id: Long,
     val title: String,
     val sourceName: String,
-    val totalLines: Int,
 )
 
 /** An earlier title of a book, and what showed it is the same book. */
@@ -82,15 +81,11 @@ internal class RenamedBookTitles(private val threshold: Double = BookRenameDetec
         if (sources.isNotEmpty()) {
             val deadIds = sources.flatMap { s -> deadBySource.getValue(s).map { it.second } }.toSet()
             val deadHashes = hashSets(lineHashes(deadIds))
-            val deadSizes = sources.associateWith { s ->
-                deadBySource.getValue(s).mapNotNull { deadHashes[it.second]?.size }
-            }
-            // A Jaccard of t needs the smaller set to be at least t of the larger one;
-            // totalLines counts repeated lines too, hence the slack.
-            val candidates = books.filter { book ->
-                val sizes = deadSizes[book.sourceName] ?: return@filter false
-                book.totalLines <= 0 || sizes.any { sizeCompatible(it, book.totalLines, slack = 0.9) }
-            }
+            // Every book of these sources is compared by its distinct lines, as the dead key
+            // is. Its line count is no stand-in: repeated lines count there too, so 20 lines
+            // written twice are 40 lines but the same 20 distinct ones. A book left out here
+            // is also a rival left out, and a dead key with two heirs would seem to have one.
+            val candidates = books.filter { it.sourceName in sources }
             val liveRaw = lineHashes(candidates.mapTo(HashSet()) { it.id })
             val matches = HashMap<Long, MutableList<LibraryBook>>()
             for (book in candidates) {
@@ -100,7 +95,7 @@ internal class RenamedBookTitles(private val threshold: Double = BookRenameDetec
                 } ?: continue
                 for ((_, deadId) in deadBySource.getValue(book.sourceName)) {
                     val old = deadHashes[deadId] ?: continue
-                    if (sizeCompatible(old.size, live.size, slack = 1.0) && old.jaccard(live) >= threshold) {
+                    if (sizeCompatible(old.size, live.size) && old.jaccard(live) >= threshold) {
                         matches.getOrPut(deadId) { ArrayList() } += book
                     }
                 }
@@ -150,9 +145,10 @@ internal class RenamedBookTitles(private val threshold: Double = BookRenameDetec
             BookRenameDetector.LineHashSet(hashes.mapTo(HashSet()) { BookRenameDetector.ContentHash(it) })
         }
 
-    private fun sizeCompatible(a: Int, b: Int, slack: Double): Boolean {
+    /** A Jaccard of t needs the smaller set to be at least t of the larger one. */
+    private fun sizeCompatible(a: Int, b: Int): Boolean {
         if (a <= 0 || b <= 0) return false
-        return minOf(a, b).toDouble() / maxOf(a, b) >= threshold * slack
+        return minOf(a, b).toDouble() / maxOf(a, b) >= threshold
     }
 
     companion object {
