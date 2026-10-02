@@ -50,17 +50,36 @@ object LinkerInputView {
 
     private const val NUMERAL_PUNCTUATION = "'\"׳״"
 
+    /**
+     * Every labelled line contains it, so a reader that only counts labelled lines
+     * ([isLabelled]) may skip the lines without it.
+     */
+    const val LABEL_OPEN: Char = '('
+
     /** The view of a book from [sourceName] whose stored lines are [contents]. */
     fun modeFor(sourceName: String, contents: Iterable<String>): Mode {
-        if (sourceName == SEFARIA) return Mode.PLAIN
+        fixedModeFor(sourceName)?.let { return it }
         var labelled = 0
         for (content in contents) {
-            if (strippedPrefixLength(Mode.PLAIN_AND_TAGGED, content) > 0 && ++labelled >= MIN_LABELLED_LINES) {
-                return Mode.PLAIN_AND_TAGGED
-            }
+            if (isLabelled(content) && ++labelled >= MIN_LABELLED_LINES) break
         }
-        return Mode.NONE
+        return modeForLabelledLines(labelled)
     }
+
+    /**
+     * The view of every book from [sourceName] when it does not depend on the
+     * book's lines, else null: then it is [modeForLabelledLines] of the number of
+     * lines [isLabelled] accepts. A caller can stream such a book's lines once it
+     * knows that number, without holding them.
+     */
+    fun fixedModeFor(sourceName: String): Mode? = if (sourceName == SEFARIA) Mode.PLAIN else null
+
+    /** Whether [content] counts toward [MIN_LABELLED_LINES]. It always contains [LABEL_OPEN]. */
+    fun isLabelled(content: String): Boolean = strippedPrefixLength(Mode.PLAIN_AND_TAGGED, content) > 0
+
+    /** The view of a book with no [fixedModeFor] and [labelledLines] labelled lines. */
+    fun modeForLabelledLines(labelledLines: Int): Mode =
+        if (labelledLines >= MIN_LABELLED_LINES) Mode.PLAIN_AND_TAGGED else Mode.NONE
 
     /** Number of leading chars of [content] the linker does not see under [mode]. */
     fun strippedPrefixLength(mode: Mode, content: String): Int {
@@ -103,7 +122,7 @@ object LinkerInputView {
     internal fun leadingNumeralMarkerEnd(content: String, from: Int = 0): Int {
         var i = from
         while (i < content.length && isPythonSpace(content[i])) i++
-        if (i >= content.length || content[i] != '(') return 0
+        if (i >= content.length || content[i] != LABEL_OPEN) return 0
         val tokenStart = ++i
         while (i < content.length && (content[i] in 'א'..'ת' || content[i] in NUMERAL_PUNCTUATION)) i++
         if (i == tokenStart || i >= content.length || content[i] != ')') return 0
