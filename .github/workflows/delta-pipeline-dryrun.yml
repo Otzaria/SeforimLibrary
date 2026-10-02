@@ -7,6 +7,8 @@ name: Delta pipeline — dry run
 #   - stampSchemaVersion is correctly chained (schema_meta.db_version)
 #   - the v1 buildstate properly seeds v2's IdAllocator (ID stability)
 #   - producePatchAndVerify's strict `prev + patch == new` invariant holds
+#   - ... on compressed DBs: compressLineContent runs on both builds, so the
+#     patch and its content-hash check go compressed→compressed
 #
 # The pipeline itself lives in delta-real-diff-test.yml; this file is the entry
 # point that runs it with inputs_from=latest. It used to carry its own copy,

@@ -16,6 +16,8 @@ name: Delta pipeline — real diff test
 # readable: with no baseline_ref it proves the build is reproducible and IDs
 # are stable, and with one it holds the code transition and nothing else.
 # producePatchAndVerify's strict `prev + patch == new` invariant is the verdict.
+# Both DBs are compressed first (compressLineContent), as the release ships
+# them, so that verdict and its content hash are on zstd frames.
 #
 # It no longer diffs two content snapshots against each other. Run 34455675206
 # built v1 from the N-1 otzaria-library release and died in seedGenerations on
@@ -485,6 +487,43 @@ jobs:
           test "$V" = "2" || { echo "❌ db_version=$V (expected 2)"; exit 1; }
           echo "✓ v2 stamped"
 
+      # ─── COMPRESS LINE TEXT (both sides) ───────────────────────────────────
+      # Clients receive compressed→compressed patches, so both DBs go through
+      # the release's compression step before the patch. The current tree
+      # compresses v1 as well: the golden test freezes the frame bytes, so a
+      # baseline tree that has the step writes the same rows, and one that
+      # predates it still yields a patch that holds the code transition only.
+      - name: Compress v1 + v2 line text (zstd dictionary)
+        run: |
+          set -euo pipefail
+          for db in build/seforim.db.v1 build/seforim.db; do
+            $GRADLE :generator-common:compressLineContent \
+              -PdbPath="$PWD/$db" \
+              --no-daemon --stacktrace
+          done
+
+      - name: Verify both DBs hold only zstd frames of one dictionary
+        run: |
+          set -euo pipefail
+          # A row the step skipped would make the patch below test plain text.
+          for db in build/seforim.db.v1 build/seforim.db; do
+            DICTS=$(sqlite3 "$db" "SELECT COUNT(*) FROM zstd_dict")
+            test "$DICTS" = "1" || { echo "::error::$db has $DICTS zstd_dict rows (expected 1)"; exit 1; }
+            PLAIN=$(sqlite3 "$db" "SELECT
+              (SELECT COUNT(*) FROM line_content
+                WHERE typeof(content) <> 'blob' OR substr(content, 1, 4) <> x'28B52FFD')
+              + (SELECT COUNT(*) FROM version_line WHERE content IS NOT NULL
+                AND (typeof(content) <> 'blob' OR substr(content, 1, 4) <> x'28B52FFD'))")
+            test "$PLAIN" = "0" || { echo "::error::$db has $PLAIN line rows that are not zstd frames"; exit 1; }
+            FRAMES=$(sqlite3 "$db" "SELECT COUNT(*) FROM line_content")
+            test "$FRAMES" -gt 0 || { echo "::error::$db has no line_content rows"; exit 1; }
+            echo "✓ $db: $FRAMES line_content frames, dictionary $(sqlite3 "$db" "SELECT id FROM zstd_dict")"
+          done
+          # The producer refuses a dictionary change; fail here with the cause.
+          V1_DICT=$(sqlite3 build/seforim.db.v1 "SELECT id || ':' || hex(dict) FROM zstd_dict" | sha256sum)
+          V2_DICT=$(sqlite3 build/seforim.db "SELECT id || ':' || hex(dict) FROM zstd_dict" | sha256sum)
+          test "$V1_DICT" = "$V2_DICT" || { echo "::error::v1 and v2 carry different zstd dictionaries"; exit 1; }
+
       # ─── PRODUCE + VERIFY PATCH ────────────────────────────────────────────
       - name: producePatchAndVerify (strict invariant)
         run: |
@@ -518,7 +557,7 @@ jobs:
           for t in source author topic pub_place pub_date connection_type tocText \
                    generation category category_closure book book_author book_base_text \
                    book_topic book_pub_place book_pub_date book_acronym book_generation \
-                   tocEntry line line_toc link link_anchor link_range link_coverage \
+                   tocEntry line line_content zstd_dict line_toc link link_anchor link_range link_coverage \
                    book_has_links book_version version_line alt_toc_structure \
                    alt_toc_entry line_alt_toc default_commentator default_targum \
                    schema_meta; do
