@@ -7,6 +7,7 @@ import io.github.kdroidfilter.seforimlibrary.common.linker.LinkerInputView
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.Paths
+import java.sql.Connection
 import java.sql.DriverManager
 import kotlin.system.exitProcess
 
@@ -34,9 +35,11 @@ import kotlin.system.exitProcess
  * One exception to "verbatim": a line's opening structural label "(א) " is left
  * out ([LinkerInputView]) in every Sefaria book and in other books with many such
  * labels, because resolving it as a citation breaks the ibid context of the line's
- * first real citation. The view is chosen per book from its own lines, so a book's
- * lines are buffered before they are written; the non-Sefaria books it applies to
- * are listed in `lines_snapshot_stripped_books`. Phase-2 recognises the view from
+ * first real citation. The view is chosen per book from its own lines. Where it
+ * depends on them (not Sefaria), a counting pass over the lines that could hold a
+ * label decides it first ([labelledLineCounts]), so every book is still streamed
+ * line by line and never held in memory; the non-Sefaria books it applies to are
+ * listed in `lines_snapshot_stripped_books`. Phase-2 recognises the view from
  * each record's source_hash and maps its offsets back.
  *
  * Usage:
@@ -114,17 +117,18 @@ fun main(args: Array<String>) {
             }
 
             // Optional book allow-list for smoke tests (deterministic: lowest ids first).
-            val bookFilter = if (bookLimit != null) {
+            val bookCondition = if (bookLimit != null) {
                 val ids = ArrayList<Long>(bookLimit)
                 src.createStatement().use { s ->
                     s.executeQuery("SELECT id FROM book ORDER BY id LIMIT $bookLimit").use { rs ->
                         while (rs.next()) ids.add(rs.getLong(1))
                     }
                 }
-                " WHERE l.bookId IN (${ids.joinToString(",")}) "
+                "l.bookId IN (${ids.joinToString(",")})"
             } else {
-                ""
+                null
             }
+            val bookFilter = bookCondition?.let { " WHERE $it " } ?: ""
 
             val insert = out.prepareStatement(
                 """
@@ -144,38 +148,21 @@ fun main(args: Array<String>) {
             val stripped = out.prepareStatement(
                 "INSERT INTO lines_snapshot_stripped_books(source_name, canonical_he_title, mode, stripped_lines) VALUES(?,?,?,?)",
             )
-            // One book's rows, held until its view is known (LinkerInputView.modeFor reads all of them).
-            val pending = ArrayList<SnapshotRow>()
-            fun flushBook() {
-                if (pending.isEmpty()) return
-                val first = pending[0]
-                val mode = LinkerInputView.modeFor(first.sourceName, pending.map { it.content })
-                var strippedLines = 0
-                for (row in pending) {
-                    val content = LinkerInputView.linkerContent(mode, row.content)
-                    if (content.length != row.content.length) strippedLines++
-                    insert.setString(1, row.sourceName)
-                    insert.setString(2, row.title)
-                    insert.setLong(3, row.lineIndex)
-                    insert.setString(4, content)
-                    insert.setString(5, row.contextRef)
-                    insert.addBatch()
-                    lines++
-                    if (lines % 100_000L == 0L) {
-                        insert.executeBatch()
-                        out.commit()
-                        logger.i { "  …$lines lines / $books books" }
-                    }
-                }
+            // The book being written: its view and how many of its lines that view shortened.
+            var mode = LinkerInputView.Mode.NONE
+            var strippedLines = 0
+            fun finishBook() {
+                val (sourceName, title) = lastKey ?: return
                 if (mode == LinkerInputView.Mode.PLAIN_AND_TAGGED) {
-                    stripped.setString(1, first.sourceName)
-                    stripped.setString(2, first.title)
+                    stripped.setString(1, sourceName)
+                    stripped.setString(2, title)
                     stripped.setString(3, mode.name)
                     stripped.setInt(4, strippedLines)
                     stripped.executeUpdate()
                 }
-                pending.clear()
             }
+            // The view of a book whose source has no fixed one, decided before its first line.
+            val labelledLines = labelledLineCounts(src, split, bookCondition)
             src.createStatement().use { s ->
                 s.fetchSize = 10_000
                 s.executeQuery(
@@ -184,7 +171,8 @@ fun main(args: Array<String>) {
                            COALESCE(b.heRef, b.title) AS canonical_he_title,
                            l.lineIndex AS line_index,
                            ${LineContentShape.contentExpr(split)} AS content,
-                           COALESCE(NULLIF(TRIM(l.heRef), ''), COALESCE(b.heRef, b.title)) AS context_ref
+                           COALESCE(NULLIF(TRIM(l.heRef), ''), COALESCE(b.heRef, b.title)) AS context_ref,
+                           b.id AS book_id
                     FROM line l
                     JOIN book b   ON l.bookId = b.id
                     JOIN source s ON b.sourceId = s.id
@@ -198,19 +186,30 @@ fun main(args: Array<String>) {
                         val title = rs.getString(2)
                         val key = sourceName to title
                         if (key != lastKey) {
-                            flushBook()
+                            finishBook()
                             books++
                             lastKey = key
+                            mode = LinkerInputView.fixedModeFor(sourceName)
+                                ?: LinkerInputView.modeForLabelledLines(labelledLines[rs.getLong(6)] ?: 0)
+                            strippedLines = 0
                         }
-                        pending += SnapshotRow(
-                            sourceName = sourceName,
-                            title = title,
-                            lineIndex = rs.getLong(3),
-                            content = rs.getString(4) ?: "",
-                            contextRef = rs.getString(5) ?: title,
-                        )
+                        val stored = rs.getString(4) ?: ""
+                        val content = LinkerInputView.linkerContent(mode, stored)
+                        if (content.length != stored.length) strippedLines++
+                        insert.setString(1, sourceName)
+                        insert.setString(2, title)
+                        insert.setLong(3, rs.getLong(3))
+                        insert.setString(4, content)
+                        insert.setString(5, rs.getString(5) ?: title)
+                        insert.addBatch()
+                        lines++
+                        if (lines % 100_000L == 0L) {
+                            insert.executeBatch()
+                            out.commit()
+                            logger.i { "  …$lines lines / $books books" }
+                        }
                     }
-                    flushBook()
+                    finishBook()
                 }
             }
             insert.executeBatch()
@@ -257,10 +256,46 @@ private fun resolveSnapshotOutPath(srcDb: Path): Path {
     return Paths.get(out).toAbsolutePath()
 }
 
-private class SnapshotRow(
-    val sourceName: String,
-    val title: String,
-    val lineIndex: Long,
-    val content: String,
-    val contextRef: String,
-)
+/**
+ * Labelled lines ([LinkerInputView.isLabelled]) per book id, for the books whose
+ * source has no [LinkerInputView.fixedModeFor] (a book without any is absent),
+ * limited to the lines [bookCondition] selects when given.
+ *
+ * Only counts are kept, so memory does not grow with a book's size. Lines without
+ * [LinkerInputView.LABEL_OPEN] cannot be labelled, so SQLite drops them before
+ * their text is decoded. The count does not depend on line order, so none is asked.
+ */
+internal fun labelledLineCounts(src: Connection, split: Boolean, bookCondition: String?): Map<Long, Int> {
+    val sourceIds = ArrayList<Long>()
+    src.createStatement().use { s ->
+        s.executeQuery("SELECT id, name FROM source").use { rs ->
+            while (rs.next()) {
+                val name: String? = rs.getString(2)
+                if (name == null || LinkerInputView.fixedModeFor(name) == null) sourceIds += rs.getLong(1)
+            }
+        }
+    }
+    val counts = HashMap<Long, Int>()
+    if (sourceIds.isEmpty()) return counts
+    val content = LineContentShape.contentExpr(split)
+    src.prepareStatement(
+        """
+        SELECT l.bookId, $content
+        FROM line l
+        JOIN book b ON l.bookId = b.id
+        ${LineContentShape.contentJoin(split)}
+        WHERE b.sourceId IN (${sourceIds.joinToString(",")})
+          AND instr($content, ?) > 0
+          ${bookCondition?.let { "AND $it" } ?: ""}
+        """.trimIndent(),
+    ).use { s ->
+        s.setString(1, LinkerInputView.LABEL_OPEN.toString())
+        s.fetchSize = 10_000
+        s.executeQuery().use { rs ->
+            while (rs.next()) {
+                if (LinkerInputView.isLabelled(rs.getString(2) ?: "")) counts.merge(rs.getLong(1), 1, Int::plus)
+            }
+        }
+    }
+    return counts
+}
