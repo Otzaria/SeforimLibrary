@@ -770,15 +770,19 @@ internal class SefariaBookPayloadReader(
                 MarkerRun.NONE -> false
             }
 
-        // Items that open with their own label, by index. A label found only after an
-        // opening heading counts when at least one item of the array opens with its own
-        // label: a lone "<br>א." is more often a summary list (תלמוד עשר הספירות).
-        val selfLabelled = if (depth == 1 && nonEmptyCount > 1 && prefixesLeaf && !sourceNumbered) {
-            text.mapIndexed { idx, item -> ownLabelValue(item, afterHeading = false) == idx + 1 }
+        // Items that drop the generated prefix because they already carry their own
+        // label for that same number. Most shapes are enough alone. Two can also be
+        // something else: a numeral that is all of a bold dibbur ("<b>י"א. </b>" is
+        // "יש אומרים", "<b>  לא  </b> פלוג") and a label after an opening heading
+        // ("<br>א." opens a list of topics). Those count only when another item of
+        // the array carries its own label too.
+        val ownLabelled: BooleanArray? = if (depth == 1 && nonEmptyCount > 1 && prefixesLeaf && !sourceNumbered) {
+            val found = text.mapIndexed { idx, item -> ownLabel(item, idx + 1) }
+            val corroborated = found.count { it != null } >= 2
+            BooleanArray(text.size) { idx -> found[idx]?.let { it == LabelKind.PLAIN || corroborated } == true }
         } else {
             null
         }
-        val arrayHasSelfLabels = selfLabelled?.any { it } == true
 
         // גרסה חלקית מותרת (מערך קצר); פרק בלי הסטה — לא.
         if (childRefOffsets != null && childRefOffsets.size < text.size) {
@@ -802,8 +806,7 @@ internal class SefariaBookPayloadReader(
             // An item that already carries its own label for this very number keeps
             // that label alone: "(נח) [נח]" is noise. Any other number keeps the prefix.
             val nextLinePrefix = if (depth == 1 && isReferenceable && prefixesLeaf && nonEmptyCount > 1 && !sourceNumbered &&
-                !(currentAddressType != "Talmud" && (selfLabelled?.get(idx) == true ||
-                    (arrayHasSelfLabels && ownLabelValue(item, afterHeading = true) == idx + 1)))
+                !(currentAddressType != "Talmud" && ownLabelled?.get(idx) == true)
             ) {
                 "($letter) "
             } else {
@@ -953,18 +956,24 @@ private val ALONE_MATCH_TEMPLATE_SCOPES = setOf("any", "alone")
 // "{אות} " (unchanged since 491a4619; an intro-shifted run of these still counts).
 private val SOURCE_MARKER_REGEX = Regex("""^\s*[({]([א-ת"׳״]{1,5})[)}]\s""")
 
-// A label an item may open with, in every shape Sefaria texts use, after any
-// opening tags: "(אות)", "{אות}", "[אות]" (אליה רבה; may be glued to a tag or take
-// a colon, "[ב]:"), "אות)" (ביאור על ספר המצוות לרס"ג; also glued, "נה)עינוי"),
-// "אות. " / "אות: " (איסור והיתר הארוך, קשר גודל, תשובות רש"י) and a bold bare
-// numeral "<b>אות</b> " (פרקי אבות in סידור ספרד). It only ever cancels the
-// generated prefix of its own item, and only for the same number: a source run
-// shifted by an intro ("(ב) א.", כף אחת) keeps the generated numbering.
+// A label an item may open with, after any opening tags, for the number [LABEL_TOKEN]:
+// "(אות)", "( אות )" (נהר מצרים), "{אות}", "[אות]" (אליה רבה) and "[אות X]" (אליה
+// רבה קסב:ה), which may be glued to a tag or take a colon, "[ב]:"; "אות)" (ביאור על
+// ספר המצוות לרס"ג; also glued, "נה)עינוי"); "אות. " / "אות: " / "אות.</b>"
+// (איסור והיתר הארוך, קשר גודל, אורחות חיים להרא"ש); and a bold numeral alone,
+// "<b>אות</b>", "<b>אות </b>", "<b>אות.</b>" (סידור ספרד, תרומת הדשן), which
+// [BOLD_ONLY_LABEL_REGEX] tells apart. "סעיף א" / "ס"ק א" name another book's seif
+// and are not labels. A generated prefix only ever yields to its own item's label,
+// for the same number: a source run shifted by an intro ("(ב) א.", כף אחת) keeps
+// the generated numbering.
 private const val LABEL_TOKEN = """([א-ת"׳״]{1,5})"""
 private val OWN_LABEL_REGEX = Regex(
-    """^\s*(?:<[^>]+>\s*)*(?:(?:\($LABEL_TOKEN\)|\{$LABEL_TOKEN\}|\[$LABEL_TOKEN\])(?=[\s<:.]|$)|""" +
-        """$LABEL_TOKEN\)|$LABEL_TOKEN[.:](?=\s)|<b>$LABEL_TOKEN</b>(?=\s))"""
+    """^\s*(?:<[^>]+>\s*)*(?:(?:\(\s*(?:אות\s+)?$LABEL_TOKEN\s*\)|\{$LABEL_TOKEN\}|\[\s*(?:אות\s+)?$LABEL_TOKEN\s*\])(?=[\s<:.]|$)|""" +
+        """$LABEL_TOKEN\)|$LABEL_TOKEN[.:](?=\s|</)|<b>\s*$LABEL_TOKEN\s*[.:]?\s*</b>)"""
 )
+
+// The numeral is all there is inside a bold run: the shape of a short dibbur too.
+private val BOLD_ONLY_LABEL_REGEX = Regex("""^\s*(?:<[^>]+>\s*)*<b>\s*$LABEL_TOKEN\s*[.:]?\s*</b>""")
 
 // A heading the item opens with: tag-wrapped text alone on its first line, the
 // label right after the break ("<big><strong>סימן א. …</strong></big><br>א. מיד",
@@ -980,15 +989,17 @@ private fun labelToken(regex: Regex, content: String): String? =
 
 private fun markerValue(token: String): Int? = gematriaToInt[token.filter { it !in "\"׳״" }]
 
-/** Numeric value of the label the item opens with ([afterHeading]: the one right after its opening heading). */
-private fun ownLabelValue(item: JsonElement, afterHeading: Boolean): Int? {
+/** PLAIN counts alone; MAYBE_DIBBUR (a bold-only numeral, a label after a heading) needs company. */
+private enum class LabelKind { PLAIN, MAYBE_DIBBUR }
+
+/** How the item carries its own label for [number], or null when it carries none for it. */
+private fun ownLabel(item: JsonElement, number: Int): LabelKind? {
     val content = (item as? JsonPrimitive)?.takeIf { it.isString }?.content ?: return null
-    val token = if (afterHeading) {
-        LEADING_HEADING_REGEX.find(content)?.let { labelToken(OWN_LABEL_REGEX, content.substring(it.range.last + 1)) }
-    } else {
-        labelToken(OWN_LABEL_REGEX, content)
-    }
-    return token?.let(::markerValue)
+    fun at(text: String, regex: Regex) = labelToken(regex, text)?.let(::markerValue) == number
+    if (at(content, BOLD_ONLY_LABEL_REGEX)) return LabelKind.MAYBE_DIBBUR
+    if (at(content, OWN_LABEL_REGEX)) return LabelKind.PLAIN
+    val afterHeading = LEADING_HEADING_REGEX.find(content)?.let { content.substring(it.range.last + 1) } ?: return null
+    return if (at(afterHeading, OWN_LABEL_REGEX)) LabelKind.MAYBE_DIBBUR else null
 }
 
 // Inverse of toGematria, for validating printed markers.
