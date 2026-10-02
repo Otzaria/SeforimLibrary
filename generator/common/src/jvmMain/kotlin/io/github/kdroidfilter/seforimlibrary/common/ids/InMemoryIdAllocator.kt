@@ -317,6 +317,25 @@ class InMemoryIdAllocator private constructor(
     override fun previousSourceHash(key: BookKey): BookSourceHash? =
         previousSourceHashes[key]
 
+    override fun knownBookKeys(): Map<BookKey, Long> = books.toMap()
+
+    override fun lineContentHashes(bookIds: Set<Long>): Map<Long, List<ByteArray>> {
+        if (bookIds.isEmpty()) return emptyMap()
+        val out = HashMap<Long, MutableList<ByteArray>>()
+        // The keys a book issued this run are all the lines it now has; its other
+        // keys are earlier versions of it, which snapshotTo prunes.
+        for (key in issuedLineIds.values) {
+            if (key.bookId in bookIds) out.getOrPut(key.bookId) { ArrayList() }.add(key.contentHash)
+        }
+        val issuedBooks = out.keys.toHashSet()
+        for (key in lines.keys) {
+            if (key.bookId in bookIds && key.bookId !in issuedBooks) {
+                out.getOrPut(key.bookId) { ArrayList() }.add(key.contentHash)
+            }
+        }
+        return out
+    }
+
     override fun stats(): AllocatorStats {
         val perTable = IdTable.values().associateWith { table ->
             val reused = reusedCount.getValue(table).get()
