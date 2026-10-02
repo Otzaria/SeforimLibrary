@@ -122,6 +122,17 @@ def book_editions(conn, split=False):
     return editions
 
 
+def line_text_decoder(conn):
+    """A DB with zstd_dict stores line text as zstd frames of its one dictionary."""
+    if not conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='zstd_dict'").fetchone():
+        return lambda value: value
+    import zstandard
+
+    [(dictionary,)] = conn.execute("SELECT dict FROM zstd_dict")
+    decompressor = zstandard.ZstdDecompressor(dict_data=zstandard.ZstdCompressionDict(dictionary))
+    return lambda value: decompressor.decompress(value).decode("utf-8") if isinstance(value, bytes) else value
+
+
 def build_catalog(db_path):
     conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
     try:
@@ -145,6 +156,7 @@ def build_catalog(db_path):
         def flush():
             books[current]["hash"] = digest.hexdigest()
 
+        decode = line_text_decoder(conn)
         content_sql = "lc.content" if split else "l.content"
         content_join = " JOIN line_content lc ON lc.id = l.id" if split else ""
         for book_id, content in conn.execute(
@@ -155,7 +167,7 @@ def build_catalog(db_path):
                 if book_id not in books:
                     raise ValueError(f"line rows reference missing book {book_id}")
                 current, digest = book_id, hashlib.sha256()
-            text = plain_text(content)
+            text = plain_text(decode(content))
             # Line breaks count as whitespace, so re-wrapping lines is not a change.
             if text:
                 if books[book_id]["chars"]:

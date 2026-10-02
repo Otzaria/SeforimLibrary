@@ -194,6 +194,12 @@ fun main(args: Array<String>) = runBlocking {
             "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='line_content') " +
                 "AND NOT EXISTS(SELECT 1 FROM pragma_table_info('line') WHERE name='content')",
             { c -> if (c.next().value) lineContentSplit = c.getLong(0) == 1L; QueryResult.Value(Unit) }, 0)
+        // Anchors hash the plain text; a compressed DB would mismatch every record.
+        var lineContentCompressed = false
+        driver.executeQuery(null,
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='zstd_dict')",
+            { c -> if (c.next().value) lineContentCompressed = c.getLong(0) == 1L; QueryResult.Value(Unit) }, 0)
+        check(!lineContentCompressed) { "Phase-2 needs plain line text; run it before compressLineContent" }
         val sourceLineSql = if (lineContentSplit) {
             """
             SELECT l.id, lc.content,

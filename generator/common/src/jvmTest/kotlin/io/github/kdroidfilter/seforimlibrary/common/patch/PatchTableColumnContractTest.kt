@@ -35,7 +35,7 @@ class PatchTableColumnContractTest {
 
     @Test
     fun `physical columns of every patch table match the committed expectation`() {
-        assertColumns(CURRENT_DB_SCHEMA_VERSION, PATCH_TABLES_IN_FK_ORDER, split = true)
+        assertColumns(CURRENT_DB_SCHEMA_VERSION, PATCH_TABLES_IN_FK_ORDER, split = true, compressed = true)
     }
 
     @Test
@@ -43,7 +43,12 @@ class PatchTableColumnContractTest {
         assertColumns(5, PATCH_TABLES_SCHEMA_5, split = false)
     }
 
-    private fun assertColumns(dbSchemaVersion: Int, tables: List<PatchTable>, split: Boolean) {
+    private fun assertColumns(
+        dbSchemaVersion: Int,
+        tables: List<PatchTable>,
+        split: Boolean,
+        compressed: Boolean = false,
+    ) {
         val fixtureName = "/patch_table_columns_schema_$dbSchemaVersion.json"
         val fixture = javaClass.getResourceAsStream(fixtureName)
             ?.readBytes()?.toString(Charsets.UTF_8)
@@ -58,7 +63,7 @@ class PatchTableColumnContractTest {
             v.jsonArray.map { it.jsonPrimitive.content }
         }
 
-        val actual = freshDatabaseColumns(tables, split)
+        val actual = freshDatabaseColumns(tables, split, compressed)
 
         val hint = "bump db_schema_version or add a column migration"
         val followUp = "If you bump db_schema_version, add a NEW " +
@@ -84,7 +89,11 @@ class PatchTableColumnContractTest {
     }
 
     /** Column names (alphabetical, like LogicalContentHasher) per patch table. */
-    private fun freshDatabaseColumns(tables: List<PatchTable>, split: Boolean): Map<String, List<String>> {
+    private fun freshDatabaseColumns(
+        tables: List<PatchTable>,
+        split: Boolean,
+        compressed: Boolean,
+    ): Map<String, List<String>> {
         val db = tmp.newFolder().toPath().resolve("fresh-seforim.db")
         Files.deleteIfExists(db)
         JdbcSqliteDriver("jdbc:sqlite:${db.toAbsolutePath()}").use { driver ->
@@ -93,6 +102,7 @@ class PatchTableColumnContractTest {
         val out = LinkedHashMap<String, List<String>>()
         DriverManager.getConnection("jdbc:sqlite:${db.toAbsolutePath()}").use { conn ->
             if (split) splitLineContent(conn)
+            if (compressed) compressLineContent(conn, threads = 1)
             for (table in tables) {
                 val cols = PatchDbSchema.readTableInfo(conn, "main", table.name).map { it.name }
                 if (cols.isEmpty()) error("patch table '${table.name}' is missing from a freshly created DB")

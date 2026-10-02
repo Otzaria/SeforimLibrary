@@ -128,6 +128,33 @@ class CatalogTest(unittest.TestCase):
         self.assertEqual(["Read", None, None, "Metadata", None], [b["edition"] for b in after["books"]])
         self.assertFalse(any(lua.diff_catalogs(before, after).values()))
 
+    def test_compressed_line_text_preserves_catalog(self):
+        try:
+            import zstandard
+        except ImportError:  # pragma: no cover - CI installs zstandard explicitly
+            self.skipTest("zstandard is not installed")
+        dictionary = (ROOT / "generator" / "common" / "src" / "jvmMain" / "resources" / "zstd"
+                      / "line_content.zdict").read_bytes()
+        compressor = zstandard.ZstdCompressor(
+            level=19, dict_data=zstandard.ZstdCompressionDict(dictionary), write_checksum=False)
+        books = [(1, 2, 1, "book 1"), (2, 2, 1, "book 2")]
+        lines = [(1, 0, "<b>אמר</b> רבא"), (1, 1, "בראשית"), (2, 0, "alpha")]
+        versions = [(1, "Read", None, {0: "<b>אמר</b> רבא", 1: "בראשית"}), (2, "Other", None, {0: "beta"})]
+        with tempfile.TemporaryDirectory() as tmp:
+            split, compressed = Path(tmp) / "split.db", Path(tmp) / "compressed.db"
+            make_db(split, books, lines, versions, split=True)
+            make_db(compressed, books, lines, versions, split=True)
+            with closing(sqlite3.connect(compressed)) as conn:
+                conn.create_function("zframe", 1, lambda t: None if t is None else compressor.compress(t.encode()))
+                conn.executescript("""
+                    UPDATE line_content SET content = zframe(content);
+                    UPDATE version_line SET content = zframe(content) WHERE content IS NOT NULL;
+                    CREATE TABLE zstd_dict (id INTEGER PRIMARY KEY, dict BLOB NOT NULL);
+                """)
+                conn.execute("INSERT INTO zstd_dict VALUES (1, ?)", (dictionary,))
+                conn.commit()
+            self.assertEqual(lua.build_catalog(split), lua.build_catalog(compressed))
+
     def test_paths_walk_up_to_a_null_parent_root(self):
         value = catalog([(10, 2, 1, "בראשית")], [(10, 0, "א")])
         self.assertEqual("תנך/תורה", value["books"][0]["path"])
@@ -926,7 +953,7 @@ sys.stdout.buffer.write((root / tag / name).read_bytes())
         ci = yaml.safe_load(CI.read_text(encoding="utf-8"))
         job = ci["jobs"]["announcer"]
         install = next(s["run"] for s in job["steps"] if "pip install" in s.get("run", ""))
-        for package in ("requests", "pyluach", "tzdata", "pyyaml"):
+        for package in ("requests", "pyluach", "tzdata", "pyyaml", "zstandard"):
             self.assertIn(package, install)
 
 

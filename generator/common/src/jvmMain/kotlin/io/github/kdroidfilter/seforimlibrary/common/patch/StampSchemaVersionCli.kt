@@ -2,6 +2,7 @@ package io.github.kdroidfilter.seforimlibrary.common.patch
 
 import co.touchlab.kermit.Logger
 import co.touchlab.kermit.Severity
+import io.github.kdroidfilter.seforimlibrary.common.db.LineContentCompression
 import java.nio.file.Files
 import java.nio.file.Paths
 import java.sql.Connection
@@ -96,6 +97,8 @@ internal fun stampSchemaVersion(conn: Connection, dbVersion: Int, dbSchemaVersio
         require(versionContent != null && !versionContent.notNull) {
             "Cannot stamp DB as schema $dbSchemaVersion; version_line.content must be nullable"
         }
+        // Compression is optional within schema 6, but a compressed DB has no plain row left.
+        if (LineContentCompression.isCompressed(conn)) validateCompressed(conn)
     }
 
     conn.autoCommit = false

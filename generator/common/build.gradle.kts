@@ -211,6 +211,22 @@ tasks.register<JavaExec>("splitLineContent") {
     jvmArgs = listOf("-Xmx1g")
 }
 
+tasks.register<JavaExec>("compressLineContent") {
+    group = "application"
+    description = "Compresses line_content/version_line text of the finished seforim.db into zstd frames with the bundled dictionary."
+    dependsOn("jvmJar")
+    mainClass.set("io.github.kdroidfilter.seforimlibrary.common.patch.CompressLineContentCliKt")
+    classpath = files(tasks.named("jvmJar")) + configurations.getByName("jvmRuntimeClasspath")
+    val dbPath = (project.findProperty("dbPath") ?: project.findProperty("seforimDb")) as String?
+        ?: System.getenv("SEFORIM_DB")
+        ?: rootProject.layout.buildDirectory.file("seforim.db").get().asFile.absolutePath
+    systemProperty("dbPath", dbPath)
+    listOf("chunkRows", "threads").forEach { key ->
+        project.findProperty(key)?.let { systemProperty(key, it as String) }
+    }
+    jvmArgs = listOf("-Xmx2g")
+}
+
 tasks.register<JavaExec>("compactSeforimDb") {
     group = "application"
     description = "Drops the freelist of the finished seforim.db via VACUUM INTO on -PscratchDir (needs ~one compacted DB free there)."

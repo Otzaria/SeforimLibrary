@@ -23,6 +23,7 @@
     "tocEntry",
     "line",
     "line_content",
+    "zstd_dict",
     "line_toc",
     "line_ref",
     "line_dh",
@@ -61,7 +62,7 @@
     "INSERT INTO link VALUES (1,1,3,X'00FF1F02'),(2,2,NULL,X''),(3,3,1,NULL)",
     "CREATE TABLE generation (id INTEGER PRIMARY KEY, name TEXT)"
   ],
-  "wholeHash": "cd68e190d45aa33dabe06b999570c6b200d3820feca8bdfd7e53a7ef5fcf9663",
+  "wholeHash": "da72fdd53edee76cf684b4f6997d9066c36ae0a753ccf274708b1efdea5d1074",
   "tableHashes": {
     "source": "feae8f08d36404f2acc5777efbde1f0a91f8296474d3dc30fb7de6652934331f",
     "author": "b91e11e69a8aa4b551cc0aca7484cbae4a270dca18dfa2c8f8ea5ea56c7811ce",
@@ -83,6 +84,7 @@
     "tocEntry": "173b2347ce3b5991b16bbcb671be1c85ec9e97ae07fad981a482d99a06876314",
     "line": "adb40da0343c74c254316aaaffd51e125bcb5001ceb5080a7201cf201dcd99ea",
     "line_content": "cc3da9b351752802a742cb7bbac61e054328032699867ec96c952d937bbd4008",
+    "zstd_dict": "3f071700c8939f91e08b2cdf26d971527a38c1e27b10f9d6ceef58f58c6c48fb",
     "line_toc": "b6e6b239b7225c3648eaef0ae9dadeeb6d2f089f753a8413963da42da2954bd4",
     "line_ref": "37250a7ebbd202879d19ad917f30e841432b2694667113c7250af61fbb11b2d2",
     "line_dh": "a26c54c96bc997dfbe2506f6be5c26b446d5eb3a4e599f516b168537ea8536b9",

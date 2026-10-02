@@ -73,6 +73,8 @@ internal val PATCH_TABLES_IN_FK_ORDER: List<PatchTable> = listOf(
     PatchTable("line",               listOf("id"),       updatable = true),
     // Schema 6. The text of each line, split out of `line`.
     PatchTable("line_content",       listOf("id"),       updatable = true),
+    // The dictionary of the line text frames; any change of it is a full rebase.
+    PatchTable("zstd_dict",          listOf("id"),       updatable = true),
     PatchTable("line_toc",           listOf("lineId"),   updatable = true),
     // Schema 4. Canonical line-reference index — pure key table (PK == all
     // columns), so there is nothing to update on conflict.
@@ -108,7 +110,7 @@ internal val PATCH_TABLES_IN_FK_ORDER: List<PatchTable> = listOf(
 
 /** Schema-5 contract, frozen: line text still lived in `line.content`. */
 internal val PATCH_TABLES_SCHEMA_5: List<PatchTable> =
-    PATCH_TABLES_IN_FK_ORDER.filterNot { it.name == "line_content" }
+    PATCH_TABLES_IN_FK_ORDER.filterNot { it.name == "line_content" || it.name == "zstd_dict" }
 
 /** Schema-4 contract shipped in v26, before line_dh gained dhDisplay. */
 internal val PATCH_TABLES_SCHEMA_4: List<PatchTable> =

@@ -28,7 +28,7 @@ class PatchTablesContractTest {
             PATCH_TABLES_SCHEMA_3,
         )
         assertEquals(
-            PATCH_TABLES_IN_FK_ORDER.filterNot { it.name == "line_content" },
+            PATCH_TABLES_IN_FK_ORDER.filterNot { it.name == "line_content" || it.name == "zstd_dict" },
             PATCH_TABLES_SCHEMA_5,
         )
         assertEquals(
@@ -77,6 +77,7 @@ class PatchTablesContractTest {
         assertEquals(
             LogicalContentHasher.TABLES_SCHEMA_5.toMutableList().apply {
                 add(indexOf("line") + 1, "line_content")
+                add(indexOf("line_content") + 1, "zstd_dict")
             },
             LogicalContentHasher.TABLES_SCHEMA_6,
         )

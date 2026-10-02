@@ -160,9 +160,14 @@ class LogicalContentHasher(
         /** Schema 5 changes line_dh columns, not the set or order of tables. */
         val TABLES_SCHEMA_5: List<String> = TABLES_SCHEMA_4
 
-        /** Schema 6 moves line text into line_content, hashed right after line. */
+        /**
+         * Schema 6 moves line text into line_content, hashed right after line, and the
+         * dictionary of its zstd frames (zstd_dict) right after that. zstd_dict joined
+         * before any release shipped schema 6; from here on the list is frozen.
+         */
         val TABLES_SCHEMA_6: List<String> = TABLES_SCHEMA_5.toMutableList().apply {
             add(indexOf("line") + 1, "line_content")
+            add(indexOf("line_content") + 1, "zstd_dict")
         }
 
         /** Current-schema default for build-time diagnostics and current DB tests. */

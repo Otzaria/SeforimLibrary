@@ -100,6 +100,15 @@ project(":generator-common").tasks.matching { it.name == "analyzeSeforimDb" }.co
     mustRunAfter(":generator-common:stampSchemaVersion")
     mustRunAfter(":sefariasqlite:generateLinkerLinks")
 }
+// Compression follows the last reader of plain text (Phase-2), and compaction
+// reclaims the space the shorter rows free.
+project(":generator-common").tasks.matching { it.name == "compressLineContent" }.configureEach {
+    lineContentWriters.forEach { mustRunAfter(it) }
+    mustRunAfter(":generator-common:splitLineContent")
+    mustRunAfter(":generator-common:stampSchemaVersion")
+    mustRunAfter(":sefariasqlite:generateLinkerLinks")
+    mustRunAfter(":generator-common:analyzeSeforimDb")
+}
 // VACUUM INTO carries sqlite_stat1 over, so compaction comes after every writer
 // including ANALYZE; the producer then reads the compacted DB's stat1.
 project(":generator-common").tasks.matching { it.name == "compactSeforimDb" }.configureEach {
@@ -107,6 +116,7 @@ project(":generator-common").tasks.matching { it.name == "compactSeforimDb" }.co
     mustRunAfter(":generator-common:stampSchemaVersion")
     mustRunAfter(":sefariasqlite:generateLinkerLinks")
     mustRunAfter(":generator-common:analyzeSeforimDb")
+    mustRunAfter(":generator-common:compressLineContent")
 }
 
 // Generator diagnostics side-channel (see GeneratorReport). Findings that are
@@ -324,6 +334,7 @@ project(":generator-common").tasks.matching { it.name == "producePatchAndVerify"
     mustRunAfter(project(":generator-common").tasks.matching { it.name == "splitLineContent" })
     mustRunAfter(project(":generator-common").tasks.matching { it.name == "stampSchemaVersion" })
     mustRunAfter(project(":generator-common").tasks.matching { it.name == "analyzeSeforimDb" })
+    mustRunAfter(project(":generator-common").tasks.matching { it.name == "compressLineContent" })
     mustRunAfter(project(":generator-common").tasks.matching { it.name == "compactSeforimDb" })
     // Map the umbrella task's -P props onto the CLI's gradle props.
     val prev = providers.gradleProperty("prevReleaseDb").orNull
