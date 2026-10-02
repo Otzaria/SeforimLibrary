@@ -517,6 +517,27 @@ internal class SefariaBookPayloadReader(
         authors: List<String>,
         collectLineKeyOverrides: Boolean = true,
     ): BuiltBookContent {
+        fun walk(labels: OwnLabelPass) =
+            walkBook(schemaObj, textElement, bookHeTitle, bookEnTitle, authors, collectLineKeyOverrides, labels)
+        val first = OwnLabelPass()
+        val built = walk(first)
+        // A section that labels most of its own items also writes some numbers its own way:
+        // "טוב." for 17 and "חי." for 18 (קשר גודל), "<b>רן </b>" for 250 (the indexes of
+        // תרומת הדשן). The book is walked again with those spellings accepted there, and
+        // only there: anywhere else "אחד." at the thirteenth place is a dibbur, not a label.
+        val variantSections = first.sectionsAdmittingVariants()
+        return if (variantSections.isEmpty()) built else walk(OwnLabelPass(variantSections))
+    }
+
+    private fun walkBook(
+        schemaObj: JsonObject,
+        textElement: JsonElement,
+        bookHeTitle: String,
+        bookEnTitle: String,
+        authors: List<String>,
+        collectLineKeyOverrides: Boolean,
+        labels: OwnLabelPass,
+    ): BuiltBookContent {
         // Pre-allocate with estimated capacity
         val output = ArrayList<String>(1000)
         val refs = ArrayList<RefEntry>(1000)
@@ -604,6 +625,7 @@ internal class SefariaBookPayloadReader(
                     cleanShifts = cleanShifts,
                     lineKeyHashOverrides = lineKeyHashOverrides,
                     numbersIntegerLeaf = numbersIntegerLeaf(node),
+                    labels = labels.section(refPrefix),
                 )
             }
         }
@@ -656,6 +678,7 @@ internal class SefariaBookPayloadReader(
                 cleanShifts = cleanShifts,
                 lineKeyHashOverrides = lineKeyHashOverrides,
                 numbersIntegerLeaf = numbersIntegerLeaf(schemaObj),
+                labels = labels.section(bookEnTitle),
             )
         }
 
@@ -689,6 +712,7 @@ internal class SefariaBookPayloadReader(
         cleanShifts: MutableMap<Int, Int>? = null,
         lineKeyHashOverrides: MutableMap<Int, ByteArray>? = null,
         numbersIntegerLeaf: Boolean = false,
+        labels: SectionLabels,
     ) {
         // Leaf when depth reached zero, OR when the data is shallower than the
         // schema declares (e.g. Keter Malkhut: schema says depth=2 but most
@@ -701,7 +725,8 @@ internal class SefariaBookPayloadReader(
             if (!content.isNullOrEmpty()) {
                 val collapseBreaks = collapsesInlineBreaks(bookEnTitle)
                 val normalized = cleanSefariaLine(content, collapseInlineBreaks = collapseBreaks)
-                val cleaned = SefariaDashlessDibburim.separate(bookHeTitle, normalized)
+                // A second walk of the book repeats the same separations: count them once.
+                val cleaned = SefariaDashlessDibburim.separate(bookHeTitle, normalized, recordStats = !labels.repeatedWalk)
                 if (cleaned.isNotEmpty()) {
                     // Reproduce the old pipeline BEFORE the dashless repair: keeping
                     // a break can either enable or suppress that repair. Collapsing
@@ -777,7 +802,7 @@ internal class SefariaBookPayloadReader(
         // ("<br>א." opens a list of topics). Those count only when another item of
         // the array carries its own label too.
         val ownLabelled: BooleanArray? = if (depth == 1 && nonEmptyCount > 1 && prefixesLeaf && !sourceNumbered) {
-            val found = text.mapIndexed { idx, item -> ownLabel(item, idx + 1) }
+            val found = text.mapIndexed { idx, item -> ownLabel(item, idx + 1, labels.variants) }
             val corroborated = found.count { it != null } >= 2
             BooleanArray(text.size) { idx -> found[idx]?.let { it == LabelKind.PLAIN || corroborated } == true }
         } else {
@@ -805,13 +830,10 @@ internal class SefariaBookPayloadReader(
             val isReferenceable = referenceableSections.getOrNull(sectionIndex) ?: true
             // An item that already carries its own label for this very number keeps
             // that label alone: "(נח) [נח]" is noise. Any other number keeps the prefix.
-            val nextLinePrefix = if (depth == 1 && isReferenceable && prefixesLeaf && nonEmptyCount > 1 && !sourceNumbered &&
-                !(currentAddressType != "Talmud" && ownLabelled?.get(idx) == true)
-            ) {
-                "($letter) "
-            } else {
-                ""
-            }
+            val numbered = depth == 1 && isReferenceable && prefixesLeaf && nonEmptyCount > 1 && !sourceNumbered
+            val selfLabelled = numbered && currentAddressType != "Talmud" && ownLabelled?.get(idx) == true
+            if (numbered) labels.count(selfLabelled)
+            val nextLinePrefix = if (numbered && !selfLabelled) "($letter) " else ""
 
             if (depth > 1 && sectionName.isNotBlank() && isReferenceable) {
                 val tag = when (level) {
@@ -867,6 +889,7 @@ internal class SefariaBookPayloadReader(
                 cleanShifts = cleanShifts,
                 lineKeyHashOverrides = lineKeyHashOverrides,
                 numbersIntegerLeaf = numbersIntegerLeaf,
+                labels = labels,
             )
         }
     }
@@ -989,13 +1012,71 @@ private fun labelToken(regex: Regex, content: String): String? =
 
 private fun markerValue(token: String): Int? = gematriaToInt[token.filter { it !in "\"׳״" }]
 
+// Another spelling of a number, accepted only in a section that labels its own items
+// ([SectionLabels]): the letters in any order and final forms at their value ("רן" 250,
+// "דשמ" 344, "אך" 21, "טוב" 17), or a letter spelled out ("יוד" 10). At most four
+// letters, so a word is not read as a sum.
+private fun variantValue(token: String): Int? {
+    val letters = token.filter { it !in "\"׳״" }
+    SPELLED_OUT_NUMERALS[letters]?.let { return it }
+    if (letters.length > 4) return null
+    return letters.sumOf { NUMERAL_LETTER_VALUES[it] ?: return null }
+}
+
+// "יוד." for 10: seven times in קשר גודל, once in ביאור על ספר המצוות לרס"ג ("יו"ד)").
+private val SPELLED_OUT_NUMERALS = mapOf("יוד" to 10)
+
+private val NUMERAL_LETTER_VALUES: Map<Char, Int> = "אבגדהוזחטיכלמנסעפצקרשתךםןףץ".toList().zip(
+    listOf(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 200, 300, 400, 20, 40, 50, 80, 90),
+).toMap()
+
+// A section accepts another spelling of a label ([variantValue]) when at least this
+// many of the items it numbers, and this share of them, carry a label of their own.
+// In the 2026-09-30 export a section with 20 such labels or more has either at most 21%
+// of its items labelled (באר הגולה חו"מ, אורחות חיים להרא"ש) or at least 68% (קול התור;
+// 92% and up elsewhere). Every item that another spelling alone would match in a section
+// below the gate is a dibbur: "<b>בידי. </b>" at 26, "האחד:" at 18.
+private const val MIN_OWN_LABELS = 20
+private const val MIN_OWN_LABEL_PERCENT = 60
+
+/**
+ * One walk of a book's text, which tallies its labels per section (a node of the
+ * schema, keyed by its ref prefix). The first walk accepts only canonical labels; a
+ * second one, if any, also accepts another spelling in [variantSections].
+ */
+private class OwnLabelPass(private val variantSections: Set<String> = emptySet()) {
+    private val sections = HashMap<String, SectionLabels>()
+
+    fun section(key: String): SectionLabels = sections.getOrPut(key) {
+        SectionLabels(variants = key in variantSections, repeatedWalk = variantSections.isNotEmpty())
+    }
+
+    fun sectionsAdmittingVariants(): Set<String> = sections.filterValues { it.admitsVariants() }.keys
+}
+
+/** Of a section's items that get a generated "(N) ", how many drop it for a label of their own. */
+private class SectionLabels(val variants: Boolean, val repeatedWalk: Boolean) {
+    private var numbered = 0
+    private var selfLabelled = 0
+
+    fun count(selfLabelled: Boolean) {
+        numbered++
+        if (selfLabelled) this.selfLabelled++
+    }
+
+    fun admitsVariants(): Boolean =
+        selfLabelled >= MIN_OWN_LABELS && selfLabelled * 100 >= numbered * MIN_OWN_LABEL_PERCENT
+}
+
 /** PLAIN counts alone; MAYBE_DIBBUR (a bold-only numeral, a label after a heading) needs company. */
 private enum class LabelKind { PLAIN, MAYBE_DIBBUR }
 
 /** How the item carries its own label for [number], or null when it carries none for it. */
-private fun ownLabel(item: JsonElement, number: Int): LabelKind? {
+private fun ownLabel(item: JsonElement, number: Int, variants: Boolean): LabelKind? {
     val content = (item as? JsonPrimitive)?.takeIf { it.isString }?.content ?: return null
-    fun at(text: String, regex: Regex) = labelToken(regex, text)?.let(::markerValue) == number
+    fun at(text: String, regex: Regex) = labelToken(regex, text)?.let { token ->
+        markerValue(token) == number || variants && variantValue(token) == number
+    } == true
     if (at(content, BOLD_ONLY_LABEL_REGEX)) return LabelKind.MAYBE_DIBBUR
     if (at(content, OWN_LABEL_REGEX)) return LabelKind.PLAIN
     val afterHeading = LEADING_HEADING_REGEX.find(content)?.let { content.substring(it.range.last + 1) } ?: return null
