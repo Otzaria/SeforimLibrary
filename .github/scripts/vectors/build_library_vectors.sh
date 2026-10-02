@@ -17,6 +17,10 @@
 #               exactly those files at their sizes it is published, --latest=false; then the
 #               ledger is persisted — only after a publish
 #
+# LIBRARY_VECTORS_PRERELEASE (true unless "false") publishes vectors-<tag> as a prerelease:
+# like the lines-snapshot-sha256-* and pipeline-result-* releases it then stays out of
+# update-release-manifest.yml and the database history; a download by tag works the same.
+#
 # --mode dry-run stops after step 6 and persists nothing. The state directory (default
 # /home/runner/otzaria-vectors; see bootstrap_runner.sh) holds the binaries, the venv, the
 # model cache, the warehouse and the published ledger, and is locked for the whole build.
@@ -40,6 +44,8 @@ while [ $# -gt 0 ]; do
 done
 echo "$TAG" | grep -Eq '^v[0-9]+-[0-9]{14}$' || { echo "::error::'$TAG' is not a database release tag (v<dbVersion>-<utcTimestamp>)"; exit 64; }
 case "$MODE" in base|dry-run) ;; *) echo "::error::--mode is base or dry-run, not '$MODE'"; exit 64 ;; esac
+PRERELEASE=${LIBRARY_VECTORS_PRERELEASE:-true}
+case "$PRERELEASE" in true|false) ;; *) echo "::error::LIBRARY_VECTORS_PRERELEASE is true or false, not '$PRERELEASE'"; exit 64 ;; esac
 VERSION=${TAG#v}; VERSION=${VERSION%%-*}
 WORK=${WORK:-$STATE/work/$TAG}
 CLI=${OTZARIA_SEMANTIC_CLI:-$STATE/bin/otzaria-semantic-search}
@@ -83,7 +89,7 @@ if [ "$MODE" = base ]; then
   # vectors-<tag> is tagged at the commit <tag> names (an annotated tag resolves to its commit)
   TARGET=$("$GH" api "repos/$REPO/commits/$TAG" --jq .sha) || die "could not resolve the commit of $TAG"
   echo "$TARGET" | grep -Eq '^[0-9a-f]{40}$' || die "$TAG resolves to '$TARGET', not a commit"
-  echo "publish: $RELEASE_TAG at $TARGET"
+  echo "publish: $RELEASE_TAG at $TARGET, prerelease $PRERELEASE"
 fi
 rm -rf "$WORK"; mkdir -p "$WORK/dl" "$WORK/index" "$WORK/shards" "$WORK/files"
 fetch() {  # <asset name>: into $WORK/dl, through gh, or anonymously from the public release URL
@@ -206,7 +212,7 @@ notes="$WORK/notes.md"
 } > "$notes"
 # A draft fires no `release` event and creates no tag: nothing is published until every
 # file is in place and checked.
-"$GH" release create "$RELEASE_TAG" --repo "$REPO" --draft --target "$TARGET" \
+"$GH" release create "$RELEASE_TAG" --repo "$REPO" --draft --target "$TARGET" --prerelease="$PRERELEASE" \
   --latest=false --title "Library vectors $TAG" --notes-file "$notes"
 UPLOADS=("${DATA[@]}" "$WORK/release/gates.json" "$WORK/files/$STEM.manifest.json")   # data first, the manifest last
 for f in "${UPLOADS[@]}"; do

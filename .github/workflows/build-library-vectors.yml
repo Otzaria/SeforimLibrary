@@ -9,7 +9,9 @@ run-name: library-vectors ${{ inputs.release_tag || github.event.workflow_run.di
 # same way; this file only decides when, where, and in which mode.
 #
 # Publishing is opt-in: a run the index workflow triggers is a dry run unless the repository
-# variable LIBRARY_VECTORS_PUBLISH is "true"; a manual run says so with `mode`.
+# variable LIBRARY_VECTORS_PUBLISH is "true"; a manual run says so with `mode`. What it
+# publishes is a prerelease unless the repository variable LIBRARY_VECTORS_PRERELEASE is
+# "false": a prerelease stays out of update-release-manifest.yml and the database history.
 
 on:
   workflow_run:
@@ -101,6 +103,7 @@ jobs:
       OTZARIA_HF_TOKEN: ${{ secrets.OTZARIA_HF_TOKEN }}
       RELEASE_TAG: ${{ needs.gate.outputs.release_tag }}
       MODE: ${{ needs.gate.outputs.mode }}
+      LIBRARY_VECTORS_PRERELEASE: ${{ vars.LIBRARY_VECTORS_PRERELEASE || 'true' }}
     steps:
       # The build machine's other self-hosted jobs pin checkout@v4: its runner's Node 24
       # support is not proven (test_ci_workflows.SELF_HOSTED_JOBS).
