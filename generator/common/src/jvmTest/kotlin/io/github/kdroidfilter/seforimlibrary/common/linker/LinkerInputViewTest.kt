@@ -93,6 +93,29 @@ class LinkerInputViewTest {
     }
 
     @Test
+    fun aCountOfLabelledLinesDecidesTheSameViewAsTheLinesThemselves() {
+        assertEquals(Mode.PLAIN, LinkerInputView.fixedModeFor("Sefaria"))
+        assertEquals(null, LinkerInputView.fixedModeFor("DictaToOtzaria"))
+        assertEquals(null, LinkerInputView.fixedModeFor("sefaria"))
+        val samples = listOf(
+            "(א) סעיף", "<b>(כ)</b> סעיף", "<sup style=\"color:blue;\">(א)</sup> x", " (טו) x", "(א)",
+            "(שם) כמבואר", "ראה (נח) שם", "<h4>(א)</h4>", "<b>(א) נידון</b>", "פתיחה", "", "（א） x",
+        )
+        for (count in listOf(0, 1, 19, 20, 21, 40)) {
+            val lines = List(count) { samples[it % 5] } + samples.drop(5)
+            assertEquals(count, lines.count(LinkerInputView::isLabelled))
+            for (source in listOf("Sefaria", "DictaToOtzaria")) {
+                val streamed = LinkerInputView.fixedModeFor(source) ?: LinkerInputView.modeForLabelledLines(count)
+                assertEquals(LinkerInputView.modeFor(source, lines), streamed, "$source, $count labelled")
+            }
+        }
+        // A reader that counts may skip every line without the opening parenthesis.
+        for (line in samples) {
+            if (LinkerInputView.isLabelled(line)) assertTrue(LinkerInputView.LABEL_OPEN in line, line)
+        }
+    }
+
+    @Test
     fun aLabelWithNothingAfterItLeavesAnEmptyLine() {
         assertEquals("", view("(א)"))
         assertEquals("", view("(א) "))
