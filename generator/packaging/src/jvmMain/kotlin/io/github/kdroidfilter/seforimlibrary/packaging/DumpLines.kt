@@ -4,6 +4,7 @@ import co.touchlab.kermit.Logger
 import co.touchlab.kermit.Severity
 import io.github.kdroidfilter.seforimlibrary.common.db.LineContentCompression
 import io.github.kdroidfilter.seforimlibrary.common.db.LineContentShape
+import io.github.kdroidfilter.seforimlibrary.common.linker.LinkerInputView
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.Paths
@@ -30,6 +31,14 @@ import kotlin.system.exitProcess
  * `context_ref` is the exact Sefaria location of the source line (falling back
  * to the canonical book title only for structural/non-Sefaria lines). The
  * linker may use it only for explicit relative citations such as לעיל/לקמן.
+ *
+ * One exception to "verbatim": a line's opening structural label "(א) " is left
+ * out ([LinkerInputView]) in every Sefaria book and in other books with many such
+ * labels, because resolving it as a citation breaks the ibid context of the line's
+ * first real citation. The view is chosen per book from its own lines, so a book's
+ * lines are buffered before they are written; the non-Sefaria books it applies to
+ * are listed in `lines_snapshot_stripped_books`. Phase-2 recognises the view from
+ * each record's source_hash and maps its offsets back.
  *
  * Usage:
  *   ./gradlew :packaging:dumpLines -PseforimDb=/path/to/seforim.db
@@ -92,6 +101,17 @@ fun main(args: Array<String>) {
                     """.trimIndent(),
                 )
                 st.execute("CREATE TABLE lines_snapshot_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+                st.execute(
+                    """
+                    CREATE TABLE lines_snapshot_stripped_books (
+                        source_name        TEXT    NOT NULL,
+                        canonical_he_title TEXT    NOT NULL,
+                        mode               TEXT    NOT NULL,
+                        stripped_lines     INTEGER NOT NULL,
+                        PRIMARY KEY (source_name, canonical_he_title)
+                    )
+                    """.trimIndent(),
+                )
             }
 
             // Optional book allow-list for smoke tests (deterministic: lowest ids first).
@@ -125,6 +145,41 @@ fun main(args: Array<String>) {
             var books = 0L
             var lines = 0L
             var lastKey: Pair<String, String>? = null
+            val stripped = out.prepareStatement(
+                "INSERT INTO lines_snapshot_stripped_books(source_name, canonical_he_title, mode, stripped_lines) VALUES(?,?,?,?)",
+            )
+            // One book's rows, held until its view is known (LinkerInputView.modeFor reads all of them).
+            val pending = ArrayList<SnapshotRow>()
+            fun flushBook() {
+                if (pending.isEmpty()) return
+                val first = pending[0]
+                val mode = LinkerInputView.modeFor(first.sourceName, pending.map { it.content })
+                var strippedLines = 0
+                for (row in pending) {
+                    val content = LinkerInputView.linkerContent(mode, row.content)
+                    if (content.length != row.content.length) strippedLines++
+                    insert.setString(1, row.sourceName)
+                    insert.setString(2, row.title)
+                    insert.setLong(3, row.lineIndex)
+                    insert.setString(4, content)
+                    insert.setString(5, row.contextRef)
+                    insert.addBatch()
+                    lines++
+                    if (lines % 100_000L == 0L) {
+                        insert.executeBatch()
+                        out.commit()
+                        logger.i { "  …$lines lines / $books books" }
+                    }
+                }
+                if (mode == LinkerInputView.Mode.PLAIN_AND_TAGGED) {
+                    stripped.setString(1, first.sourceName)
+                    stripped.setString(2, first.title)
+                    stripped.setString(3, mode.name)
+                    stripped.setInt(4, strippedLines)
+                    stripped.executeUpdate()
+                }
+                pending.clear()
+            }
             src.createStatement().use { s ->
                 s.fetchSize = 10_000
                 s.executeQuery(
@@ -145,32 +200,27 @@ fun main(args: Array<String>) {
                     while (rs.next()) {
                         val sourceName = rs.getString(1)
                         val title = rs.getString(2)
-                        val lineIndex = rs.getLong(3)
-                        val content = rs.getString(4) ?: ""
-                        val contextRef = rs.getString(5) ?: title
-                        insert.setString(1, sourceName)
-                        insert.setString(2, title)
-                        insert.setLong(3, lineIndex)
-                        insert.setString(4, content)
-                        insert.setString(5, contextRef)
-                        insert.addBatch()
-                        lines++
                         val key = sourceName to title
                         if (key != lastKey) {
+                            flushBook()
                             books++
                             lastKey = key
                         }
-                        if (lines % 100_000L == 0L) {
-                            insert.executeBatch()
-                            out.commit()
-                            logger.i { "  …$lines lines / $books books" }
-                        }
+                        pending += SnapshotRow(
+                            sourceName = sourceName,
+                            title = title,
+                            lineIndex = rs.getLong(3),
+                            content = rs.getString(4) ?: "",
+                            contextRef = rs.getString(5) ?: title,
+                        )
                     }
+                    flushBook()
                 }
             }
             insert.executeBatch()
             out.commit()
             insert.close()
+            stripped.close()
 
             out.createStatement().use { st ->
                 // Include line_index so the linker's `... WHERE source_name=? AND canonical_he_title=?
@@ -184,6 +234,7 @@ fun main(args: Array<String>) {
                 fun put(k: String, v: String) { m.setString(1, k); m.setString(2, v); m.executeUpdate() }
                 put("schema_version", "2")
                 put("context_policy", "explicit-relative-v1")
+                put("linker_input_policy", LinkerInputView.POLICY)
                 put("source_db", srcDb.fileName.toString())
                 put("book_count", books.toString())
                 put("line_count", lines.toString())
@@ -209,3 +260,11 @@ private fun resolveSnapshotOutPath(srcDb: Path): Path {
         ?: srcDb.resolveSibling("lines_snapshot.db").toString()
     return Paths.get(out).toAbsolutePath()
 }
+
+private class SnapshotRow(
+    val sourceName: String,
+    val title: String,
+    val lineIndex: Long,
+    val content: String,
+    val contextRef: String,
+)
