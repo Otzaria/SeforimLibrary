@@ -109,6 +109,34 @@ class SefariaExistingLabelPrefixTest {
         assertContains(lines, "(ב) <b>ב' פעמים. </b> ומ\"א")
         assertContains(lines, "(ג) <b>ט'. </b> וכתב בש\"ך")
         assertContains(lines, "(ד) לא יקשור הקמיע")
+        // ביאור הגר"א חו"מ ז:יא: "<b>י"א. </b>" is "יש אומרים" at the eleventh place, and
+        // no other item of the array carries a label of its own.
+        assertContains(lines, "(יא) <b>י\"א. </b> שבת נ\"ו ב':")
+        // מעדני יום טוב: "<b>  לא  </b> פלוג" at the thirty-first place.
+        assertContains(lines, "(לא) <b>  לא  </b> פלוג באדם כו'.")
+    }
+
+    @Test
+    fun moreLabelShapesAreRecognised() {
+        val lines = readBook().lines
+        // תרומת הדשן "<b>א </b>טעם", אורחות חיים להרא"ש "<b>א.</b>", נהר מצרים "( א )",
+        // אליה רבה קסב:ה "[אות ה]".
+        assertContains(lines, "<b>א </b>טעם למה אנו נוהגין")
+        assertContains(lines, "<b>ב </b>אם רשאי לענות")
+        assertContains(lines, "<b>ג.</b> לְהִתְרַחֵק מִן הַגַּאֲוָה")
+        assertContains(lines, "( ד )")
+        assertContains(lines, "[אות ה] <b>וכן המטביל וכו'.</b>")
+        // "סעיף א" names the Shulchan Arukh seif a commentary is on, not this line.
+        assertContains(lines, "(א) <b>סעיף א</b> עיין מ\"ש")
+        assertContains(lines, "(ב) <b>סעיף ב</b> שם")
+    }
+
+    @Test
+    fun aPlainLabelCountsEvenAloneInItsArray() {
+        // פסקי חלה: "א. אבאר" is the only labelled item of its array, and still a label.
+        val lines = readBook().lines
+        assertContains(lines, "א. אבאר מאימתי החלה ניטלת")
+        assertContains(lines, "(ב) המשך בלי סימון")
     }
 
     companion object {
@@ -128,7 +156,9 @@ class SefariaExistingLabelPrefixTest {
                ${node("Partial", """["Siman","Seif"]""", """["סימן","סעיף"]""")},
                ${node("Shifted", """["Siman","Seif"]""", """["סימן","סעיף"]""")},
                ${node("Heading", """["Siman","Seif"]""", """["סימן","סעיף"]""")},
-               ${node("Dibbur", """["Siman","Seif"]""", """["סימן","סעיף קטן"]""")}
+               ${node("Dibbur", """["Siman","Seif"]""", """["סימן","סעיף קטן"]""")},
+               ${node("Shapes", """["Siman","Seif"]""", """["סימן","סעיף"]""")},
+               ${node("Lonely", """["Siman","Seif"]""", """["סימן","סעיף"]""")}
              ]}}
         """.trimIndent()
 
@@ -141,7 +171,9 @@ class SefariaExistingLabelPrefixTest {
               "Partial": [["פתיחה בלי סימון", "[ב] שני ממוספר", "גוף בלי סימון", "[ד] רביעי ממוספר", "[ח] סימון של מספר אחר"]],
               "Shifted": [["קצת אזהרות לחג הסוכות:", "א. יטבול ערב סוכות", "ב. ישתדל בסוכה"], ["<b>שאלה:</b><br>המנהג בקהלתנו", "[א] תחלה יש לברר", "[ב] אמנם"]],
               "Heading": [["<big><strong>סימן א. לקום באשמורת.</strong></big><br>א. מיד כשנעור", "ב. שיעור הטלית"], ["<b>פלגש כו'. </b> דכאן ל\"ל<br> <b>א) י\"א כו'</b>", "<b>שני כו'. </b> טעם"], ["<b><big>מבאר ד' בחינות. ובו ח' ענינים:</big></b><br><small>א. בכל העולמות</small>", "<small>תקון המסך</small>"]],
-              "Dibbur": [["<b>א' פעמים. </b> ב\"ח", "<b>ב' פעמים. </b> ומ\"א", "<b>ט'. </b> וכתב בש\"ך", "לא יקשור הקמיע"]]
+              "Shapes": [["<b>א </b>טעם למה אנו נוהגין", "<b>ב </b>אם רשאי לענות", "<b>ג.</b> לְהִתְרַחֵק מִן הַגַּאֲוָה", "( ד )", "[אות ה] <b>וכן המטביל וכו'.</b>"], ["<b>סעיף א</b> עיין מ\"ש", "<b>סעיף ב</b> שם"]],
+              "Lonely": [["א. אבאר מאימתי החלה ניטלת", "המשך בלי סימון"]],
+              "Dibbur": [["<b>א' פעמים. </b> ב\"ח", "<b>ב' פעמים. </b> ומ\"א", "<b>ט'. </b> וכתב בש\"ך", "לא יקשור הקמיע"], ["<b>אבל. </b> א", "<b>וכן. </b> ב", "<b>ועוד. </b> ג", "<b>שם. </b> ד", "<b>ומה. </b> ה", "<b>וכו. </b> ו", "<b>אבל. </b> ז", "<b>וכן. </b> ח", "<b>ועוד. </b> ט", "<b>אבל. </b> י", "<b>י\"א. </b> שבת נ\"ו ב':", "<b>והביא ב' שערות. </b>"], ["<b>דיבור. </b> כו", "<b>דיבור. </b> כו", "<b>דיבור. </b> כו", "<b>דיבור. </b> כו", "<b>דיבור. </b> כו", "<b>דיבור. </b> כו", "<b>דיבור. </b> כו", "<b>דיבור. </b> כו", "<b>דיבור. </b> כו", "<b>דיבור. </b> כו", "<b>דיבור. </b> כו", "<b>דיבור. </b> כו", "<b>דיבור. </b> כו", "<b>דיבור. </b> כו", "<b>דיבור. </b> כו", "<b>דיבור. </b> כו", "<b>דיבור. </b> כו", "<b>דיבור. </b> כו", "<b>דיבור. </b> כו", "<b>דיבור. </b> כו", "<b>דיבור. </b> כו", "<b>דיבור. </b> כו", "<b>דיבור. </b> כו", "<b>דיבור. </b> כו", "<b>דיבור. </b> כו", "<b>דיבור. </b> כו", "<b>דיבור. </b> כו", "<b>דיבור. </b> כו", "<b>דיבור. </b> כו", "<b>דיבור. </b> כו", "<b>  לא  </b> פלוג באדם כו'."]]
             }}
         """.trimIndent()
     }
