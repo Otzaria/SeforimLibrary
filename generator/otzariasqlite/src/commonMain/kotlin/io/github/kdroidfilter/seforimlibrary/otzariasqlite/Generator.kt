@@ -137,6 +137,7 @@ class DatabaseGenerator(
 
     // Optional connection to the Acronymizer DB (opened lazily)
     private var acronymDb: java.sql.Connection? = null
+    private var acronymLookup: AcronymizerLookup? = null
 
     // Library root used for relative path normalization
     private lateinit var libraryRoot: Path
@@ -525,6 +526,7 @@ class DatabaseGenerator(
                 processDirectory(libraryPath, null, 0, metadata)
                 assertAllHearotMergesApplied()
                 logger.i { bookImportSummary("Otzaria book import") }
+                carryAcronymsAcrossRenames()
 
                 // Process links
                 processLinks()
@@ -647,6 +649,7 @@ class DatabaseGenerator(
                 processDirectory(libraryPath, null, 0, metadata)
                 assertAllHearotMergesApplied()
                 logger.i { bookImportSummary("Otzaria book import (phase 1)") }
+                carryAcronymsAcrossRenames()
 
                 // Build category closure after categories insertion
                 logger.i { "Building category_closure table (phase 1)..." }
@@ -2331,75 +2334,20 @@ class DatabaseGenerator(
         }
     }
 
-    /**
-     * Fetch and sanitize acronym terms for a given book title from the Acronymizer DB.
-     * Uses the new relational structure (Books, Acronyms, BookAcronyms).
-     */
-    private fun fetchAcronymsForTitle(title: String): List<String> {
-        val path = acronymDbPath ?: return emptyList()
-        try {
-            if (acronymDb == null) {
-                acronymDb = java.sql.DriverManager.getConnection("jdbc:sqlite:$path")
-            }
-            val conn = acronymDb ?: return emptyList()
+    /** The Acronymizer DB, opened on first use; null when this build has none. */
+    private fun acronymizer(): AcronymizerLookup? {
+        val path = acronymDbPath ?: return null
+        acronymLookup?.let { return it }
+        val conn = acronymDb ?: java.sql.DriverManager.getConnection("jdbc:sqlite:$path").also { acronymDb = it }
+        return AcronymizerLookup(conn).also { acronymLookup = it }
+    }
 
-            val lookupTitles = buildList {
-                add(title)
-                val stripped = stripQuotesForLookup(title)
-                if (stripped.isNotBlank()) add(stripped)
-                val noComma = title.replace(",", " ").trim()
-                if (noComma.isNotBlank()) add(noComma)
-                val noPunct = title.replace("[\\p{Punct}]".toRegex(), " ").replace("\\s+".toRegex(), " ").trim()
-                if (noPunct.isNotBlank()) add(noPunct)
-                val sanitized = sanitizeAcronymTerm(title)
-                if (sanitized.isNotBlank()) add(sanitized)
-            }.distinct()
-
-            val acronyms = mutableListOf<String>()
-
-            // Query using the new relational structure
-            for (candidate in lookupTitles) {
-                conn.prepareStatement(
-                    """
-                    SELECT a.acronym
-                    FROM Books b
-                    JOIN BookAcronyms ba ON b.id = ba.book_id
-                    JOIN Acronyms a ON ba.acronym_id = a.id
-                    WHERE b.title = ?
-                    ORDER BY a.acronym
-                    """.trimIndent()
-                ).use { ps ->
-                    ps.setString(1, candidate)
-                    ps.executeQuery().use { rs ->
-                        while (rs.next()) {
-                            val acronym = rs.getString(1)
-                            if (!acronym.isNullOrBlank()) {
-                                acronyms.add(acronym)
-                            }
-                        }
-                    }
-                }
-                if (acronyms.isNotEmpty()) break
-            }
-
-            if (acronyms.isEmpty()) return emptyList()
-
-            // Sanitize and de-duplicate
-            val clean = acronyms
-                .map { sanitizeAcronymTerm(it) }
-                .map { it.trim() }
-                .filter { it.isNotEmpty() }
-
-            // De-duplicate and drop items identical to the title after normalization
-            val titleNormalized = sanitizeAcronymTerm(title)
-            return clean
-                .filter { !it.equals(title, ignoreCase = true) }
-                .filter { !it.equals(titleNormalized, ignoreCase = true) }
-                .distinct()
-        } catch (e: Exception) {
-            logger.w(e) { "Error reading acronyms for '$title' from $path" }
-            return emptyList()
-        }
+    /** Sanitized acronym terms for a given book title from the Acronymizer DB. */
+    private fun fetchAcronymsForTitle(title: String): List<String> = try {
+        acronymizer()?.termsFor(title).orEmpty()
+    } catch (e: Exception) {
+        logger.w(e) { "Error reading acronyms for '$title' from $acronymDbPath" }
+        emptyList()
     }
 
     private suspend fun backfillAcronymsForExistingBooks() {
@@ -2421,16 +2369,69 @@ class DatabaseGenerator(
         logger.i { "Backfill complete: added $insertedCount acronyms to $touchedBooks books" }
     }
 
-    // Clean an acronym using HebrewTextUtils and remove gershayim
-    private fun sanitizeAcronymTerm(raw: String): String {
-        var s = raw.trim()
-        if (s.isEmpty()) return ""
-        s = HebrewTextUtils.removeAllDiacritics(s)
-        s = HebrewTextUtils.replaceMaqaf(s, " ")
-        s = s.replace("\u05F4", "") // remove Hebrew gershayim (״)
-        s = s.replace("\u05F3", "") // remove Hebrew geresh (׳)
-        s = s.replace("\\s+".toRegex(), " ").trim()
-        return s
+    /**
+     * Gives a renamed book the acronyms the Acronymizer still keeps under its old
+     * title, plus the old title itself, so a rename does not take its search terms
+     * with it ('אמת ואמונה - מנחם מנדל מקוצק' → 'אמת ואמונה' lost 'קוצקי').
+     *
+     * Runs once every book is in, and only for a book that has no acronyms and no
+     * Acronymizer entry under its current title: an entry for the new title is the
+     * curated answer and always wins. Which renames are followed, and which are
+     * refused, is [RenamedBookTitles]'s call. Like every Acronymizer read, a
+     * failure here costs the acronyms, not the build.
+     */
+    private suspend fun carryAcronymsAcrossRenames() {
+        try {
+            carryAcronymsAcrossRenames(acronymizer() ?: return)
+        } catch (e: Exception) {
+            logger.w(e) { "Skipping acronyms of renamed books: cannot read $acronymDbPath" }
+        }
+    }
+
+    private suspend fun carryAcronymsAcrossRenames(lookup: AcronymizerLookup) {
+        val books = repository.getAllBooks()
+        val sourceNames = repository.getAllSources().associate { it.id to it.name }
+        val withAcronyms = books.filter { repository.getAcronymsForBook(it.id).isNotEmpty() }.mapTo(HashSet()) { it.id }
+        val targets = books
+            .filter { it.id !in withAcronyms && lookup.rawTerms(it.title).isEmpty() }
+            .mapTo(HashSet()) { it.id }
+        val library = books.map { LibraryBook(it.id, it.title, sourceNames[it.sourceId].orEmpty(), it.totalLines) }
+        val formerTitles = RenamedBookTitles().resolve(
+            books = library,
+            targets = targets,
+            knownKeys = allocator.knownBookKeys(),
+            lineHashes = allocator::lineContentHashes,
+        )
+        val titles = books.associate { it.id to it.title }
+        var carriedTerms = 0
+        val carried = ArrayList<String>()
+        for ((bookId, formers) in formerTitles.byBookId) {
+            val title = titles.getValue(bookId)
+            val terms = AcronymizerLookup.clean(
+                formers.flatMap { lookup.rawTerms(it.title) + it.title },
+                title,
+            )
+            if (terms.isEmpty()) continue
+            repository.bulkInsertBookAcronyms(bookId, terms)
+            carriedTerms += terms.size
+            carried += "'${formers.joinToString("', '") { it.title }}' → '$title' (${terms.size}, ${formers.joinToString { it.evidence }})"
+        }
+        // A refused rename only costs something when the old title had acronyms.
+        val lostNames = formerTitles.refused.filter { lookup.rawTerms(it.oldTitle).isNotEmpty() }
+        logger.i {
+            "Acronyms of renamed books: $carriedTerms terms carried to ${carried.size} books" +
+                (if (carried.isEmpty()) "" else ": " + carried.take(MAX_NAMES_PER_SUMMARY_LINE).joinToString("; ")) +
+                (if (carried.size > MAX_NAMES_PER_SUMMARY_LINE) "; …" else "")
+        }
+        if (lostNames.isNotEmpty()) {
+            logger.i {
+                "Acronyms of renamed books: ${lostNames.size} renames not followed (add the new title " +
+                    "to the Acronymizer if it is the same book): " +
+                    lostNames.take(MAX_NAMES_PER_SUMMARY_LINE).joinToString("; ") {
+                        "'${it.oldTitle}' → '${it.newTitle}' (${it.reason})"
+                    }
+            }
+        }
     }
 
     /**

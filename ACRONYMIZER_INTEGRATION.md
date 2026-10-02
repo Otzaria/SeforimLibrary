@@ -64,6 +64,28 @@ CREATE TABLE book_acronym (
 );
 ```
 
+### 5. Renamed Books
+
+The Acronymizer is keyed by exact title, so a renamed book used to lose every
+acronym until someone added its new title there. Once every Otzaria book is in,
+`carryAcronymsAcrossRenames()` gives a book that has no acronyms, and no
+Acronymizer entry under its current title, the terms filed under its old title,
+plus the old title itself. An entry for the new title always wins.
+
+The old title comes from the build state, which never drops a book key
+(`RenamedBookTitles`):
+
+- **same id** — renamed in place after import (ForDB/book_renames.csv).
+- **same content** — a renamed file: a dead key whose last line hashes overlap one
+  live book of the same source by Jaccard >= 0.8, and no other.
+
+A rename is followed only when it added or dropped words, or respelled them
+(honorifics and full/defective spelling ignored). One that replaces words, such as a
+corrected attribution or edition, is refused, and so is an old title that is now
+another book's title or that two books would inherit. The build log lists the
+refused renames whose old title had acronyms. If the book really is the same, add
+its new title to Otzaria/SeforimAcronymizer.
+
 ## Usage
 
 ### Generate Database with Acronyms
