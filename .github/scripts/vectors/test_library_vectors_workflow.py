@@ -130,11 +130,11 @@ class Workflow(unittest.TestCase):
 
 
 class Pins(unittest.TestCase):
-    def test_the_sidecar_is_pinned_to_a_full_commit_and_the_planner_waits_for_p5(self):
+    def test_the_sidecar_and_the_planner_are_pinned_to_full_commits(self):
         pins = dict(line.split("=", 1) for line in PINS.read_text().splitlines()
                     if line and not line.startswith("#") and "=" in line)
         self.assertRegex(pins["SIDECAR_REV"], r"^[0-9a-f]{40}$")
-        self.assertRegex(pins["PLUGIN_REV"], r"^([0-9a-f]{40})?$")
+        self.assertRegex(pins["PLUGIN_REV"], r"^[0-9a-f]{40}$")
         self.assertRegex(pins["PASSAGE_PACKAGE_CHECKSUM"], r"^[0-9a-f]{64}$")
         self.assertEqual(pins["PASSAGE_QUANTIZATION"], "fp32")
 
@@ -143,6 +143,7 @@ STUB_GH = r"""#!/usr/bin/env bash
 echo "gh $*" >> "$CALLS"
 cmd="$1 $2"; shift 2
 case "$cmd" in
+  "auth status") exit 0 ;;
   "release view")
     tag=$1
     case "$tag" in vectors-*) [ -n "${EXISTING:-}" ] && exit 0; exit 1 ;; esac
@@ -179,7 +180,7 @@ case "$sub" in
     mkdir -p "$out"; head -c 3000 /dev/urandom > "$out/segment.oxv"
     echo '{"identityDigest":"0123456789abcdef","toLibraryVersion":30}' > "$out/release.json"
     for f in ledger-v30.keys pairs-v30.bin ledger-v30.manifest.json; do echo "$f" > "$out/$f"; done ;;
-  release-files) echo '{"files":[]}' > "$out"; echo "the manifest's SHA-256:"; echo "$(printf 'b%.0s' $(seq 64))" ;;
+  release-files) echo '{"files":[]}' > "$out"; echo "=== stem ==="; echo "Manifest SHA-256 $(sha256sum "$out" | cut -d' ' -f1)" ;;
   *) echo "stub cli: $sub" >&2; exit 90 ;;
 esac
 """
@@ -317,16 +318,14 @@ class Driver(unittest.TestCase):
             self.assertEqual(p.returncode, 64, tag)
             self.assertEqual(calls, [])
 
-    def test_without_the_plugins_planner_pinned_the_build_refuses_to_plan(self):
-        e = dict(os.environ, CALLS=str(self.calls), OTZARIA_SEMANTIC_CLI=str(self.root / "bin" / "cli"),
-                 VECTORS_MIN_FREE_GB="0", GH=str(self.root / "bin" / "gh"))
-        pins = PINS.read_text()
-        if re.search(r"^PLUGIN_REV=[0-9a-f]{40}$", pins, re.M):
-            self.skipTest("PLUGIN_REV is pinned")
-        p = subprocess.run(["bash", str(DRIVER), "--tag", TAG, "--state", str(self.state)], capture_output=True, text=True, env=e)
-        self.assertNotEqual(p.returncode, 0)
-        self.assertIn("P5", p.stdout)
-
+    def test_the_planner_is_given_the_model_the_warehouse_and_the_release(self):
+        p, calls = self.run_driver(TO_EMBED=0)
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        plan = calls[self.index_of(calls, "export --index")]
+        for arg in ("--library-version 30", "--release-tag " + TAG, "--model ", "--passage-quantization fp32",
+                    "--warehouse ", "--created-at 2026-09-30T21:38:29Z", "--out "):
+            self.assertIn(arg, plan)
+        self.assertNotIn("--chunking", plan)   # the recipe comes from the model
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
