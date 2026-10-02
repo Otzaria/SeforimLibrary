@@ -46,14 +46,14 @@ PY=${VECTOR_PYTHON:-$STATE/venv/bin/python}
 GH=${GH:-gh}
 ZSTD=${ZSTD:-zstd}
 FAMILY=$STATE/bin/family-model.json
-CHUNKING=$STATE/bin/chunking.json
 WAREHOUSE=$STATE/warehouse/$PASSAGE_QUANTIZATION-${PASSAGE_PACKAGE_CHECKSUM:0:8}
 LEDGER=$STATE/ledger
 RELEASE_TAG="vectors-$TAG"
 PART_SIZE=1992294400
 export HSA_ENABLE_DXG_DETECTION=1
 
-group() { if [ "${GITHUB_ACTIONS:-}" = true ]; then echo "::group::$*"; else echo "== $*"; fi; }
+T0=$(date +%s)
+group() { local t="[+$(( $(date +%s) - T0 ))s]"; if [ "${GITHUB_ACTIONS:-}" = true ]; then echo "::group::$* $t"; else echo "== $* $t"; fi; }
 endgroup() { if [ "${GITHUB_ACTIONS:-}" = true ]; then echo "::endgroup::"; fi; }
 die() { echo "::error::$*"; exit 1; }
 
@@ -67,7 +67,7 @@ if [ -z "${OTZARIA_SEMANTIC_CLI:-}" ]; then
 fi
 [ -n "$PLUGIN_REV" ] || [ -n "${EXPORT_SEMANTIC_PLAN:-}" ] || die "export_semantic_plan v2 (plugin P5) is not pinned yet in pins.env: the release cannot be planned"
 [ -x "$EXPORT" ] || die "export_semantic_plan is not at $EXPORT — run bootstrap_runner.sh"
-[ -f "$FAMILY" ] && [ -f "$CHUNKING" ] || die "$FAMILY or $CHUNKING is missing — run bootstrap_runner.sh"
+[ -f "$FAMILY" ] || die "$FAMILY is missing — run bootstrap_runner.sh"
 for tool in jq sha256sum split tar; do command -v "$tool" >/dev/null || die "$tool is required"; done
 MIN_FREE_GB=${VECTORS_MIN_FREE_GB:-$MIN_FREE_GB}
 free_kb=$(df -Pk "$STATE" | awk 'NR==2 {print $4}')
@@ -78,16 +78,28 @@ if [ "$MODE" = base ]; then
   fi
 fi
 rm -rf "$WORK"; mkdir -p "$WORK/dl" "$WORK/index" "$WORK/shards" "$WORK/files"
+if "$GH" auth status >/dev/null 2>&1; then GH_OK=1; else GH_OK=""; fi
+fetch() {  # <asset name>: into $WORK/dl, through gh, or anonymously from the public release URL
+  if [ -n "$GH_OK" ]; then
+    "$GH" release download "$TAG" --repo "$REPO" --dir "$WORK/dl" --pattern "$1"
+  else
+    curl -fsSL --retry 5 --retry-delay 10 -o "$WORK/dl/$1" "https://github.com/$REPO/releases/download/$TAG/$1"
+  fi
+}
+if [ -n "$GH_OK" ]; then
+  CREATED=$("$GH" release view "$TAG" --repo "$REPO" --json publishedAt --jq .publishedAt)
+else
+  CREATED=$(curl -fsSL "https://api.github.com/repos/$REPO/releases/tags/$TAG" | jq -r .published_at)
+fi
+echo "$CREATED" | grep -Eq '^[0-9]{4}-[0-9]{2}-[0-9]{2}T' || die "could not read when $TAG was published"
 endgroup
 
 # ─── 1 index ───────────────────────────────────────────────────────────────
 group "1 index: the search index of $TAG"
-"$GH" release download "$TAG" --repo "$REPO" --dir "$WORK/dl" \
-  --pattern otzaria-library-index.tar.zst.manifest.json --pattern otzaria-library-index.provenance.json
+fetch otzaria-library-index.tar.zst.manifest.json
+fetch otzaria-library-index.provenance.json
 manifest="$WORK/dl/otzaria-library-index.tar.zst.manifest.json"
-jq -r '.parts[].name' "$manifest" | while read -r part; do
-  "$GH" release download "$TAG" --repo "$REPO" --dir "$WORK/dl" --pattern "$part"
-done
+jq -r '.parts[].name' "$manifest" | while read -r part; do fetch "$part"; done
 jq -r '.parts[] | "\(.sha256)  \(.name)"' "$manifest" | (cd "$WORK/dl" && sha256sum -c --quiet -) || die "an index part does not hash to its manifest"
 whole=$(jq -r '.parts[].name' "$manifest" | sed "s|^|$WORK/dl/|" | xargs cat | sha256sum | cut -d' ' -f1)
 [ "$whole" = "$(jq -r .sha256 "$manifest")" ] || die "the index archive does not hash to its manifest"
@@ -100,12 +112,13 @@ endgroup
 
 # ─── 2 plan ────────────────────────────────────────────────────────────────
 group "2 plan"
-# P5 (plugin): export_semantic_plan v2 is not pushed yet. Its arguments are assumed to be the
-# sidecar `plan` command's, over an index instead of a transcription; check them when it lands
-# (PLUGIN_REV in pins.env stays empty until then, and preflight refuses to start without it).
+# The plugin's export_semantic_plan (PLUGIN_REV): the recipe comes from the model's
+# chunking_identity, PDF lines are left out, and keys are recomputed from the text of a
+# schema 4 index (held to its chunkKey column on schema 5). POC: every release is a base, so
+# the plan is split against the warehouse only, never against the previous ledger.
 "$EXPORT" --index "$INDEX" --library-version "$VERSION" --release-tag "$TAG" \
-  --model "$FAMILY" --chunking "$CHUNKING" --passage-quantization "$PASSAGE_QUANTIZATION" \
-  --warehouse "$WAREHOUSE" --out "$WORK/plan"
+  --model "$FAMILY" --passage-quantization "$PASSAGE_QUANTIZATION" \
+  --warehouse "$WAREHOUSE" --created-at "$CREATED" --out "$WORK/plan" | tee "$WORK/plan.log"
 PLAN=$WORK/plan
 jq -e '.format == "otzaria-vector-plan" and .version == 1' "$PLAN/plan-manifest.json" >/dev/null || die "the plan is not an otzaria-vector-plan version 1"
 [ "$(jq -r .library_release_tag "$PLAN/plan-manifest.json")" = "$TAG" ] || die "the plan was made for another release"
@@ -136,7 +149,6 @@ endgroup
 
 # ─── 5 assemble + gates ────────────────────────────────────────────────────
 group "5 assemble a base, then the gates"
-CREATED=$("$GH" release view "$TAG" --repo "$REPO" --json publishedAt --jq .publishedAt)
 BUILT_BY=$(jq -cn --arg repo "$REPO" --arg run "${GITHUB_RUN_ID:-manual}" --arg sha "${GITHUB_SHA:-$(git -C "$HERE" rev-parse HEAD 2>/dev/null || echo unknown)}" \
   --arg sidecar "$SIDECAR_REV" --arg plugin "$PLUGIN_REV" \
   '{repository: $repo, workflow: "build-library-vectors", runId: $run, commit: $sha, sidecar: $sidecar, plugin: $plugin, worker: "seforim-gpu-worker 1.0"}')
@@ -164,8 +176,10 @@ DATA=()
 while IFS= read -r f; do DATA+=("$f"); done < <(find "$WORK/files" -maxdepth 1 -name "$STEM.oxv.zst*" | sort)
 FILE_ARGS=()
 for f in "${DATA[@]}"; do FILE_ARGS+=(--files "$f"); done
-MANIFEST_SHA=$("$CLI" release-files --release "$REL" --compression zstd "${FILE_ARGS[@]}" --out "$WORK/files/$STEM.manifest.json" | tail -n1)
-echo "$MANIFEST_SHA" | grep -Eq '^[0-9a-f]{64}$' || die "release-files printed no manifest SHA-256"
+"$CLI" release-files --release "$REL" --compression zstd "${FILE_ARGS[@]}" --out "$WORK/files/$STEM.manifest.json" | tee "$WORK/release-files.log"
+MANIFEST_SHA=$(sed -n 's/^Manifest SHA-256 \([0-9a-f]\{64\}\)$/\1/p' "$WORK/release-files.log" | tail -n1)
+[ -n "$MANIFEST_SHA" ] || die "release-files printed no manifest SHA-256"
+[ "$(sha256sum "$WORK/files/$STEM.manifest.json" | cut -d' ' -f1)" = "$MANIFEST_SHA" ] || die "the manifest written is not the one release-files names"
 echo "manifest $STEM.manifest.json sha256 $MANIFEST_SHA; data: ${#DATA[@]} file(s)"
 endgroup
 
