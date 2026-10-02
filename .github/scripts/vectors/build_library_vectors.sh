@@ -8,8 +8,10 @@
 #   2 plan      export_semantic_plan v2 over it, split against the warehouse: embed.jsonl holds
 #               only the texts the warehouse has no vector for (every text, on a runner that
 #               has no warehouse yet)
-#   3 embed     those texts, on the GPU, with embed_worker.py — windows of EMBED_WINDOW records,
-#               each a v2 shard with its parity certificate
+#   3 embed     those texts: fewer than CPU_EMBED_MAX on the CPU, with the sidecar's embed-shard
+#               (ONNX Runtime and the fp32 package — the reference, so no parity certificate); more
+#               on the GPU, with embed_worker.py — windows of EMBED_WINDOW records, each a v2 shard
+#               with its parity certificate
 #   4 warehouse warehouse-add --plan: the shards held to the plan, their vectors appended (the
 #               first add creates the warehouse)
 #   5 assemble  a base (POC: every release is a base), then assemble --verify (the gates)
@@ -75,6 +77,8 @@ exec 9>"$STATE/.lock"; flock -n 9 || die "another vector build or bootstrap hold
 [ -x "$CLI" ] || die "the sidecar CLI is not at $CLI — run bootstrap_runner.sh"
 if [ -z "${OTZARIA_SEMANTIC_CLI:-}" ]; then
   [ "$(cat "$CLI.rev" 2>/dev/null)" = "$SIDECAR_REV" ] || die "$CLI is not the pinned sidecar $SIDECAR_REV — run bootstrap_runner.sh"
+  grep -q -- '--features onnx-backend' "$CLI.build" 2>/dev/null \
+    || die "$CLI was built with no inference backend, so its embed-shard cannot embed — run bootstrap_runner.sh"
 fi
 [ -n "$PLUGIN_REV" ] || [ -n "${EXPORT_SEMANTIC_PLAN:-}" ] || die "export_semantic_plan v2 (plugin P5) is not pinned yet in pins.env: the release cannot be planned"
 [ -x "$EXPORT" ] || die "export_semantic_plan is not at $EXPORT — run bootstrap_runner.sh"
@@ -159,31 +163,50 @@ endgroup
 
 # ─── 3 embed + 4 warehouse ─────────────────────────────────────────────────
 group "3 embed: $TO_EMBED text(s) the warehouse lacks"
-if [ "$TO_EMBED" -gt 0 ]; then
-  skip=0; n=0
-  while [ "$skip" -lt "$TO_EMBED" ]; do
-    "$PY" "$HERE/embed_worker.py" --plan "$PLAN" --out "$WORK/shards/$(printf 's%03d' "$n")" \
-      --skip "$skip" --take "$EMBED_WINDOW" --cache "$STATE/model-cache" \
-      --repo "$MODEL_REPO" --revision "$MODEL_REVISION" --graph "$MODEL_GRAPH" --token-env OTZARIA_HF_TOKEN
-    skip=$((skip + EMBED_WINDOW)); n=$((n + 1))
-  done
+EMBEDDED_BY="none: every vector came from the warehouse"
+if [ "$TO_EMBED" -eq 0 ]; then
+  [ -z "$FRESH" ] || die "the plan has no text to embed and there is no warehouse: nothing to assemble a release from"
+  echo "every text of the plan has its vector in the warehouse already"
+  endgroup
+else
+  if [ "$TO_EMBED" -lt "$CPU_EMBED_MAX" ]; then
+    # Few texts: ONNX Runtime with the fp32 package on this CPU, the reference itself, which needs
+    # no parity certificate (the GPU worker's could not sample 1,000 texts from fewer than 959).
+    PKG=$("$PY" "$HERE/model_package.py" fetch --cache "$STATE/model-cache" --checksum "$PASSAGE_PACKAGE_CHECKSUM" \
+      --graph "$MODEL_GRAPH" --repo "$MODEL_REPO" --revision "$MODEL_REVISION" --token-env OTZARIA_HF_TOKEN) \
+      || die "could not fetch the passage package $PASSAGE_PACKAGE_CHECKSUM"
+    ORT=""
+    for lib in "$STATE"/venv/lib/python3*/site-packages/onnxruntime/capi/libonnxruntime.so.*; do
+      [ -f "$lib" ] && { ORT=$lib; break; }
+    done
+    [ -n "$ORT" ] || die "the venv holds no ONNX Runtime library for embed-shard — run bootstrap_runner.sh"
+    echo "on the CPU: embed-shard in $CPU_PROCESSES process(es) of $CPU_THREADS thread(s), ONNX Runtime $ORT"
+    EMBEDDED_BY="otzaria-semantic-search embed-shard (onnxruntime, cpu)"
+    OTZARIA_ONNX_RUNTIME=$ORT "$CLI" embed-shard --plan "$PLAN" --model-file "$PKG/$MODEL_GRAPH" \
+      --processes "$CPU_PROCESSES" --threads "$CPU_THREADS" --out "$WORK/shards/cpu"
+  else
+    EMBEDDED_BY="seforim-gpu-worker 1.0"
+    skip=0; n=0
+    while [ "$skip" -lt "$TO_EMBED" ]; do
+      "$PY" "$HERE/embed_worker.py" --plan "$PLAN" --out "$WORK/shards/$(printf 's%03d' "$n")" \
+        --skip "$skip" --take "$EMBED_WINDOW" --cache "$STATE/model-cache" \
+        --repo "$MODEL_REPO" --revision "$MODEL_REVISION" --graph "$MODEL_GRAPH" --token-env OTZARIA_HF_TOKEN
+      skip=$((skip + EMBED_WINDOW)); n=$((n + 1))
+    done
+  fi
   endgroup
   group "4 warehouse: add the shards, held to the plan"
   CREATE=()
   [ -z "$FRESH" ] || CREATE=(--create --model "$FAMILY" --passage-quantization "$PASSAGE_QUANTIZATION")
   "$CLI" warehouse-add --warehouse "$WAREHOUSE" ${CREATE[@]+"${CREATE[@]}"} --plan "$PLAN" --shards "$WORK/shards"
-elif [ -n "$FRESH" ]; then
-  die "the plan has no text to embed and there is no warehouse: nothing to assemble a release from"
-else
-  echo "every text of the plan has its vector in the warehouse already"
+  endgroup
 fi
-endgroup
 
 # ─── 5 assemble + gates ────────────────────────────────────────────────────
 group "5 assemble a base, then the gates"
 BUILT_BY=$(jq -cn --arg repo "$REPO" --arg run "${GITHUB_RUN_ID:-manual}" --arg sha "${GITHUB_SHA:-$(git -C "$HERE" rev-parse HEAD 2>/dev/null || echo unknown)}" \
-  --arg sidecar "$SIDECAR_REV" --arg plugin "$PLUGIN_REV" \
-  '{repository: $repo, workflow: "build-library-vectors", runId: $run, commit: $sha, sidecar: $sidecar, plugin: $plugin, worker: "seforim-gpu-worker 1.0"}')
+  --arg sidecar "$SIDECAR_REV" --arg plugin "$PLUGIN_REV" --arg worker "$EMBEDDED_BY" \
+  '{repository: $repo, workflow: "build-library-vectors", runId: $run, commit: $sha, sidecar: $sidecar, plugin: $plugin, worker: $worker}')
 "$CLI" assemble --kind base --plan "$PLAN" --warehouse "$WAREHOUSE" --out "$WORK/release" \
   --created-at "$CREATED" --built-by "$BUILT_BY"
 set +e

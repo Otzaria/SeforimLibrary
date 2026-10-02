@@ -9,7 +9,9 @@ the output a v2 shard (vectors.f32, keys.bin, shard-manifest.json; see vector_sh
 model is the plan's passage package, which must be the family's fp32 package: this worker is
 a re-implementation of the fp32 graph (torch_bert.py, mode "mixed"), so every shard carries a
 parity certificate against ONNX Runtime on a CPU — the 41 golden texts plus plan texts sampled
-across the whole plan, at least 1,000 in all, lowest cosine at least 0.999.
+across the whole plan, at least 1,000 in all, lowest cosine at least 0.999. A plan of fewer than
+959 texts cannot reach 1,000 and is refused at once: it is embedded on the CPU with the sidecar's
+embed-shard, the reference itself, which needs no certificate.
 
 The package is either a directory given with --model-dir or fetched into --cache (default
 $OTZARIA_VECTOR_MODEL_CACHE, else /opt/otzaria-cache/vector-models) and verified against the
@@ -91,6 +93,16 @@ def main(argv=None) -> int:
     if package["quantization"] != "fp32":
         raise vector_shard.ContractError(f"the plan's passage package is {package['quantization']}; this worker "
                                          f"re-implements the fp32 graph only")
+    # The certificate samples the golden texts and at most one text per plan record: a plan too
+    # small to reach PARITY_MIN_SAMPLES is refused however exact the GPU is, so before any work.
+    golden = len(json.load(open(GOLDEN_TEXTS, encoding="utf-8"))["cases"])
+    reachable = golden + min(a.parity_samples - golden, plan["records"])
+    if reachable < vector_shard.PARITY_MIN_SAMPLES:
+        raise vector_shard.ContractError(
+            f"the plan holds {plan['records']} text(s), so a parity certificate can sample at most {reachable} "
+            f"({golden} golden texts and one per plan text) of the {vector_shard.PARITY_MIN_SAMPLES} it needs. "
+            f"Embed a plan this small on the CPU with the sidecar's embed-shard: ONNX Runtime on a CPU is the "
+            f"reference and needs no certificate")
     take = plan["records"] - a.skip if a.take is None else a.take
     take = max(0, take)
     vector_shard.ensure_output_dir(a.out)         # refuse a finished shard before any work

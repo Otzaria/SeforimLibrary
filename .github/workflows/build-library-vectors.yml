@@ -97,7 +97,8 @@ jobs:
     runs-on: [self-hosted, otzaria-db, amd-gpu]
     # On a runner with no warehouse yet, the first build plans and embeds the whole library
     # on the GPU (~1 h), plus the index and the assembly, and its first add creates the
-    # warehouse; a later release embeds only the texts the warehouse lacks.
+    # warehouse; a later release embeds only the texts the warehouse lacks, on the CPU when
+    # they are few (CPU_EMBED_MAX in pins.env).
     timeout-minutes: 360
     env:
       GH_TOKEN: ${{ secrets.PIPELINE_TOKEN }}

@@ -156,6 +156,31 @@ def fetch_package(cache: Path, checksum: str, graph: str, repo: str = DEFAULT_RE
         return root
 
 
+def main(argv=None) -> int:
+    """model_package.py fetch --cache DIR --checksum HEX --graph NAME [--repo R] [--revision REV]:
+    the verified package's directory on stdout, the log on stderr (for the driver's CPU path)."""
+    import argparse
+    ap = argparse.ArgumentParser(description="Fetch a model package into a cache, verified, and print its directory.")
+    sub = ap.add_subparsers(dest="command", required=True)
+    f = sub.add_parser("fetch")
+    f.add_argument("--cache", required=True, type=Path)
+    f.add_argument("--checksum", required=True)
+    f.add_argument("--graph", required=True)
+    f.add_argument("--repo", default=DEFAULT_REPO)
+    f.add_argument("--revision", default=DEFAULT_REVISION)
+    f.add_argument("--token-env", default=DEFAULT_TOKEN_ENV)
+    f.add_argument("--hub", default=HUB, help=argparse.SUPPRESS)
+    a = ap.parse_args(argv)
+    try:
+        root = fetch_package(a.cache, a.checksum, a.graph, repo=a.repo, revision=a.revision, token_env=a.token_env,
+                             hub=a.hub, log=lambda message: print(message, file=sys.stderr, flush=True))
+    except PackageError as error:
+        print(f"model_package: {error}", file=sys.stderr)
+        return 2
+    print(root)
+    return 0
+
+
 def check_family(root: Path, graph: str, model: dict, package: dict, worker_dim: int,
                  worker_pooling: str, worker_max_tokens: int) -> None:
     """check_runtime: the package is the plan's passage package, and the tokenizer, width,
@@ -172,3 +197,7 @@ def check_family(root: Path, graph: str, model: dict, package: dict, worker_dim:
     ):
         if declared != loaded:
             raise PackageError(f"{field}: the family declares {declared} and the worker loaded {loaded}")
+
+
+if __name__ == "__main__":
+    sys.exit(main())
