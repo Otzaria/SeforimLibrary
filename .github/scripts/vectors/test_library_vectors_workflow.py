@@ -10,6 +10,8 @@ the work, the same way by hand. Load-bearing properties, pinned here:
     is published;
   * it publishes through a draft at the commit of the library release's tag: data first, the
     manifest last, and the draft is published only once it holds exactly the files built;
+  * what it publishes is a prerelease unless the repository says otherwise, which keeps it out
+    of update-release-manifest.yml and the database history;
   * it persists the ledger only after a publish.
 
 The YAML assertions read the parsed workflow; the driver's are made by running it against stub
@@ -41,6 +43,7 @@ SCRIPTS = HERE.parent
 WORKFLOWS = SCRIPTS.parent / "workflows"
 VECTORS = WORKFLOWS / "build-library-vectors.yml"
 INDEX = WORKFLOWS / "build-library-index.yml"
+RELEASE_MANIFEST = WORKFLOWS / "update-release-manifest.yml"
 DRIVER = HERE / "build_library_vectors.sh"
 PINS = HERE / "pins.env"
 DATABASE_TAG = re.compile(r"^v[0-9]+-[0-9]{14}$")
@@ -130,6 +133,19 @@ class Workflow(unittest.TestCase):
         env = self.job["env"]
         self.assertEqual(env["GH_TOKEN"], "${{ secrets.PIPELINE_TOKEN }}")
         self.assertEqual(env["OTZARIA_HF_TOKEN"], "${{ secrets.OTZARIA_HF_TOKEN }}")
+
+    def test_a_publish_is_a_prerelease_unless_the_repository_says_otherwise(self):
+        self.assertEqual(self.job["env"]["LIBRARY_VECTORS_PRERELEASE"], "${{ vars.LIBRARY_VECTORS_PRERELEASE || 'true' }}")
+
+    def test_a_prerelease_stays_out_of_the_release_manifest_and_the_history(self):
+        # Why the default is a prerelease: every published release that is not one starts
+        # update-release-manifest.yml, which lists it in the database history it commits.
+        doc = yaml.safe_load(RELEASE_MANIFEST.read_text(encoding="utf-8"))
+        self.assertEqual(doc[True]["release"]["types"], ["published"])
+        (job,) = doc["jobs"].values()
+        self.assertIn("github.event.release.prerelease == false", job["if"])
+        self.assertIn("select((.draft|not) and (.prerelease|not))", run_text(job))
+
 
 class Pins(unittest.TestCase):
     def test_the_sidecar_and_the_planner_are_pinned_to_full_commits(self):
@@ -318,6 +334,23 @@ class Driver(unittest.TestCase):
                          ["ledger-v30.keys", "ledger-v30.manifest.json", "pairs-v30.bin", "published.json"])
         self.assertEqual(json.loads((ledger / "published.json").read_text())["published"], "vectors-" + TAG)
         self.assertFalse((self.state / "work" / TAG).exists())
+
+    def test_a_publish_is_a_prerelease_unless_the_variable_says_false(self):
+        for value, flag in ((None, "--prerelease=true"), ("", "--prerelease=true"), ("true", "--prerelease=true"),
+                            ("false", "--prerelease=false")):
+            self.calls.unlink(missing_ok=True)
+            (self.root / "uploaded.tsv").unlink(missing_ok=True)
+            shutil.rmtree(self.state / "ledger", ignore_errors=True)
+            env = {} if value is None else {"LIBRARY_VECTORS_PRERELEASE": value}
+            p, calls = self.run_driver(mode="base", TO_EMBED=0, **env)
+            self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+            self.assertIn(" " + flag + " ", calls[self.index_of(calls, "gh release create")], value)
+
+    def test_a_mistyped_prerelease_value_stops_before_anything_runs(self):
+        p, calls = self.run_driver(mode="base", LIBRARY_VECTORS_PRERELEASE="yes")
+        self.assertEqual(p.returncode, 64)
+        self.assertIn("LIBRARY_VECTORS_PRERELEASE is true or false", p.stdout)
+        self.assertEqual(calls, [])
 
     def test_a_draft_that_does_not_hold_the_files_built_is_never_published(self):
         p, calls = self.run_driver(mode="base", TO_EMBED=0, SHORT_UPLOAD="gates.json")
