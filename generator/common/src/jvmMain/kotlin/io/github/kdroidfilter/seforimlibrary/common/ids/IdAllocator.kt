@@ -92,6 +92,21 @@ interface IdAllocator {
     /** Returns the source hash recorded in a previous build for [key], if any. */
     fun previousSourceHash(key: BookKey): BookSourceHash?
 
+    /**
+     * Every book key this allocator knows, from the build state and from this run,
+     * with its id. Keys are never dropped, so a renamed book's old title stays here:
+     * under the book's own id when the rename kept it (book_renames.csv), under a
+     * dead id when the book came back as a new key. Read-only view.
+     */
+    fun knownBookKeys(): Map<BookKey, Long> = emptyMap()
+
+    /**
+     * The line content hashes held for each of [bookIds]. A book that allocated
+     * lines in this run reports those only; any other book reports what the build
+     * state kept for it, which for a removed book is its last content.
+     */
+    fun lineContentHashes(bookIds: Set<Long>): Map<Long, List<ByteArray>> = emptyMap()
+
     /** Stats for logging / metrics. */
     fun stats(): AllocatorStats
 
