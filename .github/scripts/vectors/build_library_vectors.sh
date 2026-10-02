@@ -6,10 +6,12 @@
 #
 #   1 index     download the release's search index (split parts, sha256-checked) and expand it
 #   2 plan      export_semantic_plan v2 over it, split against the warehouse: embed.jsonl holds
-#               only the texts the warehouse has no vector for
+#               only the texts the warehouse has no vector for (every text, on a runner that
+#               has no warehouse yet)
 #   3 embed     those texts, on the GPU, with embed_worker.py — windows of EMBED_WINDOW records,
 #               each a v2 shard with its parity certificate
-#   4 warehouse warehouse-add --plan: the shards held to the plan, their vectors appended
+#   4 warehouse warehouse-add --plan: the shards held to the plan, their vectors appended (the
+#               first add creates the warehouse)
 #   5 assemble  a base (POC: every release is a base), then assemble --verify (the gates)
 #   6 files     the segment compressed (and split below GitHub's asset limit), release-files
 #   7 publish   (mode base) a sibling release vectors-<tag> at the commit of <tag>, made a
@@ -21,7 +23,8 @@
 # like the lines-snapshot-sha256-* and pipeline-result-* releases it then stays out of
 # update-release-manifest.yml and the database history; a download by tag works the same.
 #
-# --mode dry-run stops after step 6 and persists nothing. The state directory (default
+# --mode dry-run stops after step 6: it publishes nothing and persists no ledger (the warehouse
+# keeps what it embedded, as in a base). The state directory (default
 # /home/runner/otzaria-vectors; see bootstrap_runner.sh) holds the binaries, the venv, the
 # model cache, the warehouse and the published ledger, and is locked for the whole build.
 # Runs by hand on the build machine as it runs in the workflow. Tests replace the tools with
@@ -80,6 +83,15 @@ for tool in jq sha256sum split tar; do command -v "$tool" >/dev/null || die "$to
 MIN_FREE_GB=${VECTORS_MIN_FREE_GB:-$MIN_FREE_GB}
 free_kb=$(df -Pk "$STATE" | awk 'NR==2 {print $4}')
 [ "$free_kb" -ge $((MIN_FREE_GB * 1024 * 1024)) ] || die "only $((free_kb / 1024 / 1024)) GiB free on $STATE, fewer than $MIN_FREE_GB"
+# The warehouse, or none yet: then every text is planned and the first add creates it. A
+# directory holding files but no warehouse.json is neither, and --create would empty it.
+if [ -f "$WAREHOUSE/warehouse.json" ]; then
+  FRESH=""
+elif [ -n "$(ls -A "$WAREHOUSE" 2>/dev/null)" ]; then
+  die "$WAREHOUSE holds files but no warehouse.json: it is not a warehouse (move it aside to start a new one)"
+else
+  FRESH=1
+fi
 if "$GH" auth status >/dev/null 2>&1; then GH_OK=1; else GH_OK=""; fi
 if [ "$MODE" = base ]; then
   [ -n "$GH_OK" ] || die "mode base publishes through gh, and gh is not authenticated"
@@ -129,9 +141,11 @@ group "2 plan"
 # chunking_identity, PDF lines are left out, and keys are recomputed from the text of a
 # schema 4 index (held to its chunkKey column on schema 5). POC: every release is a base, so
 # the plan is split against the warehouse only, never against the previous ledger.
+SPLIT=(--warehouse "$WAREHOUSE")
+if [ -n "$FRESH" ]; then SPLIT=(); echo "no warehouse yet at $WAREHOUSE: every text is planned"; fi
 "$EXPORT" --index "$INDEX" --library-version "$VERSION" --release-tag "$TAG" \
   --model "$FAMILY" --passage-quantization "$PASSAGE_QUANTIZATION" \
-  --warehouse "$WAREHOUSE" --created-at "$CREATED" --out "$WORK/plan" | tee "$WORK/plan.log"
+  ${SPLIT[@]+"${SPLIT[@]}"} --created-at "$CREATED" --out "$WORK/plan" | tee "$WORK/plan.log"
 PLAN=$WORK/plan
 jq -e '.format == "otzaria-vector-plan" and .version == 1' "$PLAN/plan-manifest.json" >/dev/null || die "the plan is not an otzaria-vector-plan version 1"
 [ "$(jq -r .library_release_tag "$PLAN/plan-manifest.json")" = "$TAG" ] || die "the plan was made for another release"
@@ -154,7 +168,11 @@ if [ "$TO_EMBED" -gt 0 ]; then
   done
   endgroup
   group "4 warehouse: add the shards, held to the plan"
-  "$CLI" warehouse-add --warehouse "$WAREHOUSE" --plan "$PLAN" --shards "$WORK/shards"
+  CREATE=()
+  [ -z "$FRESH" ] || CREATE=(--create --model "$FAMILY" --passage-quantization "$PASSAGE_QUANTIZATION")
+  "$CLI" warehouse-add --warehouse "$WAREHOUSE" ${CREATE[@]+"${CREATE[@]}"} --plan "$PLAN" --shards "$WORK/shards"
+elif [ -n "$FRESH" ]; then
+  die "the plan has no text to embed and there is no warehouse: nothing to assemble a release from"
 else
   echo "every text of the plan has its vector in the warehouse already"
 fi
