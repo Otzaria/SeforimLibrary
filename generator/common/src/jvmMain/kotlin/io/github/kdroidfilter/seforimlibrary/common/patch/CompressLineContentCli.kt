@@ -125,7 +125,7 @@ internal fun compressLineContent(
         val line = compressColumn(
             conn,
             selectSql = "SELECT id, CAST(content AS BLOB) FROM line_content " +
-                "WHERE id > ? AND typeof(content) = 'text' ORDER BY id LIMIT $chunkRows",
+                "WHERE id >= ? AND typeof(content) = 'text' ORDER BY id LIMIT $chunkRows",
             updateSql = "UPDATE line_content SET content = ? WHERE id = ?",
             encode = encode,
         )
@@ -133,7 +133,7 @@ internal fun compressLineContent(
         val version = compressColumn(
             conn,
             selectSql = "SELECT rowid, CAST(content AS BLOB) FROM version_line " +
-                "WHERE rowid > ? AND typeof(content) = 'text' ORDER BY rowid LIMIT $chunkRows",
+                "WHERE rowid >= ? AND typeof(content) = 'text' ORDER BY rowid LIMIT $chunkRows",
             updateSql = "UPDATE version_line SET content = ? WHERE rowid = ?",
             encode = encode,
         )
@@ -189,13 +189,14 @@ private fun compressColumn(
     updateSql: String,
     encode: (List<Pair<Long, ByteArray>>) -> List<ByteArray>,
 ): ColumnResult {
-    var lastKey = Long.MIN_VALUE
+    // An inclusive bound covers the full signed range; stop before incrementing MAX_VALUE.
+    var nextKey = Long.MIN_VALUE
     var rows = 0L
     var textBytes = 0L
     var frameBytes = 0L
     while (true) {
         val chunk = conn.prepareStatement(selectSql).use { ps ->
-            ps.setLong(1, lastKey)
+            ps.setLong(1, nextKey)
             ps.executeQuery().use { rs -> buildList { while (rs.next()) add(rs.getLong(1) to rs.getBytes(2)) } }
         }
         if (chunk.isEmpty()) break
@@ -220,7 +221,9 @@ private fun compressColumn(
         rows += chunk.size
         textBytes += chunk.sumOf { it.second.size.toLong() }
         frameBytes += frames.sumOf { it.size.toLong() }
-        lastKey = chunk.last().first
+        val lastKey = chunk.last().first
+        if (lastKey == Long.MAX_VALUE) break
+        nextKey = lastKey + 1
     }
     return ColumnResult(rows, textBytes, frameBytes)
 }
@@ -238,6 +241,8 @@ internal fun validateCompressed(
     threads: Int = Runtime.getRuntime().availableProcessors(),
     chunkRows: Int = VALIDATE_CHUNK_ROWS,
 ): Long {
+    require(threads > 0) { "threads=$threads must be positive" }
+    require(chunkRows > 0) { "chunkRows=$chunkRows must be positive" }
     val dictionaries = LineContentCompression.storedDictionaries(conn)
     check(dictionaries.size == 1) { "expected one dictionary in ${LineContentCompression.DICT_TABLE}, found ${dictionaries.keys}" }
     val (storedId, stored) = dictionaries.entries.single()
@@ -263,11 +268,11 @@ internal fun validateCompressed(
     try {
         return decodeColumn(
             conn, "line_content",
-            "SELECT id, content FROM line_content WHERE id > ? ORDER BY id LIMIT $chunkRows",
+            "SELECT id, content FROM line_content WHERE id >= ? ORDER BY id LIMIT $chunkRows",
             pool, threads, local,
         ) + decodeColumn(
             conn, "version_line",
-            "SELECT rowid, content FROM version_line WHERE rowid > ? AND content IS NOT NULL ORDER BY rowid LIMIT $chunkRows",
+            "SELECT rowid, content FROM version_line WHERE rowid >= ? AND content IS NOT NULL ORDER BY rowid LIMIT $chunkRows",
             pool, threads, local,
         )
     } finally {
@@ -306,12 +311,13 @@ private fun decodeColumn(
     threads: Int,
     local: ThreadLocal<FrameChecker>,
 ): Long {
-    var lastKey = Long.MIN_VALUE
+    // An inclusive bound covers the full signed range; stop before incrementing MAX_VALUE.
+    var nextKey = Long.MIN_VALUE
     var rows = 0L
     var pending: List<Future<*>> = emptyList()
     while (true) {
         val chunk = conn.prepareStatement(selectSql).use { ps ->
-            ps.setLong(1, lastKey)
+            ps.setLong(1, nextKey)
             ps.executeQuery().use { rs -> buildList { while (rs.next()) add(rs.getLong(1) to rs.getBytes(2)) } }
         }
         awaitAll(pending)
@@ -324,7 +330,12 @@ private fun decodeColumn(
             }
         }
         rows += chunk.size
-        lastKey = chunk.last().first
+        val lastKey = chunk.last().first
+        if (lastKey == Long.MAX_VALUE) {
+            awaitAll(pending)
+            return rows
+        }
+        nextKey = lastKey + 1
     }
 }
 

@@ -153,6 +153,79 @@ class CompressLineContentCliTest {
         assertTrue("line_content row 5" in error.message.orEmpty(), error.message)
     }
 
+    @Test
+    fun `compression and validation include both ends of the signed key range`() {
+        val db = schemaSixDb("key-extremes.db")
+        connect(db).use { conn ->
+            conn.createStatement().use { st ->
+                st.execute("UPDATE line SET id = ${Long.MIN_VALUE} WHERE id = 1")
+                st.execute("UPDATE line SET id = ${Long.MAX_VALUE} WHERE id = 5")
+                st.execute("UPDATE line_content SET id = ${Long.MIN_VALUE} WHERE id = 1")
+                st.execute("UPDATE line_content SET id = ${Long.MAX_VALUE} WHERE id = 5")
+                st.execute("UPDATE version_line SET lineId = ${Long.MIN_VALUE} WHERE lineId = 1")
+                st.execute("UPDATE version_line SET rowid = ${Long.MIN_VALUE} WHERE lineId = 2")
+                st.execute("UPDATE version_line SET rowid = ${Long.MAX_VALUE} WHERE lineId = 3")
+            }
+            val report = compressLineContent(conn, chunkRows = 1, threads = 2)
+            assertEquals(lines.size.toLong(), report.lineRowsCompressed)
+            assertEquals(2L, report.versionRowsCompressed)
+            assertEquals(7L, report.framesValidated)
+            assertEquals(7L, validateCompressed(conn, threads = 2, chunkRows = 1))
+            LineContentCompression.Decompressor().use { d ->
+                val base = blobs(conn, "SELECT id, content FROM line_content")
+                assertEquals(lines.getValue(1L), d.text(base.getValue(Long.MIN_VALUE)))
+                assertEquals(lines.getValue(5L), d.text(base.getValue(Long.MAX_VALUE)))
+                val editions = blobs(conn, "SELECT rowid, content FROM version_line WHERE content IS NOT NULL")
+                assertEquals("גרסה אחרת", d.text(editions.getValue(Long.MIN_VALUE)))
+                assertEquals("שורה ריקה בבסיס", d.text(editions.getValue(Long.MAX_VALUE)))
+            }
+        }
+    }
+
+    @Test
+    fun `corrupt boundary keys fail validation resume and stamping`() {
+        for ((table, key) in listOf(
+            "line_content" to Long.MIN_VALUE,
+            "line_content" to Long.MAX_VALUE,
+            "version_line" to Long.MIN_VALUE,
+            "version_line" to Long.MAX_VALUE,
+        )) {
+            val db = schemaSixDb("boundary-corrupt-$table-$key.db")
+            connect(db).use { conn ->
+                compressLineContent(conn, threads = 1)
+                conn.createStatement().use { st ->
+                    if (table == "line_content") {
+                        st.execute("UPDATE line SET id = $key WHERE id = 1")
+                        st.execute("UPDATE line_content SET id = $key, content = X'28B52FFD' WHERE id = 1")
+                        st.execute("UPDATE version_line SET lineId = $key WHERE lineId = 1")
+                    } else {
+                        st.execute("UPDATE version_line SET rowid = $key, content = X'28B52FFD' WHERE lineId = 2")
+                    }
+                }
+                for (attempt in listOf<() -> Unit>(
+                    { validateCompressed(conn, threads = 2, chunkRows = 1) },
+                    { compressLineContent(conn, threads = 2, chunkRows = 1) },
+                    { stampSchemaVersion(conn, dbVersion = 31, dbSchemaVersion = 6) },
+                )) {
+                    val error = assertFailsWith<IllegalStateException> { attempt() }
+                    assertTrue("$table row $key" in error.message.orEmpty(), error.message)
+                }
+            }
+        }
+    }
+
+    @Test
+    fun `validator rejects invalid parallelism and chunk sizes before reading the DB`() {
+        val conn = DriverManager.getConnection("jdbc:sqlite::memory:")
+        conn.close()
+        for ((threads, chunkRows) in listOf(0 to 1, -1 to 1, 1 to 0, 1 to -1)) {
+            val error = assertFailsWith<IllegalArgumentException> {
+                validateCompressed(conn, threads = threads, chunkRows = chunkRows)
+            }
+            assertTrue("must be positive" in error.message.orEmpty(), error.message)
+        }
+    }
+
     /** Shared dictionaries must not change a byte: the stored frames match the frozen contract. */
     @Test
     fun `frames written by the parallel run are byte-identical to the frozen contract`() {
