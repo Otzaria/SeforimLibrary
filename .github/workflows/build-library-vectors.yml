@@ -1,0 +1,111 @@
+name: Build the library's semantic vectors
+
+run-name: library-vectors ${{ inputs.release_tag || github.event.workflow_run.display_title }}
+
+# The semantic vectors of a library release, built on the machine that holds the warehouse
+# and the GPU, once the release's search index is stored (build-library-index.yml), and
+# published beside the release as vectors-<tag>. Everything happens in
+# .github/scripts/vectors/build_library_vectors.sh, which runs by hand on that machine the
+# same way; this file only decides when, where, and in which mode.
+#
+# Publishing is opt-in: a run the index workflow triggers is a dry run unless the repository
+# variable LIBRARY_VECTORS_PUBLISH is "true"; a manual run says so with `mode`.
+
+on:
+  workflow_run:
+    workflows: ["Build and store the library search index"]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Library release tag (v<dbVersion>-<utcTimestamp>)'
+        type: string
+        required: true
+      mode:
+        description: 'base: build, verify and publish vectors-<tag>; dry-run: build and verify only'
+        type: choice
+        required: true
+        default: dry-run
+        options:
+          - dry-run
+          - base
+
+permissions:
+  contents: write
+
+# One build at a time, never cancelled: the warehouse and the ledger are shared state, and a
+# run already embedding holds GPU work a newer trigger would throw away.
+concurrency:
+  group: seforim-library-vectors
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  gate:
+    name: Accept only a stored index of a database release
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      proceed: ${{ steps.classify.outputs.proceed }}
+      release_tag: ${{ steps.classify.outputs.release_tag }}
+      mode: ${{ steps.classify.outputs.mode }}
+    steps:
+      - name: Classify the trigger
+        id: classify
+        env:
+          EVENT: ${{ github.event_name }}
+          RUN_CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+          RUN_TITLE: ${{ github.event.workflow_run.display_title }}
+          INPUT_TAG: ${{ inputs.release_tag }}
+          INPUT_MODE: ${{ inputs.mode }}
+          PUBLISH: ${{ vars.LIBRARY_VECTORS_PUBLISH }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT" = workflow_dispatch ]; then
+            TAG=$INPUT_TAG; MODE=$INPUT_MODE
+            if ! echo "$TAG" | grep -Eq '^v[0-9]+-[0-9]{14}$'; then
+              echo "::error::release_tag '$TAG' is not a database release tag (v<dbVersion>-<utcTimestamp>)"
+              exit 1
+            fi
+          else
+            if [ "$RUN_CONCLUSION" != success ]; then
+              echo "The index build concluded '$RUN_CONCLUSION' — no vectors without a stored index."
+              echo "proceed=false" >> "$GITHUB_OUTPUT"; exit 0
+            fi
+            TAG=${RUN_TITLE#library-index }
+            if ! echo "$TAG" | grep -Eq '^v[0-9]+-[0-9]{14}$'; then
+              echo "The index run '$RUN_TITLE' names no database release — nothing to embed."
+              echo "proceed=false" >> "$GITHUB_OUTPUT"; exit 0
+            fi
+            MODE=dry-run
+            [ "$PUBLISH" != true ] || MODE=base
+          fi
+          echo "Release $TAG, mode $MODE."
+          {
+            echo "proceed=true"
+            echo "release_tag=$TAG"
+            echo "mode=$MODE"
+          } >> "$GITHUB_OUTPUT"
+
+  vectors:
+    name: Embed, assemble, verify and publish the vectors
+    needs: gate
+    if: needs.gate.outputs.proceed == 'true'
+    # The build machine: the label the index workflow's local runner carries, and its GPU.
+    runs-on: [self-hosted, otzaria-db, amd-gpu]
+    # An empty warehouse means the whole library on the GPU (~1 h) plus the index and the
+    # assembly; a weekly release embeds only its new texts.
+    timeout-minutes: 360
+    env:
+      GH_TOKEN: ${{ secrets.PIPELINE_TOKEN }}
+      OTZARIA_HF_TOKEN: ${{ secrets.OTZARIA_HF_TOKEN }}
+      RELEASE_TAG: ${{ needs.gate.outputs.release_tag }}
+      MODE: ${{ needs.gate.outputs.mode }}
+    steps:
+      # The build machine's other self-hosted jobs pin checkout@v4: its runner's Node 24
+      # support is not proven (test_ci_workflows.SELF_HOSTED_JOBS).
+      - name: Checkout SeforimLibrary
+        uses: actions/checkout@v4
+
+      - name: Build the vectors
+        run: bash .github/scripts/vectors/build_library_vectors.sh --tag "$RELEASE_TAG" --mode "$MODE" --repo "$GITHUB_REPOSITORY"
