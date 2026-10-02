@@ -350,6 +350,7 @@ class SefariaDirectImporter(
                 // Resolved in a second pass; left empty for now.
                 baseTextBookIds = emptySet(),
                 collectiveTitleEn = payload.collectiveTitleEn,
+                authorKeys = resolvedAuthors.mapTo(HashSet()) { it.name },
             )
             if (payload.declaredBaseTextTitleKeys.isNotEmpty()) {
                 pendingDeclaredKeysByBookId[bookId] = payload.declaredBaseTextTitleKeys
@@ -577,6 +578,10 @@ class SefariaDirectImporter(
                     // …). These books would otherwise be invisible to the sibling
                     // chaining since it requires at least one declared base.
                     inferPrimaryBasesForEmptyDeclaredBookmeta(bookMetaById, countsByBookPair, logger)
+                    // Step 1b: a declared super-commentary inherits the volume Sefaria left
+                    // out of its list (מחוקקי יהודה ↔ אבן עזרא על שמות, both commentaries),
+                    // before step 2 can chain it the wrong way round.
+                    completeDeclaredBaseFamilies(bookMetaById, countsByBookPair, logger)
                     // Step 2: walk the asymmetric density rule from declared bases
                     // to chain intermediate dependants (super-commentaries).
                     applyLinkDensitySiblingChaining(bookMetaById, countsByBookPair, logger)

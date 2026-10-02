@@ -48,6 +48,10 @@ internal data class BookMeta(
     // "Rashi on Exodus"…). Used by the density chain to aggregate per-collective
     // signal so volume-level noise doesn't tip the per-pair ratio.
     val collectiveTitleEn: String? = null,
+    // השמות הקנוניים של מחברי הספר (כמו בטבלת author). משמשים להשלמת בסיסים של
+    // פירוש-על-פירוש: "אבן עזרא על שמות; פירוש הקצר" הוא של אותו מחבר כמו
+    // "אבן עזרא על בראשית" שמחוקקי יהודה מצהיר עליו (ר' completeDeclaredBaseFamilies).
+    val authorKeys: Set<String> = emptySet(),
 )
 
 /// Base encoded value in [BookPayload.cleanShiftByLineIndex] for a line whose
