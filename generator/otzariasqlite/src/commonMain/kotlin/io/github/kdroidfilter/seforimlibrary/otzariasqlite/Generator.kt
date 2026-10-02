@@ -2395,7 +2395,7 @@ class DatabaseGenerator(
         val targets = books
             .filter { it.id !in withAcronyms && lookup.rawTerms(it.title).isEmpty() }
             .mapTo(HashSet()) { it.id }
-        val library = books.map { LibraryBook(it.id, it.title, sourceNames[it.sourceId].orEmpty(), it.totalLines) }
+        val library = books.map { LibraryBook(it.id, it.title, sourceNames[it.sourceId].orEmpty()) }
         val formerTitles = RenamedBookTitles().resolve(
             books = library,
             targets = targets,

@@ -1,6 +1,9 @@
 package io.github.kdroidfilter.seforimlibrary.otzariasqlite
 
 import app.cash.sqldelight.driver.jdbc.sqlite.JdbcSqliteDriver
+import co.touchlab.kermit.LogWriter
+import co.touchlab.kermit.Logger
+import co.touchlab.kermit.Severity
 import io.github.kdroidfilter.seforimlibrary.common.buildstate.BookKey
 import io.github.kdroidfilter.seforimlibrary.common.ids.InMemoryIdAllocator
 import io.github.kdroidfilter.seforimlibrary.dao.repository.SeforimRepository
@@ -10,7 +13,9 @@ import java.nio.file.Files
 import java.nio.file.Path
 import java.security.MessageDigest
 import java.sql.DriverManager
+import kotlin.test.AfterTest
 import kotlin.test.Test
+import kotlin.test.assertContains
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
@@ -66,7 +71,7 @@ class AcronymsFollowRenamesTest {
 
     @Test
     fun aRenamedFileIsFoundByItsContent() {
-        val books = listOf(LibraryBook(7659, "אמת ואמונה", "OnYourWay", 21))
+        val books = listOf(LibraryBook(7659, "אמת ואמונה", "OnYourWay"))
         val result = resolve(
             books,
             targets = setOf(7659),
@@ -88,8 +93,8 @@ class AcronymsFollowRenamesTest {
     @Test
     fun aBookRenamedInPlaceIsFoundByItsId() {
         val books = listOf(
-            LibraryBook(3702, "רבינו סעדיה גאון על בראשית", "Sefaria", 10),
-            LibraryBook(5732, "תשובות הרמב\"ם - מהדורת בלאו", "Sefaria", 32),
+            LibraryBook(3702, "רבינו סעדיה גאון על בראשית", "Sefaria"),
+            LibraryBook(5732, "תשובות הרמב\"ם - מהדורת בלאו", "Sefaria"),
         )
         val result = resolve(
             books,
@@ -111,8 +116,8 @@ class AcronymsFollowRenamesTest {
     fun contentShortOfTheThresholdOrInAnotherSourceIsNotARename() {
         val half = body.take(10).toTypedArray()
         val books = listOf(
-            LibraryBook(2, "ספר חדש", "A", 11),
-            LibraryBook(3, "ספר אחר", "B", 21),
+            LibraryBook(2, "ספר חדש", "A"),
+            LibraryBook(3, "ספר אחר", "B"),
         )
         val result = resolve(
             books,
@@ -127,8 +132,8 @@ class AcronymsFollowRenamesTest {
     fun aDeadTitleWithTwoHeirsGoesToNeither() {
         // The second copy already has acronyms of its own; it still competes.
         val books = listOf(
-            LibraryBook(2, "ספר", "A", 21),
-            LibraryBook(3, "ספר - מהדורה ב", "A", 21),
+            LibraryBook(2, "ספר", "A"),
+            LibraryBook(3, "ספר - מהדורה ב", "A"),
         )
         val result = resolve(
             books,
@@ -140,9 +145,75 @@ class AcronymsFollowRenamesTest {
         assertEquals("its content matches 2 books", result.refused.single().reason)
     }
 
+    // Repeated lines: a book's line count is not its number of distinct lines.
+    private val twice = (body + body)
+
+    @Test
+    fun aRenamedFileWhoseLinesRepeatIsFoundByItsContent() {
+        // 20 lines, each twice: 40 lines, 20 distinct, on both sides.
+        val books = listOf(LibraryBook(2, "ספר", "A"))
+        val result = resolve(
+            books,
+            targets = setOf(2),
+            keys = mapOf(BookKey("A", "ספר - מחבר") to 1L, BookKey("A", "ספר") to 2L),
+            lines = mapOf(1L to hashes(*twice), 2L to hashes(*twice)),
+        )
+        assertEquals(mapOf(2L to listOf(FormerTitle("ספר - מחבר", "same content"))), result.byBookId)
+        assertTrue(result.refused.isEmpty(), "${result.refused}")
+    }
+
+    @Test
+    fun aRivalWhoseLinesRepeatStillCompetes() {
+        // The rival holds the same 20 distinct lines, each twice. Left out for its line
+        // count, it would make the target look like the single heir.
+        val books = listOf(
+            LibraryBook(2, "ספר", "A"),
+            LibraryBook(3, "ספר אחר", "A"),
+        )
+        val result = resolve(
+            books,
+            targets = setOf(2),
+            keys = mapOf(BookKey("A", "ספר - מחבר") to 1L, BookKey("A", "ספר") to 2L, BookKey("A", "ספר אחר") to 3L),
+            lines = mapOf(1L to hashes(*body), 2L to hashes(*body), 3L to hashes(*twice)),
+        )
+        assertTrue(result.byBookId.isEmpty(), "${result.byBookId}")
+        assertEquals(RefusedRename("ספר - מחבר", "ספר | ספר אחר", "its content matches 2 books"), result.refused.single())
+    }
+
+    @Test
+    fun anUnrelatedBookIsNotAnHeirWhateverItsLineCount() {
+        val other = (1..20).map { "שורה אחרת $it" }.toTypedArray()
+        val books = listOf(
+            // As many lines as the old book, all of them different.
+            LibraryBook(2, "ספר", "A"),
+            // Half the old book's lines, each four times: 40 lines, 10 distinct.
+            LibraryBook(3, "ספר - חלק", "A"),
+            // The old book's lines among as many others, each twice.
+            LibraryBook(4, "ספר - מורחב", "A"),
+        )
+        val result = resolve(
+            books,
+            targets = setOf(2, 3, 4),
+            keys = mapOf(
+                BookKey("A", "ספר - מחבר") to 1L,
+                BookKey("A", "ספר") to 2L,
+                BookKey("A", "ספר - חלק") to 3L,
+                BookKey("A", "ספר - מורחב") to 4L,
+            ),
+            lines = mapOf(
+                1L to hashes(*twice),
+                2L to hashes(*other, *other),
+                3L to hashes(*(1..4).flatMap { body.take(10) }.toTypedArray()),
+                4L to hashes(*twice, *other, *other),
+            ),
+        )
+        assertTrue(result.byBookId.isEmpty(), "${result.byBookId}")
+        assertTrue(result.refused.isEmpty(), "${result.refused}")
+    }
+
     @Test
     fun aDeadTitleWhoseHeirHasItsOwnAcronymsIsLeftAlone() {
-        val books = listOf(LibraryBook(2, "הזהר המתורגם - בראשית", "A", 21))
+        val books = listOf(LibraryBook(2, "הזהר המתורגם - בראשית", "A"))
         val result = resolve(
             books,
             targets = emptySet(),
@@ -155,8 +226,8 @@ class AcronymsFollowRenamesTest {
     @Test
     fun anOldTitleThatIsNowAnotherBookIsNotInherited() {
         val books = listOf(
-            LibraryBook(1, "ספר", "Sefaria", 5),
-            LibraryBook(2, "ספר - מהדורה חדשה", "Sefaria", 5),
+            LibraryBook(1, "ספר", "Sefaria"),
+            LibraryBook(2, "ספר - מהדורה חדשה", "Sefaria"),
         )
         val result = resolve(
             books,
@@ -171,8 +242,8 @@ class AcronymsFollowRenamesTest {
     @Test
     fun anOldTitleTwoBooksWouldInheritGoesToNeither() {
         val books = listOf(
-            LibraryBook(1, "מדרש א", "Sefaria", 5),
-            LibraryBook(2, "מדרש א - כתב יד ב", "Sefaria", 5),
+            LibraryBook(1, "מדרש א", "Sefaria"),
+            LibraryBook(2, "מדרש א - כתב יד ב", "Sefaria"),
         )
         val result = resolve(
             books,
@@ -224,9 +295,19 @@ class AcronymsFollowRenamesTest {
 
     private fun text(title: String) = (listOf("<h1>$title</h1>") + body).joinToString("\n")
 
-    /** Builds [books] against [state] and returns every book's acronyms. */
-    private fun build(state: Path, acronyms: Path, books: Map<String, String>): Map<String, Set<String>> = runBlocking {
+    /** Builds [books] against [state] and returns every book's acronyms; [log] gets the build's log. */
+    private fun build(
+        state: Path,
+        acronyms: Path,
+        books: Map<String, String>,
+        log: Capture? = null,
+    ): Map<String, Set<String>> = runBlocking {
         val repo = newRepo()
+        // The repository drops the global severity, so the capture goes in after it.
+        if (log != null) {
+            Logger.setLogWriters(listOf(log))
+            Logger.setMinSeverity(Severity.Verbose)
+        }
         val allocator = InMemoryIdAllocator.load(state.takeIf { Files.exists(it) })
         DatabaseGenerator(
             sourceDirectory = library(books),
@@ -281,6 +362,52 @@ class AcronymsFollowRenamesTest {
             "כתר תורה (ר מאיר מברדיטשוב)" to (listOf("<h1>כתר תורה</h1>") + body.map { "כתר $it" }).joinToString("\n"),
             "נועם אלימלך" to (listOf("<h1>נועם אלימלך</h1>") + body.map { "נועם $it" }).joinToString("\n"),
         )))
+    }
+
+    private class Capture : LogWriter() {
+        val lines = mutableListOf<String>()
+        override fun log(severity: Severity, message: String, tag: String, throwable: Throwable?) {
+            lines += message
+        }
+
+        /** The lines about renamed books. */
+        fun renames(): List<String> = lines.filter { it.startsWith("Acronyms of renamed books:") }
+    }
+
+    private val previousWriters = Logger.config.logWriterList
+    private val previousSeverity = Logger.config.minSeverity
+
+    @AfterTest
+    fun restoreLogger() {
+        Logger.setLogWriters(previousWriters)
+        Logger.setMinSeverity(previousSeverity)
+    }
+
+    private fun textTwice(title: String) = (listOf("<h1>$title</h1>") + body + body).joinToString("\n")
+
+    @Test
+    fun aRenamedBookWhoseLinesRepeatKeepsItsAcronyms() {
+        val acronyms = acronymizer(mapOf("ספר - מחבר" to listOf("סמח")))
+        val state = Files.createTempDirectory("otzaria-renames-state").resolve("build_state.db")
+        build(state, acronyms, mapOf("ספר - מחבר" to textTwice("ספר - מחבר")))
+        val log = Capture()
+        val after = build(state, acronyms, mapOf("ספר" to textTwice("ספר")), log)
+        assertEquals(setOf("סמח", "ספר - מחבר"), after.getValue("ספר"))
+        assertContains(log.renames().single(), "2 terms carried to 1 books: 'ספר - מחבר' → 'ספר' (2, same content)")
+    }
+
+    @Test
+    fun aRenameWithTwoHeirsIsReportedAndCarriesNothing() {
+        val acronyms = acronymizer(mapOf("ספר - מחבר" to listOf("סמח")))
+        val state = Files.createTempDirectory("otzaria-renames-state").resolve("build_state.db")
+        build(state, acronyms, mapOf("ספר - מחבר" to text("ספר - מחבר")))
+        val log = Capture()
+        val after = build(state, acronyms, mapOf("ספר" to text("ספר"), "ספר אחר" to textTwice("ספר אחר")), log)
+        assertEquals(mapOf("ספר" to emptySet<String>(), "ספר אחר" to emptySet()), after)
+        val refused = log.renames().single { "not followed" in it }
+        assertContains(refused, "1 renames not followed")
+        assertContains(refused, "'ספר - מחבר' → ")
+        assertContains(refused, "(its content matches 2 books)")
     }
 
     @Test
