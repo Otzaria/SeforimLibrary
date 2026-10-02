@@ -190,7 +190,7 @@ STUB_GH = r"""
           exit 1
         fi
         mkdir -p "$dir"
-        cp "$src" "$dir/$pattern"
+        cp "$src" "$dir/$pattern" || exit $?
         [ -z "${DOWNLOAD_LOG:-}" ] || echo "$tag/$pattern" >> "$DOWNLOAD_LOG"
         exit 0 ;;
     esac
@@ -869,7 +869,7 @@ STUB_GH_NO_CLOBBER = r"""
           exit 1
         fi
         mkdir -p "$dir"
-        cp "$src" "$dir/$pattern"
+        cp "$src" "$dir/$pattern" || exit $?
         [ -z "${DOWNLOAD_LOG:-}" ] || echo "$tag/$pattern" >> "$DOWNLOAD_LOG"
         exit 0 ;;
     esac
@@ -919,7 +919,7 @@ class AnchorCacheEdgeCaseSandboxTest(unittest.TestCase):
             case "$1" in
               */cache/*/seforim.db.zst) head -c 10 "$1" > "$2"; exit 1 ;;
             esac
-            exec /usr/bin/cp "$@"
+            exec "$REAL_CP" "$@"
             """,
             executable=True,
         )
@@ -1084,7 +1084,11 @@ class AnchorCacheEdgeCaseSandboxTest(unittest.TestCase):
         result = subprocess.run(
             [bash, "-c", textwrap.dedent(driver)],
             cwd=root,
-            env=dict(os.environ, REAL_PYTHON=sys.executable),
+            env=dict(
+                os.environ, REAL_PYTHON=sys.executable,
+                # Resolve before the driver puts its failing cp stub on PATH.
+                REAL_CP=shutil.which("cp"),
+            ),
             capture_output=True,
             text=True,
         )
@@ -1102,6 +1106,27 @@ class AnchorCacheEdgeCaseSandboxTest(unittest.TestCase):
     def phase(self, name):
         self.assertIn(name, self.phases, self.result.stdout + self.result.stderr)
         return self.phases[name]
+
+    def test_download_stubs_propagate_copy_failure(self):
+        # A failed download must not masquerade as success merely because the
+        # stub logged it. Exercise both stubs with a real failing child process.
+        fail_bin = self.root / "bin-copy-fail"
+        write(fail_bin / "cp", "#!/bin/sh\nexit 7\n", executable=True)
+        for stub in ("bin", "bin-strict"):
+            with self.subTest(stub=stub):
+                result = subprocess.run(
+                    [
+                        str(self.root / stub / "gh"), "release", "download", "v-ln",
+                        "--pattern", "seforim.db.zst", "--dir",
+                        str(self.root / f"failed-{stub}"),
+                    ],
+                    env=dict(
+                        os.environ, PATH=f"{fail_bin}:{os.environ['PATH']}",
+                        ASSET_ROOT=str(self.root / "assets"),
+                    ),
+                    capture_output=True, text=True,
+                )
+                self.assertEqual(result.returncode, 7, result.stdout + result.stderr)
 
     def test_a_republished_tag_is_never_served_from_the_old_entry(self):
         # The cache is keyed by tag, so the ONLY thing standing between a
