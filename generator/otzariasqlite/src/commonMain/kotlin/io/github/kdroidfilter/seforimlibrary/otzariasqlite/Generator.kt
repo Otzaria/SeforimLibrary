@@ -112,9 +112,22 @@ class DatabaseGenerator(
         m[hashKey] = v
         return v
     }
-    private fun stableLineId(bookId: Long, content: String): Long {
+    /**
+     * [legacyContent]: what builds before a normalisation keyed this line on (only
+     * line 0 of a book whose BOM is now stripped). The allocator reuses the seed id
+     * filed under it when [content]'s own key is new, so the line keeps its id.
+     * Line 0 is a book's first line, so its occurrence index is 0 in either scheme.
+     */
+    private fun stableLineId(bookId: Long, content: String, legacyContent: String? = null): Long {
         val hash = IdAllocatorBindings.normalisedContentHash(content)
-        return allocator.lineId(bookId, hash, nextLineOccurrence(bookId, hash))
+        val occurrence = nextLineOccurrence(bookId, hash)
+        val legacy = legacyContent?.let {
+            io.github.kdroidfilter.seforimlibrary.common.ids.LegacyLineKey(
+                IdAllocatorBindings.normalisedContentHash(it),
+                0,
+            )
+        }
+        return allocator.lineId(bookId, hash, occurrence, legacy)
     }
     // Per-book stack of (level -> textId) used to derive a stable tocEntry ancestor path.
     private val tocAncestorStackByBook = mutableMapOf<Long, MutableMap<Int, Long>>()
@@ -874,7 +887,7 @@ class DatabaseGenerator(
                 standalone += "$baseTitle (base file at library root is never imported)"
                 continue
             }
-            val baseLines = basePath.readText(Charsets.UTF_8).lines()
+            val baseLines = Utf8Bom.stripFirstLine(basePath.readText(Charsets.UTF_8).lines())
 
             val byHearot = companionEntries
                 .groupBy { normalizeBookTitle(linkTargetTitleOf(it.path_2)) }
@@ -888,7 +901,7 @@ class DatabaseGenerator(
                     continue
                 }
                 val hearotBytes = Files.readAllBytes(hearotPath)
-                val hearotLines = hearotBytes.toString(Charsets.UTF_8).lines()
+                val hearotLines = Utf8Bom.stripFirstLine(hearotBytes.toString(Charsets.UTF_8).lines())
                 if (entries.any {
                         it.line_index_1.toInt() - 1 !in baseLines.indices ||
                             it.line_index_2.toInt() - 1 !in hearotLines.indices
@@ -986,7 +999,7 @@ class DatabaseGenerator(
     private fun loadMetadata(): Map<String, BookMetadata> {
         val metadataFile = sourceDirectory.resolve("metadata.json")
         return if (metadataFile.exists()) {
-            val content = metadataFile.readText()
+            val content = Utf8Bom.strip(metadataFile.readText())
             try {
                 // Try to parse as Map first (original format)
                 json.decodeFromString<Map<String, BookMetadata>>(content)
@@ -1051,7 +1064,7 @@ class DatabaseGenerator(
         }
         logger.i { "Loading sources from manifest: ${manifestPath.toAbsolutePath()}" }
         runCatching {
-            val content = manifestPath.readText()
+            val content = Utf8Bom.strip(manifestPath.readText())
             val map = json.decodeFromString<Map<String, ManifestEntry>>(content)
             // For every manifest key, if it contains "/אוצריא/", index the subpath after it
             for ((path, _) in map) {
@@ -1317,10 +1330,13 @@ class DatabaseGenerator(
 
         // Prefer preloaded content from RAM if available
         val key = toLibraryRelativeKey(path)
-        val rawLines = bookContentCache[key] ?: run {
+        val fileLines = bookContentCache[key] ?: run {
             val content = path.readText(Charsets.UTF_8)
             content.lines()
         }
+        // A UTF-8 BOM would hide line 0's <h1> from detectHeaderLevel (no title in the TOC).
+        val rawLines = Utf8Bom.stripFirstLine(fileLines)
+        val firstLineHadBom = rawLines !== fileLines
         // Inject companion notes as inline footnotes when a merge plan exists
         val plan = hearotMergePlans[bookTitle]
         val lines = if (plan == null) rawLines else {
@@ -1332,7 +1348,7 @@ class DatabaseGenerator(
         }
 
         // Process each line one by one, handling TOC entries as we go
-        val tocStats = processLinesWithTocEntries(bookId, bookTitle, categoryId, lines)
+        val tocStats = processLinesWithTocEntries(bookId, bookTitle, categoryId, lines, firstLineHadBom)
 
         // Update the total number of lines
         repository.updateBookTotalLines(bookId, lines.size)
@@ -1363,8 +1379,17 @@ class DatabaseGenerator(
         bookTitle: String,
         categoryId: Long,
         lines: List<String>,
+        firstLineHadBom: Boolean = false,
     ): BookContentStats {
         logger.d { "Processing lines and TOC entries together for book ID: $bookId" }
+
+        // Line 0 of a book whose BOM was stripped keeps the id earlier builds gave it.
+        fun lineIdFor(lineIndex: Int, line: String): Long =
+            if (lineIndex == 0 && firstLineHadBom) {
+                stableLineId(bookId, line, legacyContent = Utf8Bom.legacyFirstLineContent(line))
+            } else {
+                stableLineId(bookId, line)
+            }
 
         // Structure pour stocker toutes les entrées TOC créées
         data class TocEntryData(
@@ -1422,7 +1447,7 @@ class DatabaseGenerator(
 
                 val parentId = (level - 1 downTo 1).firstNotNullOfOrNull { parentStack[it] }
                 val (currentTocEntryId, tocTextStableId) = stableTocEntryId(bookId, level, plainText, lineIndex)
-                val currentLineId = stableLineId(bookId, line)
+                val currentLineId = lineIdFor(lineIndex, line)
 
                 // Stocker l'info de cette entrée pour la deuxième passe
                 allTocEntries.add(TocEntryData(
@@ -1469,7 +1494,7 @@ class DatabaseGenerator(
                 lineTocBuffer.add(currentLineId to tocEntryId)
             } else {
                 // Regular line
-                val currentLineId = stableLineId(bookId, line)
+                val currentLineId = lineIdFor(lineIndex, line)
                 lineBuffer.add(
                     Line(
                         id = currentLineId,
@@ -2200,7 +2225,7 @@ class DatabaseGenerator(
                 logger.w { "Alt-toc file targets Sefaria-sourced book $bookTitle — ignored" }
                 continue
             }
-            val parsed = runCatching { json.decodeFromString<List<AltTocStructureData>>(file.readText()) }
+            val parsed = runCatching { json.decodeFromString<List<AltTocStructureData>>(Utf8Bom.strip(file.readText())) }
             val structures = parsed.getOrNull()
             if (structures == null) {
                 logger.w(parsed.exceptionOrNull()) { "Failed to parse alt-toc JSON for $bookTitle — skipped" }
@@ -2545,7 +2570,9 @@ class DatabaseGenerator(
     /**
      * Parses links from JSON content, handling both Ben-YehudaToOtzaria and DictaToOtzaria formats
      */
-    private fun parseLinksFromJson(content: String, bookTitle: String): List<LinkData> {
+    private fun parseLinksFromJson(rawContent: String, bookTitle: String): List<LinkData> {
+        // kotlinx.serialization rejects a leading BOM ("Unexpected JSON token at offset 0").
+        val content = Utf8Bom.strip(rawContent)
         return try {
             // First, try to parse as Ben-YehudaToOtzaria format (List<LinkData>)
             json.decodeFromString<List<LinkData>>(content)
