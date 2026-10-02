@@ -10,7 +10,8 @@
 #   venv/                                  the worker's Python: PyTorch ROCm, ONNX Runtime, tokenizers
 #   model-cache/<checksum>/                seeded from --seed-model-dir (checksum-verified), or
 #                                          fetched by the worker on its first run
-#   warehouse/                             created by the first warehouse-add
+#   warehouse/                             its package's warehouse is created by the first
+#                                          build, which plans and embeds every text
 # Builds happen under <state>/build, which is removed afterwards. Needs cargo (rustup) for
 # the binaries and network access to GitHub, crates.io and PyPI.
 set -euo pipefail

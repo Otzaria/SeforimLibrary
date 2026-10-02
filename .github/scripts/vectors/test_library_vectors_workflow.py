@@ -6,6 +6,7 @@ the work, the same way by hand. Load-bearing properties, pinned here:
 
   * it runs only behind a successful index build of a database release (or a manual run
     naming one), and publishing is opt-in;
+  * a runner with no warehouse yet plans every text and creates the warehouse on its first add;
   * a gate failure, an existing vectors release or a damaged index stops it before anything
     is published;
   * it publishes through a draft at the commit of the library release's tag: data first, the
@@ -16,6 +17,8 @@ the work, the same way by hand. Load-bearing properties, pinned here:
 
 The YAML assertions read the parsed workflow; the driver's are made by running it against stub
 tools (gh, the planner, the sidecar CLI, the worker's Python, zstd) and reading what it called.
+The stubs refuse what the real tools refuse (a missing warehouse, an add with no shards), so a
+driver that depends on state the runner lacks fails here too.
 """
 
 import hashlib
@@ -192,7 +195,12 @@ esac
 
 STUB_EXPORT = r"""#!/usr/bin/env bash
 echo "export $*" >> "$CALLS"
-out=""; while [ $# -gt 0 ]; do case "$1" in --out) out=$2; shift 2;; *) shift;; esac; done
+out=""; warehouse=""
+while [ $# -gt 0 ]; do case "$1" in --out) out=$2; shift 2;; --warehouse) warehouse=$2; shift 2;; *) shift;; esac; done
+# as export_semantic_plan does: a --warehouse is opened, and a directory without warehouse.json is none
+if [ -n "$warehouse" ] && [ ! -f "$warehouse/warehouse.json" ]; then
+  echo "Could not open the warehouse: $warehouse/warehouse.json: No such file or directory" >&2; exit 1
+fi
 mkdir -p "$out"
 : > "$out/embed.jsonl"
 jq -n --argjson n "${TO_EMBED:-0}" '{format:"otzaria-embed-plan",version:2,records:$n,plan_sha256:("a"*64),passage_package:{checksum:"4a4a2ae88a86f15ffe6069bfcefc3abd13c207cec5d7aaef52c0c59d752ade46",quantization:"fp32"}}' > "$out/embed-manifest.json"
@@ -202,11 +210,24 @@ jq -n --arg tag "${PLAN_TAG:-v30-20260930165019}" '{format:"otzaria-vector-plan"
 STUB_CLI = r"""#!/usr/bin/env bash
 echo "cli $*" >> "$CALLS"
 sub=$1; shift
-out=""; files=(); verify=""
-while [ $# -gt 0 ]; do case "$1" in --out) out=$2; shift 2;; --files) files+=("$2"); shift 2;; --verify) verify=1; shift;; *) shift;; esac; done
+out=""; files=(); verify=""; warehouse=""; create=""; model=""; shards=()
+while [ $# -gt 0 ]; do case "$1" in
+  --out) out=$2; shift 2;; --files) files+=("$2"); shift 2;; --verify) verify=1; shift;;
+  --warehouse) warehouse=$2; shift 2;; --create) create=1; shift;; --model) model=$2; shift 2;;
+  --shards) shards+=("$2"); shift 2;; *) shift;; esac; done
+# as the sidecar does: --create makes a missing warehouse for --model; everything else needs one
+need_warehouse() { [ -f "$warehouse/warehouse.json" ] || { echo "Could not open the warehouse $warehouse" >&2; exit 1; }; }
 case "$sub" in
-  warehouse-add) ;;
+  warehouse-add)
+    if [ -n "$create" ] && [ ! -f "$warehouse/warehouse.json" ]; then
+      [ -f "$model" ] || { echo "--create needs --model" >&2; exit 1; }
+      mkdir -p "$warehouse"; echo '{"format":"otzaria-vector-warehouse","records":0}' > "$warehouse/warehouse.json"
+    fi
+    found=$(for s in "${shards[@]}"; do find "$s" -name shard-manifest.json; done | wc -l)
+    [ "$found" -gt 0 ] || { echo "Nothing to add: no shard-manifest.json under --shards" >&2; exit 1; }
+    need_warehouse ;;
   assemble)
+    need_warehouse
     if [ -n "$verify" ]; then echo '{"gates":"stub"}' > "$out/gates.json"; exit "${VERIFY_EXIT:-0}"; fi
     mkdir -p "$out"; head -c 3000 /dev/urandom > "$out/segment.oxv"
     echo '{"identityDigest":"0123456789abcdef","toLibraryVersion":30}' > "$out/release.json"
@@ -262,6 +283,10 @@ class Driver(unittest.TestCase):
         (self.state / "bin").mkdir(parents=True)
         for f in ("family-model.json", "chunking.json"):
             (self.state / "bin" / f).write_text("{}")
+        # a runner that has built before: its warehouse (the driver's path for the fp32 package)
+        self.warehouse = self.state / "warehouse" / "fp32-4a4a2ae8"
+        self.warehouse.mkdir(parents=True)
+        (self.warehouse / "warehouse.json").write_text("{}")
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -301,6 +326,53 @@ class Driver(unittest.TestCase):
         self.assertGreater(add, self.index_of(calls, "py "))
         self.assertIn("--plan", calls[add])
         self.assertLess(add, self.index_of(calls, "cli assemble --kind base"))
+
+    def test_the_stubs_refuse_what_the_real_tools_refuse(self):
+        missing, env = self.root / "no-warehouse", dict(os.environ, CALLS=str(self.calls))
+        plan = subprocess.run([str(self.root / "bin" / "export"), "--warehouse", str(missing), "--out", str(self.root / "p")],
+                              env=env, capture_output=True)
+        self.assertNotEqual(plan.returncode, 0)
+        shard = self.root / "shard"
+        shard.mkdir()
+        (shard / "shard-manifest.json").write_text("{}")
+        add = subprocess.run([str(self.root / "bin" / "cli"), "warehouse-add", "--warehouse", str(missing), "--shards", str(shard)],
+                             env=env, capture_output=True)
+        self.assertNotEqual(add.returncode, 0)
+        self.assertFalse(missing.exists())
+
+    def test_a_runner_with_no_warehouse_yet_plans_every_text_and_creates_it_on_the_first_add(self):
+        shutil.rmtree(self.warehouse)
+        p, calls = self.run_driver(TO_EMBED=2_000_000)      # the whole library
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertNotIn("--warehouse", calls[self.index_of(calls, "export --index")])   # every text is planned
+        add = self.index_of(calls, "cli warehouse-add")
+        for arg in ("--create", "--model " + str(self.state / "bin" / "family-model.json"), "--passage-quantization fp32",
+                    "--plan "):
+            self.assertIn(arg, calls[add])
+        self.assertLess(add, self.index_of(calls, "cli assemble --kind base"))
+        self.assertTrue((self.warehouse / "warehouse.json").exists())
+
+    def test_a_runner_with_a_warehouse_plans_against_it_and_adds_to_it(self):
+        p, calls = self.run_driver(TO_EMBED=2_000_000)
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertIn("--warehouse " + str(self.warehouse), calls[self.index_of(calls, "export --index")])
+        self.assertNotIn("--create", calls[self.index_of(calls, "cli warehouse-add")])
+
+    def test_a_warehouse_directory_without_its_manifest_is_refused_before_the_build(self):
+        (self.warehouse / "warehouse.json").unlink()
+        (self.warehouse / "vectors.f32").write_bytes(b"\0" * 1024)
+        p, calls = self.run_driver(mode="base")
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn("no warehouse.json", p.stdout)
+        self.assertFalse([c for c in calls if "release download" in c or c.startswith(("export ", "cli ", "py "))])
+        self.assertEqual((self.warehouse / "vectors.f32").stat().st_size, 1024)   # never recreated over
+
+    def test_an_empty_plan_on_a_runner_with_no_warehouse_stops_before_assembling(self):
+        shutil.rmtree(self.warehouse)
+        p, calls = self.run_driver(TO_EMBED=0)
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn("no warehouse", p.stdout)
+        self.assertFalse([c for c in calls if "cli assemble" in c])
 
     def test_a_publish_is_a_draft_at_the_library_commit_with_the_data_first_and_the_manifest_last(self):
         p, calls = self.run_driver(mode="base", TO_EMBED=0)
