@@ -13,7 +13,9 @@ different checksum than this computes, so it is refused, never silently accepted
 
 The fetch reads the access token from an environment variable and never prints it: it goes
 only into the Authorization header of requests to the hub's own host, and is dropped when a
-download is redirected to another host (the hub's CDN, whose URLs are already signed).
+download is redirected to another host (the hub's CDN, whose URLs are already signed). By
+default it reads the repository at the commit pins.env pins (MODEL_REPO, MODEL_REVISION),
+never at a branch; what it fetches is held to the package checksum either way.
 
 Standard library only.
 """
@@ -33,9 +35,24 @@ from typing import Dict, Iterable, List, Optional, Tuple
 
 MANIFEST_VERSION = "otzaria-onnx-package-v1"
 TOKENIZER_FILE = "tokenizer.json"
-DEFAULT_REPO = "otzaria/judaic-semantic-round2-onnx-zayit"
-DEFAULT_REVISION = "main"
 DEFAULT_TOKEN_ENV = "OTZARIA_HF_TOKEN"
+
+
+def _pins() -> Dict[str, str]:
+    """pins.env beside this file, KEY=value lines."""
+    pins = {}
+    path = Path(__file__).resolve().parent / "pins.env"
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if line and not line.startswith("#") and "=" in line:
+            key, value = line.split("=", 1)
+            pins[key] = value.strip().strip('"')
+    return pins
+
+
+_PINS = _pins()
+DEFAULT_REPO = _PINS["MODEL_REPO"]
+DEFAULT_REVISION = _PINS["MODEL_REVISION"]
 HUB = "https://huggingface.co"
 
 
@@ -110,6 +127,8 @@ def fetch_package(cache: Path, checksum: str, graph: str, repo: str = DEFAULT_RE
     """
     if not (len(checksum) == 64 and all(c in "0123456789abcdef" for c in checksum)):
         raise PackageError("the package checksum must be 64 lowercase hex digits")
+    if not revision:
+        raise PackageError("no revision to fetch the package at")
     root = Path(cache) / checksum
     root.mkdir(parents=True, exist_ok=True)
     with open(Path(cache) / f".{checksum}.lock", "w") as lock:

@@ -13,7 +13,8 @@ across the whole plan, at least 1,000 in all, lowest cosine at least 0.999.
 
 The package is either a directory given with --model-dir or fetched into --cache (default
 $OTZARIA_VECTOR_MODEL_CACHE, else /opt/otzaria-cache/vector-models) and verified against the
-plan's package checksum. The fetch authenticates with the token in $OTZARIA_HF_TOKEN (see
+plan's package checksum. The fetch reads --repo at --revision, by default the mirror at the
+commit pins.env pins. The fetch authenticates with the token in $OTZARIA_HF_TOKEN (see
 --token-env) when it is set; the token is never printed.
 """
 
