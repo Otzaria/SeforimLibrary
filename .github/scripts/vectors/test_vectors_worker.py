@@ -1,5 +1,5 @@
 """CPU tests for the vector worker: the v2 shard contract, the package checksum and fetch,
-and (when PyTorch is installed) the re-implementation's batching.
+the bridge, and (when PyTorch is installed) the re-implementation's batching.
 
 No GPU, no model and no network beyond a local HTTP server. Run:
     python3 .github/scripts/vectors/test_vectors_worker.py
@@ -334,6 +334,50 @@ class Fetch(unittest.TestCase):
         self.assertTrue(hub and cdn)
         self.assertTrue(all(s[2] == "Bearer s3cr3t-token" for s in hub))
         self.assertTrue(all(s[2] is None for s in cdn))
+
+
+class Bridge(unittest.TestCase):
+    def test_a_whole_library_run_becomes_one_verified_window_with_hard_links(self):
+        import bridge_whole_library as bridge
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run = root / "run"; run.mkdir()
+            fam = family(DIM, "c" * 64)
+            vecs = b"".join(struct.pack("<4f", *fake_vector(t)) for t in TEXTS)
+            (run / "vectors.f32").write_bytes(vecs)
+            (run / "keys.sha256").write_bytes(b"".join(hashlib.sha256(t.encode()).digest() for t in TEXTS))
+            (run / "certificate.json").write_text(json.dumps({"pass": True,
+                "goldens": {"cases": 41, "min_cos": 0.9999998, "mean_cos": 0.9999999},
+                "ort_crosscheck": {"n": 20480, "min": 0.9999997, "mean": 0.99999986,
+                                   "ort": "onnxruntime 1.28.0 CPU fp32 graph, 16 proc x 1 thread"}}))
+            (run / "manifest.json").write_text(json.dumps({
+                "model": {"passage_package": {"package_checksum": "c" * 64, "variant": "fp32"}},
+                "worker": {"device": "AMD Radeon RX 9060 XT"}, "vectors": {"count": len(TEXTS)},
+                "files": {"vectors.f32": {"sha256": hashlib.sha256(vecs).hexdigest()}}}))
+            (root / "unique.jsonl").write_text("".join(json.dumps({"k": hashlib.sha256(t.encode()).hexdigest(), "t": t},
+                                                                  ensure_ascii=False) + "\n" for t in TEXTS), encoding="utf-8")
+            (root / "family.json").write_text(json.dumps(fam))
+            args = ["--run", str(run), "--unique", str(root / "unique.jsonl"), "--family", str(root / "family.json"),
+                    "--out", str(root / "shard"), "--plan-out", str(root / "plan")]
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(bridge.main(args), 0)
+            m = json.loads((root / "shard" / vs.SHARD_MANIFEST_FILE).read_text())
+            plan = vs.read_embed_manifest(root / "plan")
+            self.assertEqual((m["skip"], m["take"], m["records"]), (0, len(TEXTS), len(TEXTS)))
+            self.assertEqual(m["plan_sha256"], plan["plan_sha256"])
+            self.assertEqual(m["plan_sha256"], vs.sha256_file(root / "plan" / vs.EMBED_PLAN_FILE))
+            self.assertEqual(os.stat(root / "shard" / vs.VECTORS_FILE).st_ino, os.stat(run / "vectors.f32").st_ino)
+            self.assertEqual(m["parity"]["samples"], 20521)
+            self.assertEqual(m["parity"]["reference"], "onnxruntime 1.28.0 cpu fp32")
+            self.assertEqual(m["parity"]["min_cosine"], 0.9999997)
+            self.assertEqual(m["worker"]["mode"], "torch-mixed")
+            self.assertEqual([r.text for r in vs.read_window(root / "plan", 0, 99)], TEXTS)
+            with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(vs.ContractError):
+                bridge.main(args)  # the finished shard is not overwritten
+            keys = bytearray((run / "keys.sha256").read_bytes()); keys[40] ^= 1
+            (run / "keys.sha256").write_bytes(bytes(keys))
+            with contextlib.redirect_stdout(io.StringIO()), self.assertRaisesRegex(vs.ContractError, "disagree"):
+                bridge.main(args[:-4] + ["--out", str(root / "shard2")])
 
 
 @unittest.skipIf(torch is None, "PyTorch and NumPy are not installed")
