@@ -31,6 +31,8 @@ except ImportError:  # the CI image has neither; those tests skip
     np = torch = None
 
 DIM = 4
+PINS = dict(line.split("=", 1) for line in (HERE / "pins.env").read_text().splitlines()
+            if line and not line.startswith("#") and "=" in line)
 
 
 def family(dim=DIM, fp32="f" * 64):
@@ -286,12 +288,12 @@ class Fetch(unittest.TestCase):
         self.tmp.cleanup()
         os.environ.pop("TEST_HF_TOKEN", None)
 
-    def fetch(self, checksum=None, hub=None):
+    def fetch(self, checksum=None, hub=None, **revision):
         out = io.StringIO()
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
             root = mp.fetch_package(Path(self.tmp.name), checksum or self.checksum, "g.onnx", repo="org/model",
-                                    revision="main", token_env="TEST_HF_TOKEN",
-                                    hub=hub or f"http://127.0.0.1:{self.port}", log=print)
+                                    token_env="TEST_HF_TOKEN", hub=hub or f"http://127.0.0.1:{self.port}", log=print,
+                                    **(revision or {"revision": "main"}))
         self.assertNotIn("s3cr3t", out.getvalue())
         return root, out.getvalue()
 
@@ -304,6 +306,17 @@ class Fetch(unittest.TestCase):
         Hub.seen = []
         self.fetch()
         self.assertEqual(Hub.seen, [])
+
+    def test_by_default_the_package_is_fetched_at_the_pinned_mirror_revision(self):
+        self.assertRegex(PINS["MODEL_REVISION"], r"^[0-9a-f]{7,40}$")
+        self.assertEqual(mp.DEFAULT_REPO, PINS["MODEL_REPO"])
+        self.assertEqual(mp.DEFAULT_REVISION, PINS["MODEL_REVISION"])
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
+            mp.fetch_package(Path(self.tmp.name), self.checksum, "g.onnx", repo="org/model", token_env="TEST_HF_TOKEN",
+                             hub=f"http://127.0.0.1:{self.port}")
+        rev = PINS["MODEL_REVISION"]
+        self.assertEqual([s[1] for s in Hub.seen], [f"/org/model/resolve/{rev}/g.onnx", f"/org/model/resolve/{rev}/tokenizer.json"])
 
     def test_a_cached_copy_that_no_longer_hashes_is_fetched_again(self):
         root, _ = self.fetch()
