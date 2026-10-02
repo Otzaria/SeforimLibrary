@@ -3,6 +3,7 @@ package io.github.kdroidfilter.seforimlibrary.sefariasqlite
 import co.touchlab.kermit.Logger
 import co.touchlab.kermit.Severity
 import io.github.kdroidfilter.seforimlibrary.common.buildstate.BuildStateVerifier
+import io.github.kdroidfilter.seforimlibrary.common.db.LineContentShape
 import io.github.kdroidfilter.seforimlibrary.common.ids.altTocChildPath
 import java.nio.file.Files
 import java.nio.file.Path
@@ -28,6 +29,10 @@ import kotlin.system.exitProcess
  *    on the Rosh) disqualify the book: its title names the wrong base.
  *    A second pass retries rejected books crediting links from commentaries
  *    the first pass gave a structure (הגהות הב"ח על הרי"ף ← ר"ן, רבינו יונה).
+ *    A native Chapters structure its own links contradict is no base
+ *    ([unreliableChaptersBases]: המאור, מלחמת השם). Its chapters are worked out
+ *    from its links like a commentary's, never written, and a third pass
+ *    credits them to the books still without a base (כתוב שם ← המאור הקטן).
  * 2. no COMMENTARY links: the single declared Chapters base, else
  * 3. the title "X על <base>" (optionally "על מסכת <base>").
  *
@@ -56,6 +61,12 @@ import kotlin.system.exitProcess
  *   ב", "דף יג") whose amud reaches the chapter start. A chapter starting
  *   mid-amud therefore opens at that amud's heading, taking the previous
  *   chapter's tail on the same amud with it.
+ * Neither method opens a chapter above a line of the commentary that closes
+ * an earlier chapter ("הדרן עלך...", "סליקו להו...", "סליק פירקא") between
+ * the heading and the chapter's own material: it opens on the line after it,
+ * and the heading stays in the previous chapter with the lines it holds. When
+ * the chapter's opening line ("פרק...") comes before that closing, the amud is
+ * covered twice (ברכת הזבח: "חדושים", then "הגהות") and its heading opens it.
  * Chapters with no material are dropped.
  *
  * Under each chapter hang the book's own daf headings (text copied verbatim)
@@ -69,7 +80,10 @@ import kotlin.system.exitProcess
  * ([layoutChapters]): with pagination each goes to its amud's chapter (an
  * out-of-order one opens or joins its chapter where it stands); without, they
  * open the first chapter if it is the base's first, else the book is skipped.
- * A chapter's anchor is never below its first daf.
+ * With pagination a back-reference section ("(לעיל) דף ט.") is its daf's
+ * chapter wherever it stands. A chapter's entries stay together in line
+ * order: one the commentary leaves and comes back to is written once per run,
+ * each run's anchor never below its first daf.
  *
  * A book whose own TOC has "פרק <n>" on a line the inherited structure gives
  * to another chapter is rejected (and gives no credit): the anchors are wrong.
@@ -84,8 +98,9 @@ import kotlin.system.exitProcess
  * chapter's key is its base chapter number, and every base chapter's id is
  * reserved in order when the structure is first built, so a chapter that gains
  * or loses material keeps its siblings' ids and order (the reader sorts
- * siblings by id). Daf entries are keyed by ordinal within their chapter: a
- * heading added to the commentary's TOC renumbers only that chapter's dafs.
+ * siblings by id). A chapter's later runs follow every reserved chapter, in
+ * chapter and line order. Daf entries are keyed by ordinal within their run: a
+ * heading added to the commentary's TOC renumbers only that run's dafs.
  *
  * Usage:
  *   ./gradlew :sefariasqlite:inheritChaptersAltToc -PseforimDb=/path/to/seforim.db
@@ -164,8 +179,17 @@ internal data class ChaptersBaseChoice(
     val sourceIds: Set<Long> = emptySet(),
 )
 
-/** [index] is the chapter's position in the base's chapter list. */
-internal data class ChapterAnchor(val chapter: BaseChapter, val lineIndex: Long, val index: Int = -1)
+/**
+ * [index] is the chapter's position in the base's chapter list. [occurrence]
+ * numbers the chapter's runs of lines in line order: a commentary that leaves
+ * a chapter and comes back to it gets the chapter again (see [layoutChapters]).
+ */
+internal data class ChapterAnchor(
+    val chapter: BaseChapter,
+    val lineIndex: Long,
+    val index: Int = -1,
+    val occurrence: Int = 0,
+)
 
 /** An alt-TOC entry below a chapter: a daf heading or one of its sub-headings. */
 internal data class DafNode(val text: String, val lineIndex: Long, val children: List<DafNode> = emptyList())
@@ -197,6 +221,12 @@ internal class InheritChaptersStats {
     val skipped = sortedMapOf<String, Int>()
     val titleDisagreements = mutableListOf<String>()
     var recoveredByCredit = 0
+    /** Native Chapters structures that are no base ([unreliableChaptersBases]). */
+    val unreliableBases = mutableListOf<Long>()
+    /** Unreliable bases whose chapters were worked out to credit the books linking to them. */
+    var shadowed = 0
+    /** Books whose only base is through an unreliable base's worked-out chapters. */
+    var recoveredThroughUnreliableBases = 0
     val skippedBooks = sortedMapOf<String, MutableList<Long>>()
 
     fun skip(reason: String, bookId: Long) {
@@ -205,7 +235,8 @@ internal class InheritChaptersStats {
     }
     fun take(rule: ChaptersBaseRule) { byRule.merge(rule.name, 1, Int::plus) }
     fun summary(): String =
-        "selected=$byRule recoveredByCredit=$recoveredByCredit skipped=$skipped " +
+        "selected=$byRule recoveredByCredit=$recoveredByCredit unreliableBases=${unreliableBases.size} " +
+            "shadowed=$shadowed recoveredThroughUnreliableBases=$recoveredThroughUnreliableBases skipped=$skipped " +
             "titleDisagreements=${titleDisagreements.size}"
 }
 
@@ -325,14 +356,21 @@ private val AMUD_HEADING = Regex(
 )
 private val DAF_ONLY_HEADING = Regex("""^דף\s+$NUMERAL(?=$|[\s,\-–])""")
 
+/** "(לעיל) " / "[לקמן] " before a daf: the commentary returns to (or anticipates) that daf. */
+private val CROSS_REFERENCE_PREFIX = Regex("""^[(\[]\s*(?:לעיל|לקמן)\s*[)\]]\s*""")
+
 private fun String.normalizedHeading(): String = trimStart('﻿').trim()
+
+/** "(לעיל) דף ט.": a section on that daf, wherever the commentary puts it. */
+internal fun isCrossReferenceHeading(text: String): Boolean = CROSS_REFERENCE_PREFIX.containsMatchIn(text.normalizedHeading())
 
 /**
  * The amud span a commentary heading names ("דף יג.", "יג:", "דף יג ע"א",
- * "דף יג עמוד ב", or "דף יג" for both amudim), or null for any other heading.
+ * "דף יג עמוד ב", or "דף יג" for both amudim, also after "(לעיל)" or
+ * "(לקמן)"), or null for any other heading.
  */
 internal fun parseDafHeading(text: String): AmudSpan? {
-    val heading = text.normalizedHeading()
+    val heading = text.normalizedHeading().replaceFirst(CROSS_REFERENCE_PREFIX, "")
     AMUD_HEADING.find(heading)?.let { match ->
         val daf = parseHebrewNumeral(match.groupValues[1]) ?: return null
         val marker = match.groupValues[2]
@@ -395,6 +433,8 @@ internal fun longestNonDecreasingRun(values: List<Int>): List<Int> {
  * maps a linked commentary lineIndex to the lowest chapter number it is
  * linked to. [dafChapters] must be an independently identified complete
  * pagination donor with the same chapter names; null disables daf inference.
+ * [marks] (line order) are the commentary's own chapter marks: no chapter
+ * opens above a line that closes an earlier chapter on its first amud.
  */
 internal fun computeChapterAnchors(
     chapters: List<BaseChapter>,
@@ -403,18 +443,53 @@ internal fun computeChapterAnchors(
     chapterByLine: Map<Long, Int>,
     dafChapters: List<BaseChapter>? = null,
     linkPagination: List<BaseChapter>? = null,
+    marks: List<ChapterMark> = emptyList(),
 ): List<ChapterAnchor> {
     if (chapters.isEmpty()) return emptyList()
     require(dafChapters == null || dafChapters.map { it.text.trim() } == chapters.map { it.text.trim() })
     val donor = dafChapters?.takeIf { dafHeadingsAgreeWithLinks(it, headings, chapterByLine) }
     val pagination = chapterPagination(chapters, headings, chapterByLine, dafChapters, linkPagination)
-    val byLinks = anchorsFromLinks(chapters, lineIndices, headings, chapterByLine, pagination)
+    val nextLine = nextLineOf(lineIndices)
+    val byLinks = anchorsFromLinks(chapters, lineIndices, headings, chapterByLine, pagination, marks)
     // Only a named donor places chapters from daf headings alone.
-    val byDaf = donor?.let { anchorsFromDafHeadings(it, headings) }
+    val byDaf = donor?.let { anchorsFromDafHeadings(it, headings, marks, nextLine) }
         ?.map { it.copy(chapter = chapters[it.index]) }.orEmpty()
     // Sparse links place only the chapters they touch; full daf headings then place more.
     if (byDaf.size > byLinks.size) return byDaf
-    return if (pagination == null) byLinks.map { it.anchor } else fillUnlinkedChapters(chapters, byLinks, headings, pagination)
+    return if (pagination == null) {
+        byLinks.map { it.anchor }
+    } else {
+        fillUnlinkedChapters(chapters, byLinks, headings, pagination, marks, nextLine)
+    }
+}
+
+/** The line after [line] in the book ([lineIndices] ascending), null past the end. */
+private fun nextLineOf(lineIndices: List<Long>): (Long) -> Long? = { line ->
+    val i = lineIndices.binarySearch(line)
+    lineIndices.getOrNull(if (i >= 0) i + 1 else -i - 1)
+}
+
+/** The daf heading lines in line order, each with its amud span. */
+private fun dafHeadingLines(headings: List<ChaptersHeading>): List<Pair<Long, AmudSpan>> =
+    headings.mapNotNull { h -> parseDafHeading(h.text)?.let { h.lineIndex to it } }.sortedBy { it.first }
+
+/**
+ * Moves a chapter opening at the daf heading [heading] below the closing
+ * lines of earlier chapters on that heading's amud (up to the next daf
+ * heading, never to or past [limit]): the lines above them, the heading
+ * with them, are the previous chapter's.
+ */
+private fun openingBelowClosings(
+    heading: Long,
+    chapter: Int,
+    dafs: List<Pair<Long, AmudSpan>>,
+    marks: List<ChapterMark>,
+    nextLine: (Long) -> Long?,
+    limit: Long = Long.MAX_VALUE,
+): Long {
+    val nextHeading = dafs.firstOrNull { it.first > heading }?.first ?: Long.MAX_VALUE
+    val opening = openingAfterClosings(marks, chapter, heading, minOf(nextHeading, limit), nextLine) ?: return heading
+    return opening.takeIf { it < limit } ?: heading
 }
 
 /**
@@ -505,6 +580,7 @@ private fun anchorsFromLinks(
     headings: List<ChaptersHeading>,
     chapterByLine: Map<Long, Int>,
     dafChapters: List<BaseChapter>?,
+    marks: List<ChapterMark>,
 ): List<LinkedChapter> {
     val linked = chapterByLine.entries
         .map { it.key to it.value }
@@ -514,11 +590,12 @@ private fun anchorsFromLinks(
     val run = longestNonDecreasingRun(linked.map { it.second }).map { linked[it] }
 
     val headingByLine = headings.groupBy { it.lineIndex }
-    val dafHeadings = headings.mapNotNull { h -> parseDafHeading(h.text)?.let { h.lineIndex to it } }
-        .sortedBy { it.first }
+    val dafHeadings = dafHeadingLines(headings)
     val positionOfLine = HashMap<Long, Int>(lineIndices.size * 2).apply {
         lineIndices.forEachIndexed { position, lineIndex -> put(lineIndex, position) }
     }
+    val closingLines = marks.filter { it.closes }.mapTo(HashSet()) { it.lineIndex }
+    val nextLine = nextLineOf(lineIndices)
 
     val anchors = mutableListOf<LinkedChapter>()
     var cursor = 0
@@ -541,7 +618,9 @@ private fun anchorsFromLinks(
             }
         }
         if (dafAnchor != null) {
-            anchor = dafAnchor.first
+            // The previous chapter's closing lines under that heading keep it there,
+            // with its lines (רבינו יונה על ברכות: "הדרן עלך מאימתי" under ז.).
+            anchor = openingAfterClosings(marks, k, dafAnchor.first, firstLine, nextLine) ?: dafAnchor.first
         } else {
             // Heading lines directly above the first line open the same material,
             // a daf heading too: no line of the previous chapter stands under it.
@@ -552,6 +631,7 @@ private fun anchorsFromLinks(
                 val candidate = lineIndices[position - 1]
                 if (candidate <= previousLine) break
                 val lineHeadings = headingByLine[candidate] ?: break
+                if (candidate in closingLines) break
                 if (dafChapters != null && lineHeadings.any { parseDafHeading(it.text) != null }) break
                 anchor = candidate
                 position--
@@ -583,9 +663,10 @@ private fun fillUnlinkedChapters(
     placed: List<LinkedChapter>,
     headings: List<ChaptersHeading>,
     pagination: List<BaseChapter>,
+    marks: List<ChapterMark>,
+    nextLine: (Long) -> Long?,
 ): List<ChapterAnchor> {
-    val dafHeadings = headings.mapNotNull { h -> parseDafHeading(h.text)?.let { h.lineIndex to it } }
-        .sortedBy { it.first }
+    val dafHeadings = dafHeadingLines(headings)
     val anchors = mutableListOf<ChapterAnchor>()
     var lowerLine = -1L
     var nextChapter = 0
@@ -597,8 +678,9 @@ private fun fillUnlinkedChapters(
             val heading = dafHeadings.firstOrNull { (line, span) ->
                 line > after && line < upperLine && span.end >= start && span.start < nextStart
             } ?: continue
-            anchors += ChapterAnchor(chapters[j], heading.first, j)
-            after = heading.first
+            val opening = openingBelowClosings(heading.first, j, dafHeadings, marks, nextLine, upperLine)
+            anchors += ChapterAnchor(chapters[j], opening, j)
+            after = opening
         }
     }
     for (chapter in placed) {
@@ -614,10 +696,11 @@ private fun fillUnlinkedChapters(
 private fun anchorsFromDafHeadings(
     chapters: List<BaseChapter>,
     headings: List<ChaptersHeading>,
+    marks: List<ChapterMark>,
+    nextLine: (Long) -> Long?,
 ): List<ChapterAnchor> {
     if (chapters.any { it.amud == null }) return emptyList()
-    val parsed = headings.sortedBy { it.lineIndex }
-        .mapNotNull { h -> parseDafHeading(h.text)?.let { h.lineIndex to it } }
+    val parsed = dafHeadingLines(headings)
     val ordered = longestNonDecreasingRun(parsed.map { it.second.start }).map { parsed[it] }
 
     val anchors = mutableListOf<ChapterAnchor>()
@@ -629,7 +712,7 @@ private fun anchorsFromDafHeadings(
         if (next >= ordered.size) break
         val (line, span) = ordered[next]
         if (span.start >= nextStart) continue
-        anchors += ChapterAnchor(chapter, line, k)
+        anchors += ChapterAnchor(chapter, openingBelowClosings(line, k, parsed, marks, nextLine), k)
         next++
     }
     return anchors
@@ -669,7 +752,7 @@ private fun lineOwner(anchors: List<ChapterAnchor>, line: Long): Int {
     return lo - 1
 }
 
-/** The chapters as written: [anchors] in chapter order, [dafs] below each. */
+/** The chapters as written: [anchors] in chapter order (each chapter's runs in line order), [dafs] below each. */
 internal data class ChaptersLayout(val anchors: List<ChapterAnchor>, val dafs: List<List<DafNode>>)
 
 /**
@@ -677,22 +760,31 @@ internal data class ChaptersLayout(val anchors: List<ChapterAnchor>, val dafs: L
  * range holds, then partitions the daf subtrees ([partitionDafs]).
  *
  * With [pagination] each of those headings belongs to its amud's chapter (a
- * non-daf one to the chapter of the daf heading above it). The first chapter
- * opens at the first of its own, so it takes no heading of an earlier
- * chapter; a heading of another chapter is out of order (קרן לדוד על שבת opens
- * on קלה. and קנג:) and opens that chapter where it stands, or joins it when
- * links place it further down. Without pagination they are the first
- * chapter's when it is the base's first chapter; otherwise nothing tells
- * which earlier chapter they belong to, and the book gets no structure (null).
+ * non-daf one to the chapter of the daf heading above it), unless a closing
+ * line of the chapter before it stands on that amud: then the amud's heading
+ * is that chapter's, as its first lines are. The first chapter opens at the
+ * first of its own, so it takes no heading of an earlier chapter; a heading
+ * of another chapter is out of order (קרן לדוד על שבת opens on קלה. and
+ * קנג:) and opens that chapter where it stands. Without pagination they are
+ * the first chapter's when it is the base's first chapter; otherwise nothing
+ * tells which earlier chapter they belong to, and the book gets no structure
+ * (null).
  *
  * [anchors] are the line-ordered chapter anchors; a written anchor moves up
  * to the first heading it receives here, so it never sits below its dafs.
+ *
+ * Each chapter's entries stay together in line order: a reader's section, and
+ * the app's print range, is a chapter's lines up to the next chapter's. A
+ * chapter the commentary leaves and comes back to (קרן לדוד על סוכה: לח.,
+ * then ט. and יא., then לא:) is written once per run of its dafs, each with
+ * the dafs of that run.
  */
 internal fun layoutChapters(
     chapters: List<BaseChapter>,
     anchors: List<ChapterAnchor>,
     headings: List<ChaptersHeading>,
     pagination: List<BaseChapter>? = null,
+    marks: List<ChapterMark> = emptyList(),
 ): ChaptersLayout? {
     if (anchors.isEmpty()) return ChaptersLayout(emptyList(), emptyList())
     val relevant = relevantDafHeadings(headings)
@@ -700,28 +792,64 @@ internal fun layoutChapters(
     val leading = headings.withIndex()
         .filter { relevant[it.index] && it.value.lineIndex < first.lineIndex }
         .sortedWith(HEADING_ORDER)
-    val leadingChapter = HashMap<Int, Int>()
+    val chapterByAmud = HashMap<Int, Int>()
     if (leading.isNotEmpty()) {
         if (pagination == null && first.index > 0) return null
+        val dafs = dafHeadingLines(headings)
         var current = first.index
         for ((i, heading) in leading) {
             val span = if (pagination == null) null else parseDafHeading(heading.text)
-            if (span != null) current = chapterOfAmud(pagination!!, span.start)
-            leadingChapter[i] = current
+            if (span != null) {
+                current = chapterOfAmud(pagination!!, span.start)
+                val nextHeading = dafs.firstOrNull { it.first > heading.lineIndex }?.first ?: Long.MAX_VALUE
+                val closed = openingAfterClosings(marks, current, heading.lineIndex, nextHeading) { it }
+                if (current > 0 && closed != null) current--
+            }
+            chapterByAmud[i] = current
+        }
+    }
+    // With pagination a "(לעיל) דף ט." section is its daf's chapter wherever it stands, and so
+    // are the headings under it up to the next daf heading.
+    if (pagination != null) {
+        var current: Int? = null
+        for ((i, heading) in headings.withIndex().filter { relevant[it.index] && it.index !in chapterByAmud }.sortedWith(HEADING_ORDER)) {
+            val span = parseDafHeading(heading.text)
+            if (span != null) current = if (isCrossReferenceHeading(heading.text)) chapterOfAmud(pagination, span.start) else null
+            current?.let { chapterByAmud[i] = it }
         }
     }
     val opened = HashMap<Int, Long>()
-    for ((i, chapter) in leadingChapter) opened.merge(chapter, headings[i].lineIndex, ::minOf)
+    for ((i, chapter) in chapterByAmud) opened.merge(chapter, headings[i].lineIndex, ::minOf)
     val main = anchors.associateBy { it.index }
-    val written = (main.keys + opened.keys).sorted().map { k ->
+    val roots = (main.keys + opened.keys).sorted().map { k ->
         val line = listOfNotNull(main[k]?.lineIndex, opened[k]).min()
         ChapterAnchor(main[k]?.chapter ?: chapters[k], line, k)
     }
-    val position = written.withIndex().associate { it.value.index to it.index }
-    val owners = IntArray(headings.size) { i ->
-        val chapter = leadingChapter[i] ?: anchors[lineOwner(anchors, headings[i].lineIndex).coerceAtLeast(0)].index
-        position.getValue(chapter)
+    val chapterOfHeading = IntArray(headings.size) { i ->
+        chapterByAmud[i] ?: anchors[lineOwner(anchors, headings[i].lineIndex).coerceAtLeast(0)].index
     }
+
+    // Runs: the chapter's root and relevant headings in line order, cut where another chapter's entry comes between.
+    data class Item(val line: Long, val chapter: Int, val heading: Int)
+    val items = roots.map { Item(it.lineIndex, it.index, -1) } +
+        headings.indices.filter { relevant[it] }.map { Item(headings[it].lineIndex, chapterOfHeading[it], it) }
+    val ordered = items.sortedWith(compareBy({ it.line }, { if (it.heading < 0) 0 else 1 }, { headings.getOrNull(it.heading)?.id ?: 0L }, { it.heading }))
+    val runStarts = HashMap<Int, MutableList<Long>>()
+    val runOfHeading = IntArray(headings.size)
+    var previous: Int? = null
+    for (item in ordered) {
+        val starts = runStarts.getOrPut(item.chapter) { mutableListOf() }
+        if (item.chapter != previous) starts += item.line
+        if (item.heading >= 0) runOfHeading[item.heading] = starts.lastIndex
+        previous = item.chapter
+    }
+    val written = roots.flatMap { root ->
+        runStarts.getValue(root.index).mapIndexed { run, line ->
+            if (run == 0) root else root.copy(lineIndex = line, occurrence = run)
+        }
+    }
+    val position = written.withIndex().associate { (it.value.index to it.value.occurrence) to it.index }
+    val owners = IntArray(headings.size) { i -> position[chapterOfHeading[i] to runOfHeading[i]] ?: 0 }
     return ChaptersLayout(written, partitionDafs(written.size, headings, relevant, owners))
 }
 
@@ -765,6 +893,125 @@ private fun partitionDafs(
             local.forEach { if (!emitted[it]) add(subtree(it)) }
         }
     }
+}
+
+/**
+ * A line that marks a chapter boundary in the commentary's own text: a
+ * closing ([closes]: "הדרן עלך גיד הנשה", "סליקו להו במה טומנין", "סליק
+ * פירקא", a comment ending "...: הדרן עלך פרק ראשון") or an opening (a line
+ * starting "פרק", as "פרק שני. הקומץ זוטא"). A closing line stays in the
+ * chapter it closes, also when it goes on with the next chapter's first words
+ * ("הדרן עלך פרק הזורק המגרש את אשתו..."). [chapter] is the base chapter the
+ * mark names, null when it names none or several.
+ */
+internal data class ChapterMark(val lineIndex: Long, val chapter: Int?, val closes: Boolean = true)
+
+private val CLOSING_MARKER = Regex(
+    """(?:^|(?<=[\s:.0]))(לא\s+)?(הדרן\s+עלך|סליק(?:ו|א)?\s+(?:להו?|פירקא|פרקא|פרק))(?=$|[\s.:,])""",
+)
+private val HTML_TAG = Regex("<[^>]+>")
+private val NAME_PUNCTUATION = Regex("""["'״׳.,:;()\[\]]""")
+private val WHITESPACE = Regex("""\s+""")
+private val ORDINAL_PEREK = mapOf(
+    "ראשון" to 0, "קמא" to 0, "שני" to 1, "שלישי" to 2, "רביעי" to 3, "חמישי" to 4,
+    "ששי" to 5, "שישי" to 5, "שביעי" to 6, "שמיני" to 7, "תשיעי" to 8, "עשירי" to 9,
+)
+
+/** Words without punctuation or "פרק", and without a leading article ("הרגל" = "רגל"). */
+private fun closingNameTokens(text: String): List<String> =
+    text.replace(NAME_PUNCTUATION, " ").split(WHITESPACE)
+        .filter { it.isNotEmpty() && it != "פרק" }
+        .map { if (it.length > 2 && it.startsWith('ה')) it.substring(1) else it }
+
+/** Where a closing marker may stand: the line's opening words, or its last ones. */
+private const val CLOSING_EDGE_CHARS = 3
+private const val CLOSING_TAIL_CHARS = 60
+
+private val OPENING_MARKER = Regex("""^פרק(?=\s)""")
+
+/**
+ * The chapter mark in a line's text (HTML allowed), or null. A closing marker
+ * counts only at the start of the line or in its last words: "סליקו להו"
+ * inside an argument is Aramaic, and "לא סליק להו" never closes anything;
+ * "סליק להו" must name a chapter.
+ */
+internal fun parseChapterMark(lineIndex: Long, content: String, chapters: List<BaseChapter>): ChapterMark? {
+    val text = content.replace(HTML_TAG, " ").normalizedHeading()
+    closingMark(lineIndex, text, chapters)?.let { return it }
+    if (!OPENING_MARKER.containsMatchIn(text)) return null
+    return ChapterMark(lineIndex, namedChapter(closingNameTokens(text), chapters), closes = false)
+}
+
+private fun closingMark(lineIndex: Long, text: String, chapters: List<BaseChapter>): ChapterMark? {
+    for (match in CLOSING_MARKER.findAll(text)) {
+        if (match.groups[1] != null) continue
+        val atStart = match.range.first < CLOSING_EDGE_CHARS
+        val rest = text.substring(match.range.last + 1)
+        if (!atStart && rest.length > CLOSING_TAIL_CHARS) continue
+        val name = closingNameTokens(rest)
+        val chapter = namedChapter(name, chapters)
+        // "סליקו להו" is a closing only when it names what it closes.
+        val generic = match.groupValues[2].let { it.startsWith("הדרן") || !it.contains("לה") }
+        if (chapter == null && !generic && name.firstOrNull() != "מסכת") continue
+        return ChapterMark(lineIndex, chapter, closes = true)
+    }
+    return null
+}
+
+/**
+ * The chapter [name] (words, [closingNameTokens]) starts with: an ordinal
+ * ("ראשון"), the one chapter whose first word it starts with, else the one
+ * whose first two words, else the longest whose whole name it starts with
+ * ("כל הזבחים שקבלו דמן" over "כל הזבחים"); null when none or several.
+ */
+private fun namedChapter(name: List<String>, chapters: List<BaseChapter>): Int? {
+    val first = name.firstOrNull() ?: return null
+    ORDINAL_PEREK[first]?.let { return it.takeIf { it < chapters.size } }
+    val tokens = chapters.map { closingNameTokens(it.text) }
+    var candidates = chapters.indices.filter { tokens[it].firstOrNull() == first }
+    if (candidates.size > 1) candidates = candidates.filter { tokens[it].getOrNull(1) == name.getOrNull(1) }
+    if (candidates.size > 1) {
+        val whole = candidates.filter { tokens[it] == name.take(tokens[it].size) }
+        val longest = whole.maxOfOrNull { tokens[it].size }
+        candidates = whole.filter { tokens[it].size == longest }
+    }
+    return candidates.singleOrNull()
+}
+
+/**
+ * The first line [chapter] may open at after the closings in (from, until):
+ * the line after the last one that closes an earlier chapter. A closing
+ * naming [chapter] or a later one ends the search (it is out of place;
+ * nothing below it is trusted).
+ *
+ * Null when nothing closes, and when the chapter already opens above that
+ * closing: a commentary in two runs over each amud (ברכת הזבח: "חדושים", then
+ * "הגהות") opens the chapter in the first ("פרק הקומץ זוטא") and closes the
+ * previous one in the second. No single line divides such an amud.
+ */
+private fun openingAfterClosings(
+    marks: List<ChapterMark>,
+    chapter: Int,
+    from: Long,
+    until: Long,
+    nextLine: (Long) -> Long?,
+): Long? {
+    var opening: Long? = null
+    var closing: Long? = null
+    for (mark in marks) {
+        if (mark.lineIndex <= from) continue
+        if (mark.lineIndex >= until) break
+        if (!mark.closes) continue
+        if (mark.chapter != null && mark.chapter >= chapter) break
+        // A closing on the book's last line leaves nothing to open: the search stops.
+        opening = nextLine(mark.lineIndex) ?: break
+        closing = mark.lineIndex
+    }
+    if (closing == null) return null
+    val openedAbove = marks.any { mark ->
+        !mark.closes && mark.lineIndex > from && mark.lineIndex < closing && (mark.chapter == null || mark.chapter >= chapter)
+    }
+    return opening.takeUnless { openedAbove }
 }
 
 private val NUMBERED_PEREK = Regex("""^פרק\s+([א-ת"'״׳]+)(?=$|[\s,.:\-–])""")
@@ -845,17 +1092,110 @@ internal fun readChaptersBases(conn: Connection): Map<Long, ChaptersBase> {
     }
 }
 
+/** Linked lines that judge a base's chapters, and the share of them it must agree on. */
+private const val MIN_BASE_CHECK_LINKS = 5
+
+/**
+ * Native Chapters structures that their own links contradict, by book id. A
+ * commentary's Sefaria "Chapters" can be cut from Bavli daf ranges while its
+ * text is paged by the Rif (המאור, מלחמת השם: "מי שמתו" at the Rif's יח:,
+ * which is תפלת השחר), and Sefaria does not show them. Each is checked against
+ * the other bases linking to it with its own pagination (at least two links,
+ * nine in ten from a line on the same amud): it is unreliable when one of
+ * them links at least [MIN_BASE_CHECK_LINKS] of its lines inside chapters of
+ * both, and none puts half of those lines in the chapter of the same name.
+ * Full base books (the Bavli) are the reference and never checked.
+ */
+internal fun unreliableChaptersBases(conn: Connection, bases: Map<Long, ChaptersBase>): Set<Long> {
+    val unreliable = HashSet<Long>()
+    val names = bases.mapValues { (_, base) -> base.chapters.map { closingNameTokens(it.text) } }
+    conn.prepareStatement(
+        """
+        SELECT k.sourceBookId, bl.lineIndex, bl.heRef, ml.lineIndex, ml.heRef
+        FROM link k INDEXED BY idx_link_target_book
+        JOIN connection_type c ON c.id = k.connectionTypeId
+        JOIN line ml ON ml.id = k.targetLineId
+        JOIN line bl ON bl.id = k.sourceLineId
+        WHERE k.targetBookId = ? AND k.sourceBookId <> k.targetBookId AND c.name = 'COMMENTARY'
+        """.trimIndent(),
+    ).use { st ->
+        for (base in bases.values.sortedBy { it.bookId }) {
+            if (base.isBaseBook) continue
+            class Tally { var sameAmud = 0; var paged = 0; var agree = 0; var judged = 0 }
+            val bySource = HashMap<Long, Tally>()
+            st.setLong(1, base.bookId)
+            st.executeQuery().use { rs ->
+                while (rs.next()) {
+                    val source = bases[rs.getLong(1)] ?: continue
+                    val tally = bySource.getOrPut(source.bookId) { Tally() }
+                    val sourceAmud = parseHeRefAmud(rs.getString(3))
+                    val ownAmud = parseHeRefAmud(rs.getString(5))
+                    if (sourceAmud != null && ownAmud != null) {
+                        tally.paged++
+                        if (sourceAmud == ownAmud) tally.sameAmud++
+                    }
+                    val sourceChapter = chapterOfBaseLine(source.chapters, rs.getLong(2))
+                    val ownChapter = chapterOfBaseLine(base.chapters, rs.getLong(4))
+                    if (sourceChapter < 0 || ownChapter < 0) continue
+                    tally.judged++
+                    if (names.getValue(source.bookId)[sourceChapter] == names.getValue(base.bookId)[ownChapter]) tally.agree++
+                }
+            }
+            val judges = bySource.values.filter {
+                it.sameAmud >= MIN_PAGINATION_LINKS && it.sameAmud * 10 >= it.paged * 9 && it.judged >= MIN_BASE_CHECK_LINKS
+            }
+            if (judges.isNotEmpty() && judges.all { it.agree * 2 < it.judged }) unreliable += base.bookId
+        }
+    }
+    return unreliable
+}
+
+/**
+ * The book's chapter marks ([parseChapterMark]) in line order. The stage runs
+ * on the working DB (text in `line.content`); a rerun may meet the finished one.
+ */
+private fun readChapterMarks(conn: Connection, bookId: Long, chapters: List<BaseChapter>, split: Boolean): List<ChapterMark> {
+    val marks = mutableListOf<ChapterMark>()
+    val content = LineContentShape.contentExpr(split)
+    conn.prepareStatement(
+        """
+        SELECT l.lineIndex, $content FROM line l ${LineContentShape.contentJoin(split)}
+        WHERE l.bookId = ?
+          AND ($content LIKE '%הדרן%' OR $content LIKE '%סליק%' OR instr($content, 'פרק') BETWEEN 1 AND $OPENING_SCAN_CHARS)
+        ORDER BY l.lineIndex
+        """.trimIndent(),
+    ).use { st ->
+        st.setLong(1, bookId)
+        st.executeQuery().use { rs ->
+            while (rs.next()) parseChapterMark(rs.getLong(1), rs.getString(2), chapters)?.let { marks += it }
+        }
+    }
+    return marks
+}
+
+/** An opening "פרק" is the line's first word; markup before it may take this many characters. */
+private const val OPENING_SCAN_CHARS = 80
+
 /**
  * Reads every eligible commentary and returns those with at least one anchor,
  * in book-id order: a first pass on base links, then a retry of the books it
  * rejected for their base, crediting links from the first pass's commentaries.
+ *
+ * An unreliable base ([unreliableChaptersBases]) is no base. Its own chapters
+ * are worked out in the first pass like a commentary's, from its links, and a
+ * third pass credits them to the books still without a base (כתוב שם ←
+ * המאור הקטן); its own structure is left as imported.
  */
 internal fun readInheritChaptersSnapshots(
     conn: Connection,
     stats: InheritChaptersStats = InheritChaptersStats(),
 ): List<InheritChaptersSnapshot> {
-    val bases = readChaptersBases(conn)
+    val allBases = readChaptersBases(conn)
+    val unreliable = unreliableChaptersBases(conn, allBases)
+    stats.unreliableBases += unreliable.sorted()
+    val bases = allBases - unreliable
     if (bases.isEmpty()) return emptyList()
+    val contentSplit = LineContentShape.isSplit(conn)
     val baseIdByTitle = bases.values.groupBy { it.title }
         .filterValues { it.size == 1 }
         .mapValues { it.value.single().bookId }
@@ -867,7 +1207,15 @@ internal fun readInheritChaptersSnapshots(
         }
     }
 
-    data class Candidate(val bookId: Long, val title: String, val titleBaseId: Long?, val declared: List<Long>, val links: Map<Long, Int>)
+    data class Candidate(
+        val bookId: Long,
+        val title: String,
+        val titleBaseId: Long?,
+        val declared: List<Long>,
+        val links: Map<Long, Int>,
+        /** An unreliable base: its chapters only credit the books linking to it. */
+        val shadow: Boolean = false,
+    )
 
     val candidates = mutableListOf<Candidate>()
     conn.prepareStatement(
@@ -883,10 +1231,14 @@ internal fun readInheritChaptersSnapshots(
                 val title = rs.getString(2)
                 val titleBaseId = titleChaptersBase(title, baseIdByTitle)
                 val declaredIds = declared[bookId].orEmpty()
-                if (titleBaseId == null && declaredIds.none { it in bases }) continue
+                if (titleBaseId == null && declaredIds.none { it in bases || it in unreliable }) continue
                 candidates += Candidate(bookId, title, titleBaseId, declaredIds, emptyMap())
             }
         }
+    }
+    for (bookId in unreliable.sorted()) {
+        val base = allBases.getValue(bookId)
+        candidates += Candidate(bookId, base.title, titleChaptersBase(base.title, baseIdByTitle), declared[bookId].orEmpty(), emptyMap(), shadow = true)
     }
     val withLinks = candidates.map { it.copy(links = readCommentaryLinkCounts(conn, it.bookId)) }
 
@@ -899,23 +1251,39 @@ internal fun readInheritChaptersSnapshots(
     val anchorsOfSource = HashMap<Long, List<ChapterAnchor>>()
 
     val snapshots = HashMap<Long, InheritChaptersSnapshot>()
+    val shadows = HashMap<Long, InheritChaptersSnapshot>()
     val rejectedForBase = mutableListOf<Candidate>()
-    for (pass in 1..2) {
-        val todo = if (pass == 1) withLinks else rejectedForBase.toList()
-        if (pass == 2) {
-            // Only first-pass books are credited, so pass-2 results never feed each other.
-            for (snapshot in snapshots.values) {
-                groupOfSource[snapshot.bookId] = bases.getValue(snapshot.baseId).groupKey
-                baseOfSource[snapshot.bookId] = snapshot.baseId
-                anchorsOfSource[snapshot.bookId] = snapshot.lineAnchors
-            }
+    val rejectedAgain = mutableListOf<Candidate>()
+    for (pass in 1..3) {
+        val todo = when (pass) {
+            1 -> withLinks
+            2 -> rejectedForBase.toList()
+            else -> rejectedAgain.toList()
+        }
+        // Only first-pass books are credited, so later results never feed each other.
+        // An unreliable base's chapters only serve a book nothing else gives a base.
+        val credited = when (pass) {
+            1 -> emptyList()
+            2 -> snapshots.values.toList()
+            else -> shadows.values.toList()
+        }
+        for (snapshot in credited) {
+            groupOfSource[snapshot.bookId] = bases.getValue(snapshot.baseId).groupKey
+            baseOfSource[snapshot.bookId] = snapshot.baseId
+            anchorsOfSource[snapshot.bookId] = snapshot.lineAnchors
         }
         for (candidate in todo) {
+            fun skip(reason: String) = stats.skip(if (candidate.shadow) "unreliable-base:$reason" else reason, candidate.bookId)
             val choice = chooseChaptersBase(
                 candidate.titleBaseId, candidate.declared, candidate.links, groupOfSource, baseOfSource, bases.keys,
             )
             if (choice == null) {
-                if (pass == 1) rejectedForBase += candidate else stats.skip("no-consistent-base", candidate.bookId)
+                when {
+                    candidate.shadow -> skip("no-consistent-base")
+                    pass == 1 -> rejectedForBase += candidate
+                    pass == 2 -> rejectedAgain += candidate
+                    else -> stats.skip("no-consistent-base", candidate.bookId)
+                }
                 continue
             }
             val base = bases.getValue(choice.baseId)
@@ -925,7 +1293,7 @@ internal fun readInheritChaptersSnapshots(
 
             val headings = readChaptersHeadings(conn, candidate.bookId)
             if (hasOwnChapterHeadings(headings, base.chapters)) {
-                stats.skip("own-chapter-headings", candidate.bookId)
+                skip("own-chapter-headings")
                 continue
             }
             val chapterByLine = if (choice.sourceIds.isEmpty()) {
@@ -941,6 +1309,7 @@ internal fun readInheritChaptersSnapshots(
                 choice.rule == ChaptersBaseRule.LINKS && chapters.all { it.amud != null } &&
                     linksProvePagination(headings, readBaseAmudByLine(conn, candidate.bookId, choice.baseId))
             }
+            val marks = readChapterMarks(conn, candidate.bookId, base.chapters, contentSplit)
             val anchors = computeChapterAnchors(
                 chapters = base.chapters,
                 lineIndices = readBookLineIndex(conn, candidate.bookId).map { it.second },
@@ -948,24 +1317,26 @@ internal fun readInheritChaptersSnapshots(
                 chapterByLine = chapterByLine,
                 dafChapters = dafBase?.chapters,
                 linkPagination = linkPagination,
+                marks = marks,
             )
             if (anchors.isEmpty()) {
-                stats.skip("no-anchor", candidate.bookId)
+                skip("no-anchor")
                 continue
             }
             if (!perekHeadingsAgree(anchors, headings)) {
-                stats.skip("perek-mismatch", candidate.bookId)
+                skip("perek-mismatch")
                 continue
             }
             val pagination = chapterPagination(base.chapters, headings, chapterByLine, dafBase?.chapters, linkPagination)
-            val layout = layoutChapters(base.chapters, anchors, headings, pagination)
+            val layout = layoutChapters(base.chapters, anchors, headings, pagination, marks)
             if (layout == null) {
-                stats.skip("unplaced-leading-dafs", candidate.bookId)
+                skip("unplaced-leading-dafs")
                 continue
             }
-            stats.take(choice.rule)
+            if (candidate.shadow) stats.shadowed++ else stats.take(choice.rule)
             if (pass == 2) stats.recoveredByCredit++
-            snapshots[candidate.bookId] = InheritChaptersSnapshot(
+            if (pass == 3) stats.recoveredThroughUnreliableBases++
+            (if (candidate.shadow) shadows else snapshots)[candidate.bookId] = InheritChaptersSnapshot(
                 bookId = candidate.bookId,
                 title = candidate.title,
                 baseId = choice.baseId,
@@ -1153,8 +1524,10 @@ private fun writeInheritedChapters(
     var nextEntryId = maxId(conn, "alt_toc_entry")
     fun entryId(path: String): Long = stableIds?.altTocEntryId(structureId, path) ?: ++nextEntryId
 
-    // Every base chapter's id first, in chapter order — see the file KDoc.
+    // Every base chapter's id first, in chapter order — see the file KDoc. A
+    // chapter's later runs come after them, in chapter and line order.
     val chapterIds = (0 until snapshot.chapterCount).map { entryId(altTocChildPath("", it + 1)) }
+    var laterRuns = 0
     val pending = mutableListOf<Pending>()
     fun addDafs(nodes: List<DafNode>, parentId: Long, parentPath: String, level: Int) {
         nodes.forEachIndexed { i, node ->
@@ -1165,10 +1538,11 @@ private fun writeInheritedChapters(
         }
     }
     snapshot.anchors.forEachIndexed { i, anchor ->
-        val id = chapterIds[anchor.index]
+        val path = altTocChildPath("", if (anchor.occurrence == 0) anchor.index + 1 else snapshot.chapterCount + ++laterRuns)
+        val id = if (anchor.occurrence == 0) chapterIds[anchor.index] else entryId(path)
         val dafs = snapshot.dafs[i]
         pending += Pending(id, null, anchor.chapter.text, 0, anchor.lineIndex, dafs.isNotEmpty(), i == snapshot.anchors.lastIndex)
-        addDafs(dafs, id, altTocChildPath("", anchor.index + 1), 1)
+        addDafs(dafs, id, path, 1)
     }
 
     // Lines are re-read here so the snapshots of a whole library stay small.
