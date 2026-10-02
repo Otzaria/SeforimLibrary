@@ -8,7 +8,9 @@ the work, the same way by hand. Load-bearing properties, pinned here:
     naming one), and publishing is opt-in;
   * a gate failure, an existing vectors release or a damaged index stops it before anything
     is published;
-  * it publishes data first and the manifest last, and persists the ledger only after a publish.
+  * it publishes through a draft at the commit of the library release's tag: data first, the
+    manifest last, and the draft is published only once it holds exactly the files built;
+  * it persists the ledger only after a publish.
 
 The YAML assertions read the parsed workflow; the driver's are made by running it against stub
 tools (gh, the planner, the sidecar CLI, the worker's Python, zstd) and reading what it called.
@@ -43,6 +45,7 @@ DRIVER = HERE / "build_library_vectors.sh"
 PINS = HERE / "pins.env"
 DATABASE_TAG = re.compile(r"^v[0-9]+-[0-9]{14}$")
 TAG = "v30-20260930165019"
+TAG_COMMIT = "c66256253b25c0aa0b13d04e399647496f3b0bee"   # the commit TAG names (the stub gh's answer)
 
 
 def run_text(job):
@@ -128,7 +131,6 @@ class Workflow(unittest.TestCase):
         self.assertEqual(env["GH_TOKEN"], "${{ secrets.PIPELINE_TOKEN }}")
         self.assertEqual(env["OTZARIA_HF_TOKEN"], "${{ secrets.OTZARIA_HF_TOKEN }}")
 
-
 class Pins(unittest.TestCase):
     def test_the_sidecar_and_the_planner_are_pinned_to_full_commits(self):
         pins = dict(line.split("=", 1) for line in PINS.read_text().splitlines()
@@ -141,12 +143,20 @@ class Pins(unittest.TestCase):
 
 STUB_GH = r"""#!/usr/bin/env bash
 echo "gh $*" >> "$CALLS"
+if [ "$1" = api ]; then
+  case "$2" in */commits/v*) echo "${TAG_COMMIT:-c66256253b25c0aa0b13d04e399647496f3b0bee}"; exit 0 ;; esac
+  echo "stub gh: api $2" >&2; exit 90
+fi
 cmd="$1 $2"; shift 2
 case "$cmd" in
-  "auth status") exit 0 ;;
+  "auth status") [ -z "${GH_UNAUTHENTICATED:-}" ] ;;
   "release view")
     tag=$1
-    case "$tag" in vectors-*) [ -n "${EXISTING:-}" ] && exit 0; exit 1 ;; esac
+    case "$tag" in vectors-*)
+      # a draft's assets: what was uploaded, as name<TAB>size
+      case " $* " in *" --json assets "*) cat "$UPLOADED" 2>/dev/null; exit 0 ;; esac
+      [ -n "${EXISTING:-}" ] && exit 0; exit 1 ;;
+    esac
     case " $* " in *" --json publishedAt "*) echo "2026-09-30T21:38:29Z" ;; esac
     exit 0 ;;
   "release download")
@@ -154,7 +164,12 @@ case "$cmd" in
     while [ $# -gt 0 ]; do case "$1" in --dir) dir=$2; shift 2;; --pattern) pats+=("$2"); shift 2;; *) shift;; esac; done
     for p in "${pats[@]}"; do cp "$ASSETS/$tag/$p" "$dir/$p" || exit 1; done ;;
   "release create") ;;
-  "release upload") ;;
+  "release upload")
+    # SHORT_UPLOAD names an asset that arrives one byte short
+    name=$(basename "$2"); size=$(stat -c %s "$2")
+    [ "$name" != "${SHORT_UPLOAD:-}" ] || size=$((size - 1))
+    printf '%s\t%s\n' "$name" "$size" >> "$UPLOADED" ;;
+  "release edit") ;;
   *) echo "stub gh: $cmd" >&2; exit 90 ;;
 esac
 """
@@ -236,7 +251,7 @@ class Driver(unittest.TestCase):
         self.tmp.cleanup()
 
     def run_driver(self, mode="dry-run", tag=TAG, **env):
-        e = dict(os.environ, CALLS=str(self.calls), ASSETS=str(self.root / "assets"),
+        e = dict(os.environ, CALLS=str(self.calls), ASSETS=str(self.root / "assets"), UPLOADED=str(self.root / "uploaded.tsv"),
                  OTZARIA_SEMANTIC_CLI=str(self.root / "bin" / "cli"), EXPORT_SEMANTIC_PLAN=str(self.root / "bin" / "export"),
                  VECTOR_PYTHON=str(self.root / "bin" / "py"), GH=str(self.root / "bin" / "gh"), ZSTD=str(self.root / "bin" / "zstd"),
                  VECTORS_MIN_FREE_GB="0", OTZARIA_HF_TOKEN="hf_s3cr3t", GITHUB_ACTIONS="")
@@ -257,7 +272,7 @@ class Driver(unittest.TestCase):
                                                    "cli assemble --kind base", "cli assemble --verify", "cli release-files")]
         self.assertEqual(order, sorted(order))
         self.assertFalse([c for c in calls if c.startswith("py ") or "warehouse-add" in c])   # nothing to embed
-        self.assertFalse([c for c in calls if "release create" in c or "release upload" in c])
+        self.assertFalse([c for c in calls if "release create" in c or "release upload" in c or "release edit" in c])
         self.assertFalse((self.state / "ledger").exists())
 
     def test_only_missing_texts_are_embedded_in_windows_and_then_added_to_the_warehouse(self):
@@ -271,26 +286,64 @@ class Driver(unittest.TestCase):
         self.assertIn("--plan", calls[add])
         self.assertLess(add, self.index_of(calls, "cli assemble --kind base"))
 
-    def test_a_publish_uploads_data_then_the_manifest_and_only_then_persists_the_ledger(self):
+    def test_a_publish_is_a_draft_at_the_library_commit_with_the_data_first_and_the_manifest_last(self):
         p, calls = self.run_driver(mode="base", TO_EMBED=0)
         self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        # the commit is resolved before the build, from the library release's tag
+        resolve = self.index_of(calls, "gh api repos/o/r/commits/" + TAG)
+        self.assertLess(resolve, self.index_of(calls, "gh release download"))
         create = self.index_of(calls, "gh release create vectors-" + TAG)
-        self.assertIn("--latest=false", calls[create])
+        for arg in ("--draft", "--target " + TAG_COMMIT, "--latest=false"):
+            self.assertIn(arg, calls[create].split(" --title")[0])
         uploads = [c for c in calls if "gh release upload" in c]
         self.assertTrue(all(self.index_of(calls, u) > create for u in uploads))
-        self.assertIn(".oxv.zst", uploads[0])
-        self.assertIn(".manifest.json", uploads[-1])
+        names = [Path(u.split()[4]).name for u in uploads]
+        self.assertEqual(len(names), 3)
+        self.assertTrue(names[0].endswith(".oxv.zst"))
+        self.assertEqual(names[1], "gates.json")
+        self.assertTrue(names[2].endswith(".manifest.json"))   # the manifest last
+
+    def test_the_draft_is_published_only_once_its_files_are_checked_and_then_the_ledger_is_persisted(self):
+        p, calls = self.run_driver(mode="base", TO_EMBED=0)
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        last_upload = max(i for i, c in enumerate(calls) if "gh release upload" in c)
+        check = self.index_of(calls, "gh release view vectors-" + TAG + " --repo o/r --json assets")
+        edits = [i for i, c in enumerate(calls) if "gh release edit" in c]
+        self.assertEqual(len(edits), 1)
+        self.assertTrue(last_upload < check < edits[0])
+        self.assertEqual(calls[edits[0]], "gh release edit vectors-" + TAG + " --repo o/r --draft=false --latest=false")
+        self.assertEqual(edits[0], len(calls) - 1)   # nothing reaches the release after it is published
         ledger = self.state / "ledger"
         self.assertEqual(sorted(f.name for f in ledger.iterdir()),
                          ["ledger-v30.keys", "ledger-v30.manifest.json", "pairs-v30.bin", "published.json"])
         self.assertEqual(json.loads((ledger / "published.json").read_text())["published"], "vectors-" + TAG)
         self.assertFalse((self.state / "work" / TAG).exists())
 
+    def test_a_draft_that_does_not_hold_the_files_built_is_never_published(self):
+        p, calls = self.run_driver(mode="base", TO_EMBED=0, SHORT_UPLOAD="gates.json")
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn("it stays a draft", p.stdout)
+        self.assertFalse([c for c in calls if "release edit" in c])
+        self.assertFalse((self.state / "ledger").exists())
+
+    def test_a_library_tag_that_names_no_commit_stops_before_the_build(self):
+        p, calls = self.run_driver(mode="base", TAG_COMMIT="not-a-commit")
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn("not a commit", p.stdout)
+        self.assertFalse([c for c in calls if "release download" in c or "release create" in c])
+
+    def test_a_publish_needs_an_authenticated_gh(self):
+        p, calls = self.run_driver(mode="base", GH_UNAUTHENTICATED=1)
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn("gh is not authenticated", p.stdout)
+        self.assertFalse([c for c in calls if "release download" in c or "release create" in c])
+
     def test_a_failed_gate_stops_before_anything_is_published(self):
         p, calls = self.run_driver(mode="base", TO_EMBED=0, VERIFY_EXIT=2)
         self.assertEqual(p.returncode, 2)
         self.assertIn("a gate failed", p.stdout)
-        self.assertFalse([c for c in calls if "release create" in c or "release upload" in c or "release-files" in c])
+        self.assertFalse([c for c in calls if "release create" in c or "release upload" in c or "release edit" in c
+                          or "release-files" in c])
         self.assertFalse((self.state / "ledger").exists())
 
     def test_an_existing_vectors_release_is_never_rebuilt_in_place(self):
