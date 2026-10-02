@@ -7,6 +7,8 @@ the work, the same way by hand. Load-bearing properties, pinned here:
   * it runs only behind a successful index build of a database release (or a manual run
     naming one), and publishing is opt-in;
   * a runner with no warehouse yet plans every text and creates the warehouse on its first add;
+  * a plan of fewer than CPU_EMBED_MAX texts is embedded on the CPU by the sidecar's embed-shard
+    (the reference), so the GPU worker never gets a plan its parity certificate cannot cover;
   * a gate failure, an existing vectors release or a damaged index stops it before anything
     is published;
   * it publishes through a draft at the commit of the library release's tag: data first, the
@@ -50,6 +52,8 @@ RELEASE_MANIFEST = WORKFLOWS / "update-release-manifest.yml"
 DRIVER = HERE / "build_library_vectors.sh"
 PINS = HERE / "pins.env"
 DATABASE_TAG = re.compile(r"^v[0-9]+-[0-9]{14}$")
+BOOTSTRAP = HERE / "bootstrap_runner.sh"
+PIN = dict(line.split("=", 1) for line in PINS.read_text().splitlines() if line and not line.startswith("#") and "=" in line)
 TAG = "v30-20260930165019"
 TAG_COMMIT = "c66256253b25c0aa0b13d04e399647496f3b0bee"   # the commit TAG names (the stub gh's answer)
 
@@ -160,6 +164,18 @@ class Pins(unittest.TestCase):
         self.assertRegex(pins["MODEL_REVISION"], r"^[0-9a-f]{7,40}$")   # the mirror at a commit, never a branch
         self.assertEqual(pins["PASSAGE_QUANTIZATION"], "fp32")
 
+    def test_a_plan_the_gpu_worker_gets_can_always_be_certified(self):
+        # the GPU worker's parity certificate needs 1,000 samples, 41 of them golden: a plan of fewer
+        # than 959 texts can never have one, so everything below CPU_EMBED_MAX goes to the CPU
+        self.assertGreaterEqual(int(PIN["CPU_EMBED_MAX"]), 1000)
+        self.assertGreaterEqual(int(PIN["CPU_PROCESSES"]), 1)
+        self.assertGreaterEqual(int(PIN["CPU_THREADS"]), 1)
+
+    def test_the_sidecar_cli_is_built_able_to_embed(self):
+        # embed-shard needs a real inference backend; a default build of the sidecar has none
+        line = next(l for l in BOOTSTRAP.read_text().splitlines() if l.startswith("build_bin otzaria-semantic-search "))
+        self.assertIn("--features onnx-backend", line)
+
 
 STUB_GH = r"""#!/usr/bin/env bash
 echo "gh $*" >> "$CALLS"
@@ -215,10 +231,18 @@ out=""; files=(); verify=""; warehouse=""; create=""; model=""; shards=()
 while [ $# -gt 0 ]; do case "$1" in
   --out) out=$2; shift 2;; --files) files+=("$2"); shift 2;; --verify) verify=1; shift;;
   --warehouse) warehouse=$2; shift 2;; --create) create=1; shift;; --model) model=$2; shift 2;;
-  --shards) shards+=("$2"); shift 2;; *) shift;; esac; done
+  --shards) shards+=("$2"); shift 2;; --processes) processes=$2; shift 2;; *) shift;; esac; done
 # as the sidecar does: --create makes a missing warehouse for --model; everything else needs one
 need_warehouse() { [ -f "$warehouse/warehouse.json" ] || { echo "Could not open the warehouse $warehouse" >&2; exit 1; }; }
 case "$sub" in
+  embed-shard)
+    # as the sidecar does: one shard in --out, or with --processes P one per process in shard-NNN
+    echo "cli-env OTZARIA_ONNX_RUNTIME=${OTZARIA_ONNX_RUNTIME:-}" >> "$CALLS"
+    p=${processes:-1}; [ "$p" -le "${TO_EMBED:-1}" ] || p=${TO_EMBED:-1}
+    for i in $(seq 0 $((p - 1))); do
+      d=$out; [ "${processes:-1}" -le 1 ] || d=$out/$(printf 'shard-%03d' "$i")
+      mkdir -p "$d"; for f in vectors.f32 keys.bin shard-manifest.json; do : > "$d/$f"; done
+    done ;;
   warehouse-add)
     if [ -n "$create" ] && [ ! -f "$warehouse/warehouse.json" ]; then
       [ -f "$model" ] || { echo "--create needs --model" >&2; exit 1; }
@@ -240,8 +264,16 @@ esac
 
 STUB_PY = r"""#!/usr/bin/env bash
 echo "py $*" >> "$CALLS"
-out=""; while [ $# -gt 0 ]; do case "$1" in --out) out=$2; shift 2;; *) shift;; esac; done
-mkdir -p "$out"; for f in vectors.f32 keys.bin shard-manifest.json; do : > "$out/$f"; done
+script=$1; shift
+out=""; cache=""; checksum=""; graph=""
+while [ $# -gt 0 ]; do case "$1" in --out) out=$2; shift 2;; --cache) cache=$2; shift 2;;
+  --checksum) checksum=$2; shift 2;; --graph) graph=$2; shift 2;; *) shift;; esac; done
+case "$script" in
+  */model_package.py)   # fetch: the verified package's directory on stdout
+    mkdir -p "$cache/$checksum"; : > "$cache/$checksum/$graph"; echo "$cache/$checksum" ;;
+  *)                    # the GPU worker: a shard in --out
+    mkdir -p "$out"; for f in vectors.f32 keys.bin shard-manifest.json; do : > "$out/$f"; done ;;
+esac
 """
 
 STUB_ZSTD = r"""#!/usr/bin/env bash
@@ -288,6 +320,9 @@ class Driver(unittest.TestCase):
         self.warehouse = self.state / "warehouse" / "fp32-4a4a2ae8"
         self.warehouse.mkdir(parents=True)
         (self.warehouse / "warehouse.json").write_text("{}")
+        self.ort = self.state / "venv/lib/python3.12/site-packages/onnxruntime/capi/libonnxruntime.so.1.28.0"
+        self.ort.parent.mkdir(parents=True)
+        self.ort.write_bytes(b"")
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -317,16 +352,47 @@ class Driver(unittest.TestCase):
         self.assertFalse([c for c in calls if "release create" in c or "release upload" in c or "release edit" in c])
         self.assertFalse((self.state / "ledger").exists())
 
-    def test_only_missing_texts_are_embedded_in_windows_and_then_added_to_the_warehouse(self):
-        p, calls = self.run_driver(TO_EMBED=3, **{})
+    def test_a_large_update_is_embedded_on_the_gpu_in_windows_and_then_added_to_the_warehouse(self):
+        n = int(PIN["CPU_EMBED_MAX"])                    # the smallest plan the GPU worker gets
+        p, calls = self.run_driver(TO_EMBED=n)
         self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
-        workers = [c for c in calls if c.startswith("py ")]
-        self.assertEqual(len(workers), 1)
+        workers = [c for c in calls if "embed_worker.py" in c]
+        self.assertEqual(len(workers), -(-n // int(PIN["EMBED_WINDOW"])))
         self.assertIn("--skip 0 --take", workers[0])
+        self.assertFalse([c for c in calls if "cli embed-shard" in c or "model_package.py" in c])
+        self.assertIn('"worker":"seforim-gpu-worker 1.0"', calls[self.index_of(calls, "cli assemble --kind base")])
         add = self.index_of(calls, "cli warehouse-add")
-        self.assertGreater(add, self.index_of(calls, "py "))
+        self.assertGreater(add, self.index_of(calls, "embed_worker.py"))
         self.assertIn("--plan", calls[add])
         self.assertLess(add, self.index_of(calls, "cli assemble --kind base"))
+
+    def test_a_small_update_is_embedded_on_the_cpu_by_the_sidecar_with_no_gpu_worker(self):
+        for n in (1, 100, 958, 959, int(PIN["CPU_EMBED_MAX"]) - 1):
+            with self.subTest(texts=n):
+                self.calls.unlink(missing_ok=True)
+                p, calls = self.run_driver(TO_EMBED=n)
+                self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+                self.assertFalse([c for c in calls if "embed_worker.py" in c])
+                package = self.state / "model-cache" / PIN["PASSAGE_PACKAGE_CHECKSUM"]
+                fetch = calls[self.index_of(calls, "model_package.py fetch")]
+                for arg in ("--cache " + str(self.state / "model-cache"), "--checksum " + PIN["PASSAGE_PACKAGE_CHECKSUM"],
+                            "--graph " + PIN["MODEL_GRAPH"], "--repo " + PIN["MODEL_REPO"], "--revision " + PIN["MODEL_REVISION"]):
+                    self.assertIn(arg + " ", fetch + " ")
+                embed = self.index_of(calls, "cli embed-shard")
+                self.assertGreater(embed, self.index_of(calls, "model_package.py fetch"))
+                for arg in ("--plan ", "--model-file " + str(package / PIN["MODEL_GRAPH"]),
+                            "--processes " + PIN["CPU_PROCESSES"], "--threads " + PIN["CPU_THREADS"], "--out "):
+                    self.assertIn(arg, calls[embed])
+                self.assertEqual(calls[embed + 1], "cli-env OTZARIA_ONNX_RUNTIME=" + str(self.ort))
+                self.assertGreater(self.index_of(calls, "cli warehouse-add"), embed)
+                self.assertIn('"worker":"otzaria-semantic-search embed-shard', calls[self.index_of(calls, "cli assemble --kind base")])
+
+    def test_the_cpu_path_needs_the_venvs_onnx_runtime(self):
+        self.ort.unlink()
+        p, calls = self.run_driver(TO_EMBED=5)
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn("ONNX Runtime", p.stdout)
+        self.assertFalse([c for c in calls if "cli embed-shard" in c or "warehouse-add" in c])
 
     def test_the_stubs_refuse_what_the_real_tools_refuse(self):
         missing, env = self.root / "no-warehouse", dict(os.environ, CALLS=str(self.calls))

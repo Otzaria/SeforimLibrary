@@ -4,7 +4,9 @@
 #   bootstrap_runner.sh [--state DIR] [--seed-model-dir DIR]
 #
 # Into the persistent state directory (default /home/runner/otzaria-vectors, on ext4):
-#   bin/otzaria-semantic-search (+ .rev)   the sidecar CLI at SIDECAR_REV, release build
+#   bin/otzaria-semantic-search (+ .rev, .build)   the sidecar CLI at SIDECAR_REV, a release build
+#                                          with onnx-backend, so its embed-shard embeds on the CPU
+#                                          (ONNX Runtime is the venv's libonnxruntime, loaded at run time)
 #   bin/export_semantic_plan (+ .rev)      the plugin's planner at PLUGIN_REV (when pinned)
 #   bin/family-model.json, bin/chunking.json   the family's identity and recipe at SIDECAR_REV
 #   venv/                                  the worker's Python: PyTorch ROCm, ONNX Runtime, tokenizers
@@ -32,8 +34,10 @@ exec 9>"$STATE/.lock"; flock -n 9 || { echo "another build or bootstrap holds $S
 
 build_bin() {  # <name> <repo> <rev> <package dir in the repo> [cargo args...]
   local name=$1 repo=$2 rev=$3 sub=$4; shift 4
-  if [ -x "$STATE/bin/$name" ] && [ "$(cat "$STATE/bin/$name.rev" 2>/dev/null)" = "$rev" ]; then
-    echo "$name at $rev: present"; return
+  local build="$*"   # the cargo arguments: a binary built with others (another feature set) is rebuilt
+  if [ -x "$STATE/bin/$name" ] && [ "$(cat "$STATE/bin/$name.rev" 2>/dev/null)" = "$rev" ] \
+     && [ "$(cat "$STATE/bin/$name.build" 2>/dev/null)" = "$build" ]; then
+    echo "$name at $rev ($build): present"; return
   fi
   command -v cargo >/dev/null || { echo "cargo is needed to build $name (install rustup)" >&2; exit 69; }
   rm -rf "$STATE/build"; mkdir -p "$STATE/build"
@@ -42,6 +46,7 @@ build_bin() {  # <name> <repo> <rev> <package dir in the repo> [cargo args...]
   (cd "$STATE/build/src/$sub" && CARGO_TARGET_DIR="$STATE/build/target" cargo build --release --locked "$@")
   install -m 0755 "$STATE/build/target/release/$name" "$STATE/bin/$name"
   echo "$rev" > "$STATE/bin/$name.rev"
+  echo "$build" > "$STATE/bin/$name.build"
   if [ "$name" = otzaria-semantic-search ]; then
     cp "$STATE/build/src/$FAMILY_CONFIG/model.json" "$STATE/bin/family-model.json"
     cp "$STATE/build/src/$FAMILY_CONFIG/chunking.json" "$STATE/bin/chunking.json"
@@ -50,7 +55,7 @@ build_bin() {  # <name> <repo> <rev> <package dir in the repo> [cargo args...]
   echo "$name at $rev: built"
 }
 
-build_bin otzaria-semantic-search "$SIDECAR_REPO" "$SIDECAR_REV" . --bin otzaria-semantic-search
+build_bin otzaria-semantic-search "$SIDECAR_REPO" "$SIDECAR_REV" . --features onnx-backend --bin otzaria-semantic-search
 if [ -n "$PLUGIN_REV" ]; then
   build_bin export_semantic_plan "$PLUGIN_REPO" "$PLUGIN_REV" rust --features semantic-integration --bin export_semantic_plan
 else
