@@ -12,8 +12,10 @@
 #   4 warehouse warehouse-add --plan: the shards held to the plan, their vectors appended
 #   5 assemble  a base (POC: every release is a base), then assemble --verify (the gates)
 #   6 files     the segment compressed (and split below GitHub's asset limit), release-files
-#   7 publish   (mode base) a sibling release vectors-<tag>, --latest=false: data first,
-#               the manifests last; then the ledger is persisted — only after a publish
+#   7 publish   (mode base) a sibling release vectors-<tag> at the commit of <tag>, made a
+#               draft first: data, then gates.json, the manifest last; once the draft holds
+#               exactly those files at their sizes it is published, --latest=false; then the
+#               ledger is persisted — only after a publish
 #
 # --mode dry-run stops after step 6 and persists nothing. The state directory (default
 # /home/runner/otzaria-vectors; see bootstrap_runner.sh) holds the binaries, the venv, the
@@ -72,13 +74,18 @@ for tool in jq sha256sum split tar; do command -v "$tool" >/dev/null || die "$to
 MIN_FREE_GB=${VECTORS_MIN_FREE_GB:-$MIN_FREE_GB}
 free_kb=$(df -Pk "$STATE" | awk 'NR==2 {print $4}')
 [ "$free_kb" -ge $((MIN_FREE_GB * 1024 * 1024)) ] || die "only $((free_kb / 1024 / 1024)) GiB free on $STATE, fewer than $MIN_FREE_GB"
+if "$GH" auth status >/dev/null 2>&1; then GH_OK=1; else GH_OK=""; fi
 if [ "$MODE" = base ]; then
+  [ -n "$GH_OK" ] || die "mode base publishes through gh, and gh is not authenticated"
   if "$GH" release view "$RELEASE_TAG" --repo "$REPO" >/dev/null 2>&1; then
-    die "$RELEASE_TAG exists already; a published vector release is never rebuilt in place"
+    die "$RELEASE_TAG exists already (a draft a failed publish left counts too: delete it to retry); a published vector release is never rebuilt in place"
   fi
+  # vectors-<tag> is tagged at the commit <tag> names (an annotated tag resolves to its commit)
+  TARGET=$("$GH" api "repos/$REPO/commits/$TAG" --jq .sha) || die "could not resolve the commit of $TAG"
+  echo "$TARGET" | grep -Eq '^[0-9a-f]{40}$' || die "$TAG resolves to '$TARGET', not a commit"
+  echo "publish: $RELEASE_TAG at $TARGET"
 fi
 rm -rf "$WORK"; mkdir -p "$WORK/dl" "$WORK/index" "$WORK/shards" "$WORK/files"
-if "$GH" auth status >/dev/null 2>&1; then GH_OK=1; else GH_OK=""; fi
 fetch() {  # <asset name>: into $WORK/dl, through gh, or anonymously from the public release URL
   if [ -n "$GH_OK" ]; then
     "$GH" release download "$TAG" --repo "$REPO" --dir "$WORK/dl" --pattern "$1"
@@ -197,12 +204,19 @@ notes="$WORK/notes.md"
   echo
   echo "Manifest: \`$STEM.manifest.json\`, SHA-256 \`$MANIFEST_SHA\` — check it before trusting the files it lists."
 } > "$notes"
-"$GH" release create "$RELEASE_TAG" --repo "$REPO" --latest=false --title "Library vectors $TAG" --notes-file "$notes"
-for f in "${DATA[@]}"; do                               # data first
+# A draft fires no `release` event and creates no tag: nothing is published until every
+# file is in place and checked.
+"$GH" release create "$RELEASE_TAG" --repo "$REPO" --draft --target "$TARGET" \
+  --latest=false --title "Library vectors $TAG" --notes-file "$notes"
+UPLOADS=("${DATA[@]}" "$WORK/release/gates.json" "$WORK/files/$STEM.manifest.json")   # data first, the manifest last
+for f in "${UPLOADS[@]}"; do
   "$GH" release upload "$RELEASE_TAG" "$f" --repo "$REPO"
 done
-"$GH" release upload "$RELEASE_TAG" "$WORK/release/gates.json" --repo "$REPO"
-"$GH" release upload "$RELEASE_TAG" "$WORK/files/$STEM.manifest.json" --repo "$REPO"   # the manifest last
+expected=$(for f in "${UPLOADS[@]}"; do printf '%s\t%s\n' "$(basename "$f")" "$(stat -c %s "$f")"; done | sort)
+actual=$("$GH" release view "$RELEASE_TAG" --repo "$REPO" --json assets --jq '.assets[] | "\(.name)\t\(.size)"' | sort) \
+  || die "could not list the assets of the draft $RELEASE_TAG; it stays a draft"
+[ "$actual" = "$expected" ] || die "the draft $RELEASE_TAG does not hold the files built (expected: $(echo $expected); found: $(echo $actual)); it stays a draft"
+"$GH" release edit "$RELEASE_TAG" --repo "$REPO" --draft=false --latest=false
 endgroup
 
 group "persist the ledger of $TAG"
