@@ -157,6 +157,7 @@ class Pins(unittest.TestCase):
         self.assertRegex(pins["SIDECAR_REV"], r"^[0-9a-f]{40}$")
         self.assertRegex(pins["PLUGIN_REV"], r"^[0-9a-f]{40}$")
         self.assertRegex(pins["PASSAGE_PACKAGE_CHECKSUM"], r"^[0-9a-f]{64}$")
+        self.assertRegex(pins["MODEL_REVISION"], r"^[0-9a-f]{7,40}$")   # the mirror at a commit, never a branch
         self.assertEqual(pins["PASSAGE_QUANTIZATION"], "fp32")
 
 
@@ -351,6 +352,16 @@ class Driver(unittest.TestCase):
             self.assertIn(arg, calls[add])
         self.assertLess(add, self.index_of(calls, "cli assemble --kind base"))
         self.assertTrue((self.warehouse / "warehouse.json").exists())
+
+    def test_the_gpu_worker_fetches_the_model_at_the_pinned_revision(self):
+        pins = dict(line.split("=", 1) for line in PINS.read_text().splitlines()
+                    if line and not line.startswith("#") and "=" in line)
+        p, calls = self.run_driver(TO_EMBED=2_000_000)
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        workers = [c for c in calls if c.startswith("py ") and "embed_worker.py" in c]
+        self.assertTrue(workers)
+        for c in workers:
+            self.assertIn(f"--repo {pins['MODEL_REPO']} --revision {pins['MODEL_REVISION']} ", c + " ")
 
     def test_a_runner_with_a_warehouse_plans_against_it_and_adds_to_it(self):
         p, calls = self.run_driver(TO_EMBED=2_000_000)

@@ -79,6 +79,7 @@ fi
 [ -n "$PLUGIN_REV" ] || [ -n "${EXPORT_SEMANTIC_PLAN:-}" ] || die "export_semantic_plan v2 (plugin P5) is not pinned yet in pins.env: the release cannot be planned"
 [ -x "$EXPORT" ] || die "export_semantic_plan is not at $EXPORT — run bootstrap_runner.sh"
 [ -f "$FAMILY" ] || die "$FAMILY is missing — run bootstrap_runner.sh"
+[ -n "${MODEL_REVISION:-}" ] || die "pins.env pins no MODEL_REVISION: the model is fetched at a commit, never a branch"
 for tool in jq sha256sum split tar; do command -v "$tool" >/dev/null || die "$tool is required"; done
 MIN_FREE_GB=${VECTORS_MIN_FREE_GB:-$MIN_FREE_GB}
 free_kb=$(df -Pk "$STATE" | awk 'NR==2 {print $4}')
@@ -163,7 +164,7 @@ if [ "$TO_EMBED" -gt 0 ]; then
   while [ "$skip" -lt "$TO_EMBED" ]; do
     "$PY" "$HERE/embed_worker.py" --plan "$PLAN" --out "$WORK/shards/$(printf 's%03d' "$n")" \
       --skip "$skip" --take "$EMBED_WINDOW" --cache "$STATE/model-cache" \
-      --repo "$MODEL_REPO" --graph "$MODEL_GRAPH" --token-env OTZARIA_HF_TOKEN
+      --repo "$MODEL_REPO" --revision "$MODEL_REVISION" --graph "$MODEL_GRAPH" --token-env OTZARIA_HF_TOKEN
     skip=$((skip + EMBED_WINDOW)); n=$((n + 1))
   done
   endgroup
