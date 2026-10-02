@@ -21,6 +21,7 @@ SCRIPTS = [("check3_elucidation.py", False, False, False),
            ("check5_import_metrics.py", False, False, True),
            ("check7_provenance.py", False, True, False),
            ("check8_integrity.py", False, False, False),
+           ("check9_acronyms.py", False, False, False),
            ("check1_dependence_count.py", True, True, False),
            ("check2_book_base_text.py", True, True, False),
            ("check6_metadata_rowbyrow.py", True, True, False)]

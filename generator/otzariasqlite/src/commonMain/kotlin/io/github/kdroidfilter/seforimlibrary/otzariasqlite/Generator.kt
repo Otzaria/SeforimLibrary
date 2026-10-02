@@ -1269,8 +1269,8 @@ class DatabaseGenerator(
 
         // Insert acronyms for this book if an Acronymizer DB is available
         var acronymCount = 0
+        val terms = fetchAcronymsForTitle(title)
         try {
-            val terms = fetchAcronymsForTitle(title)
             if (terms.isNotEmpty()) {
                 repository.bulkInsertBookAcronyms(insertedBookId, terms)
                 acronymCount = terms.size
@@ -2396,9 +2396,9 @@ class DatabaseGenerator(
                 .filter { !it.equals(title, ignoreCase = true) }
                 .filter { !it.equals(titleNormalized, ignoreCase = true) }
                 .distinct()
-        } catch (e: Exception) {
-            logger.w(e) { "Error reading acronyms for '$title' from $path" }
-            return emptyList()
+        } catch (e: java.sql.SQLException) {
+            // Swallowing this would ship a whole DB without acronyms on a schema change.
+            throw IllegalStateException("Acronymizer DB at $path is unreadable or has an unexpected schema", e)
         }
     }
 
