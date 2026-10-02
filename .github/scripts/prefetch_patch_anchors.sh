@@ -271,10 +271,17 @@ cache_mark_used() {  # <entry-dir> — this entry is in use, so it ranks newest
 }
 
 asset_meta() {  # <tag> -> "<size>\t<digest>\t<name>" of that release's full-DB asset
-  local tag="$1" row
+  local tag="$1" row name manifest
   row=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$tag" \
-    --jq "$FULL_DB_ASSET_JQ"' | select(. != null) | [(.size|tostring), (.digest // ""), .name] | @tsv') || return 1
+    --jq "$FULL_DB_ASSET_JQ"' | select(. != null) | [(.size|tostring), (.digest // ""), .name, (.manifest // "")] | @tsv') || return 1
   [ -n "$row" ] || return 1
+  IFS="|" read -r _ _ name manifest <<<"${row//$'\t'/|}"
+  # A split DB's size and digest are the whole archive's, read from its manifest.
+  if [ -n "$manifest" ]; then
+    row=$(split_full_db_meta "$tag" "$name") || return 1
+    printf '%s\t%s' "$row" "$name"
+    return
+  fi
   printf '%s' "$row"
 }
 
@@ -486,7 +493,7 @@ fetch_one() {  # <target_version> <tag> <offset> <dest-dir>
     # that says why, and it would otherwise land bare in the prefetch log the
     # fan replays (run 34024655297 printed such a line with nothing naming the
     # asset). Capture it and fold it into the line that does.
-    if ! gh release download "$tag" --pattern "$expected_name" --dir "$dir" \
+    if ! download_full_db_by_name "$tag" "$expected_name" "$dir" \
          2> "$dir/download.err"; then
       reason=$(tr -d '\r' < "$dir/download.err" 2>/dev/null | head -n1)
       report+="prefetch anchor v$version ($tag): download of $expected_name failed (${reason:-gh gave no reason}) — the fan falls back to its serial download"$'\n'

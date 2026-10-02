@@ -184,11 +184,26 @@ def validate(value: dict) -> None:
         forbidden = set()
     # seforim.db.zst is matched by name by every released updater: never a schema-6+ DB.
     if full_db != LEGACY_FULL_DB_ASSET:
-        forbidden = forbidden | {LEGACY_FULL_DB_ASSET}
-    if not required.issubset(names):
+        forbidden = forbidden | set(full_db_asset_forms(LEGACY_FULL_DB_ASSET, names))
+    if not required.issubset(published_names(full_db, names)):
         raise ValueError("required build assets are missing")
+    if full_db in names and len(full_db_asset_forms(full_db, names)) > 1:
+        raise ValueError("the full DB is published both whole and in parts")
     if forbidden & set(names):
         raise ValueError("build assets superseded by this schema version are still published")
+
+
+def full_db_asset_forms(full_db: str, names) -> list:
+    """Every asset of <full_db>: the file itself, or its split manifest and parts."""
+    part = re.compile(re.escape(full_db) + r"\.part-[0-9]{3,}")
+    return [n for n in names if n in (full_db, full_db + ".manifest.json") or part.fullmatch(n)]
+
+
+def published_names(full_db: str, names) -> set:
+    """<names>, counting <full_db> as present when it ships as manifest + parts only (stage_full_db)."""
+    forms = set(full_db_asset_forms(full_db, names))
+    split = full_db + ".manifest.json" in forms and len(forms) >= 2 and full_db not in forms
+    return set(names) | ({full_db} if split else set())
 
 
 def main() -> int:

@@ -267,6 +267,32 @@ class BuildProvenanceContractTest(unittest.TestCase):
             with self.assertRaises(ValueError):
                 contract.validate(contract.load(self.write(tmp, value)))
 
+    def test_a_full_db_above_the_limit_is_published_as_manifest_and_parts(self):
+        def assets(*names):
+            return sorted(
+                [{"name": n, "size": 1, "sha256": "a" * 64} for n in names],
+                key=lambda asset: asset["name"].encode("utf-8"),
+            )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            value = self.value()
+            value["db_schema"]["db_schema_version"] = 6
+            split = ("seforim-schema6.db.zst.manifest.json",
+                     "seforim-schema6.db.zst.part-000", "seforim-schema6.db.zst.part-001")
+            value["assets"] = assets(*split, "seforim.db.buildstate.zst")
+            contract.validate(contract.load(self.write(tmp, value)))
+            for broken in (
+                # A manifest without its parts, or both forms at once.
+                assets(split[0], "seforim.db.buildstate.zst"),
+                assets(*split, "seforim-schema6.db.zst", "seforim.db.buildstate.zst"),
+                # The legacy name stays forbidden in its split form too.
+                assets(*split, "seforim.db.zst.manifest.json", "seforim.db.zst.part-000",
+                       "seforim.db.buildstate.zst"),
+            ):
+                value["assets"] = broken
+                with self.assertRaises(ValueError, msg=[a["name"] for a in broken]):
+                    contract.validate(contract.load(self.write(tmp, value)))
+
     def test_the_full_db_name_has_one_definition_in_shell_and_python(self):
         import shutil
 

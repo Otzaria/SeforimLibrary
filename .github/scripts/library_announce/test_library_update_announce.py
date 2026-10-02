@@ -881,29 +881,52 @@ class WorkflowContractTest(unittest.TestCase):
         for text in (self.text, script):
             self.assertNotIn("chat", text.lower())
 
-    def test_databases_stream_into_zstd_with_the_long_window(self):
-        run = next(s["run"] for s in self.doc["jobs"]["prepare"]["steps"] if s.get("name") == "Build both catalogs")
-        self.assertIn("-O - | zstd -d -q --long=31 --memory=2048MB", run)
-        self.assertIn('rm -f "$db"', run)
+    def catalog_step(self):
+        return next(s["run"] for s in self.doc["jobs"]["prepare"]["steps"] if s.get("name") == "Build both catalogs")
 
-    @unittest.skipUnless(shutil.which("bash") and shutil.which("jq"), "bash and jq are required")
-    def test_catalog_workflow_downloads_the_full_asset_for_each_release_schema(self):
-        run = next(s["run"] for s in self.doc["jobs"]["prepare"]["steps"] if s.get("name") == "Build both catalogs")
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            binaries = root / "bin"
-            binaries.mkdir()
-            for tag, name, split in (("v5", "seforim.db.zst", False), ("v6", "seforim-schema6.db.zst", True)):
-                release = root / tag
-                release.mkdir()
-                make_db(release / name, [(1, 2, 1, "book")], [(1, 0, "text")], split=split)
-                assets = [{"name": name}, {"name": "patch-v4-v6.db.zst"}]
-                if split:
-                    assets.append({"name": "seforim.db.zst"})
-                (release / "release.json").write_text(json.dumps({"assets": assets}), encoding="utf-8")
-            gh = binaries / "gh"
-            gh.write_text(f"#!{sys.executable}\n" + """
-import json, os, subprocess, sys
+    def test_databases_stream_into_zstd_with_the_long_window(self):
+        run = self.catalog_step()
+        self.assertIn('--jq "$FULL_DB_ASSET_JQ | .name // empty"', run)
+        self.assertIn('stream_full_db "$tag" "$asset" "$GITHUB_REPOSITORY"'
+                      ' | zstd -d -q --long=31 --memory=2048MB -o "$db"', run)
+        # Saving helpers would put the .zst (or its parts) on disk beside the DB.
+        for saving in ("download_full_db_by_name", "gh release download", "--dir", "-D "):
+            self.assertNotIn(saving, run)
+        self.assertIn('rm -f "$db"', run)
+        names = (ROOT / ".github" / "scripts" / "db_asset_names.sh").read_text(encoding="utf-8")
+        stream = names[names.index("stream_full_db() {"):]
+        stream = stream[:stream.index("\n}\n")]
+        self.assertEqual(3, stream.count("-O -"), stream)
+        self.assertNotIn("--dir", stream)
+
+    def run_catalog_step(self, releases):
+        """releases: {previous_tag: ..., current_tag: (asset, split_db, split_asset)} -> assets served."""
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        root = Path(tmp)
+        binaries = root / "bin"
+        binaries.mkdir()
+        for tag, (name, split_db, split_asset) in releases.items():
+            release = root / tag
+            release.mkdir()
+            (root / "built" / tag).mkdir(parents=True)
+            db = root / "built" / tag / name
+            make_db(db, [(1, 2, 1, "book")], [(1, 0, "text")], split=split_db)
+            if split_asset:
+                size = db.stat().st_size
+                subprocess.run([shutil.which("bash"), str(ROOT / ".github/scripts/split_release_asset.sh"),
+                                str(db), str(release), str(size // 2 + 1)], check=True, capture_output=True)
+                self.assertFalse((release / name).exists())
+            else:
+                shutil.copy(db, release / name)
+            assets = [{"name": p.name} for p in sorted(release.iterdir())]
+            assets.append({"name": "patch-v4-v6.db.zst"})
+            if name != "seforim.db.zst":
+                assets.append({"name": "seforim.db.zst"})
+            (release / "release.json").write_text(json.dumps({"assets": assets}), encoding="utf-8")
+        gh = binaries / "gh"
+        gh.write_text(f"#!{sys.executable}\n" + """
+import os, subprocess, sys
 from pathlib import Path
 args = sys.argv[1:]
 root = Path(os.environ['FIXTURES'])
@@ -912,29 +935,62 @@ if args[0] == 'api':
     query = args[args.index('--jq') + 1]
     result = subprocess.run(['jq', '-r', query], input=(root / tag / 'release.json').read_text(), text=True)
     sys.exit(result.returncode)
-tag = args[2]
-name = args[args.index('-p') + 1]
+if args[:2] != ['release', 'download']:
+    sys.exit(f'stub gh: unexpected {args}')
+tag, opts = args[2], args[3:]
+opt = lambda flag: opts[opts.index(flag) + 1] if flag in opts else None
+if opt('-R') != os.environ['GITHUB_REPOSITORY']:
+    sys.exit(f'stub gh: download without -R $GITHUB_REPOSITORY: {args}')
+if opt('-O') != '-':
+    sys.exit(f'stub gh: the catalog step must stream, not save: {args}')
+src = root / tag / opt('--pattern')
+if not src.is_file():
+    sys.exit(f'no assets match the file pattern {src.name}')
 with (root / 'downloads.log').open('a') as log:
-    log.write(f'{tag}/{name}\\n')
-sys.stdout.buffer.write((root / tag / name).read_bytes())
+    log.write(f'{tag}/{src.name}\\n')
+sys.stdout.buffer.write(src.read_bytes())
 """, encoding="utf-8")
-            zstd = binaries / "zstd"
-            zstd.write_text("#!/bin/sh\nwhile [ $# -gt 0 ]; do\n"
-                            "  if [ \"$1\" = -o ]; then out=$2; shift; fi\n  shift\ndone\ncat > \"$out\"\n", encoding="utf-8")
-            python = binaries / "python"
-            python.write_text(f"#!/bin/sh\nexec '{sys.executable}' \"$@\"\n", encoding="utf-8")
-            for path in (gh, zstd, python):
-                path.chmod(0o755)
-            result = subprocess.run([shutil.which("bash"), "-c", run], cwd=ROOT,
-                                    env=dict(os.environ, PATH=f"{binaries}{os.pathsep}{os.environ['PATH']}",
-                                             RUNNER_TEMP=tmp, PREVIOUS="v5", TAG="v6",
-                                             GITHUB_REPOSITORY="Otzaria/SeforimLibrary", FIXTURES=tmp),
-                                    capture_output=True, text=True)
-            self.assertEqual(0, result.returncode, result.stdout + result.stderr)
-            self.assertEqual(["v5/seforim.db.zst", "v6/seforim-schema6.db.zst"],
-                             (root / "downloads.log").read_text().splitlines())
-            self.assertEqual(json.loads((root / "announce/previous.json").read_text()),
-                             json.loads((root / "announce/current.json").read_text()))
+        zstd = binaries / "zstd"
+        zstd.write_text(f"#!{sys.executable}\n" + """
+import sys
+from pathlib import Path
+args = sys.argv[1:]
+for flag in ('-d', '--long=31', '--memory=2048MB', '-o'):
+    if flag not in args:
+        sys.exit(f'stub zstd: missing {flag} in {args}')
+Path(args[args.index('-o') + 1]).write_bytes(sys.stdin.buffer.read())
+""", encoding="utf-8")
+        python = binaries / "python"
+        python.write_text(f"#!/bin/sh\nexec '{sys.executable}' \"$@\"\n", encoding="utf-8")
+        for path in (gh, zstd, python):
+            path.chmod(0o755)
+        previous, current = releases
+        result = subprocess.run([shutil.which("bash"), "-c", self.catalog_step()], cwd=ROOT,
+                                env=dict(os.environ, PATH=f"{binaries}{os.pathsep}{os.environ['PATH']}",
+                                         RUNNER_TEMP=tmp, PREVIOUS=previous, TAG=current,
+                                         GITHUB_REPOSITORY="Otzaria/SeforimLibrary", FIXTURES=tmp),
+                                capture_output=True, text=True)
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+        work = root / "announce"
+        self.assertEqual(["current.json", "previous.json"], sorted(p.name for p in work.iterdir()))
+        self.assertEqual(json.loads((work / "previous.json").read_text()),
+                         json.loads((work / "current.json").read_text()))
+        return (root / "downloads.log").read_text().splitlines()
+
+    @unittest.skipUnless(shutil.which("bash") and shutil.which("jq"), "bash and jq are required")
+    def test_catalog_workflow_downloads_the_full_asset_for_each_release_schema(self):
+        downloads = self.run_catalog_step({"v5": ("seforim.db.zst", False, False),
+                                           "v6": ("seforim-schema6.db.zst", True, False)})
+        self.assertEqual(["v5/seforim.db.zst", "v6/seforim-schema6.db.zst"], downloads)
+
+    @unittest.skipUnless(shutil.which("bash") and shutil.which("jq") and shutil.which("split")
+                         and shutil.which("sha256sum"), "bash, jq, split and sha256sum are required")
+    def test_catalog_workflow_streams_a_split_full_asset_part_by_part(self):
+        downloads = self.run_catalog_step({"v5": ("seforim.db.zst", False, False),
+                                           "v6": ("seforim-schema6.db.zst", True, True)})
+        self.assertEqual(["v5/seforim.db.zst", "v6/seforim-schema6.db.zst.manifest.json",
+                          "v6/seforim-schema6.db.zst.part-000", "v6/seforim-schema6.db.zst.part-001"],
+                         downloads)
 
     def test_hosted_python_is_set_up_before_pip(self):
         checked = 0

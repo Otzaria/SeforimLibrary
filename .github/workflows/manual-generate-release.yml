@@ -174,7 +174,8 @@ jobs:
             test_ci_workflows \
             test_patch_anchor_schema \
             test_library_index_workflow \
-            test_prefetch_patch_anchors; do
+            test_prefetch_patch_anchors \
+            test_split_full_db; do
             log="$RUNNER_TEMP/$suite.log"
             if ! python3 ".github/scripts/$suite.py" > "$log" 2>&1; then
               cat "$log"
@@ -2222,8 +2223,10 @@ jobs:
           STAGE=release-staging
           mkdir -p "$STAGE"
           # Full DB, compressed — canonical source of the DB.
-          # Future releases reconstitute the prev DB from this.
-          cp "build/$FULL_DB_ASSET" "$STAGE/"
+          # Future releases reconstitute the prev DB from this. Above 1.9 GiB it
+          # is staged as parts + manifest (db_asset_names.sh: stage_full_db).
+          . .pipeline-control/.github/scripts/db_asset_names.sh
+          stage_full_db "build/$FULL_DB_ASSET" "$STAGE"
           # E1: the IdAllocator seed for the NEXT build, compressed (~2x).
           cp build/seforim.db.buildstate.zst "$STAGE/"
           # E2: lines_snapshot.db.zst is deliberately NOT staged. The identical
