@@ -7,15 +7,22 @@
 #   bin/otzaria-semantic-search (+ .rev, .build)   the sidecar CLI at SIDECAR_REV, a release build
 #                                          with onnx-backend, so its embed-shard embeds on the CPU
 #                                          (ONNX Runtime is the venv's libonnxruntime, loaded at run time)
-#   bin/export_semantic_plan (+ .rev)      the plugin's planner at PLUGIN_REV (when pinned)
+#   bin/export_semantic_plan (+ .rev, .build)   the plugin's planner at PLUGIN_REV
+#   bin/validate_semantic_vectors (+ .rev, .build)   the plugin's validator at PLUGIN_REV, with
+#                                          --features semantic: G6 runs the int8 query model
 #   bin/family-model.json, bin/chunking.json   the family's identity and recipe at SIDECAR_REV
 #   venv/                                  the worker's Python: PyTorch ROCm, ONNX Runtime, tokenizers
 #   model-cache/<checksum>/                seeded from --seed-model-dir (checksum-verified), or
 #                                          fetched by the worker on its first run
 #   warehouse/                             its package's warehouse is created by the first
 #                                          build, which plans and embeds every text
-# Builds happen under <state>/build, which is removed afterwards. Needs cargo (rustup) for
-# the binaries and network access to GitHub, crates.io and PyPI.
+# Builds happen under <state>/build, which is removed afterwards.
+#
+# Prerequisites, which this script does not install: cargo, from rustup installed for the user
+# that runs it (curl --proto '=https' -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal),
+# python3 with venv, and network access to GitHub, crates.io and PyPI. pip is handed the system
+# CA bundle (PIP_CERT, unless set): behind TLS inspection, as NetFree is on the build machine,
+# its root is in the system bundle and not in pip's own.
 set -euo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd)
 # shellcheck source=pins.env
@@ -29,6 +36,8 @@ while [ $# -gt 0 ]; do
     *) echo "usage: bootstrap_runner.sh [--state DIR] [--seed-model-dir DIR]" >&2; exit 64 ;;
   esac
 done
+SYSTEM_CA=${SYSTEM_CA:-/etc/ssl/certs/ca-certificates.crt}
+if [ -f "$SYSTEM_CA" ]; then export PIP_CERT=${PIP_CERT:-$SYSTEM_CA}; fi
 mkdir -p "$STATE/bin" "$STATE/model-cache" "$STATE/warehouse"
 exec 9>"$STATE/.lock"; flock -n 9 || { echo "another build or bootstrap holds $STATE/.lock" >&2; exit 75; }
 
@@ -39,7 +48,11 @@ build_bin() {  # <name> <repo> <rev> <package dir in the repo> [cargo args...]
      && [ "$(cat "$STATE/bin/$name.build" 2>/dev/null)" = "$build" ]; then
     echo "$name at $rev ($build): present"; return
   fi
-  command -v cargo >/dev/null || { echo "cargo is needed to build $name (install rustup)" >&2; exit 69; }
+  command -v cargo >/dev/null || {
+    echo "cargo is needed to build $name: install rustup for this user first" \
+         "(curl --proto '=https' -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal), then run this again" >&2
+    exit 69
+  }
   rm -rf "$STATE/build"; mkdir -p "$STATE/build"
   git clone -q --filter=blob:none "https://github.com/$repo.git" "$STATE/build/src"
   git -C "$STATE/build/src" checkout -q "$rev"
@@ -58,8 +71,9 @@ build_bin() {  # <name> <repo> <rev> <package dir in the repo> [cargo args...]
 build_bin otzaria-semantic-search "$SIDECAR_REPO" "$SIDECAR_REV" . --features onnx-backend --bin otzaria-semantic-search
 if [ -n "$PLUGIN_REV" ]; then
   build_bin export_semantic_plan "$PLUGIN_REPO" "$PLUGIN_REV" rust --features semantic-integration --bin export_semantic_plan
+  build_bin validate_semantic_vectors "$PLUGIN_REPO" "$PLUGIN_REV" rust --features semantic --bin validate_semantic_vectors
 else
-  echo "export_semantic_plan: PLUGIN_REV is not pinned yet (plugin P5) — the build cannot plan until it is"
+  echo "export_semantic_plan, validate_semantic_vectors: PLUGIN_REV is not pinned — the build can neither plan nor validate"
 fi
 [ -f "$STATE/bin/chunking.json" ] || { echo "bin/chunking.json missing: rebuild the sidecar CLI (remove bin/otzaria-semantic-search.rev)" >&2; exit 1; }
 
