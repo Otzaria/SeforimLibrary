@@ -116,7 +116,7 @@ fun main(args: Array<String>) {
     // Semantic checks that require post-append books still run in their real
     // appliers, but malformed JSON/CSV/header/duplicate-path input can never be
     // discovered only after rename/move mutations were committed.
-    parseGenerations(downloadRequiredForDbFile(FOR_DB_CSV_FILES.getValue("generations"), logger), logger)
+    loadGenerationRows(logger)
     parseBulkMetadata(downloadRequiredForDbFile("all_metadata.json", logger))
     parseDescriptionOverrides(downloadRequiredForDbFile("sefaria_metadata_changes.csv", logger))
     parseCategoryDescriptionOverrides(
