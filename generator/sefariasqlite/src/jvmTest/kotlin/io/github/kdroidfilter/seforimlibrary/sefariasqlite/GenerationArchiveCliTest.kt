@@ -1,5 +1,6 @@
 package io.github.kdroidfilter.seforimlibrary.sefariasqlite
 
+import io.github.kdroidfilter.seforimlibrary.common.ids.InMemoryIdAllocator
 import java.net.URLClassLoader
 import java.nio.file.Files
 import java.nio.file.Path
@@ -65,10 +66,13 @@ class GenerationArchiveCliTest {
 
     private fun failsBeforeWrites(assets: Map<String, String>, message: String) = fixture(assets) { root, db, archive ->
         val before = Files.readAllBytes(db).toList()
+        val state = Path.of("$db.buildstate")
+        val beforeState = Files.readAllBytes(state).toList()
         val result = cli(root, db, archive, "RenameCategoriesPostProcessKt")
         assertNotEquals(0, result.first, result.second)
         assertContains(result.second, message)
         assertEquals(before, Files.readAllBytes(db).toList(), "Rejected input must not modify the database")
+        assertEquals(beforeState, Files.readAllBytes(state).toList(), "Rejected input must not modify build state")
         assertEquals("Old title", title(db))
     }
 
@@ -84,6 +88,10 @@ class GenerationArchiveCliTest {
                     st.execute("INSERT INTO book VALUES (1, 'Old title')")
                 }
             }
+            // Newer rename stages require the same stable-id state that real generation creates.
+            val allocator = InMemoryIdAllocator.load(path = null)
+            assertEquals(1L, allocator.bookId("fixture", "Old title"))
+            allocator.snapshotTo(Path.of("$db.buildstate"))
             val archive = root.resolve("fordb.zip")
             val files = mapOf(
                 "category_renames.csv" to "",
