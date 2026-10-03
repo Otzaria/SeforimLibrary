@@ -239,7 +239,7 @@ internal class SefariaBookPayloadReader(
             val description = extractDescription(schemaJson, schemaObj)
             val heShortDesc = extractShortDescription(schemaJson, schemaObj)
             val pubDates = extractPubDates(schemaJson, schemaObj)
-            val altStructures = parseAltStructures(schemaJson)
+            val altStructures = SefariaAltNodeNameFixes.apply(englishTitle, parseAltStructures(schemaJson), logger)
             val rawDependence = extractRawDependence(schemaJson, schemaObj)
             val dependence = rawDependence?.let(::mapDependence)
             val declaredBaseTextTitleKeys = extractBaseTextTitleKeys(schemaJson, schemaObj)
@@ -517,6 +517,27 @@ internal class SefariaBookPayloadReader(
         authors: List<String>,
         collectLineKeyOverrides: Boolean = true,
     ): BuiltBookContent {
+        fun walk(labels: OwnLabelPass) =
+            walkBook(schemaObj, textElement, bookHeTitle, bookEnTitle, authors, collectLineKeyOverrides, labels)
+        val first = OwnLabelPass()
+        val built = walk(first)
+        // A section that labels most of its own items also writes some numbers its own way:
+        // "טוב." for 17 and "חי." for 18 (קשר גודל), "<b>רן </b>" for 250 (the indexes of
+        // תרומת הדשן). The book is walked again with those spellings accepted there, and
+        // only there: anywhere else "אחד." at the thirteenth place is a dibbur, not a label.
+        val variantSections = first.sectionsAdmittingVariants()
+        return if (variantSections.isEmpty()) built else walk(OwnLabelPass(variantSections))
+    }
+
+    private fun walkBook(
+        schemaObj: JsonObject,
+        textElement: JsonElement,
+        bookHeTitle: String,
+        bookEnTitle: String,
+        authors: List<String>,
+        collectLineKeyOverrides: Boolean,
+        labels: OwnLabelPass,
+    ): BuiltBookContent {
         // Pre-allocate with estimated capacity
         val output = ArrayList<String>(1000)
         val refs = ArrayList<RefEntry>(1000)
@@ -604,6 +625,7 @@ internal class SefariaBookPayloadReader(
                     cleanShifts = cleanShifts,
                     lineKeyHashOverrides = lineKeyHashOverrides,
                     numbersIntegerLeaf = numbersIntegerLeaf(node),
+                    labels = labels.section(refPrefix),
                 )
             }
         }
@@ -656,6 +678,7 @@ internal class SefariaBookPayloadReader(
                 cleanShifts = cleanShifts,
                 lineKeyHashOverrides = lineKeyHashOverrides,
                 numbersIntegerLeaf = numbersIntegerLeaf(schemaObj),
+                labels = labels.section(bookEnTitle),
             )
         }
 
@@ -689,6 +712,7 @@ internal class SefariaBookPayloadReader(
         cleanShifts: MutableMap<Int, Int>? = null,
         lineKeyHashOverrides: MutableMap<Int, ByteArray>? = null,
         numbersIntegerLeaf: Boolean = false,
+        labels: SectionLabels,
     ) {
         // Leaf when depth reached zero, OR when the data is shallower than the
         // schema declares (e.g. Keter Malkhut: schema says depth=2 but most
@@ -701,7 +725,8 @@ internal class SefariaBookPayloadReader(
             if (!content.isNullOrEmpty()) {
                 val collapseBreaks = collapsesInlineBreaks(bookEnTitle)
                 val normalized = cleanSefariaLine(content, collapseInlineBreaks = collapseBreaks)
-                val cleaned = SefariaDashlessDibburim.separate(bookHeTitle, normalized)
+                // A second walk of the book repeats the same separations: count them once.
+                val cleaned = SefariaDashlessDibburim.separate(bookHeTitle, normalized, recordStats = !labels.repeatedWalk)
                 if (cleaned.isNotEmpty()) {
                     // Reproduce the old pipeline BEFORE the dashless repair: keeping
                     // a break can either enable or suppress that repair. Collapsing
@@ -764,11 +789,25 @@ internal class SefariaBookPayloadReader(
             when (sourceMarkerRun(text)) {
                 MarkerRun.CONSECUTIVE -> true
                 MarkerRun.BROKEN -> {
-                    logger.d { "Partially numbered leaf array in '$bookHeTitle' ($refPrefix); keeping generated prefixes" }
+                    logger.d { "Partially numbered leaf array in '$bookHeTitle' ($refPrefix); keeping generated prefixes except on self-labelled items" }
                     false
                 }
                 MarkerRun.NONE -> false
             }
+
+        // Items that drop the generated prefix because they already carry their own
+        // label for that same number. Most shapes are enough alone. Two can also be
+        // something else: a numeral that is all of a bold dibbur ("<b>י"א. </b>" is
+        // "יש אומרים", "<b>  לא  </b> פלוג") and a label after an opening heading
+        // ("<br>א." opens a list of topics). Those count only when another item of
+        // the array carries its own label too.
+        val ownLabelled: BooleanArray? = if (depth == 1 && nonEmptyCount > 1 && prefixesLeaf && !sourceNumbered) {
+            val found = text.mapIndexed { idx, item -> ownLabel(item, idx + 1, labels.variants) }
+            val corroborated = found.count { it != null } >= 2
+            BooleanArray(text.size) { idx -> found[idx]?.let { it == LabelKind.PLAIN || corroborated } == true }
+        } else {
+            null
+        }
 
         // גרסה חלקית מותרת (מערך קצר); פרק בלי הסטה — לא.
         if (childRefOffsets != null && childRefOffsets.size < text.size) {
@@ -789,11 +828,12 @@ internal class SefariaBookPayloadReader(
 
             val sectionIndex = sectionNames.size - depth
             val isReferenceable = referenceableSections.getOrNull(sectionIndex) ?: true
-            val nextLinePrefix = if (depth == 1 && isReferenceable && prefixesLeaf && nonEmptyCount > 1 && !sourceNumbered) {
-                "($letter) "
-            } else {
-                ""
-            }
+            // An item that already carries its own label for this very number keeps
+            // that label alone: "(נח) [נח]" is noise. Any other number keeps the prefix.
+            val numbered = depth == 1 && isReferenceable && prefixesLeaf && nonEmptyCount > 1 && !sourceNumbered
+            val selfLabelled = numbered && currentAddressType != "Talmud" && ownLabelled?.get(idx) == true
+            if (numbered) labels.count(selfLabelled)
+            val nextLinePrefix = if (numbered && !selfLabelled) "($letter) " else ""
 
             if (depth > 1 && sectionName.isNotBlank() && isReferenceable) {
                 val tag = when (level) {
@@ -849,6 +889,7 @@ internal class SefariaBookPayloadReader(
                 cleanShifts = cleanShifts,
                 lineKeyHashOverrides = lineKeyHashOverrides,
                 numbersIntegerLeaf = numbersIntegerLeaf,
+                labels = labels,
             )
         }
     }
@@ -934,8 +975,113 @@ private val UNNUMBERED_INTEGER_LEAF_NAMES = setOf("פסקה", "פירוש", "פ�
 /** `match_templates[].scope` values that make an alt-struct node citable alone. */
 private val ALONE_MATCH_TEMPLATE_SCOPES = setOf("any", "alone")
 
-// Leading printed marker of a line: "(אות) " or "{אות} ".
+// Leading printed marker that makes a whole array self-numbered: "(אות) " or
+// "{אות} " (unchanged since 491a4619; an intro-shifted run of these still counts).
 private val SOURCE_MARKER_REGEX = Regex("""^\s*[({]([א-ת"׳״]{1,5})[)}]\s""")
+
+// A label an item may open with, after any opening tags, for the number [LABEL_TOKEN]:
+// "(אות)", "( אות )" (נהר מצרים), "{אות}", "[אות]" (אליה רבה) and "[אות X]" (אליה
+// רבה קסב:ה), which may be glued to a tag or take a colon, "[ב]:"; "אות)" (ביאור על
+// ספר המצוות לרס"ג; also glued, "נה)עינוי"); "אות. " / "אות: " / "אות.</b>"
+// (איסור והיתר הארוך, קשר גודל, אורחות חיים להרא"ש); and a bold numeral alone,
+// "<b>אות</b>", "<b>אות </b>", "<b>אות.</b>" (סידור ספרד, תרומת הדשן), which
+// [BOLD_ONLY_LABEL_REGEX] tells apart. "סעיף א" / "ס"ק א" name another book's seif
+// and are not labels. A generated prefix only ever yields to its own item's label,
+// for the same number: a source run shifted by an intro ("(ב) א.", כף אחת) keeps
+// the generated numbering.
+private const val LABEL_TOKEN = """([א-ת"׳״]{1,5})"""
+private val OWN_LABEL_REGEX = Regex(
+    """^\s*(?:<[^>]+>\s*)*(?:(?:\(\s*(?:אות\s+)?$LABEL_TOKEN\s*\)|\{$LABEL_TOKEN\}|\[\s*(?:אות\s+)?$LABEL_TOKEN\s*\])(?=[\s<:.]|$)|""" +
+        """$LABEL_TOKEN\)|$LABEL_TOKEN[.:](?=\s|</)|<b>\s*$LABEL_TOKEN\s*[.:]?\s*</b>)"""
+)
+
+// The numeral is all there is inside a bold run: the shape of a short dibbur too.
+private val BOLD_ONLY_LABEL_REGEX = Regex("""^\s*(?:<[^>]+>\s*)*<b>\s*$LABEL_TOKEN\s*[.:]?\s*</b>""")
+
+// A heading the item opens with: tag-wrapped text alone on its first line, the
+// label right after the break ("<big><strong>סימן א. …</strong></big><br>א. מיד",
+// קשר גודל). Text outside the tags before the break (a bold dibbur and its
+// comment, ביאור הגר"א) means the label belongs to a merged later segment.
+private val LEADING_HEADING_REGEX = Regex(
+    """^\s*(?:<[a-z][^>]*>\s*)+[^<]*(?:</[a-z]+>\s*)+<br\s*/?>""",
+    RegexOption.IGNORE_CASE,
+)
+
+private fun labelToken(regex: Regex, content: String): String? =
+    regex.find(content)?.groupValues?.drop(1)?.first { it.isNotEmpty() }
+
+private fun markerValue(token: String): Int? = gematriaToInt[token.filter { it !in "\"׳״" }]
+
+// Another spelling of a number, accepted only in a section that labels its own items
+// ([SectionLabels]): the letters in any order and final forms at their value ("רן" 250,
+// "דשמ" 344, "אך" 21, "טוב" 17), or a letter spelled out ("יוד" 10). At most four
+// letters, so a word is not read as a sum.
+private fun variantValue(token: String): Int? {
+    val letters = token.filter { it !in "\"׳״" }
+    SPELLED_OUT_NUMERALS[letters]?.let { return it }
+    if (letters.length > 4) return null
+    return letters.sumOf { NUMERAL_LETTER_VALUES[it] ?: return null }
+}
+
+// "יוד." for 10: seven times in קשר גודל, once in ביאור על ספר המצוות לרס"ג ("יו"ד)").
+private val SPELLED_OUT_NUMERALS = mapOf("יוד" to 10)
+
+private val NUMERAL_LETTER_VALUES: Map<Char, Int> = "אבגדהוזחטיכלמנסעפצקרשתךםןףץ".toList().zip(
+    listOf(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 200, 300, 400, 20, 40, 50, 80, 90),
+).toMap()
+
+// A section accepts another spelling of a label ([variantValue]) when at least this
+// many of the items it numbers, and this share of them, carry a label of their own.
+// In the 2026-09-30 export a section with 20 such labels or more has either at most 21%
+// of its items labelled (באר הגולה חו"מ, אורחות חיים להרא"ש) or at least 68% (קול התור;
+// 92% and up elsewhere). Every item that another spelling alone would match in a section
+// below the gate is a dibbur: "<b>בידי. </b>" at 26, "האחד:" at 18.
+private const val MIN_OWN_LABELS = 20
+private const val MIN_OWN_LABEL_PERCENT = 60
+
+/**
+ * One walk of a book's text, which tallies its labels per section (a node of the
+ * schema, keyed by its ref prefix). The first walk accepts only canonical labels; a
+ * second one, if any, also accepts another spelling in [variantSections].
+ */
+private class OwnLabelPass(private val variantSections: Set<String> = emptySet()) {
+    private val sections = HashMap<String, SectionLabels>()
+
+    fun section(key: String): SectionLabels = sections.getOrPut(key) {
+        SectionLabels(variants = key in variantSections, repeatedWalk = variantSections.isNotEmpty())
+    }
+
+    fun sectionsAdmittingVariants(): Set<String> = sections.filterValues { it.admitsVariants() }.keys
+}
+
+/** Of a section's items that get a generated "(N) ", how many drop it for a label of their own. */
+private class SectionLabels(val variants: Boolean, val repeatedWalk: Boolean) {
+    private var numbered = 0
+    private var selfLabelled = 0
+
+    fun count(selfLabelled: Boolean) {
+        numbered++
+        if (selfLabelled) this.selfLabelled++
+    }
+
+    fun admitsVariants(): Boolean =
+        selfLabelled >= MIN_OWN_LABELS && selfLabelled * 100 >= numbered * MIN_OWN_LABEL_PERCENT
+}
+
+/** PLAIN counts alone; MAYBE_DIBBUR (a bold-only numeral, a label after a heading) needs company. */
+private enum class LabelKind { PLAIN, MAYBE_DIBBUR }
+
+/** How the item carries its own label for [number], or null when it carries none for it. */
+private fun ownLabel(item: JsonElement, number: Int, variants: Boolean): LabelKind? {
+    val content = (item as? JsonPrimitive)?.takeIf { it.isString }?.content ?: return null
+    fun at(text: String, regex: Regex) = labelToken(regex, text)?.let { token ->
+        markerValue(token) == number || variants && variantValue(token) == number
+    } == true
+    if (at(content, BOLD_ONLY_LABEL_REGEX)) return LabelKind.MAYBE_DIBBUR
+    if (at(content, OWN_LABEL_REGEX)) return LabelKind.PLAIN
+    val afterHeading = LEADING_HEADING_REGEX.find(content)?.let { content.substring(it.range.last + 1) } ?: return null
+    return if (at(afterHeading, OWN_LABEL_REGEX)) LabelKind.MAYBE_DIBBUR else null
+}
 
 // Inverse of toGematria, for validating printed markers.
 private val gematriaToInt: Map<String, Int> = (1..999).associateBy { toGematria(it) }
@@ -952,14 +1098,13 @@ private fun sourceMarkerRun(items: JsonArray): MarkerRun {
     items.forEachIndexed { idx, item ->
         val content = (item as? JsonPrimitive)?.contentOrNull ?: return@forEachIndexed
         if (content.isBlank()) return@forEachIndexed
-        val match = SOURCE_MARKER_REGEX.find(content)
-        if (match == null) {
+        val token = labelToken(SOURCE_MARKER_REGEX, content)
+        if (token == null) {
             if (block == 0) pre++ else post++
             return@forEachIndexed
         }
         if (post > 0) return MarkerRun.BROKEN
-        val value = gematriaToInt[match.groupValues[1].filter { it !in "\"׳״" }]
-            ?: return MarkerRun.BROKEN
+        val value = markerValue(token) ?: return MarkerRun.BROKEN
         when {
             next < 0 -> if (value > idx + 1) return MarkerRun.BROKEN else next = value + 1
             value != next -> return MarkerRun.BROKEN

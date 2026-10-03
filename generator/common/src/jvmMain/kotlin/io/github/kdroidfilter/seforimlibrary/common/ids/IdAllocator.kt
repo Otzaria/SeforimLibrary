@@ -34,12 +34,25 @@ interface IdAllocator {
      * Forgets the id cached for [canonicalPath] and hands out a fresh one.
      *
      * Only for the case where the reserved id turns out to be already occupied in
-     * the DB by a row this allocator never created — categories inserted with an
-     * implicit rowid outside the allocator, e.g. `renameCategories`' leaf
-     * auto-creation for book_moves.csv. The default implementation cannot
-     * reallocate and keeps the current id.
+     * the DB by a row this allocator never created — categories inserted outside the
+     * allocator. `renameCategories`' leaf auto-creation for book_moves.csv used to be
+     * one (implicit rowid, v19 and v30); it now takes its ids from the build state.
+     * The default implementation cannot reallocate and keeps the current id.
      */
     fun reallocateCategoryId(canonicalPath: String): Long = categoryId(canonicalPath)
+
+    /** The id [canonicalPath] already holds, without allocating one; null when it has none. */
+    fun peekCategoryId(canonicalPath: String): Long? = null
+
+    /** Every category key and the id it holds, as of this call. */
+    fun categoryKeys(): Map<String, Long> = emptyMap()
+
+    /**
+     * Points [canonicalPath] at [id], an id that is already allocated to the same folder
+     * under another key (a book_moves.csv leaf, see [BOOK_MOVE_LEAF_KEY_PREFIX]). The id
+     * the key held before is left unheld. Returns false if this allocator cannot do it.
+     */
+    fun pointCategoryKey(canonicalPath: String, id: Long): Boolean = false
 
     /** Stable id for a book edition; natural key = (bookId, versionTitle). */
     fun bookVersionId(bookId: Long, versionTitle: String): Long
@@ -78,6 +91,21 @@ interface IdAllocator {
 
     /** Returns the source hash recorded in a previous build for [key], if any. */
     fun previousSourceHash(key: BookKey): BookSourceHash?
+
+    /**
+     * Every book key this allocator knows, from the build state and from this run,
+     * with its id. Keys are never dropped, so a renamed book's old title stays here:
+     * under the book's own id when the rename kept it (book_renames.csv), under a
+     * dead id when the book came back as a new key. Read-only view.
+     */
+    fun knownBookKeys(): Map<BookKey, Long> = emptyMap()
+
+    /**
+     * The line content hashes held for each of [bookIds]. A book that allocated
+     * lines in this run reports those only; any other book reports what the build
+     * state kept for it, which for a removed book is its last content.
+     */
+    fun lineContentHashes(bookIds: Set<Long>): Map<Long, List<ByteArray>> = emptyMap()
 
     /** Stats for logging / metrics. */
     fun stats(): AllocatorStats

@@ -272,17 +272,33 @@ class GenerateLinkerLinksTest {
 
     private val sourceContent = "see Genesis 1:1 and again Genesis 1:1"
 
-    private fun record(start: Int, end: Int, base: Int?, target: String = "Genesis 1:1"): String {
+    private fun record(
+        start: Int,
+        end: Int,
+        base: Int?,
+        target: String = "Genesis 1:1",
+        hashedContent: String = sourceContent,
+    ): String {
         val baseField = if (base == null) "" else "\"line_index_base\":$base,"
         return "{\"book_key\":{\"source_name\":\"Sefaria\",\"canonical_he_title\":\"SrcBook\"}," +
             "\"line_index\":0,$baseField\"start\":$start,\"end\":$end,\"target_ref\":\"$target\"," +
-            "\"source_hash\":\"${linkerContentHash(sourceContent)}\"}"
+            "\"source_hash\":\"${linkerContentHash(hashedContent)}\"}"
     }
 
-    private class LinkerRun(val failure: Throwable?, val links: Long, val anchors: Long)
+    private class LinkerRun(
+        val failure: Throwable?,
+        val links: Long,
+        val anchors: Long,
+        val anchorRanges: List<Pair<Int, Int>> = emptyList(),
+    )
 
     // Runs the real entry point (reflective main) on a fixture DB + build_state + sidecar.
-    private fun runLinkerMain(artifactBody: String, strict: String?, splitLineContent: Boolean = false): LinkerRun {
+    private fun runLinkerMain(
+        artifactBody: String,
+        strict: String?,
+        splitLineContent: Boolean = false,
+        storedSource: String = sourceContent,
+    ): LinkerRun {
         val dir = Files.createTempDirectory("linkerMainFixture")
         val artifacts = Files.createDirectory(dir.resolve("artifacts"))
         Files.writeString(artifacts.resolve("a.jsonl"), artifactBody)
@@ -302,7 +318,7 @@ class GenerateLinkerLinksTest {
                 repo.insertBook(Book(id = 2, categoryId = catId, sourceId = sourceId, title = "SrcBook", heRef = "SrcBook"))
                 repo.insertLinesBatch(listOf(
                     Line(id = 10, bookId = 1, lineIndex = 0, content = "target", heRef = "TgtBook 1:1"),
-                    Line(id = 20, bookId = 2, lineIndex = 0, content = sourceContent, heRef = "SrcBook 1"),
+                    Line(id = 20, bookId = 2, lineIndex = 0, content = storedSource, heRef = "SrcBook 1"),
                 ))
                 repo.executeRawQuery("INSERT INTO connection_type(name) VALUES ('${ConnectionType.LINKER.name}')")
                 var id = 0L
@@ -346,10 +362,18 @@ class GenerateLinkerLinksTest {
                 c.createStatement().use { st -> st.executeQuery(sql).use { rs -> rs.next(); rs.getLong(1) } }
             }
             val linkerLinks = "SELECT id FROM link WHERE connectionTypeId = $linkerTypeId"
+            val ranges = DriverManager.getConnection("jdbc:sqlite:$db").use { c ->
+                c.createStatement().use { st ->
+                    st.executeQuery(
+                        "SELECT charStart, charEnd FROM link_anchor WHERE linkId IN ($linkerLinks) ORDER BY charStart",
+                    ).use { rs -> buildList { while (rs.next()) add(rs.getInt(1) to rs.getInt(2)) } }
+                }
+            }
             return LinkerRun(
                 failure,
                 count("SELECT COUNT(*) FROM ($linkerLinks)"),
                 count("SELECT COUNT(*) FROM link_anchor WHERE linkId IN ($linkerLinks)"),
+                ranges,
             )
         } finally {
             keys.forEach { key ->
@@ -423,6 +447,52 @@ class GenerateLinkerLinksTest {
         assertEquals(null, run.failure)
         assertEquals(1L, run.links)
         assertEquals(2L, run.anchors)
+    }
+
+    @Test
+    fun recordsOnTheLinkerViewOfASeifPrefixedLineLandOnTheStoredLine() {
+        // The snapshot handed the linker the line without "(ח) "; its offsets index that text.
+        val stored = "(ח) $sourceContent"
+        val body = record(4, 15, base = 0, hashedContent = sourceContent) + "\n" +
+            record(26, 37, base = 0, hashedContent = sourceContent) + "\n"
+        val run = runLinkerMain(body, strict = "true", storedSource = stored)
+        assertEquals(null, run.failure)
+        assertEquals(1L, run.links)
+        assertEquals(listOf(8 to 19, 30 to 41), run.anchorRanges)
+        assertEquals("Genesis 1:1", stored.substring(8, 19))
+    }
+
+    @Test
+    fun aRecordMadeOnTheWholePrefixedLineIsStillPlacedExactly() {
+        val stored = "(ח) $sourceContent"
+        val run = runLinkerMain(record(8, 19, base = 0, hashedContent = stored) + "\n", strict = "true", storedSource = stored)
+        assertEquals(null, run.failure)
+        assertEquals(listOf(8 to 19), run.anchorRanges)
+    }
+
+    @Test
+    fun aRecordForChangedTextIsStillSafeDropped() {
+        val stored = "(ח) $sourceContent"
+        val run = runLinkerMain(record(4, 15, base = 0, hashedContent = "something else") + "\n", strict = null, storedSource = stored)
+        assertEquals(null, run.failure)
+        assertEquals(0L, run.links)
+    }
+
+    @Test
+    fun offsetShiftFollowsTheHashedText() {
+        val stored = "(יב) <b>דיבור</b> סי' ע\"ט"
+        val view = "<b>דיבור</b> סי' ע\"ט"
+        assertEquals(5, linkerOffsetShift("Sefaria", stored, linkerContentHash(view)))
+        assertEquals(0, linkerOffsetShift("Sefaria", stored, linkerContentHash(stored)))
+        assertEquals(null, linkerOffsetShift("Sefaria", stored, linkerContentHash("other")))
+        assertEquals(5, linkerOffsetShift("Sefaria", stored, null))
+        // Any source: the hash, not the book's view, says which text the offsets index.
+        assertEquals(5, linkerOffsetShift("MoreBooks", stored, linkerContentHash(view)))
+        assertEquals(0, linkerOffsetShift("MoreBooks", stored, linkerContentHash(stored)))
+        assertEquals(0, linkerOffsetShift("MoreBooks", stored, null))
+        val tagged = "<b>(א)</b> <b>במג\"א</b> סק\"ו"
+        assertEquals(11, linkerOffsetShift("DictaToOtzaria", tagged, linkerContentHash("<b>במג\"א</b> סק\"ו")))
+        assertEquals(0, linkerOffsetShift("DictaToOtzaria", tagged, linkerContentHash(tagged)))
     }
 
     @Test
