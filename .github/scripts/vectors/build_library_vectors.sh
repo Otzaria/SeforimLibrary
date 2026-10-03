@@ -14,12 +14,14 @@
 #               with its parity certificate
 #   4 warehouse warehouse-add --plan: the shards held to the plan, their vectors appended (the
 #               first add creates the warehouse)
-#   5 assemble  a base (POC: every release is a base), then assemble --verify (the gates)
+#   5 assemble  a base (POC: every release is a base), then assemble --verify (the gates), then
+#               the plugin's validate_semantic_vectors on the release index: G3 coverage, G4
+#               resolution, G6 retrieval with the int8 query model; any exit but 0 stops the build
 #   6 files     the segment compressed (and split below GitHub's asset limit), release-files
 #   7 publish   (mode base) a sibling release vectors-<tag> at the commit of <tag>, made a
-#               draft first: data, then gates.json, the manifest last; once the draft holds
-#               exactly those files at their sizes it is published, --latest=false; then the
-#               ledger is persisted — only after a publish
+#               draft first: data, then gates.json and validation.json, the manifest last;
+#               once the draft holds exactly those files at their sizes it is published,
+#               --latest=false; then the ledger is persisted — only after a publish
 #
 # LIBRARY_VECTORS_PRERELEASE (true unless "false") publishes vectors-<tag> as a prerelease:
 # like the lines-snapshot-sha256-* and pipeline-result-* releases it then stays out of
@@ -30,7 +32,7 @@
 # /home/runner/otzaria-vectors; see bootstrap_runner.sh) holds the binaries, the venv, the
 # model cache, the warehouse and the published ledger, and is locked for the whole build.
 # Runs by hand on the build machine as it runs in the workflow. Tests replace the tools with
-# OTZARIA_SEMANTIC_CLI, EXPORT_SEMANTIC_PLAN, VECTOR_PYTHON, GH and ZSTD.
+# OTZARIA_SEMANTIC_CLI, EXPORT_SEMANTIC_PLAN, VALIDATE_SEMANTIC_VECTORS, VECTOR_PYTHON, GH and ZSTD.
 set -euo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd)
 # shellcheck source=pins.env
@@ -55,6 +57,7 @@ VERSION=${TAG#v}; VERSION=${VERSION%%-*}
 WORK=${WORK:-$STATE/work/$TAG}
 CLI=${OTZARIA_SEMANTIC_CLI:-$STATE/bin/otzaria-semantic-search}
 EXPORT=${EXPORT_SEMANTIC_PLAN:-$STATE/bin/export_semantic_plan}
+VALIDATE=${VALIDATE_SEMANTIC_VECTORS:-$STATE/bin/validate_semantic_vectors}
 PY=${VECTOR_PYTHON:-$STATE/venv/bin/python}
 GH=${GH:-gh}
 ZSTD=${ZSTD:-zstd}
@@ -69,6 +72,13 @@ T0=$(date +%s)
 group() { local t="[+$(( $(date +%s) - T0 ))s]"; if [ "${GITHUB_ACTIONS:-}" = true ]; then echo "::group::$* $t"; else echo "== $* $t"; fi; }
 endgroup() { if [ "${GITHUB_ACTIONS:-}" = true ]; then echo "::endgroup::"; fi; }
 die() { echo "::error::$*"; exit 1; }
+onnx_runtime() {  # the venv's ONNX Runtime library, which embed-shard and the validator load
+  local lib
+  for lib in "$STATE"/venv/lib/python3*/site-packages/onnxruntime/capi/libonnxruntime.so.*; do
+    [ -f "$lib" ] && { echo "$lib"; return 0; }
+  done
+  return 1
+}
 
 # ─── preflight ─────────────────────────────────────────────────────────────
 group "preflight ($TAG, $MODE)"
@@ -82,6 +92,14 @@ if [ -z "${OTZARIA_SEMANTIC_CLI:-}" ]; then
 fi
 [ -n "$PLUGIN_REV" ] || [ -n "${EXPORT_SEMANTIC_PLAN:-}" ] || die "export_semantic_plan v2 (plugin P5) is not pinned yet in pins.env: the release cannot be planned"
 [ -x "$EXPORT" ] || die "export_semantic_plan is not at $EXPORT — run bootstrap_runner.sh"
+[ -x "$VALIDATE" ] || die "validate_semantic_vectors is not at $VALIDATE — run bootstrap_runner.sh"
+if [ -z "${EXPORT_SEMANTIC_PLAN:-}${VALIDATE_SEMANTIC_VECTORS:-}" ]; then
+  for bin in "$EXPORT" "$VALIDATE"; do
+    [ "$(cat "$bin.rev" 2>/dev/null)" = "$PLUGIN_REV" ] || die "$bin is not the pinned plugin $PLUGIN_REV — run bootstrap_runner.sh"
+  done
+  grep -qE -- '--features semantic( |$)' "$VALIDATE.build" 2>/dev/null \
+    || die "$VALIDATE was built without --features semantic, so it cannot run G6 — run bootstrap_runner.sh"
+fi
 [ -f "$FAMILY" ] || die "$FAMILY is missing — run bootstrap_runner.sh"
 [ -n "${MODEL_REVISION:-}" ] || die "pins.env pins no MODEL_REVISION: the model is fetched at a commit, never a branch"
 for tool in jq sha256sum split tar; do command -v "$tool" >/dev/null || die "$tool is required"; done
@@ -175,11 +193,7 @@ else
     PKG=$("$PY" "$HERE/model_package.py" fetch --cache "$STATE/model-cache" --checksum "$PASSAGE_PACKAGE_CHECKSUM" \
       --graph "$MODEL_GRAPH" --repo "$MODEL_REPO" --revision "$MODEL_REVISION" --token-env OTZARIA_HF_TOKEN) \
       || die "could not fetch the passage package $PASSAGE_PACKAGE_CHECKSUM"
-    ORT=""
-    for lib in "$STATE"/venv/lib/python3*/site-packages/onnxruntime/capi/libonnxruntime.so.*; do
-      [ -f "$lib" ] && { ORT=$lib; break; }
-    done
-    [ -n "$ORT" ] || die "the venv holds no ONNX Runtime library for embed-shard — run bootstrap_runner.sh"
+    ORT=$(onnx_runtime) || die "the venv holds no ONNX Runtime library for embed-shard — run bootstrap_runner.sh"
     echo "on the CPU: embed-shard in $CPU_PROCESSES process(es) of $CPU_THREADS thread(s), ONNX Runtime $ORT"
     EMBEDDED_BY="otzaria-semantic-search embed-shard (onnxruntime, cpu)"
     OTZARIA_ONNX_RUNTIME=$ORT "$CLI" embed-shard --plan "$PLAN" --model-file "$PKG/$MODEL_GRAPH" \
@@ -217,6 +231,25 @@ jq -c . "$WORK/release/gates.json" 2>/dev/null || true
 [ "$verified" -eq 0 ] || { echo "::error::a gate failed (assemble --verify exited $verified); nothing is published"; exit 2; }
 endgroup
 
+group "5 validate the release on its index: G3 coverage, G4 resolution, G6 retrieval"
+# What assemble --verify cannot check, since it needs the index: the plugin's validator installs
+# the release as a device installs it (into a set under the work directory), and holds it to the
+# index and the plan (G3, G4) and the recall of its scan with the int8 query model the
+# application runs against the exact f32 scan of the warehouse (G6). Its report is published.
+QPKG=$("$PY" "$HERE/model_package.py" fetch --cache "$STATE/model-cache" --checksum "$QUERY_PACKAGE_CHECKSUM" \
+  --graph "$QUERY_GRAPH" --repo "$MODEL_REPO" --revision "$MODEL_REVISION" --token-env OTZARIA_HF_TOKEN) \
+  || die "could not fetch the query package $QUERY_PACKAGE_CHECKSUM"
+ORT=$(onnx_runtime) || die "the venv holds no ONNX Runtime library for the validator — run bootstrap_runner.sh"
+set +e
+TMPDIR="$WORK" "$VALIDATE" --index "$INDEX" --release "$WORK/release" --plan "$PLAN" \
+  --warehouse "$WAREHOUSE" --model "$QPKG/$QUERY_GRAPH" --model-identity "$FAMILY" --onnx-runtime "$ORT" \
+  --threads "$(getconf _NPROCESSORS_ONLN)" --report "$WORK/release/validation.json"
+validated=$?
+set -e
+jq -c '{passed, gates: [.gates[] | {gate, status}]}' "$WORK/release/validation.json" 2>/dev/null || true
+[ "$validated" -eq 0 ] || { echo "::error::validate_semantic_vectors exited $validated: the release did not pass G3, G4 and G6; nothing is published"; exit 2; }
+endgroup
+
 # ─── 6 files ───────────────────────────────────────────────────────────────
 group "6 the published files"
 REL=$WORK/release/release.json
@@ -251,12 +284,15 @@ notes="$WORK/notes.md"
   echo "Semantic vectors for library release $TAG (base)."
   echo
   echo "Manifest: \`$STEM.manifest.json\`, SHA-256 \`$MANIFEST_SHA\` — check it before trusting the files it lists."
+  echo
+  echo "Gates: \`gates.json\` (assemble --verify) and \`validation.json\` (validate_semantic_vectors on the release index: G3, G4, G6)."
 } > "$notes"
 # A draft fires no `release` event and creates no tag: nothing is published until every
 # file is in place and checked.
 "$GH" release create "$RELEASE_TAG" --repo "$REPO" --draft --target "$TARGET" --prerelease="$PRERELEASE" \
   --latest=false --title "Library vectors $TAG" --notes-file "$notes"
-UPLOADS=("${DATA[@]}" "$WORK/release/gates.json" "$WORK/files/$STEM.manifest.json")   # data first, the manifest last
+UPLOADS=("${DATA[@]}" "$WORK/release/gates.json" "$WORK/release/validation.json" \
+  "$WORK/files/$STEM.manifest.json")   # data first, the manifest last
 for f in "${UPLOADS[@]}"; do
   "$GH" release upload "$RELEASE_TAG" "$f" --repo "$REPO"
 done

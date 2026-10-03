@@ -15,6 +15,8 @@ the work, the same way by hand. Load-bearing properties, pinned here:
     manifest last, and the draft is published only once it holds exactly the files built;
   * what it publishes is a prerelease unless the repository says otherwise, which keeps it out
     of update-release-manifest.yml and the database history;
+  * nothing is published unless the plugin's validate_semantic_vectors passes the release on its
+    index (G3 coverage, G4 resolution, G6 retrieval), and its report is published with the gates;
   * it persists the ledger only after a publish.
 
 The YAML assertions read the parsed workflow; the driver's are made by running it against stub
@@ -163,6 +165,8 @@ class Pins(unittest.TestCase):
         self.assertRegex(pins["PASSAGE_PACKAGE_CHECKSUM"], r"^[0-9a-f]{64}$")
         self.assertRegex(pins["MODEL_REVISION"], r"^[0-9a-f]{7,40}$")   # the mirror at a commit, never a branch
         self.assertEqual(pins["PASSAGE_QUANTIZATION"], "fp32")
+        self.assertRegex(pins["QUERY_PACKAGE_CHECKSUM"], r"^[0-9a-f]{64}$")      # G6 measures the int8 query model
+        self.assertTrue(pins["QUERY_GRAPH"].endswith("-int8.onnx"))
 
     def test_a_plan_the_gpu_worker_gets_can_always_be_certified(self):
         # the GPU worker's parity certificate needs 1,000 samples, 41 of them golden: a plan of fewer
@@ -276,6 +280,66 @@ case "$script" in
 esac
 """
 
+# As validate_semantic_vectors does: arguments that are wrong, or inputs that do not read, exit 2;
+# a gate that failed or did not run (its inputs not given, and not skipped) exits 1, with the
+# report written; every gate passed or skipped exits 0. VALIDATE_FAILS names gates that fail and
+# VALIDATE_UNREADABLE makes the index unreadable, for the driver's tests.
+STUB_VALIDATE = r"""#!/usr/bin/env bash
+echo "validate $*" >> "$CALLS"
+echo "validate-env TMPDIR=${TMPDIR:-}" >> "$CALLS"
+wrong() { echo "$1" >&2; exit 2; }
+given=" "; releases=0; skips=""
+index=""; vectors=""; plan=""; warehouse=""; model=""; identity=""; ort=""; report=""; threads=""
+while [ $# -gt 0 ]; do
+  flag=$1
+  case "$flag" in
+    --release) [ $# -ge 2 ] || wrong "--release needs a value"
+      { [ -f "$2/segment.oxv" ] && [ -f "$2/release.json" ]; } || wrong "the releases do not install as a device installs them: $2"
+      releases=$((releases + 1)); shift 2; continue ;;
+    --skip) case "${2:-}" in G3|G4|G6) skips="$skips $2"; shift 2; continue ;; *) wrong "--skip needs a gate" ;; esac ;;
+    --index|--vectors|--plan|--max-stale-hints|--warehouse|--model|--model-identity|--onnx-runtime|--queries|\
+    --sample-queries|--min-recall-10|--min-recall-50|--threads|--report) ;;
+    *) wrong "unknown argument $flag" ;;
+  esac
+  [ $# -ge 2 ] || wrong "$flag needs a value"
+  case "$given" in *" $flag "*) wrong "$flag is given twice" ;; esac
+  given="$given$flag "
+  case "$flag" in
+    --index) index=$2 ;; --vectors) vectors=$2 ;; --plan) plan=$2 ;; --warehouse) warehouse=$2 ;; --model) model=$2 ;;
+    --model-identity) identity=$2 ;; --onnx-runtime) ort=$2 ;; --report) report=$2 ;; --threads) threads=$2 ;;
+  esac
+  shift 2
+done
+n=0; for g in G3 G4 G6; do case "$skips" in *$g*) n=$((n + 1)) ;; esac; done
+[ "$n" -lt 3 ] || wrong "--skip names every gate, which leaves nothing to validate"
+[ -n "$index" ] || wrong "--index is required"
+if [ -n "$vectors" ] && [ "$releases" -gt 0 ]; then wrong "give --vectors, or one --release or more, and not both"; fi
+if [ -z "$vectors" ] && [ "$releases" -eq 0 ]; then wrong "give --vectors, or one --release or more, and not both"; fi
+[ "$threads" != 0 ] || wrong "--threads is 0, and a scan needs one"
+g6=""; [ -z "$warehouse" ] || g6=${g6}w; [ -z "$model" ] || g6=${g6}m; [ -z "$identity" ] || g6=${g6}i
+case "$g6" in ""|wmi) ;; *) wrong "G6 needs --warehouse, --model and --model-identity together" ;; esac
+{ [ -d "$index" ] && [ -z "${VALIDATE_UNREADABLE:-}" ]; } || wrong "could not validate against the index $index"
+[ -z "$plan" ] || [ -f "$plan/plan-manifest.json" ] || wrong "could not read the plan $plan"
+if [ "$g6" = wmi ]; then
+  [ -f "$warehouse/warehouse.json" ] || wrong "could not open the warehouse $warehouse"
+  [ -f "$model" ] || wrong "loading the query model $model"
+  [ -f "$identity" ] || wrong "could not read the model identity $identity"
+  [ -z "$ort" ] || [ -f "$ort" ] || wrong "could not load ONNX Runtime from $ort"
+fi
+verdict() {
+  case "$skips" in *$1*) echo skipped; return ;; esac
+  case "${VALIDATE_FAILS:-}" in *$1*) echo failed; return ;; esac
+  if [ "$1" = G6 ] && [ "$g6" != wmi ]; then echo notRun; return; fi
+  echo passed
+}
+g3=$(verdict G3); g4=$(verdict G4); g6v=$(verdict G6); passed=true
+for v in $g3 $g4 $g6v; do case "$v" in passed|skipped) ;; *) passed=false ;; esac; done
+[ -z "$report" ] || jq -n --argjson passed "$passed" --arg g3 "$g3" --arg g4 "$g4" --arg g6 "$g6v" \
+  '{tool: "validate_semantic_vectors", reportVersion: 1, passed: $passed,
+    gates: [{gate: "G3", status: $g3}, {gate: "G4", status: $g4}, {gate: "G6", status: $g6}]}' > "$report"
+[ "$passed" = true ]
+"""
+
 STUB_ZSTD = r"""#!/usr/bin/env bash
 echo "zstd $*" >> "$CALLS"
 if [ "$1" = "-dc" ]; then cat; exit 0; fi
@@ -291,7 +355,8 @@ class Driver(unittest.TestCase):
         r = Path(self.tmp.name)
         self.root, self.calls = r, r / "calls.log"
         (r / "bin").mkdir()
-        for name, body in (("gh", STUB_GH), ("export", STUB_EXPORT), ("cli", STUB_CLI), ("py", STUB_PY), ("zstd", STUB_ZSTD)):
+        for name, body in (("gh", STUB_GH), ("export", STUB_EXPORT), ("cli", STUB_CLI), ("py", STUB_PY), ("zstd", STUB_ZSTD),
+                           ("validate", STUB_VALIDATE)):
             p = r / "bin" / name
             p.write_text(body)
             p.chmod(p.stat().st_mode | stat.S_IEXEC)
@@ -331,6 +396,7 @@ class Driver(unittest.TestCase):
         e = dict(os.environ, CALLS=str(self.calls), ASSETS=str(self.root / "assets"), UPLOADED=str(self.root / "uploaded.tsv"),
                  OTZARIA_SEMANTIC_CLI=str(self.root / "bin" / "cli"), EXPORT_SEMANTIC_PLAN=str(self.root / "bin" / "export"),
                  VECTOR_PYTHON=str(self.root / "bin" / "py"), GH=str(self.root / "bin" / "gh"), ZSTD=str(self.root / "bin" / "zstd"),
+                 VALIDATE_SEMANTIC_VECTORS=str(self.root / "bin" / "validate"),
                  VECTORS_MIN_FREE_GB="0", OTZARIA_HF_TOKEN="hf_s3cr3t", GITHUB_ACTIONS="")
         e.update({k: str(v) for k, v in env.items()})
         p = subprocess.run(["bash", str(DRIVER), "--tag", tag, "--mode", mode, "--state", str(self.state), "--repo", "o/r"],
@@ -346,9 +412,10 @@ class Driver(unittest.TestCase):
         p, calls = self.run_driver(TO_EMBED=0)
         self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
         order = [self.index_of(calls, n) for n in ("--pattern otzaria-library-index.tar.zst.manifest.json", "export --index",
-                                                   "cli assemble --kind base", "cli assemble --verify", "cli release-files")]
-        self.assertEqual(order, sorted(order))
-        self.assertFalse([c for c in calls if c.startswith("py ") or "warehouse-add" in c])   # nothing to embed
+                                                   "cli assemble --kind base", "cli assemble --verify", "validate --index",
+                                                   "cli release-files")]
+        self.assertEqual(order, sorted(order))                 # a dry run validates too
+        self.assertFalse([c for c in calls if "embed_worker.py" in c or "embed-shard" in c or "warehouse-add" in c])
         self.assertFalse([c for c in calls if "release create" in c or "release upload" in c or "release edit" in c])
         self.assertFalse((self.state / "ledger").exists())
 
@@ -359,7 +426,8 @@ class Driver(unittest.TestCase):
         workers = [c for c in calls if "embed_worker.py" in c]
         self.assertEqual(len(workers), -(-n // int(PIN["EMBED_WINDOW"])))
         self.assertIn("--skip 0 --take", workers[0])
-        self.assertFalse([c for c in calls if "cli embed-shard" in c or "model_package.py" in c])
+        self.assertFalse([c for c in calls if "cli embed-shard" in c
+                          or ("model_package.py" in c and PIN["PASSAGE_PACKAGE_CHECKSUM"] in c)])   # not the CPU path
         self.assertIn('"worker":"seforim-gpu-worker 1.0"', calls[self.index_of(calls, "cli assemble --kind base")])
         add = self.index_of(calls, "cli warehouse-add")
         self.assertGreater(add, self.index_of(calls, "embed_worker.py"))
@@ -451,6 +519,82 @@ class Driver(unittest.TestCase):
         self.assertIn("no warehouse", p.stdout)
         self.assertFalse([c for c in calls if "cli assemble" in c])
 
+    def test_the_release_is_validated_on_its_index_with_every_gate_before_anything_is_published(self):
+        p, calls = self.run_driver(mode="base", TO_EMBED=0)
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        work, cache = self.state / "work" / TAG, self.state / "model-cache"
+        fetch = calls[self.index_of(calls, "--checksum " + PIN["QUERY_PACKAGE_CHECKSUM"])]   # the int8 query package
+        for arg in ("model_package.py fetch", "--cache " + str(cache), "--graph " + PIN["QUERY_GRAPH"],
+                    "--repo " + PIN["MODEL_REPO"], "--revision " + PIN["MODEL_REVISION"]):
+            self.assertIn(arg + " ", fetch + " ")
+        i = self.index_of(calls, "validate --index")
+        args = calls[i].split()[1:]
+        pairs = dict(zip(args[::2], args[1::2]))
+        self.assertEqual(args[::2], ["--index", "--release", "--plan", "--warehouse", "--model", "--model-identity",
+                                     "--onnx-runtime", "--threads", "--report"])
+        self.assertEqual(pairs, {
+            "--index": str(work / "index" / "index"), "--release": str(work / "release"), "--plan": str(work / "plan"),
+            "--warehouse": str(self.warehouse), "--model": str(cache / PIN["QUERY_PACKAGE_CHECKSUM"] / PIN["QUERY_GRAPH"]),
+            "--model-identity": str(self.state / "bin" / "family-model.json"), "--onnx-runtime": str(self.ort),
+            "--threads": pairs["--threads"], "--report": str(work / "release" / "validation.json")})
+        self.assertGreater(int(pairs["--threads"]), 0)
+        self.assertEqual(calls[i + 1], "validate-env TMPDIR=" + str(work))   # its installed set stays in the work dir
+        self.assertTrue(self.index_of(calls, "cli assemble --verify") < self.index_of(calls, "validate --index")
+                        < self.index_of(calls, "cli release-files") < self.index_of(calls, "gh release create"))
+
+    def test_a_release_the_validator_does_not_pass_is_never_published(self):
+        for env, code in (({"VALIDATE_FAILS": "G6"}, 1), ({"VALIDATE_FAILS": "G3 G4"}, 1), ({"VALIDATE_UNREADABLE": "1"}, 2)):
+            with self.subTest(env=env):
+                self.calls.unlink(missing_ok=True)
+                p, calls = self.run_driver(mode="base", TO_EMBED=0, **env)
+                self.assertNotEqual(p.returncode, 0)
+                self.assertIn(f"validate_semantic_vectors exited {code}", p.stdout)
+                after = calls[self.index_of(calls, "validate --index"):]
+                self.assertFalse([c for c in after if c.startswith("gh ") or "release-files" in c])
+                self.assertFalse([c for c in calls if "gh release create" in c or "gh release upload" in c
+                                  or "gh release edit" in c])
+                self.assertFalse((self.state / "ledger").exists())
+
+    def test_a_dry_run_the_validator_does_not_pass_fails_too(self):
+        p, calls = self.run_driver(TO_EMBED=0, VALIDATE_FAILS="G4")
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn("validate_semantic_vectors exited 1", p.stdout)
+        self.assertFalse([c for c in calls if "release-files" in c])
+
+    def test_a_missing_validator_stops_the_build_before_it_starts(self):
+        p, calls = self.run_driver(VALIDATE_SEMANTIC_VECTORS=str(self.root / "bin" / "no-validator"))
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn("validate_semantic_vectors is not at", p.stdout)
+        self.assertFalse([c for c in calls if "release download" in c])
+
+    def test_the_stub_validator_refuses_what_the_real_one_refuses(self):
+        release, index, plan = self.root / "rel", self.root / "idx", self.root / "plan"
+        release.mkdir(); index.mkdir(); plan.mkdir()
+        for f in ("segment.oxv", "release.json"):
+            (release / f).write_text("x")
+        (plan / "plan-manifest.json").write_text("{}")
+        model, ort = self.root / "q.onnx", self.root / "libonnxruntime.so"
+        model.write_text("x"); ort.write_text("x")
+        g6 = ["--warehouse", str(self.warehouse), "--model", str(model), "--model-identity", str(self.state / "bin" / "family-model.json")]
+        base = ["--index", str(index), "--release", str(release)]
+        report = self.root / "report.json"
+        for args, code in ((base + g6, 0), (base + g6 + ["--onnx-runtime", str(ort), "--plan", str(plan)], 0),
+                           (base + ["--report", str(report)], 1),                       # G6 not given: not run
+                           (base + g6[:2], 2),                                          # G6 half given
+                           (base + g6 + ["--frobnicate", "1"], 2),
+                           (base + ["--skip", "G3", "--skip", "G4", "--skip", "G6"], 2),
+                           (base + ["--skip", "G6"], 0),
+                           (["--release", str(release)] + g6, 2),                      # no --index
+                           (["--index", str(index)] + g6, 2),                          # no set
+                           (base + g6 + ["--threads", "0"], 2),
+                           (["--index", str(index), "--release", str(self.root)] + g6, 2),   # not a release
+                           (base + g6 + ["--plan", str(self.root / "nowhere")], 2)):
+            with self.subTest(args=args):
+                p = subprocess.run([str(self.root / "bin" / "validate")] + args, capture_output=True, text=True,
+                                   env=dict(os.environ, CALLS=str(self.calls)))
+                self.assertEqual(p.returncode, code, p.stderr)
+        self.assertEqual(json.loads(report.read_text())["gates"][2], {"gate": "G6", "status": "notRun"})
+
     def test_a_publish_is_a_draft_at_the_library_commit_with_the_data_first_and_the_manifest_last(self):
         p, calls = self.run_driver(mode="base", TO_EMBED=0)
         self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
@@ -463,10 +607,10 @@ class Driver(unittest.TestCase):
         uploads = [c for c in calls if "gh release upload" in c]
         self.assertTrue(all(self.index_of(calls, u) > create for u in uploads))
         names = [Path(u.split()[4]).name for u in uploads]
-        self.assertEqual(len(names), 3)
+        self.assertEqual(len(names), 4)
         self.assertTrue(names[0].endswith(".oxv.zst"))
-        self.assertEqual(names[1], "gates.json")
-        self.assertTrue(names[2].endswith(".manifest.json"))   # the manifest last
+        self.assertEqual(names[1:3], ["gates.json", "validation.json"])
+        self.assertTrue(names[3].endswith(".manifest.json"))   # the manifest last
 
     def test_the_draft_is_published_only_once_its_files_are_checked_and_then_the_ledger_is_persisted(self):
         p, calls = self.run_driver(mode="base", TO_EMBED=0)
