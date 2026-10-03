@@ -562,5 +562,98 @@ class Driver(unittest.TestCase):
             self.assertIn(arg, plan)
         self.assertNotIn("--chunking", plan)   # the recipe comes from the model
 
+STUB_GIT = r"""#!/usr/bin/env bash
+echo "git $*" >> "$CALLS"
+if [ "$1" = clone ]; then           # git clone -q --filter=blob:none <url> <dest>
+  url=${@: -2:1}; dest=${@: -1}
+  mkdir -p "$dest"
+  case "$url" in *otzaria-semantic-search*)
+    mkdir -p "$dest/config/models/meivin-round2-onnx"
+    echo '{"family_id":"stub"}' > "$dest/config/models/meivin-round2-onnx/model.json"
+    echo '{"chunking_version":1}' > "$dest/config/models/meivin-round2-onnx/chunking.json" ;;
+    *otzaria_search_engine*) mkdir -p "$dest/rust" ;;     # the plugin's crate
+  esac
+fi
+"""
+
+STUB_CARGO = r"""#!/usr/bin/env bash
+echo "cargo $*" >> "$CALLS"
+bins=(); while [ $# -gt 0 ]; do case "$1" in --bin) bins+=("$2"); shift 2;; *) shift;; esac; done
+mkdir -p "$CARGO_TARGET_DIR/release"
+for b in "${bins[@]}"; do printf '#!/bin/sh\n' > "$CARGO_TARGET_DIR/release/$b"; chmod +x "$CARGO_TARGET_DIR/release/$b"; done
+"""
+
+# a venv made before: its python stands in for pip and for the import check
+STUB_VENV_PYTHON = r"""#!/usr/bin/env bash
+echo "venv-python PIP_CERT=${PIP_CERT:-} $*" >> "$CALLS"
+if [ "${1:-}" = - ]; then cat > /dev/null; echo "venv: stub"; fi
+"""
+
+
+@unittest.skipUnless(linux_tools(), "needs bash, flock and install")
+class Bootstrap(unittest.TestCase):
+    """bootstrap_runner.sh against stub git, cargo and venv: what it builds, records and hands pip."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        r = Path(self.tmp.name)
+        self.root, self.calls, self.state = r, r / "calls.log", r / "state"
+        (r / "bin").mkdir()
+        python = self.state / "venv" / "bin" / "python"
+        python.parent.mkdir(parents=True)
+        for path, body in ((r / "bin" / "git", STUB_GIT), (r / "bin" / "cargo", STUB_CARGO), (python, STUB_VENV_PYTHON)):
+            path.write_text(body)
+            path.chmod(path.stat().st_mode | stat.S_IEXEC)
+        self.ca = r / "system-ca.crt"
+        self.ca.write_text("a stand-in for the system bundle")
+        # the stubs, flock, and the system's tools: no other cargo
+        self.path = os.pathsep.join([str(r / "bin"), os.path.dirname(shutil.which("flock")), "/usr/bin", "/bin"])
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def run_bootstrap(self, **env):
+        self.calls.unlink(missing_ok=True)
+        e = {"PATH": self.path, "CALLS": str(self.calls), "HOME": str(self.root), "SYSTEM_CA": str(self.ca)}
+        e.update({k: str(v) for k, v in env.items()})
+        p = subprocess.run(["bash", str(BOOTSTRAP), "--state", str(self.state)], capture_output=True, text=True, env=e)
+        return p, (self.calls.read_text().splitlines() if self.calls.exists() else [])
+
+    def test_the_validator_is_built_able_to_run_g6_and_recorded_like_every_binary(self):
+        p, calls = self.run_bootstrap()
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        b = self.state / "bin"
+        for name, rev, build in (
+                ("otzaria-semantic-search", PIN["SIDECAR_REV"], "--features onnx-backend --bin otzaria-semantic-search"),
+                ("export_semantic_plan", PIN["PLUGIN_REV"], "--features semantic-integration --bin export_semantic_plan"),
+                ("validate_semantic_vectors", PIN["PLUGIN_REV"], "--features semantic --bin validate_semantic_vectors")):
+            self.assertTrue(os.access(b / name, os.X_OK), name)
+            self.assertEqual((b / f"{name}.rev").read_text().strip(), rev, name)
+            self.assertEqual((b / f"{name}.build").read_text().strip(), build, name)
+        self.assertTrue((b / "family-model.json").exists() and (b / "chunking.json").exists())
+        self.assertFalse((self.state / "build").exists())        # the build directory goes
+        p, calls = self.run_bootstrap()                            # and a second run builds nothing
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertFalse([c for c in calls if c.startswith("cargo ")])
+
+    def test_pip_is_handed_the_system_ca_bundle_unless_it_is_told_another(self):
+        for env, expected in (({}, str(self.ca)), ({"PIP_CERT": "/elsewhere/bundle.pem"}, "/elsewhere/bundle.pem"),
+                              ({"SYSTEM_CA": str(self.root / "no-bundle")}, "")):
+            with self.subTest(env=env):
+                p, calls = self.run_bootstrap(**env)
+                self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+                pips = [c for c in calls if " -m pip install " in c]
+                self.assertEqual(len(pips), 2)
+                for c in pips:
+                    self.assertTrue(c.startswith(f"venv-python PIP_CERT={expected} -m pip install "), c)
+
+    def test_with_no_cargo_it_says_to_install_rustup_first(self):
+        (self.root / "bin" / "cargo").unlink()
+        p, calls = self.run_bootstrap()
+        self.assertEqual(p.returncode, 69)
+        self.assertIn("install rustup", p.stderr)
+        self.assertFalse((self.state / "bin" / "otzaria-semantic-search").exists())
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
