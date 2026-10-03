@@ -8,9 +8,20 @@ import java.sql.DriverManager
 import kotlin.io.path.exists
 import kotlin.system.exitProcess
 
+/** Site-curated book info: the generation source. */
+internal const val BOOK_INFO_FILE = "book_info.csv"
+
+/** The previous generation source, read only from an archive without [BOOK_INFO_FILE]. */
+internal const val GENERATIONS_FILE = "generations.csv"
+
+private val BOOK_INFO_HEADER =
+    listOf("bookName", "authorName", "generationName", "subGenerationName", "startYear", "endYear")
+
 /**
  * Seeds the `generation` table and links books to their generation, driven by
- * otzaria-library/ForDB/generations.csv (`שם ספר,קבוצת דור` with header).
+ * otzaria-library/ForDB/book_info.csv — the per-book info edited on the Otzaria
+ * website (one PR per edit). An older ForDB archive that predates it falls back
+ * to ForDB/generations.csv (`שם ספר,קבוצת דור` with header); see [loadGenerationRows].
  *
  * Runs AFTER appendOtzaria so both Sefaria- and Otzaria-stage books are
  * considered. Linking is purely by book title — no transitive author-level
@@ -27,8 +38,6 @@ import kotlin.system.exitProcess
  * Env alternatives:
  *   SEFORIM_DB
  */
-private val GENERATIONS_FILE = FOR_DB_CSV_FILES.getValue("generations")
-
 fun main(args: Array<String>) {
     Logger.setMinSeverity(Severity.Info)
     val logger = Logger.withTag("SeedGenerations")
@@ -46,7 +55,7 @@ fun main(args: Array<String>) {
 
     logger.i { "Seeding generations in $dbPath" }
 
-    val rows = parseGenerations(downloadRequiredForDbFile(GENERATIONS_FILE, logger), logger)
+    val rows = loadGenerationRows(logger)
 
     try {
         DriverManager.getConnection("jdbc:sqlite:$dbPath").use { conn ->
@@ -70,6 +79,64 @@ fun main(args: Array<String>) {
         logger.e(e) { "Failed to seed generations; aborting" }
         exitProcess(1)
     }
+}
+
+/**
+ * Generation rows for [applyGenerations]: from [BOOK_INFO_FILE] when the ForDB
+ * archive has it, else from [GENERATIONS_FILE]. The fallback keeps an older pinned
+ * archive buildable (e.g. a delta test on the released inputs) while otzaria-library
+ * moves from one file to the other. Neither file present is fatal.
+ */
+internal fun loadGenerationRows(logger: Logger): List<Pair<String, String>> {
+    downloadOptionalForDbFile(BOOK_INFO_FILE, logger)?.let { return parseBookInfoGenerations(it, logger) }
+    val legacy = checkNotNull(downloadOptionalForDbFile(GENERATIONS_FILE, logger)) {
+        "ForDB archive has neither $BOOK_INFO_FILE nor $GENERATIONS_FILE"
+    }
+    logger.w { "$BOOK_INFO_FILE is not in this ForDB archive; reading generations from $GENERATIONS_FILE" }
+    return parseGenerations(legacy, logger)
+}
+
+/**
+ * [BOOK_INFO_FILE] → (book title, generation) pairs, one per title.
+ *
+ * The file has one row per (book, author), so a title may appear more than once;
+ * rows without a generation are skipped. When a title's rows disagree, the most
+ * frequent generation wins and a tie goes to the first row in the file (it is
+ * sorted by book, then author), with a warning — a book is never linked to two
+ * generations. Records are parsed RFC-4180 style, since fields are all quoted.
+ */
+internal fun parseBookInfoGenerations(lines: List<String>, logger: Logger): List<Pair<String, String>> {
+    val records = parseForDbCsvRecords(lines.joinToString("\n"))
+    require(records.isNotEmpty()) { "$BOOK_INFO_FILE is empty" }
+    require(records.first() == BOOK_INFO_HEADER) {
+        "$BOOK_INFO_FILE must start with the header ${BOOK_INFO_HEADER.joinToString(",")}"
+    }
+
+    val byTitle = LinkedHashMap<String, MutableList<String>>()
+    for ((index, fields) in records.drop(1).withIndex()) {
+        require(fields.size == BOOK_INFO_HEADER.size && fields[0].isNotEmpty()) {
+            "$BOOK_INFO_FILE record ${index + 2} is malformed: $fields"
+        }
+        val generation = fields[2]
+        if (generation.isEmpty()) continue
+        byTitle.getOrPut(fields[0]) { mutableListOf() } += generation
+    }
+
+    val conflicts = mutableListOf<String>()
+    val rows = byTitle.map { (title, generations) ->
+        val counts = generations.groupingBy { it }.eachCount()
+        val best = counts.values.max()
+        val chosen = generations.first { counts.getValue(it) == best }
+        if (counts.size > 1) conflicts += "'$title' → $chosen (${counts.keys.joinToString("/")})"
+        title to chosen
+    }
+    if (conflicts.isNotEmpty()) {
+        logger.w {
+            "$BOOK_INFO_FILE: ${conflicts.size} book(s) have rows with different generations; using " +
+                conflicts.take(20).joinToString()
+        }
+    }
+    return rows
 }
 
 /**
