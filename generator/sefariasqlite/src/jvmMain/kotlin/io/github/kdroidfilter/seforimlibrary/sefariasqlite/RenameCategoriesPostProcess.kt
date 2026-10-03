@@ -85,7 +85,8 @@ internal val FOR_DB_CSV_FILES = mapOf(
     "categoryMoves" to "category_moves.csv",
     "bookRenames" to "book_renames.csv",
     "bookMoves" to "book_moves.csv",
-    "generations" to "generations.csv",
+    // Generations are read from book_info.csv, or generations.csv in an older
+    // archive (SeedGenerationsPostProcess.loadGenerationRows) — neither is required here.
     "categoryDescriptions" to "sefaria_category_changes.csv",
 )
 
@@ -123,7 +124,7 @@ fun main(args: Array<String>) {
     // Semantic checks that require post-append books still run in their real
     // appliers, but malformed JSON/CSV/header/duplicate-path input can never be
     // discovered only after rename/move mutations were committed.
-    parseGenerations(downloadRequiredForDbFile(FOR_DB_CSV_FILES.getValue("generations"), logger), logger)
+    loadGenerationRows(logger)
     parseBulkMetadata(downloadRequiredForDbFile("all_metadata.json", logger))
     parseDescriptionOverrides(downloadRequiredForDbFile("sefaria_metadata_changes.csv", logger))
     parseCategoryDescriptionOverrides(
