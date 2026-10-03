@@ -8,6 +8,11 @@ run-name: library-vectors ${{ inputs.release_tag || github.event.workflow_run.di
 # .github/scripts/vectors/build_library_vectors.sh, which runs by hand on that machine the
 # same way; this file only decides when, where, and in which mode.
 #
+# Nothing is published, and a dry run fails too, unless the release passes two sets of gates:
+# the sidecar's assemble --verify, and the plugin's validate_semantic_vectors on the release
+# index (G3 coverage, G4 resolution, G6 retrieval with the int8 query model). Both reports,
+# gates.json and validation.json, are published with the release.
+#
 # Publishing is opt-in: a run the index workflow triggers is a dry run unless the repository
 # variable LIBRARY_VECTORS_PUBLISH is "true"; a manual run says so with `mode`. What it
 # publishes is a prerelease unless the repository variable LIBRARY_VECTORS_PRERELEASE is
@@ -90,7 +95,7 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
   vectors:
-    name: Embed, assemble, verify and publish the vectors
+    name: Embed, assemble, verify, validate and publish the vectors
     needs: gate
     if: needs.gate.outputs.proceed == 'true'
     # The build machine: the label the index workflow's local runner carries, and its GPU.
