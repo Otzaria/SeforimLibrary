@@ -3,6 +3,10 @@ package io.github.kdroidfilter.seforimlibrary.sefariasqlite
 import co.touchlab.kermit.Logger
 import co.touchlab.kermit.Severity
 import io.github.kdroidfilter.seforimlibrary.common.OptimizedHttpClient
+import io.github.kdroidfilter.seforimlibrary.common.buildstate.BuildStateVerifier
+import io.github.kdroidfilter.seforimlibrary.common.buildstate.IdTable
+import io.github.kdroidfilter.seforimlibrary.common.ids.BOOK_MOVE_LEAF_KEY_PREFIX
+import io.github.kdroidfilter.seforimlibrary.common.ids.CategoryLabels
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
@@ -12,6 +16,7 @@ import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.io.InputStream
 import java.nio.charset.StandardCharsets
+import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.Paths
 import java.sql.Connection
@@ -43,6 +48,8 @@ import kotlin.system.exitProcess
  *
  * Book moves require the source path and the destination's parent path to exist;
  * only the final (leaf) destination segment is auto-created if missing (idempotent).
+ * A created leaf takes its id from the build state (`<db>.buildstate`, or
+ * -PbuildStatePath), which must exist: see [BookMoveLeafIds].
  *
  * Category moves reparent an existing category (books and subcategories follow).
  * The destination parent must already exist (nothing is auto-created); moving a
@@ -56,9 +63,10 @@ import kotlin.system.exitProcess
  *
  * Usage:
  *   ./gradlew -p SeforimLibrary :sefariasqlite:renameCategories -PseforimDb=/path/to/seforim.db
+ *       [-PbuildStatePath=/path/to/seforim.db.buildstate]
  *
  * Env alternatives:
- *   SEFORIM_DB
+ *   SEFORIM_DB, BUILD_STATE_PATH
  */
 private const val FOR_DB_POINTER_URL =
     "https://raw.githubusercontent.com/Otzaria/otzaria-library/main/fordb_latest_pointer.json"
@@ -122,8 +130,24 @@ fun main(args: Array<String>) {
         downloadRequiredForDbFile(FOR_DB_CSV_FILES.getValue("categoryDescriptions"), logger),
     )
 
+    // Book-move destination leaves get their ids from the build state (see
+    // [BookMoveLeafIds]); without it they would fall back to implicit rowids and
+    // land on ids the build state reserves for Otzaria folders.
+    val buildStatePath = resolveSeifimBuildStatePath(dbPath)
+    if (!Files.exists(buildStatePath)) {
+        logger.e { "build_state not found at $buildStatePath; run the DB generation pipeline first" }
+        exitProcess(1)
+    }
+
     try {
         DriverManager.getConnection("jdbc:sqlite:$dbPath").use { conn ->
+            // ATTACH is not allowed inside a transaction, so it precedes autoCommit=false.
+            // From here on the build state's id rows commit or roll back with the DB.
+            conn.prepareStatement("ATTACH DATABASE ? AS $BOOK_MOVE_STATE_SCHEMA").use { st ->
+                st.setString(1, buildStatePath.toAbsolutePath().toString())
+                st.execute()
+            }
+            val leafIds = BookMoveLeafIds(conn)
             conn.autoCommit = false
 
             // PREFLIGHT (defence in depth beside the update-fordb publish gate): dry-run
@@ -139,6 +163,9 @@ fun main(args: Array<String>) {
                 exitProcess(1)
             }
             logger.i { "ForDB preflight passed — applying for real" }
+
+            // Before any leaf is created, so a restored id is never handed to a leaf.
+            leafIds.restore(CATEGORY_ID_RESTORES, logger)
 
             var totalRenamed = 0
             var totalMerged = 0
@@ -162,7 +189,9 @@ fun main(args: Array<String>) {
                 renameBookTitle(conn, oldTitle, newTitle, logger)
             }
 
-            val booksMoved = runSection("Book moves", bookMoves, logger) { move -> applyBookMove(conn, move, logger) }
+            val booksMoved = runSection("Book moves", bookMoves, logger) { move ->
+                applyBookMove(conn, move, logger, leafIds)
+            }
 
             conn.commit()
             logger.i {
@@ -170,6 +199,9 @@ fun main(args: Array<String>) {
                     "books renamed=$booksRenamed; books moved=$booksMoved"
             }
         }
+        // The ATTACHed build state was mutated in place; meta stays with the stage
+        // that wrote it, the counters must still be ahead of the DB.
+        BuildStateVerifier.verifyFreshSnapshot(buildStatePath, dbPath, emptyMap())
     } catch (e: Exception) {
         logger.e(e) { "Failed to open or commit DB; aborting" }
         exitProcess(1)
@@ -631,11 +663,19 @@ private fun categoryParent(conn: Connection, categoryId: Long): Long? =
 /**
  * Updates the matching book's categoryId. Source path must fully exist; the
  * destination's leaf is created if missing (parents must exist).
+ *
+ * [leafIds] gives a created leaf its id from the build state. Null (the ForDB
+ * dry-run validator, which always rolls back) keeps SQLite's implicit rowid.
  */
-internal fun applyBookMove(conn: Connection, move: BookMove, logger: Logger): Int {
+internal fun applyBookMove(
+    conn: Connection,
+    move: BookMove,
+    logger: Logger,
+    leafIds: BookMoveLeafIds? = null,
+): Int {
     val sourceCatId = resolveCategoryPath(conn, move.sourcePath)
         ?: error("Book move source '${move.sourcePath}' not found for '${move.name}'")
-    val destCatId = resolveOrCreateDestCategory(conn, move.destPath, logger)
+    val destCatId = resolveOrCreateDestCategory(conn, move.destPath, logger, leafIds)
         ?: error("Book move destination parent path '${move.destPath}' not found for '${move.name}' (only the final segment is auto-created)")
 
     val candidates = mutableListOf<Pair<Long, Long>>() // (bookId, categoryId)
@@ -678,7 +718,12 @@ private fun resolveCategoryPath(conn: Connection, path: String): Long? {
 }
 
 /** Resolves the dest path, creating only a missing leaf; parents must exist (else null). */
-private fun resolveOrCreateDestCategory(conn: Connection, path: String, logger: Logger): Long? {
+private fun resolveOrCreateDestCategory(
+    conn: Connection,
+    path: String,
+    logger: Logger,
+    leafIds: BookMoveLeafIds?,
+): Long? {
     val segments = path.split('/').map { it.trim() }.filter { it.isNotEmpty() }
     if (segments.isEmpty()) return null
     var parentId: Long? = null
@@ -687,7 +732,8 @@ private fun resolveOrCreateDestCategory(conn: Connection, path: String, logger: 
         if (existing != null) {
             parentId = existing
         } else if (idx == segments.lastIndex) {
-            parentId = createCategory(conn, segment, parentId, logger)
+            val stableId = leafIds?.leafId(segments)
+            parentId = createCategory(conn, segment, parentId, stableId, logger)
         } else {
             return null
         }
@@ -695,9 +741,25 @@ private fun resolveOrCreateDestCategory(conn: Connection, path: String, logger: 
     return parentId
 }
 
-/** Inserts a category under [parentId] (level = parent.level + 1) and returns its new id. */
-private fun createCategory(conn: Connection, title: String, parentId: Long?, logger: Logger): Long {
+/**
+ * Inserts a category under [parentId] (level = parent.level + 1) and returns its id:
+ * [id] when given, otherwise SQLite's implicit rowid.
+ */
+private fun createCategory(conn: Connection, title: String, parentId: Long?, id: Long?, logger: Logger): Long {
     val level = if (parentId == null) 0 else categoryLevel(conn, parentId) + 1
+    if (id != null) {
+        // The build state does not describe this DB if the id is already taken; a
+        // plain INSERT fails on the primary key rather than merging two folders.
+        conn.prepareStatement("INSERT INTO category (id, parentId, title, level) VALUES (?, ?, ?, ?)").use { stmt ->
+            stmt.setLong(1, id)
+            if (parentId == null) stmt.setNull(2, java.sql.Types.INTEGER) else stmt.setLong(2, parentId)
+            stmt.setString(3, title)
+            stmt.setInt(4, level)
+            stmt.executeUpdate()
+        }
+        logger.i { "Created category '$title' (id=$id from build state, parentId=$parentId, level=$level)" }
+        return id
+    }
     conn.prepareStatement(
         "INSERT INTO category (parentId, title, level) VALUES (?, ?, ?)",
         Statement.RETURN_GENERATED_KEYS,
@@ -708,9 +770,224 @@ private fun createCategory(conn: Connection, title: String, parentId: Long?, log
         stmt.executeUpdate()
         stmt.generatedKeys.use { rs ->
             require(rs.next()) { "Failed to create category '$title'" }
-            val id = rs.getLong(1)
-            logger.i { "Created category '$title' (id=$id, parentId=$parentId, level=$level)" }
-            return id
+            val implicitId = rs.getLong(1)
+            logger.i { "Created category '$title' (id=$implicitId, parentId=$parentId, level=$level)" }
+            return implicitId
+        }
+    }
+}
+
+/** Schema name the build state is ATTACHed under while renameCategories runs. */
+internal const val BOOK_MOVE_STATE_SCHEMA = "rename_state"
+
+/**
+ * Ids the leaves below shipped with (v20 to v30), before they were keyed in the build
+ * state. A leaf's first keyed build takes its published id from here, so clients keep
+ * their per-book settings and saved tabs; the next build finds it under its key.
+ * Applied only while no key holds the id and the DB does not use it, so it can never
+ * take an id from anything else. Leaves added later are not listed: they get fresh ids.
+ *
+ * `תלמוד בבלי/כללי הש״ס` is deliberately absent: it first shipped in v30 (pre-release
+ * only) on 1478, the id it took from `אור הישר/סדר נשים`. That id goes back to סדר
+ * נשים (see [CATEGORY_ID_RESTORES]) and כללי הש״ס gets a fresh one.
+ */
+internal val PUBLISHED_BOOK_MOVE_LEAF_IDS: Map<String, Long> = mapOf(
+    "שו״ת/אחרונים/שות מהרשם" to 1472L,
+    "קבלה/כתבי רבי אברהם אבולעפיא" to 1473L,
+    "מדרש/אגדה/ילקוט שמעוני" to 1474L,
+    "מדרש/אגדה/תנא דבי אליהו" to 1475L,
+    "מחשבת ישראל/אחרונים/רמחל" to 1476L,
+    "מחשבת ישראל/ראשונים/מורה נבוכים" to 1477L,
+)
+
+/**
+ * An Otzaria folder that a book_moves leaf pushed off its id, and the id to give back.
+ * [key] is the folder's build-state key (its Otzaria canonical path).
+ */
+internal data class CategoryIdRestore(val key: String, val reallocatedId: Long, val publishedId: Long)
+
+/**
+ * v30 renumbered `אור הישר/סדר נשים` 1478 -> 1526 (see [BookMoveLeafIds]). v28, the
+ * stable release, and v29 have it on 1478, and clients key per-book settings, hidden
+ * books, note drafts, user links and saved tabs on (title, categoryId). Moving it back
+ * costs only the v30 pre-release one more change.
+ */
+internal val CATEGORY_ID_RESTORES: List<CategoryIdRestore> = listOf(
+    CategoryIdRestore("תלמוד בבלי/אחרונים/אור הישר/סדר נשים", reallocatedId = 1526L, publishedId = 1478L),
+)
+
+/**
+ * Stable ids for the leaves renameCategories creates for book_moves.csv destinations.
+ *
+ * These leaves used to get SQLite's implicit rowid, MAX(category.id) + 1: the id right
+ * after the Sefaria stage's categories, which the build state may already reserve for
+ * an Otzaria folder. The Otzaria stage then found that id taken and had to renumber its
+ * folder (v19: 26 books misplaced; v30: `אור הישר/סדר נשים` 1478 -> 1526). The leaf ids
+ * also shifted whenever the Sefaria tree grew or book_moves.csv rows were added,
+ * removed or reordered.
+ *
+ * Now each leaf is keyed by its destination path in the build state's `id_lookup`
+ * (kind `category`, prefix [BOOK_MOVE_LEAF_KEY_PREFIX]), so it keeps its id across
+ * builds. A new key takes, in this order: its published id from [publishedIds] when
+ * that id is free; the id of the Otzaria folder already at that path (see
+ * [otzariaFolderId]); otherwise a fresh id above both the counter and the DB, never an
+ * id another key holds.
+ *
+ * The Otzaria step matters for a folder that holds Otzaria books too. The Otzaria stage
+ * runs after this one and puts its books into the leaf it finds, so a leaf on a new id
+ * would renumber that folder the first time a book_moves row targets it. When the last
+ * row into the folder is removed, the Otzaria stage recreates it on the leaf id
+ * (IdAllocatorBindings.upsertOtzariaCategory), so it does not move back either.
+ *
+ * The build state must be ATTACHed to [conn] as [schema], so the id rows commit or
+ * roll back together with the category rows.
+ */
+internal class BookMoveLeafIds(
+    private val conn: Connection,
+    private val schema: String = BOOK_MOVE_STATE_SCHEMA,
+    private val publishedIds: Map<String, Long> = PUBLISHED_BOOK_MOVE_LEAF_IDS,
+) {
+    private val kind = IdTable.CATEGORY.lookupKind!!
+
+    /**
+     * Points each restore's key back at its published id, before any leaf is created.
+     * Runs only while the key still holds the reallocated id and nothing (no key, no DB
+     * row) uses the published one, so it applies once and is a no-op afterwards. The
+     * reallocated id is left unheld; fresh ids only grow, so nothing is handed it again.
+     */
+    fun restore(restores: List<CategoryIdRestore>, logger: Logger): Int {
+        var restored = 0
+        for (restore in restores) {
+            if (lookupId(restore.key) != restore.reallocatedId) continue
+            if (lookupHoldsId(restore.publishedId) || dbHoldsId(restore.publishedId)) {
+                logger.w {
+                    "Category id ${restore.publishedId} for '${restore.key}' is taken; " +
+                        "keeping ${restore.reallocatedId}"
+                }
+                continue
+            }
+            conn.prepareStatement(
+                "UPDATE $schema.id_lookup SET id = ? WHERE kind = ? AND natural_key = ?",
+            ).use { st ->
+                st.setLong(1, restore.publishedId)
+                st.setString(2, kind)
+                st.setString(3, restore.key)
+                check(st.executeUpdate() == 1) { "Failed to restore category id for '${restore.key}'" }
+            }
+            logger.i { "Restored category id for '${restore.key}': ${restore.reallocatedId} -> ${restore.publishedId}" }
+            restored++
+        }
+        return restored
+    }
+
+    fun leafId(destSegments: List<String>): Long {
+        val path = destSegments.joinToString("/")
+        val key = BOOK_MOVE_LEAF_KEY_PREFIX + path
+        lookupId(key)?.let { return it }
+
+        val nextId = categoryNextId()
+        val dbMax = queryMaxId(conn, "category")
+        val published = publishedIds[path]?.takeIf { !lookupHoldsId(it) && !dbHoldsId(it) }
+        val id = published ?: otzariaFolderId(path) ?: maxOf(nextId, dbMax + 1)
+
+        conn.prepareStatement(
+            "INSERT INTO $schema.id_lookup(kind, natural_key, id) VALUES (?, ?, ?)",
+        ).use { st ->
+            st.setString(1, kind)
+            st.setString(2, key)
+            st.setLong(3, id)
+            st.executeUpdate()
+        }
+        if (id >= nextId) setCategoryNextId(id + 1)
+        return id
+    }
+
+    /**
+     * The id the Otzaria stage keeps for the folder at [path], when the leaf may take it:
+     * a plain key (not [BOOK_MOVE_LEAF_KEY_PREFIX]) for the same folder holds it, no DB
+     * row does, and every key that holds it is for that folder. "The same folder" is the
+     * Otzaria stage's own test (Generator.findExistingCategory), segment by segment
+     * [CategoryLabels.comparablePath]; a key spelled exactly as [path] wins a tie.
+     */
+    private fun otzariaFolderId(path: String): Long? {
+        val comparable = CategoryLabels.comparablePath(path)
+        val matches = plainKeys().filterKeys { CategoryLabels.comparablePath(it) == comparable }
+        if (matches.isEmpty()) return null
+        val id = matches[path] ?: matches.values.toSet().singleOrNull() ?: return null
+        if (dbHoldsId(id)) return null
+        val holders = keysHolding(id)
+        val sameFolder = holders.all { key ->
+            !key.startsWith(BOOK_MOVE_LEAF_KEY_PREFIX) && CategoryLabels.comparablePath(key) == comparable
+        }
+        return id.takeIf { sameFolder }
+    }
+
+    private fun plainKeys(): Map<String, Long> =
+        conn.prepareStatement(
+            "SELECT natural_key, id FROM $schema.id_lookup WHERE kind = ?",
+        ).use { st ->
+            st.setString(1, kind)
+            st.executeQuery().use { rs ->
+                buildMap {
+                    while (rs.next()) {
+                        val key = rs.getString(1)
+                        if (!key.startsWith(BOOK_MOVE_LEAF_KEY_PREFIX)) put(key, rs.getLong(2))
+                    }
+                }
+            }
+        }
+
+    private fun keysHolding(id: Long): List<String> =
+        conn.prepareStatement(
+            "SELECT natural_key FROM $schema.id_lookup WHERE kind = ? AND id = ?",
+        ).use { st ->
+            st.setString(1, kind)
+            st.setLong(2, id)
+            st.executeQuery().use { rs -> buildList { while (rs.next()) add(rs.getString(1)) } }
+        }
+
+    private fun lookupId(key: String): Long? =
+        conn.prepareStatement(
+            "SELECT id FROM $schema.id_lookup WHERE kind = ? AND natural_key = ?",
+        ).use { st ->
+            st.setString(1, kind)
+            st.setString(2, key)
+            st.executeQuery().use { rs -> if (rs.next()) rs.getLong(1) else null }
+        }
+
+    private fun lookupHoldsId(id: Long): Boolean =
+        conn.prepareStatement(
+            "SELECT 1 FROM $schema.id_lookup WHERE kind = ? AND id = ? LIMIT 1",
+        ).use { st ->
+            st.setString(1, kind)
+            st.setLong(2, id)
+            st.executeQuery().use { it.next() }
+        }
+
+    private fun dbHoldsId(id: Long): Boolean =
+        conn.prepareStatement("SELECT 1 FROM category WHERE id = ?").use { st ->
+            st.setLong(1, id)
+            st.executeQuery().use { it.next() }
+        }
+
+    private fun categoryNextId(): Long =
+        conn.prepareStatement(
+            "SELECT next_id FROM $schema.id_counters WHERE table_name = ?",
+        ).use { st ->
+            st.setString(1, IdTable.CATEGORY.tableName)
+            st.executeQuery().use { rs -> if (rs.next()) rs.getLong(1) else 1L }
+        }
+
+    private fun setCategoryNextId(nextId: Long) {
+        conn.prepareStatement(
+            """
+            INSERT INTO $schema.id_counters(table_name, next_id) VALUES (?, ?)
+            ON CONFLICT(table_name) DO UPDATE SET next_id = excluded.next_id
+            """.trimIndent(),
+        ).use { st ->
+            st.setString(1, IdTable.CATEGORY.tableName)
+            st.setLong(2, nextId)
+            st.executeUpdate()
         }
     }
 }

@@ -6,6 +6,7 @@ import io.github.kdroidfilter.seforimlibrary.common.buildstate.BookSourceHash
 import io.github.kdroidfilter.seforimlibrary.common.changes.OtzariaSourceHashComputer
 import io.github.kdroidfilter.seforimlibrary.common.changes.TouchedBookDetector
 import io.github.kdroidfilter.seforimlibrary.common.countVisibleChars
+import io.github.kdroidfilter.seforimlibrary.common.ids.CategoryLabels
 import io.github.kdroidfilter.seforimlibrary.common.ids.IdAllocator
 import io.github.kdroidfilter.seforimlibrary.common.ids.IdAllocatorBindings
 import io.github.kdroidfilter.seforimlibrary.common.ids.altTocChildPath
@@ -112,9 +113,22 @@ class DatabaseGenerator(
         m[hashKey] = v
         return v
     }
-    private fun stableLineId(bookId: Long, content: String): Long {
+    /**
+     * [legacyContent]: what builds before a normalisation keyed this line on (only
+     * line 0 of a book whose BOM is now stripped). The allocator reuses the seed id
+     * filed under it when [content]'s own key is new, so the line keeps its id.
+     * Line 0 is a book's first line, so its occurrence index is 0 in either scheme.
+     */
+    private fun stableLineId(bookId: Long, content: String, legacyContent: String? = null): Long {
         val hash = IdAllocatorBindings.normalisedContentHash(content)
-        return allocator.lineId(bookId, hash, nextLineOccurrence(bookId, hash))
+        val occurrence = nextLineOccurrence(bookId, hash)
+        val legacy = legacyContent?.let {
+            io.github.kdroidfilter.seforimlibrary.common.ids.LegacyLineKey(
+                IdAllocatorBindings.normalisedContentHash(it),
+                0,
+            )
+        }
+        return allocator.lineId(bookId, hash, occurrence, legacy)
     }
     // Per-book stack of (level -> textId) used to derive a stable tocEntry ancestor path.
     private val tocAncestorStackByBook = mutableMapOf<Long, MutableMap<Int, Long>>()
@@ -137,6 +151,7 @@ class DatabaseGenerator(
 
     // Optional connection to the Acronymizer DB (opened lazily)
     private var acronymDb: java.sql.Connection? = null
+    private var acronymLookup: AcronymizerLookup? = null
 
     // Library root used for relative path normalization
     private lateinit var libraryRoot: Path
@@ -236,35 +251,11 @@ class DatabaseGenerator(
     )
 
     // Normalization helpers for categories/titles
-    private fun normalizeHebrewLabel(raw: String): String {
-        var s = raw.trim()
-        // Normalize common quote variants to Hebrew gershayim/geresh
-        s = s.replace('\u201C', '"').replace('\u201D', '"')
-        s = s.replace('\u2018', '\'').replace('\u2019', '\'')
-        s = s.replace("\"", "״")
-        s = s.replace("''", "״")
-        s = s.replace("׳׳", "״")
-        s = s.replace("`", "׳")
-        s = s.replace("\u05f3", "׳")
-        s = s.replace("\\s+".toRegex(), " ").trim()
-        return s
-    }
+    // Shared with renameCategories, which must match a book_moves leaf to the Otzaria
+    // folder that findExistingCategory would put into it.
+    private fun normalizeHebrewLabel(raw: String): String = CategoryLabels.normalize(raw)
 
-    private fun comparableLabel(raw: String): String {
-        fun stripCorpusSuffix(s: String): String {
-            val pattern = "(?i)\\s+על\\s+(התנ\"ך|התורה|התלמוד|המשנה|תנך|תורה|תלמוד|משנה)$".toRegex()
-            return s.replace(pattern, "").trim()
-        }
-
-        val base = normalizeHebrewLabel(raw)
-            .replace("״", "")
-            .replace("\"", "")
-            .replace("׳", "")
-            .replace("'", "")
-            .replace("\\s+".toRegex(), " ")
-            .trim()
-        return stripCorpusSuffix(base)
-    }
+    private fun comparableLabel(raw: String): String = CategoryLabels.comparable(raw)
 
     private fun normalizeCategorySegments(rawTitle: String): List<String> {
         val cleaned = normalizeHebrewLabel(rawTitle)
@@ -302,13 +293,20 @@ class DatabaseGenerator(
             if (pathSoFar.isNotEmpty()) pathSoFar.append('/')
             pathSoFar.append(title)
             val existing = findExistingCategory(currentParent, title)
-            val categoryId = existing?.id ?: bindings.upsertCategory(
-                canonicalPath = pathSoFar.toString(),
-                parentId = currentParent,
-                title = title,
-                level = currentLevel,
-                orderIndex = 999,
-            )
+            // A folder that is also a book_moves.csv leaf keeps one id under both of its
+            // keys, so it does not move when the book_moves rows into it come or go.
+            val categoryId = if (existing != null) {
+                bindings.alignWithBookMoveLeaf(pathSoFar.toString(), existing.id)
+                existing.id
+            } else {
+                bindings.upsertOtzariaCategory(
+                    canonicalPath = pathSoFar.toString(),
+                    parentId = currentParent,
+                    title = title,
+                    level = currentLevel,
+                    orderIndex = 999,
+                )
+            }
             lastId = categoryId
             currentParent = categoryId
             currentLevel += 1
@@ -525,6 +523,7 @@ class DatabaseGenerator(
                 processDirectory(libraryPath, null, 0, metadata)
                 assertAllHearotMergesApplied()
                 logger.i { bookImportSummary("Otzaria book import") }
+                carryAcronymsAcrossRenames()
 
                 // Process links
                 processLinks()
@@ -647,6 +646,7 @@ class DatabaseGenerator(
                 processDirectory(libraryPath, null, 0, metadata)
                 assertAllHearotMergesApplied()
                 logger.i { bookImportSummary("Otzaria book import (phase 1)") }
+                carryAcronymsAcrossRenames()
 
                 // Build category closure after categories insertion
                 logger.i { "Building category_closure table (phase 1)..." }
@@ -874,7 +874,7 @@ class DatabaseGenerator(
                 standalone += "$baseTitle (base file at library root is never imported)"
                 continue
             }
-            val baseLines = basePath.readText(Charsets.UTF_8).lines()
+            val baseLines = Utf8Bom.stripFirstLine(basePath.readText(Charsets.UTF_8).lines())
 
             val byHearot = companionEntries
                 .groupBy { normalizeBookTitle(linkTargetTitleOf(it.path_2)) }
@@ -888,7 +888,7 @@ class DatabaseGenerator(
                     continue
                 }
                 val hearotBytes = Files.readAllBytes(hearotPath)
-                val hearotLines = hearotBytes.toString(Charsets.UTF_8).lines()
+                val hearotLines = Utf8Bom.stripFirstLine(hearotBytes.toString(Charsets.UTF_8).lines())
                 if (entries.any {
                         it.line_index_1.toInt() - 1 !in baseLines.indices ||
                             it.line_index_2.toInt() - 1 !in hearotLines.indices
@@ -986,7 +986,7 @@ class DatabaseGenerator(
     private fun loadMetadata(): Map<String, BookMetadata> {
         val metadataFile = sourceDirectory.resolve("metadata.json")
         return if (metadataFile.exists()) {
-            val content = metadataFile.readText()
+            val content = Utf8Bom.strip(metadataFile.readText())
             try {
                 // Try to parse as Map first (original format)
                 json.decodeFromString<Map<String, BookMetadata>>(content)
@@ -1051,7 +1051,7 @@ class DatabaseGenerator(
         }
         logger.i { "Loading sources from manifest: ${manifestPath.toAbsolutePath()}" }
         runCatching {
-            val content = manifestPath.readText()
+            val content = Utf8Bom.strip(manifestPath.readText())
             val map = json.decodeFromString<Map<String, ManifestEntry>>(content)
             // For every manifest key, if it contains "/אוצריא/", index the subpath after it
             for ((path, _) in map) {
@@ -1317,10 +1317,13 @@ class DatabaseGenerator(
 
         // Prefer preloaded content from RAM if available
         val key = toLibraryRelativeKey(path)
-        val rawLines = bookContentCache[key] ?: run {
+        val fileLines = bookContentCache[key] ?: run {
             val content = path.readText(Charsets.UTF_8)
             content.lines()
         }
+        // A UTF-8 BOM would hide line 0's <h1> from detectHeaderLevel (no title in the TOC).
+        val rawLines = Utf8Bom.stripFirstLine(fileLines)
+        val firstLineHadBom = rawLines !== fileLines
         // Inject companion notes as inline footnotes when a merge plan exists
         val plan = hearotMergePlans[bookTitle]
         val lines = if (plan == null) rawLines else {
@@ -1332,7 +1335,7 @@ class DatabaseGenerator(
         }
 
         // Process each line one by one, handling TOC entries as we go
-        val tocStats = processLinesWithTocEntries(bookId, bookTitle, categoryId, lines)
+        val tocStats = processLinesWithTocEntries(bookId, bookTitle, categoryId, lines, firstLineHadBom)
 
         // Update the total number of lines
         repository.updateBookTotalLines(bookId, lines.size)
@@ -1363,8 +1366,17 @@ class DatabaseGenerator(
         bookTitle: String,
         categoryId: Long,
         lines: List<String>,
+        firstLineHadBom: Boolean = false,
     ): BookContentStats {
         logger.d { "Processing lines and TOC entries together for book ID: $bookId" }
+
+        // Line 0 of a book whose BOM was stripped keeps the id earlier builds gave it.
+        fun lineIdFor(lineIndex: Int, line: String): Long =
+            if (lineIndex == 0 && firstLineHadBom) {
+                stableLineId(bookId, line, legacyContent = Utf8Bom.legacyFirstLineContent(line))
+            } else {
+                stableLineId(bookId, line)
+            }
 
         // Structure pour stocker toutes les entrées TOC créées
         data class TocEntryData(
@@ -1422,7 +1434,7 @@ class DatabaseGenerator(
 
                 val parentId = (level - 1 downTo 1).firstNotNullOfOrNull { parentStack[it] }
                 val (currentTocEntryId, tocTextStableId) = stableTocEntryId(bookId, level, plainText, lineIndex)
-                val currentLineId = stableLineId(bookId, line)
+                val currentLineId = lineIdFor(lineIndex, line)
 
                 // Stocker l'info de cette entrée pour la deuxième passe
                 allTocEntries.add(TocEntryData(
@@ -1469,7 +1481,7 @@ class DatabaseGenerator(
                 lineTocBuffer.add(currentLineId to tocEntryId)
             } else {
                 // Regular line
-                val currentLineId = stableLineId(bookId, line)
+                val currentLineId = lineIdFor(lineIndex, line)
                 lineBuffer.add(
                     Line(
                         id = currentLineId,
@@ -2200,7 +2212,7 @@ class DatabaseGenerator(
                 logger.w { "Alt-toc file targets Sefaria-sourced book $bookTitle — ignored" }
                 continue
             }
-            val parsed = runCatching { json.decodeFromString<List<AltTocStructureData>>(file.readText()) }
+            val parsed = runCatching { json.decodeFromString<List<AltTocStructureData>>(Utf8Bom.strip(file.readText())) }
             val structures = parsed.getOrNull()
             if (structures == null) {
                 logger.w(parsed.exceptionOrNull()) { "Failed to parse alt-toc JSON for $bookTitle — skipped" }
@@ -2331,75 +2343,20 @@ class DatabaseGenerator(
         }
     }
 
-    /**
-     * Fetch and sanitize acronym terms for a given book title from the Acronymizer DB.
-     * Uses the new relational structure (Books, Acronyms, BookAcronyms).
-     */
-    private fun fetchAcronymsForTitle(title: String): List<String> {
-        val path = acronymDbPath ?: return emptyList()
-        try {
-            if (acronymDb == null) {
-                acronymDb = java.sql.DriverManager.getConnection("jdbc:sqlite:$path")
-            }
-            val conn = acronymDb ?: return emptyList()
+    /** The Acronymizer DB, opened on first use; null when this build has none. */
+    private fun acronymizer(): AcronymizerLookup? {
+        val path = acronymDbPath ?: return null
+        acronymLookup?.let { return it }
+        val conn = acronymDb ?: java.sql.DriverManager.getConnection("jdbc:sqlite:$path").also { acronymDb = it }
+        return AcronymizerLookup(conn).also { acronymLookup = it }
+    }
 
-            val lookupTitles = buildList {
-                add(title)
-                val stripped = stripQuotesForLookup(title)
-                if (stripped.isNotBlank()) add(stripped)
-                val noComma = title.replace(",", " ").trim()
-                if (noComma.isNotBlank()) add(noComma)
-                val noPunct = title.replace("[\\p{Punct}]".toRegex(), " ").replace("\\s+".toRegex(), " ").trim()
-                if (noPunct.isNotBlank()) add(noPunct)
-                val sanitized = sanitizeAcronymTerm(title)
-                if (sanitized.isNotBlank()) add(sanitized)
-            }.distinct()
-
-            val acronyms = mutableListOf<String>()
-
-            // Query using the new relational structure
-            for (candidate in lookupTitles) {
-                conn.prepareStatement(
-                    """
-                    SELECT a.acronym
-                    FROM Books b
-                    JOIN BookAcronyms ba ON b.id = ba.book_id
-                    JOIN Acronyms a ON ba.acronym_id = a.id
-                    WHERE b.title = ?
-                    ORDER BY a.acronym
-                    """.trimIndent()
-                ).use { ps ->
-                    ps.setString(1, candidate)
-                    ps.executeQuery().use { rs ->
-                        while (rs.next()) {
-                            val acronym = rs.getString(1)
-                            if (!acronym.isNullOrBlank()) {
-                                acronyms.add(acronym)
-                            }
-                        }
-                    }
-                }
-                if (acronyms.isNotEmpty()) break
-            }
-
-            if (acronyms.isEmpty()) return emptyList()
-
-            // Sanitize and de-duplicate
-            val clean = acronyms
-                .map { sanitizeAcronymTerm(it) }
-                .map { it.trim() }
-                .filter { it.isNotEmpty() }
-
-            // De-duplicate and drop items identical to the title after normalization
-            val titleNormalized = sanitizeAcronymTerm(title)
-            return clean
-                .filter { !it.equals(title, ignoreCase = true) }
-                .filter { !it.equals(titleNormalized, ignoreCase = true) }
-                .distinct()
-        } catch (e: Exception) {
-            logger.w(e) { "Error reading acronyms for '$title' from $path" }
-            return emptyList()
-        }
+    /** Sanitized acronym terms for a given book title from the Acronymizer DB. */
+    private fun fetchAcronymsForTitle(title: String): List<String> = try {
+        acronymizer()?.termsFor(title).orEmpty()
+    } catch (e: Exception) {
+        logger.w(e) { "Error reading acronyms for '$title' from $acronymDbPath" }
+        emptyList()
     }
 
     private suspend fun backfillAcronymsForExistingBooks() {
@@ -2421,16 +2378,69 @@ class DatabaseGenerator(
         logger.i { "Backfill complete: added $insertedCount acronyms to $touchedBooks books" }
     }
 
-    // Clean an acronym using HebrewTextUtils and remove gershayim
-    private fun sanitizeAcronymTerm(raw: String): String {
-        var s = raw.trim()
-        if (s.isEmpty()) return ""
-        s = HebrewTextUtils.removeAllDiacritics(s)
-        s = HebrewTextUtils.replaceMaqaf(s, " ")
-        s = s.replace("\u05F4", "") // remove Hebrew gershayim (״)
-        s = s.replace("\u05F3", "") // remove Hebrew geresh (׳)
-        s = s.replace("\\s+".toRegex(), " ").trim()
-        return s
+    /**
+     * Gives a renamed book the acronyms the Acronymizer still keeps under its old
+     * title, plus the old title itself, so a rename does not take its search terms
+     * with it ('אמת ואמונה - מנחם מנדל מקוצק' → 'אמת ואמונה' lost 'קוצקי').
+     *
+     * Runs once every book is in, and only for a book that has no acronyms and no
+     * Acronymizer entry under its current title: an entry for the new title is the
+     * curated answer and always wins. Which renames are followed, and which are
+     * refused, is [RenamedBookTitles]'s call. Like every Acronymizer read, a
+     * failure here costs the acronyms, not the build.
+     */
+    private suspend fun carryAcronymsAcrossRenames() {
+        try {
+            carryAcronymsAcrossRenames(acronymizer() ?: return)
+        } catch (e: Exception) {
+            logger.w(e) { "Skipping acronyms of renamed books: cannot read $acronymDbPath" }
+        }
+    }
+
+    private suspend fun carryAcronymsAcrossRenames(lookup: AcronymizerLookup) {
+        val books = repository.getAllBooks()
+        val sourceNames = repository.getAllSources().associate { it.id to it.name }
+        val withAcronyms = books.filter { repository.getAcronymsForBook(it.id).isNotEmpty() }.mapTo(HashSet()) { it.id }
+        val targets = books
+            .filter { it.id !in withAcronyms && lookup.rawTerms(it.title).isEmpty() }
+            .mapTo(HashSet()) { it.id }
+        val library = books.map { LibraryBook(it.id, it.title, sourceNames[it.sourceId].orEmpty()) }
+        val formerTitles = RenamedBookTitles().resolve(
+            books = library,
+            targets = targets,
+            knownKeys = allocator.knownBookKeys(),
+            lineHashes = allocator::lineContentHashes,
+        )
+        val titles = books.associate { it.id to it.title }
+        var carriedTerms = 0
+        val carried = ArrayList<String>()
+        for ((bookId, formers) in formerTitles.byBookId) {
+            val title = titles.getValue(bookId)
+            val terms = AcronymizerLookup.clean(
+                formers.flatMap { lookup.rawTerms(it.title) + it.title },
+                title,
+            )
+            if (terms.isEmpty()) continue
+            repository.bulkInsertBookAcronyms(bookId, terms)
+            carriedTerms += terms.size
+            carried += "'${formers.joinToString("', '") { it.title }}' → '$title' (${terms.size}, ${formers.joinToString { it.evidence }})"
+        }
+        // A refused rename only costs something when the old title had acronyms.
+        val lostNames = formerTitles.refused.filter { lookup.rawTerms(it.oldTitle).isNotEmpty() }
+        logger.i {
+            "Acronyms of renamed books: $carriedTerms terms carried to ${carried.size} books" +
+                (if (carried.isEmpty()) "" else ": " + carried.take(MAX_NAMES_PER_SUMMARY_LINE).joinToString("; ")) +
+                (if (carried.size > MAX_NAMES_PER_SUMMARY_LINE) "; …" else "")
+        }
+        if (lostNames.isNotEmpty()) {
+            logger.i {
+                "Acronyms of renamed books: ${lostNames.size} renames not followed (add the new title " +
+                    "to the Acronymizer if it is the same book): " +
+                    lostNames.take(MAX_NAMES_PER_SUMMARY_LINE).joinToString("; ") {
+                        "'${it.oldTitle}' → '${it.newTitle}' (${it.reason})"
+                    }
+            }
+        }
     }
 
     /**
@@ -2545,7 +2555,9 @@ class DatabaseGenerator(
     /**
      * Parses links from JSON content, handling both Ben-YehudaToOtzaria and DictaToOtzaria formats
      */
-    private fun parseLinksFromJson(content: String, bookTitle: String): List<LinkData> {
+    private fun parseLinksFromJson(rawContent: String, bookTitle: String): List<LinkData> {
+        // kotlinx.serialization rejects a leading BOM ("Unexpected JSON token at offset 0").
+        val content = Utf8Bom.strip(rawContent)
         return try {
             // First, try to parse as Ben-YehudaToOtzaria format (List<LinkData>)
             json.decodeFromString<List<LinkData>>(content)

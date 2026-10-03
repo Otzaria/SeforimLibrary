@@ -153,6 +153,20 @@ class InMemoryIdAllocator private constructor(
         return fresh
     }
 
+    override fun peekCategoryId(canonicalPath: String): Long? =
+        lookupMaps.getValue(IdTable.CATEGORY)[canonicalPath]
+
+    override fun categoryKeys(): Map<String, Long> = lookupMaps.getValue(IdTable.CATEGORY).toMap()
+
+    override fun pointCategoryKey(canonicalPath: String, id: Long): Boolean {
+        require(id > 0) { "Category id must be positive, got $id for '$canonicalPath'" }
+        val stale = lookupMaps.getValue(IdTable.CATEGORY).put(canonicalPath, id)
+        // The id came from the build state, so the counter is normally past it already.
+        counters.getValue(IdTable.CATEGORY).updateAndGet { maxOf(it, id + 1) }
+        logger.i { "Category key '$canonicalPath' now holds $id (was ${stale ?: "unset"})" }
+        return true
+    }
+
     // bookId is itself build-stable, so the encoded string key is stable too.
     override fun bookVersionId(bookId: Long, versionTitle: String): Long =
         allocateLookup(IdTable.BOOK_VERSION, "$bookId $versionTitle")
@@ -302,6 +316,25 @@ class InMemoryIdAllocator private constructor(
 
     override fun previousSourceHash(key: BookKey): BookSourceHash? =
         previousSourceHashes[key]
+
+    override fun knownBookKeys(): Map<BookKey, Long> = books.toMap()
+
+    override fun lineContentHashes(bookIds: Set<Long>): Map<Long, List<ByteArray>> {
+        if (bookIds.isEmpty()) return emptyMap()
+        val out = HashMap<Long, MutableList<ByteArray>>()
+        // The keys a book issued this run are all the lines it now has; its other
+        // keys are earlier versions of it, which snapshotTo prunes.
+        for (key in issuedLineIds.values) {
+            if (key.bookId in bookIds) out.getOrPut(key.bookId) { ArrayList() }.add(key.contentHash)
+        }
+        val issuedBooks = out.keys.toHashSet()
+        for (key in lines.keys) {
+            if (key.bookId in bookIds && key.bookId !in issuedBooks) {
+                out.getOrPut(key.bookId) { ArrayList() }.add(key.contentHash)
+            }
+        }
+        return out
+    }
 
     override fun stats(): AllocatorStats {
         val perTable = IdTable.values().associateWith { table ->
