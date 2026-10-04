@@ -321,7 +321,10 @@ case "$sub" in
     mkdir -p "$out"; head -c 3000 /dev/urandom > "$out/segment.oxv"
     echo '{"identityDigest":"0123456789abcdef","toLibraryVersion":30}' > "$out/release.json"
     for f in ledger-v30.keys pairs-v30.bin ledger-v30.manifest.json; do echo "$f" > "$out/$f"; done ;;
-  release-files) echo '{"files":[]}' > "$out"; echo "=== stem ==="; echo "Manifest SHA-256 $(sha256sum < "$out" | cut -d' ' -f1)" ;;
+  release-files)
+    for f in "${files[@]}"; do [ -f "$f" ] || { echo "Could not read release file $f" >&2; exit 1; }; done
+    jq -cn --args '$ARGS.positional' "${files[@]}" > "$RELEASE_FILE_ARGS"
+    echo '{"files":[]}' > "$out"; echo "=== stem ==="; echo "Manifest SHA-256 $(sha256sum < "$out" | cut -d' ' -f1)" ;;
   *) echo "stub cli: $sub" >&2; exit 90 ;;
 esac
 """
@@ -479,6 +482,7 @@ class Driver(unittest.TestCase):
 
     def run_driver(self, mode="dry-run", tag=TAG, args=(), **env):
         e = dict(os.environ, CALLS=str(self.calls), ASSETS=str(self.root / "assets"), UPLOADED=str(self.root / "uploaded.tsv"),
+                 RELEASE_FILE_ARGS=str(self.root / "release-file-args.json"),
                  OTZARIA_SEMANTIC_CLI=str(self.root / "bin" / "cli"), EXPORT_SEMANTIC_PLAN=str(self.root / "bin" / "export"),
                  VECTOR_PYTHON=str(self.root / "bin" / "py"), GH=str(self.root / "bin" / "gh"), ZSTD=str(self.root / "bin" / "zstd"),
                  VALIDATE_SEMANTIC_VECTORS=str(self.root / "bin" / "validate"),
@@ -904,6 +908,68 @@ class Driver(unittest.TestCase):
         p, calls = self.run_driver(TO_EMBED=5, args=("--work", str(work)))
         self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
         self.assertTrue((work / "index" / "index" / "meta.json").exists())
+
+    def test_newlines_in_state_and_work_reach_release_files_as_one_path(self):
+        odd = self.root / "state\nwith newline"
+        self.state.rename(odd)
+        self.state = odd
+        for work in (odd / "work" / TAG, self.root / "work\nwith newline\n"):
+            with self.subTest(work=work):
+                p, _ = self.run_driver(TO_EMBED=0, args=("--work", str(work)))
+                self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+                files = json.loads((self.root / "release-file-args.json").read_text())
+                self.assertEqual(files, [str(work / "files" / "otzaria-vectors-01234567-v30-base.oxv.zst")])
+                self.assertTrue(Path(files[0]).is_file())
+
+    def test_work_overlapping_state_or_persistent_paths_is_refused_without_changes(self):
+        alias = self.root / "state-alias"
+        alias.symlink_to(self.state, target_is_directory=True)
+        for persistent in ("ledger", "ledger.next", "ledger.prev", "model-cache"):
+            (self.state / persistent).mkdir()
+            (self.state / persistent / "keep").write_text("persistent content")
+        external = self.root / "external-cache"
+        external.mkdir()
+        (external / "keep").write_text("symlinked content")
+        shutil.rmtree(self.state / "model-cache")
+        (self.state / "model-cache").symlink_to(external, target_is_directory=True)
+        works = [self.root, self.state, alias, alias / "work" / ".." / "..",
+                 self.warehouse.parent, self.warehouse, self.warehouse / "new-scratch",
+                 alias / "bin" / "new-scratch", self.state / "venv", self.state / ".lock",
+                 external, external / "new-scratch", self.root / "bin"]
+        works += [self.state / name for name in ("ledger", "ledger.next", "ledger.prev")]
+        before = {p: p.read_bytes() for p in self.root.rglob("*") if p.is_file()}
+        for work in works:
+            with self.subTest(work=work):
+                p, calls = self.run_driver(args=("--work", str(work)))
+                self.assertNotEqual(p.returncode, 0)
+                self.assertIn("persistent", p.stdout + p.stderr)
+                self.assertEqual(calls, [])
+                self.assertEqual({path: path.read_bytes() for path in before}, before)
+                self.assertFalse((self.state / ".lock").exists())
+
+    def test_work_beside_persistent_paths_can_clear_old_scratch_and_build(self):
+        work = self.state / "warehouse-scratch"
+        work.mkdir()
+        (work / "old-scratch").write_text("replace me")
+        p, _ = self.run_driver(TO_EMBED=0, args=("--work", str(work)))
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertFalse((work / "old-scratch").exists())
+        self.assertTrue((work / "files" / "otzaria-vectors-01234567-v30-base.oxv.zst").is_file())
+
+    def test_work_cannot_delete_custom_gh_or_zstd_executables(self):
+        for variable, tool in (("GH", "gh"), ("ZSTD", "zstd")):
+            with self.subTest(tool=tool):
+                work = self.root / (tool + "-installation")
+                (work / "bin").mkdir(parents=True)
+                executable = work / "bin" / tool
+                shutil.copyfile(self.root / "bin" / tool, executable)
+                executable.chmod(0o755)
+                before = executable.read_bytes()
+                p, calls = self.run_driver(args=("--work", str(work)), **{variable: executable})
+                self.assertNotEqual(p.returncode, 0)
+                self.assertIn("persistent", p.stdout + p.stderr)
+                self.assertEqual(calls, [])
+                self.assertEqual(executable.read_bytes(), before)
 
     def test_an_index_manifest_that_names_no_part_of_its_archive_is_refused(self):
         manifest = json.loads(self.manifest.read_text())
