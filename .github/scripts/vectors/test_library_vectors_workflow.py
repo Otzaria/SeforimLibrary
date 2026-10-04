@@ -426,15 +426,15 @@ class Driver(unittest.TestCase):
                 prov[key] = value
         self.provenance.write_text(json.dumps(prov))
 
-    def run_driver(self, mode="dry-run", tag=TAG, **env):
+    def run_driver(self, mode="dry-run", tag=TAG, args=(), **env):
         e = dict(os.environ, CALLS=str(self.calls), ASSETS=str(self.root / "assets"), UPLOADED=str(self.root / "uploaded.tsv"),
                  OTZARIA_SEMANTIC_CLI=str(self.root / "bin" / "cli"), EXPORT_SEMANTIC_PLAN=str(self.root / "bin" / "export"),
                  VECTOR_PYTHON=str(self.root / "bin" / "py"), GH=str(self.root / "bin" / "gh"), ZSTD=str(self.root / "bin" / "zstd"),
                  VALIDATE_SEMANTIC_VECTORS=str(self.root / "bin" / "validate"),
                  VECTORS_MIN_FREE_GB="0", OTZARIA_HF_TOKEN="hf_s3cr3t", GITHUB_ACTIONS="")
         e.update({k: str(v) for k, v in env.items()})
-        p = subprocess.run(["bash", str(DRIVER), "--tag", tag, "--mode", mode, "--state", str(self.state), "--repo", "o/r"],
-                           capture_output=True, text=True, env=e)
+        p = subprocess.run(["bash", str(DRIVER), "--tag", tag, "--mode", mode, "--state", str(self.state), "--repo", "o/r",
+                            *args], capture_output=True, text=True, env=e)
         calls = self.calls.read_text().splitlines() if self.calls.exists() else []
         self.assertNotIn("hf_s3cr3t", p.stdout + p.stderr)
         return p, calls
@@ -789,6 +789,37 @@ class Driver(unittest.TestCase):
         p, calls = self.run_driver(mode="base", TO_EMBED=0)
         self.assert_refused_before_the_parts(p, calls, "no full DB")
 
+    def test_state_and_work_paths_with_spaces_and_odd_characters_build_and_publish(self):
+        odd = self.root / "state with spaces & 'quotes' |pipes| back\\slash"
+        self.state.rename(odd)
+        self.state = odd
+        for n in (0, 5, int(PIN["CPU_EMBED_MAX"])):   # the warehouse alone, the CPU, the GPU
+            with self.subTest(texts=n):
+                self.calls.unlink(missing_ok=True)
+                (self.root / "uploaded.tsv").unlink(missing_ok=True)
+                p, calls = self.run_driver(mode="base", TO_EMBED=n)
+                self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+                self.assertTrue([c for c in calls if "gh release edit" in c])
+                self.assertTrue((odd / "ledger" / "published.json").exists())
+        work = self.root / "work with spaces & 'quotes' |pipes|"
+        p, calls = self.run_driver(TO_EMBED=5, args=("--work", str(work)))
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertTrue((work / "index" / "index" / "meta.json").exists())
+
+    def test_an_index_manifest_that_names_no_part_of_its_archive_is_refused(self):
+        manifest = json.loads(self.manifest.read_text())
+        part = manifest["parts"][0]
+        for parts, needle in (([dict(part, name="../otzaria-library-index.tar.zst.part-000")], "unexpected part"),
+                              ([dict(part, name="otzaria-library-index.tar.zst.part-000 x")], "unexpected part"),
+                              ([dict(part, name="seforim-schema6.db.zst")], "unexpected part"),
+                              ([], "lists no parts")):
+            with self.subTest(parts=parts):
+                self.calls.unlink(missing_ok=True)
+                self.manifest.write_text(json.dumps(dict(manifest, parts=parts)))
+                p, calls = self.run_driver()
+                self.assert_refused_before_the_parts(p, calls, needle)
+                self.assertFalse([c for c in calls if "release download" in c and "seforim-schema6.db.zst" in c])
+
     def test_a_plan_for_another_release_is_refused(self):
         p, calls = self.run_driver(PLAN_TAG="v29-20260927072953")
         self.assertNotEqual(p.returncode, 0)
@@ -860,11 +891,11 @@ class Bootstrap(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def run_bootstrap(self, **env):
+    def run_bootstrap(self, args=(), **env):
         self.calls.unlink(missing_ok=True)
         e = {"PATH": self.path, "CALLS": str(self.calls), "HOME": str(self.root), "SYSTEM_CA": str(self.ca)}
         e.update({k: str(v) for k, v in env.items()})
-        p = subprocess.run(["bash", str(BOOTSTRAP), "--state", str(self.state)], capture_output=True, text=True, env=e)
+        p = subprocess.run(["bash", str(BOOTSTRAP), "--state", str(self.state), *args], capture_output=True, text=True, env=e)
         return p, (self.calls.read_text().splitlines() if self.calls.exists() else [])
 
     def test_the_validator_is_built_able_to_run_g6_and_recorded_like_every_binary(self):
@@ -894,6 +925,24 @@ class Bootstrap(unittest.TestCase):
                 self.assertEqual(len(pips), 2)
                 for c in pips:
                     self.assertTrue(c.startswith(f"venv-python PIP_CERT={expected} -m pip install "), c)
+
+    def test_a_seed_package_is_hashed_whatever_the_state_path_holds(self):
+        odd = self.root / "state with spaces & 'quotes'"
+        self.state.rename(odd)
+        self.state = odd
+        python = odd / "venv" / "bin" / "python"   # the checksum runs in a real Python
+        python.write_text(STUB_VENV_PYTHON + f'[ "${{1:-}}" != -c ] || exec "{sys.executable}" "$@"\n')
+        seed = self.root / "seed"
+        seed.mkdir()
+        (seed / PIN["MODEL_GRAPH"]).write_bytes(b"not the pinned graph")
+        (seed / "tokenizer.json").write_text("{}")
+        p, calls = self.run_bootstrap(args=("--seed-model-dir", str(seed)))
+        sys.path.insert(0, str(HERE))
+        import model_package
+        got = model_package.package_checksum(seed, PIN["MODEL_GRAPH"])
+        self.assertEqual(p.returncode, 1, p.stdout + p.stderr)
+        self.assertIn(f"the seed package hashes to {got}, not {PIN['PASSAGE_PACKAGE_CHECKSUM']}", p.stderr)
+        self.assertFalse((odd / "model-cache" / PIN["PASSAGE_PACKAGE_CHECKSUM"]).exists())
 
     def test_with_no_cargo_it_says_to_install_rustup_first(self):
         (self.root / "bin" / "cargo").unlink()

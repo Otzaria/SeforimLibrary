@@ -93,7 +93,8 @@ if [ -n "$SEED" ]; then
   dest="$STATE/model-cache/$PASSAGE_PACKAGE_CHECKSUM"
   mkdir -p "$dest"
   cp -f "$SEED/$MODEL_GRAPH" "$SEED/tokenizer.json" "$dest/"
-  got=$("$STATE/venv/bin/python" -c "import sys; sys.path.insert(0, '$HERE'); import model_package as m; print(m.package_checksum('$dest', '$MODEL_GRAPH'))")
+  got=$("$STATE/venv/bin/python" -c 'import sys; sys.path.insert(0, sys.argv[1]); import model_package as m; print(m.package_checksum(sys.argv[2], sys.argv[3]))' \
+    "$HERE" "$dest" "$MODEL_GRAPH")   # paths as arguments, never as Python source
   [ "$got" = "$PASSAGE_PACKAGE_CHECKSUM" ] || { rm -rf "$dest"; echo "the seed package hashes to $got, not $PASSAGE_PACKAGE_CHECKSUM" >&2; exit 1; }
   echo "model cache seeded: $PASSAGE_PACKAGE_CHECKSUM"
 fi
