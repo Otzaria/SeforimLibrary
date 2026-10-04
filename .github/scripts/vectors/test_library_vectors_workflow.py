@@ -232,20 +232,26 @@ case "$cmd" in
 esac
 """
 
-# The anonymous path, with gh unauthenticated: the release API and the public download URLs.
-# As curl -f does, an HTTP error (CURL_FAIL=api: the API's) exits 22.
+# The anonymous path (gh unauthenticated), as GitHub and curl answer it: an asset URL is a 302
+# only -L follows; an HTTP error (CURL_FAIL=api: the API's) exits 22 under -f, else saves its body.
 STUB_CURL = r"""#!/usr/bin/env bash
 """ + RELEASE_JSON + r"""echo "curl $*" >> "$CALLS"
-out=/dev/stdout; url=""
-while [ $# -gt 0 ]; do case "$1" in -o) out=$2; shift 2;; --retry|--retry-delay) shift 2;; -*) shift;; *) url=$1; shift;; esac; done
+out=/dev/stdout; url=""; opts=""
+while [ $# -gt 0 ]; do case "$1" in -o) out=$2; shift 2;; --retry|--retry-delay) shift 2;; --*) shift;;
+  -*) opts=$opts${1#-}; shift;; *) url=$1; shift;; esac; done
+has() { case "$opts" in *"$1"*) return 0;; esac; return 1; }
+http_error() {
+  if has f; then { has S || ! has s; } && echo "curl: (22) The requested URL returned error: 404" >&2; exit 22; fi
+  echo '{"message":"Not Found","status":"404"}' > "$out"
+}
 case "$url" in
   https://api.github.com/repos/*/releases/tags/*)
-    [ "${CURL_FAIL:-}" != api ] || exit 22
-    release_json "${url##*/}" > "$out" ;;
+    if [ "${CURL_FAIL:-}" = api ]; then http_error; else release_json "${url##*/}" > "$out"; fi ;;
   https://github.com/*/releases/download/*)
     asset="$ASSETS/${url#*/releases/download/}"
-    [ -f "$asset" ] || exit 22
-    cp "$asset" "$out" ;;
+    if [ ! -f "$asset" ]; then http_error
+    elif has L; then cp "$asset" "$out"
+    else : > "$out"; fi ;;
   *) echo "stub curl: $url" >&2; exit 90 ;;
 esac
 """
@@ -948,6 +954,12 @@ class Driver(unittest.TestCase):
             p, calls = run()
             self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
             self.assertTrue([c for c in calls if c.endswith(download + "seforim-schema6.db.zst.manifest.json")])
+        with self.subTest("an asset the release lacks stops the build at its download"):
+            (assets / "otzaria-library-index.provenance.json").unlink()
+            p, calls = run()
+            self.assertEqual(p.returncode, 22, p.stdout + p.stderr)
+            self.assertIn("curl: (22) The requested URL returned error: 404", p.stderr)
+            self.assertTrue(calls[-1].endswith(download + "otzaria-library-index.provenance.json"))
 
     def test_a_plan_for_another_release_is_refused(self):
         p, calls = self.run_driver(PLAN_TAG="v29-20260927072953")
