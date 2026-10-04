@@ -184,7 +184,18 @@ class Pins(unittest.TestCase):
 STUB_GH = r"""#!/usr/bin/env bash
 echo "gh $*" >> "$CALLS"
 if [ "$1" = api ]; then
-  case "$2" in */commits/v*) echo "${TAG_COMMIT:-c66256253b25c0aa0b13d04e399647496f3b0bee}"; exit 0 ;; esac
+  case "$2" in
+    */commits/v*) echo "${TAG_COMMIT:-c66256253b25c0aa0b13d04e399647496f3b0bee}"; exit 0 ;;
+    */releases/tags/v*)
+      # the release as the API returns it: its assets, with no digest under NO_DIGEST
+      tag=${2##*/}
+      for f in "$ASSETS/$tag"/*; do
+        digest=""; [ -n "${NO_DIGEST:-}" ] || digest="sha256:$(sha256sum "$f" | cut -d' ' -f1)"
+        jq -n --arg name "$(basename "$f")" --argjson size "$(stat -c %s "$f")" --arg digest "$digest" \
+          '{name: $name, size: $size, digest: (if $digest == "" then null else $digest end)}'
+      done | jq -s --arg tag "$tag" '{tag_name: $tag, published_at: "2026-09-30T21:38:29Z", assets: .}'
+      exit 0 ;;
+  esac
   echo "stub gh: api $2" >&2; exit 90
 fi
 cmd="$1 $2"; shift 2
@@ -197,7 +208,6 @@ case "$cmd" in
       case " $* " in *" --json assets "*) cat "$UPLOADED" 2>/dev/null; exit 0 ;; esac
       [ -n "${EXISTING:-}" ] && exit 0; exit 1 ;;
     esac
-    case " $* " in *" --json publishedAt "*) echo "2026-09-30T21:38:29Z" ;; esac
     exit 0 ;;
   "release download")
     tag=$1; shift; dir=.; pats=()
@@ -373,10 +383,17 @@ class Driver(unittest.TestCase):
         parts = {"otzaria-library-index.tar.zst.part-000": archive[:half], "otzaria-library-index.tar.zst.part-001": archive[half:]}
         for name, b in parts.items():
             (assets / name).write_bytes(b)
-        (assets / "otzaria-library-index.tar.zst.manifest.json").write_text(json.dumps({
-            "sha256": hashlib.sha256(archive).hexdigest(),
+        self.archive_sha = hashlib.sha256(archive).hexdigest()
+        self.manifest = assets / "otzaria-library-index.tar.zst.manifest.json"
+        self.manifest.write_text(json.dumps({
+            "schemaVersion": 1, "archive": "otzaria-library-index.tar.zst", "size": len(archive), "sha256": self.archive_sha,
             "parts": [{"name": n, "size": len(b), "sha256": hashlib.sha256(b).hexdigest()} for n, b in parts.items()]}))
-        (assets / "otzaria-library-index.provenance.json").write_text(json.dumps({"searchEngineVersion": "0.8.7"}))
+        # the full DB the index was built from: the driver holds the provenance to its digest, never downloads it
+        db = b"a stand-in for the release's full database"
+        (assets / "seforim-schema6.db.zst").write_bytes(db)
+        self.db_sha = hashlib.sha256(db).hexdigest()
+        self.provenance = assets / "otzaria-library-index.provenance.json"
+        self.write_provenance()
         self.state = r / "state"
         (self.state / "bin").mkdir(parents=True)
         for f in ("family-model.json", "chunking.json"):
@@ -391,6 +408,23 @@ class Driver(unittest.TestCase):
 
     def tearDown(self):
         self.tmp.cleanup()
+
+    def write_provenance(self, **changes):
+        """The index provenance, shaped as v30's (build-library-index.yml); a change to None drops the field."""
+        prov = {"schemaVersion": 1, "libraryReleaseTag": TAG, "seforimDbZstSha256": self.db_sha,
+                "indexArchive": "otzaria-library-index.tar.zst", "indexArchiveSha256": self.archive_sha,
+                "indexUncompressedBytes": 5235054900, "catalogueBooks": 7803, "indexSegments": 11,
+                "talmudBavliSha256": "c" * 64, "talmudVolumesDigest": "e" * 64, "talmudVolumes": 39,
+                "includesPdfBooks": False, "searchEngineVersion": "0.8.7",
+                "otzaria": {"repository": "Otzaria/otzaria", "ref": "dev", "sha": "d" * 40, "runId": None},
+                "builtBy": {"repository": "Otzaria/SeforimLibrary", "runId": "36780724734"},
+                "builtAt": "2026-09-30T22:37:59Z"}
+        for key, value in changes.items():
+            if value is None:
+                prov.pop(key)
+            else:
+                prov[key] = value
+        self.provenance.write_text(json.dumps(prov))
 
     def run_driver(self, mode="dry-run", tag=TAG, **env):
         e = dict(os.environ, CALLS=str(self.calls), ASSETS=str(self.root / "assets"), UPLOADED=str(self.root / "uploaded.tsv"),
@@ -684,6 +718,76 @@ class Driver(unittest.TestCase):
         p, calls = self.run_driver()
         self.assertNotEqual(p.returncode, 0)
         self.assertFalse([c for c in calls if c.startswith("export ")])
+
+    def assert_refused_before_the_parts(self, p, calls, needle="provenance"):
+        self.assertNotEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertIn(needle, p.stdout)
+        self.assertFalse([c for c in calls if "release download" in c and ".part-" in c])   # nothing large is fetched
+        self.assertFalse([c for c in calls if c.startswith("export ") or "release create" in c or "release edit" in c])
+        self.assertFalse((self.state / "ledger").exists())
+
+    def test_an_index_whose_provenance_is_not_this_releases_is_refused_before_its_parts_download(self):
+        audit = json.dumps({"schemaVersion": 1, "libraryReleaseTag": "v29-20260801000000", "indexArchive": "unrelated.tar.zst",
+                            "indexArchiveSha256": "0" * 64, "seforimDbZstSha256": "f" * 64, "searchEngineVersion": "0.8.7"})
+        prov = "the index provenance"
+        cases = (({"libraryReleaseTag": "v29-20260927072953"}, {}, "another release"), ({"libraryReleaseTag": None}, {}, prov),
+                 ({"indexArchiveSha256": "0" * 64}, {}, prov), ({"indexArchiveSha256": None}, {}, prov),
+                 ({"indexArchive": "unrelated.tar.zst"}, {}, prov), ({"indexArchive": None}, {}, prov),
+                 ({"seforimDbZstSha256": "f" * 64}, {}, "another database"), ({"seforimDbZstSha256": None}, {}, prov),
+                 ({"schemaVersion": 2}, {}, prov), ({"schemaVersion": None}, {}, prov),
+                 (audit, {}, prov), ("not json", {}, prov), ("", {}, prov),
+                 # absent on both sides is no match
+                 ({"indexArchiveSha256": None}, {"sha256": None}, "the index manifest"),
+                 ({"indexArchive": None}, {"archive": None}, "the index manifest"),
+                 ({}, {"archive": "otzaria-library-index.tar.gz"}, "the index manifest"))
+        manifest = json.loads(self.manifest.read_text())
+        for changes, man, needle in cases:
+            with self.subTest(provenance=changes, manifest=man):
+                self.calls.unlink(missing_ok=True)
+                (self.root / "uploaded.tsv").unlink(missing_ok=True)
+                shutil.rmtree(self.state / "ledger", ignore_errors=True)
+                if isinstance(changes, str):
+                    self.provenance.write_text(changes)
+                else:
+                    self.write_provenance(**changes)
+                self.manifest.write_text(json.dumps({k: v for k, v in {**manifest, **man}.items() if v is not None}))
+                p, calls = self.run_driver(mode="base", TO_EMBED=0)
+                self.assert_refused_before_the_parts(p, calls, needle)
+
+    def test_an_index_whose_provenance_is_this_releases_is_built_and_the_database_is_never_downloaded(self):
+        p, calls = self.run_driver(mode="base", TO_EMBED=0)
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertIn("0.8.7 engine", p.stdout)
+        self.assertTrue(self.index_of(calls, "gh api repos/o/r/releases/tags/" + TAG)
+                        < self.index_of(calls, "--pattern otzaria-library-index.tar.zst.part-000"))
+        self.assertFalse([c for c in calls if "release download" in c and "seforim" in c])
+
+    def test_a_split_database_is_identified_by_its_manifest_and_its_parts_are_never_downloaded(self):
+        assets = self.root / "assets" / TAG
+        (assets / "seforim-schema6.db.zst").unlink()
+        split = {"schemaVersion": 1, "archive": "seforim-schema6.db.zst", "size": 3, "sha256": self.db_sha,
+                 "parts": [{"name": "seforim-schema6.db.zst.part-000", "size": 3, "sha256": "a" * 64}]}
+        for sha, ok in ((self.db_sha, True), ("f" * 64, False), (None, False)):
+            with self.subTest(sha=sha):
+                self.calls.unlink(missing_ok=True)
+                (self.root / "uploaded.tsv").unlink(missing_ok=True)
+                shutil.rmtree(self.state / "ledger", ignore_errors=True)
+                (assets / "seforim-schema6.db.zst.manifest.json").write_text(json.dumps(dict(split, sha256=sha)))
+                p, calls = self.run_driver(mode="base", TO_EMBED=0)
+                self.assertTrue([c for c in calls if "--pattern seforim-schema6.db.zst.manifest.json" in c])
+                self.assertFalse([c for c in calls if "release download" in c and "seforim-schema6.db.zst.part-" in c])
+                if ok:
+                    self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+                else:
+                    self.assert_refused_before_the_parts(p, calls)
+
+    def test_a_release_that_states_no_digest_of_its_database_is_refused(self):
+        p, calls = self.run_driver(mode="base", TO_EMBED=0, NO_DIGEST=1)
+        self.assert_refused_before_the_parts(p, calls, "no sha256")
+        (self.root / "assets" / TAG / "seforim-schema6.db.zst").unlink()
+        self.calls.unlink()
+        p, calls = self.run_driver(mode="base", TO_EMBED=0)
+        self.assert_refused_before_the_parts(p, calls, "no full DB")
 
     def test_a_plan_for_another_release_is_refused(self):
         p, calls = self.run_driver(PLAN_TAG="v29-20260927072953")
