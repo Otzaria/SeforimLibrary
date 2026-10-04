@@ -648,6 +648,25 @@ class ComputeHeRefSeifMarkersTest {
     }
 
     @Test
+    fun `the siman topic line under its heading carries no seif`() {
+        val topic = SeifRefLine(lineId = 10, lineIndex = 1, heRef = null, isSimanTopic = true)
+        val markers = computeHeRefSeifMarkers(
+            "ערוך השולחן",
+            mapOf(0L to "סימן א"),
+            listOf(line(0, null), topic, line(2, "ערוך השולחן, יורה דעה,  א, א")),
+        )
+        assertEquals(listOf(2L to "סעיף א"), markers.map { it.lineIndex to it.label })
+        // Below the first se'if a ref-less line is a broken ref again, whatever its shape.
+        assertFailsWith<IllegalStateException> {
+            computeHeRefSeifMarkers(
+                "ערוך השולחן",
+                mapOf(0L to "סימן א"),
+                listOf(line(0, null), line(1, "ערוך השולחן, יורה דעה,  א, א"), topic.copy(lineIndex = 2)),
+            )
+        }
+    }
+
+    @Test
     fun `a too-shallow heRef inside a siman aborts`() {
         assertFailsWith<IllegalArgumentException> {
             computeHeRefSeifMarkers(

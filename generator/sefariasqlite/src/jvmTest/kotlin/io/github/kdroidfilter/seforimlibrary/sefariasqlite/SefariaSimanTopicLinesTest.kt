@@ -28,6 +28,9 @@ class SefariaSimanTopicLinesTest {
     private val schema = json.parseToJsonElement(
         """{"depth":2,"sectionNames":["Siman","Seif"],"heSectionNames":["סימן","סעיף"],"addressTypes":["Integer","Integer"]}""",
     ).jsonObject
+    private val paragraphSchema = json.parseToJsonElement(
+        """{"depth":2,"sectionNames":["Siman","Paragraph"],"heSectionNames":["סימן","פסקה"],"addressTypes":["Integer","Integer"]}""",
+    ).jsonObject
     private val orachChayim = "שולחן ערוך, אורח חיים"
     private val bh = """<i data-commentator="Be'er HaGolah" data-label="א" data-order="1"></i>"""
 
@@ -106,6 +109,16 @@ class SefariaSimanTopicLinesTest {
         val built = build(orachChayim, listOf("<b>כוונת הברכות. ובו סעיף אחד:</b><br>יכוין"))
 
         assertEquals(listOf("<b>כוונת הברכות. ובו סעיף אחד:</b>", "יכוין"), built.lines.drop(2))
+    }
+
+    @Test
+    fun `a book without seif prefixes splits the same way`() {
+        // ערוך השולחן: the leaf is a פסקה, so the se'if line carries no "(א) ".
+        val built = buildWith(paragraphSchema, "ערוך השולחן", listOf("<b>דיני מליחת הלב והריאה. ובו י\"ח סעיפים</b> <br>יש בלב", "שני"))
+
+        assertEquals(listOf("<b>דיני מליחת הלב והריאה. ובו י\"ח סעיפים</b>", "יש בלב", "שני"), built.lines.drop(2))
+        assertTrue(SefariaSimanTopicLines.isTopicLine(built.lines[2]))
+        assertTrue(!SefariaSimanTopicLines.isTopicLine(built.lines[3]))
     }
 
     @Test
