@@ -132,6 +132,65 @@ class SefariaLinksImporterTest {
         assertEquals(ConnectionType.SOURCE, reverse)
     }
 
+    // ───── reclassifyProvenanceConnectionType (Otzaria#1508) ─────
+
+    private val tanakhMeta = BookMeta(
+        isBaseBook = true, categoryLevel = 1, priorityRank = null, topCategoryEn = "Tanakh",
+    )
+
+    @Test
+    fun diburHamatchilFromMidrashAnthologyBecomesMidrash() {
+        // Yalkut Shimoni: no `dependence`, filed under Midrash.
+        val yalkut = BookMeta(
+            isBaseBook = true, categoryLevel = 3, priorityRank = null, topCategoryEn = "Midrash",
+        )
+
+        assertEquals(
+            ConnectionType.MIDRASH,
+            reclassifyProvenanceConnectionType(ConnectionType.DIBUR_HAMATCHIL, tanakhMeta, yalkut),
+        )
+        assertEquals(
+            ConnectionType.MIDRASH,
+            reclassifyProvenanceConnectionType(ConnectionType.DIBUR_HAMATCHIL, yalkut, tanakhMeta),
+        )
+    }
+
+    @Test
+    fun provenanceTypesFromCommentaryBecomeCommentary() {
+        // Meshech Hochmah (Parshanut), Tzror HaMor (Dibur Hamatchil).
+        val commentary = BookMeta(
+            isBaseBook = false, categoryLevel = 3, priorityRank = null,
+            dependence = Dependence.COMMENTARY, topCategoryEn = "Tanakh",
+        )
+
+        assertEquals(
+            ConnectionType.COMMENTARY,
+            reclassifyProvenanceConnectionType(ConnectionType.PARSHANUT, tanakhMeta, commentary),
+        )
+        assertEquals(
+            ConnectionType.COMMENTARY,
+            reclassifyProvenanceConnectionType(ConnectionType.DIBUR_HAMATCHIL, commentary, tanakhMeta),
+        )
+    }
+
+    @Test
+    fun provenanceTypeWithoutSchemaSignalFallsBackToCommentary() {
+        assertEquals(
+            ConnectionType.COMMENTARY,
+            reclassifyProvenanceConnectionType(ConnectionType.PARSHANUT, tanakhMeta, null),
+        )
+    }
+
+    @Test
+    fun otherTypesAreNotReclassified() {
+        val yalkut = BookMeta(
+            isBaseBook = true, categoryLevel = 3, priorityRank = null, topCategoryEn = "Midrash",
+        )
+        for (type in listOf(ConnectionType.QUOTATION, ConnectionType.COMMENTARY, ConnectionType.OTHER)) {
+            assertEquals(type, reclassifyProvenanceConnectionType(type, tanakhMeta, yalkut))
+        }
+    }
+
     // ───── inferConnectionTypeFromSchema (empty CSV Conection Type) ─────
 
     @Test
