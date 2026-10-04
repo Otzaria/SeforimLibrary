@@ -4,7 +4,8 @@
 #   build_library_vectors.sh --tag v<N>-<YYYYMMDDHHMMSS> [--mode base|dry-run]
 #                            [--state DIR] [--work DIR] [--repo OWNER/NAME]
 #
-#   1 index     download the release's search index (split parts, sha256-checked) and expand it
+#   1 index     download the release's search index (split parts, sha256-checked) and expand it,
+#               once its provenance names this release, this archive and this release's DB
 #   2 plan      export_semantic_plan v2 over it, split against the warehouse: embed.jsonl holds
 #               only the texts the warehouse has no vector for (every text, on a runner that
 #               has no warehouse yet)
@@ -37,6 +38,8 @@ set -euo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd)
 # shellcheck source=pins.env
 . "$HERE/pins.env"
+# shellcheck source=../db_asset_names.sh
+. "$HERE/../db_asset_names.sh"   # FULL_DB_ASSET_JQ: the release's full DB, which the index is built from
 
 TAG=""; MODE=dry-run; STATE=/home/runner/otzaria-vectors; WORK=""; REPO=${GITHUB_REPOSITORY:-Otzaria/SeforimLibrary}
 while [ $# -gt 0 ]; do
@@ -134,23 +137,50 @@ fetch() {  # <asset name>: into $WORK/dl, through gh, or anonymously from the pu
     curl -fsSL --retry 5 --retry-delay 10 -o "$WORK/dl/$1" "https://github.com/$REPO/releases/download/$TAG/$1"
   fi
 }
+RELEASE_JSON=$WORK/library-release.json   # when <tag> was published, and its assets' digests
 if [ -n "$GH_OK" ]; then
-  CREATED=$("$GH" release view "$TAG" --repo "$REPO" --json publishedAt --jq .publishedAt)
+  "$GH" api "repos/$REPO/releases/tags/$TAG" > "$RELEASE_JSON" || die "could not read the release $TAG"
 else
-  CREATED=$(curl -fsSL "https://api.github.com/repos/$REPO/releases/tags/$TAG" | jq -r .published_at)
+  curl -fsSL "https://api.github.com/repos/$REPO/releases/tags/$TAG" -o "$RELEASE_JSON" || die "could not read the release $TAG"
 fi
+CREATED=$(jq -r .published_at "$RELEASE_JSON")
 echo "$CREATED" | grep -Eq '^[0-9]{4}-[0-9]{2}-[0-9]{2}T' || die "could not read when $TAG was published"
 endgroup
 
 # ─── 1 index ───────────────────────────────────────────────────────────────
 group "1 index: the search index of $TAG"
-fetch otzaria-library-index.tar.zst.manifest.json
+ARCHIVE=otzaria-library-index.tar.zst
+fetch "$ARCHIVE.manifest.json"
 fetch otzaria-library-index.provenance.json
-manifest="$WORK/dl/otzaria-library-index.tar.zst.manifest.json"
+manifest="$WORK/dl/$ARCHIVE.manifest.json"
+provenance="$WORK/dl/otzaria-library-index.provenance.json"
+# Before the parts download: the provenance names this release, the manifest's archive and
+# this release's full DB (its digest, or its split manifest's sha256). A missing field fails.
+archive_sha=$(jq -r '.sha256 // empty' "$manifest")
+echo "$archive_sha" | grep -Eqx '[0-9a-f]{64}' || die "the index manifest states no sha256 of its archive"
+[ "$(jq -r '.archive // empty' "$manifest")" = "$ARCHIVE" ] || die "the index manifest does not describe $ARCHIVE"
+prov() { jq -r "$1 // empty" "$provenance"; }
+[ "$(prov .schemaVersion)" = 1 ] || die "the index provenance is not a schema 1 provenance"
+[ "$(prov .libraryReleaseTag)" = "$TAG" ] \
+  || die "the index provenance names release '$(prov .libraryReleaseTag)': this index is another release's, not $TAG's"
+[ "$(prov .indexArchive)" = "$ARCHIVE" ] && [ "$(prov .indexArchiveSha256)" = "$archive_sha" ] \
+  || die "the index provenance names archive '$(prov .indexArchive)' sha256 '$(prov .indexArchiveSha256)', not the manifest's $ARCHIVE $archive_sha"
+db=$(jq -c "$FULL_DB_ASSET_JQ" "$RELEASE_JSON")
+db_name=$(printf '%s' "$db" | jq -r '.name // empty')
+[ -n "$db_name" ] || die "$TAG carries no full DB, so the index provenance's database cannot be checked"
+if [ -n "$(printf '%s' "$db" | jq -r '.manifest // empty')" ]; then
+  fetch "$db_name.manifest.json"
+  db_sha=$(jq -r '.sha256 // empty' "$WORK/dl/$db_name.manifest.json")
+else
+  db_sha=$(printf '%s' "$db" | jq -r '.digest // empty'); db_sha=${db_sha#sha256:}
+fi
+echo "$db_sha" | grep -Eqx '[0-9a-f]{64}' || die "$TAG publishes no sha256 of $db_name, so the index provenance's database cannot be checked"
+[ "$(prov .seforimDbZstSha256)" = "$db_sha" ] \
+  || die "the index provenance names database sha256 '$(prov .seforimDbZstSha256)', not $db_name's $db_sha: this index was built from another database"
 jq -r '.parts[].name' "$manifest" | while read -r part; do fetch "$part"; done
 jq -r '.parts[] | "\(.sha256)  \(.name)"' "$manifest" | (cd "$WORK/dl" && sha256sum -c --quiet -) || die "an index part does not hash to its manifest"
 whole=$(jq -r '.parts[].name' "$manifest" | sed "s|^|$WORK/dl/|" | xargs cat | sha256sum | cut -d' ' -f1)
-[ "$whole" = "$(jq -r .sha256 "$manifest")" ] || die "the index archive does not hash to its manifest"
+[ "$whole" = "$archive_sha" ] || die "the index archive hashes to $whole, not the $archive_sha its manifest and provenance state"
 jq -r '.parts[].name' "$manifest" | sed "s|^|$WORK/dl/|" | xargs cat | "$ZSTD" -dc --long=31 | tar -x -C "$WORK/index"
 rm -f "$WORK"/dl/otzaria-library-index.tar.zst.part-*
 INDEX=$WORK/index/index
