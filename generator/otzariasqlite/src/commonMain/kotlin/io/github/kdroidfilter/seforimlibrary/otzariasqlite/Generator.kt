@@ -2386,8 +2386,8 @@ class DatabaseGenerator(
      * Runs once every book is in, and only for a book that has no acronyms and no
      * Acronymizer entry under its current title: an entry for the new title is the
      * curated answer and always wins. Which renames are followed, and which are
-     * refused, is [RenamedBookTitles]'s call. Like every Acronymizer read, a
-     * failure here costs the acronyms, not the build.
+     * refused, is [RenamedBookTitles]'s call. A failure here costs these acronyms,
+     * not the build: an unreadable Acronymizer has already failed it per book.
      */
     private suspend fun carryAcronymsAcrossRenames() {
         try {
