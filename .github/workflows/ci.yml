@@ -109,6 +109,50 @@ jobs:
       - name: Validate the library update announcer
         run: python .github/scripts/library_announce/test_library_update_announce.py
 
+  # The library-vectors build's suites (.github/scripts/vectors): its workflow, driver and
+  # bootstrap run against stub tools, and the GPU worker's shard contract. Not a release gate,
+  # so outside the contract loop above. NumPy lets the worker's small-plan tests run its real
+  # parity path; PyTorch is not installed, so its re-implementation tests skip, and a suite that
+  # skips anything else fails the job rather than reporting a hollow green.
+  vectors:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Install the suites' dependencies
+        run: python -m pip install --quiet --disable-pip-version-check pyyaml numpy
+
+      - name: Validate the library-vectors build
+        run: |
+          set -euo pipefail
+          for suite in test_library_vectors_workflow test_vectors_worker; do
+            log="$RUNNER_TEMP/$suite.log"
+            if ! python ".github/scripts/vectors/$suite.py" -v > "$log" 2>&1; then
+              cat "$log"
+              echo "::error::$suite failed — see its output above"
+              exit 1
+            fi
+            ran=$(sed -n 's/^Ran \([0-9][0-9]*\) test.*/\1/p' "$log" | tail -n1)
+            skipped=$(grep -c ' \.\.\. skipped ' "$log" || true)
+            unexpected=$(grep ' \.\.\. skipped ' "$log" | grep -v 'PyTorch and NumPy are not installed' || true)
+            if [ -z "$ran" ] || [ "$ran" -eq 0 ] || [ -n "$unexpected" ]; then
+              cat "$log"
+              echo "::error::$suite ran no tests, or skipped tests this job can run"
+              exit 1
+            fi
+            note=""; [ "$skipped" -eq 0 ] || note=", $skipped skipped (no PyTorch)"
+            echo "tests: $suite $((ran - skipped)) passed$note"
+          done
+
   test:
     runs-on: ubuntu-latest
 
