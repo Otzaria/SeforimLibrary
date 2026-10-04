@@ -350,6 +350,7 @@ class SefariaDirectImporter(
                 // Resolved in a second pass; left empty for now.
                 baseTextBookIds = emptySet(),
                 collectiveTitleEn = payload.collectiveTitleEn,
+                topCategoryEn = payload.categoriesEn.firstOrNull(),
                 authorKeys = resolvedAuthors.mapTo(HashSet()) { it.name },
             )
             if (payload.declaredBaseTextTitleKeys.isNotEmpty()) {
