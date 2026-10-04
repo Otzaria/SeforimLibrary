@@ -177,12 +177,19 @@ fi
 echo "$db_sha" | grep -Eqx '[0-9a-f]{64}' || die "$TAG publishes no sha256 of $db_name, so the index provenance's database cannot be checked"
 [ "$(prov .seforimDbZstSha256)" = "$db_sha" ] \
   || die "the index provenance names database sha256 '$(prov .seforimDbZstSha256)', not $db_name's $db_sha: this index was built from another database"
-jq -r '.parts[].name' "$manifest" | while read -r part; do fetch "$part"; done
+# The parts' paths in an array, never split on whitespace: --state and --work may hold any character.
+parts=()
+while IFS= read -r part; do
+  echo "$part" | grep -Eqx 'otzaria-library-index\.tar\.zst\.part-[0-9]+' || die "the index manifest names an unexpected part '$part'"
+  parts+=("$WORK/dl/$part")
+done < <(jq -r '.parts[].name' "$manifest")
+[ "${#parts[@]}" -gt 0 ] || die "the index manifest lists no parts"
+for part in "${parts[@]}"; do fetch "${part##*/}"; done
 jq -r '.parts[] | "\(.sha256)  \(.name)"' "$manifest" | (cd "$WORK/dl" && sha256sum -c --quiet -) || die "an index part does not hash to its manifest"
-whole=$(jq -r '.parts[].name' "$manifest" | sed "s|^|$WORK/dl/|" | xargs cat | sha256sum | cut -d' ' -f1)
+whole=$(cat "${parts[@]}" | sha256sum | cut -d' ' -f1)
 [ "$whole" = "$archive_sha" ] || die "the index archive hashes to $whole, not the $archive_sha its manifest and provenance state"
-jq -r '.parts[].name' "$manifest" | sed "s|^|$WORK/dl/|" | xargs cat | "$ZSTD" -dc --long=31 | tar -x -C "$WORK/index"
-rm -f "$WORK"/dl/otzaria-library-index.tar.zst.part-*
+cat "${parts[@]}" | "$ZSTD" -dc --long=31 | tar -x -C "$WORK/index"
+rm -f "${parts[@]}"
 INDEX=$WORK/index/index
 [ -f "$INDEX/meta.json" ] || die "the archive holds no index/meta.json"
 echo "index: $(du -sh "$INDEX" | cut -f1), $(jq -r .searchEngineVersion "$WORK/dl/otzaria-library-index.provenance.json") engine"
@@ -329,7 +336,7 @@ done
 expected=$(for f in "${UPLOADS[@]}"; do printf '%s\t%s\n' "$(basename "$f")" "$(stat -c %s "$f")"; done | sort)
 actual=$("$GH" release view "$RELEASE_TAG" --repo "$REPO" --json assets --jq '.assets[] | "\(.name)\t\(.size)"' | sort) \
   || die "could not list the assets of the draft $RELEASE_TAG; it stays a draft"
-[ "$actual" = "$expected" ] || die "the draft $RELEASE_TAG does not hold the files built (expected: $(echo $expected); found: $(echo $actual)); it stays a draft"
+[ "$actual" = "$expected" ] || die "the draft $RELEASE_TAG does not hold the files built (expected: $(printf '%s' "$expected" | tr '\t\n' '  '); found: $(printf '%s' "$actual" | tr '\t\n' '  ')); it stays a draft"
 "$GH" release edit "$RELEASE_TAG" --repo "$REPO" --draft=false --latest=false
 endgroup
 
