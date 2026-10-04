@@ -11,6 +11,7 @@ import io.github.kdroidfilter.seforimlibrary.dao.repository.SeforimRepository
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.jsonObject
 import kotlin.test.Test
@@ -19,6 +20,7 @@ import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 
 // Issue otzaria-library#45: the siman's topic line stands above se'if א instead of inside it.
+// Fixtures are Sefaria's own segments (merged.json), including the `<br>` closing the topic.
 class SefariaSimanTopicLinesTest {
 
     private val json = Json { ignoreUnknownKeys = true }
@@ -26,10 +28,15 @@ class SefariaSimanTopicLinesTest {
     private val schema = json.parseToJsonElement(
         """{"depth":2,"sectionNames":["Siman","Seif"],"heSectionNames":["סימן","סעיף"],"addressTypes":["Integer","Integer"]}""",
     ).jsonObject
+    private val orachChayim = "שולחן ערוך, אורח חיים"
+    private val bh = """<i data-commentator="Be'er HaGolah" data-label="א" data-order="1"></i>"""
 
     private fun build(heTitle: String, vararg simanim: List<String>): SefariaBookPayloadReader.BuiltBookContent =
+        buildWith(schema, heTitle, *simanim)
+
+    private fun buildWith(schemaObj: JsonObject, heTitle: String, vararg simanim: List<String>) =
         reader.walkTextWithSchema(
-            schemaObj = schema,
+            schemaObj = schemaObj,
             textElement = JsonArray(simanim.map { seifim -> JsonArray(seifim.map(::JsonPrimitive)) }),
             bookHeTitle = heTitle,
             bookEnTitle = "Shulchan Arukh, Orach Chayim",
@@ -37,7 +44,7 @@ class SefariaSimanTopicLinesTest {
 
     private fun keyHash(built: SefariaBookPayloadReader.BuiltBookContent, lineIndex: Int): ByteArray {
         val payload = BookPayload(
-            heTitle = "שולחן ערוך, אורח חיים", enTitle = "Shulchan Arukh, Orach Chayim", categoriesHe = listOf("הלכה"),
+            heTitle = orachChayim, enTitle = "Shulchan Arukh, Orach Chayim", categoriesHe = listOf("הלכה"),
             lines = built.lines, refEntries = built.refs, headings = built.headings,
             authors = emptyList(), description = null, heShortDesc = null,
             pubDates = emptyList(), altStructures = emptyList(),
@@ -49,72 +56,82 @@ class SefariaSimanTopicLinesTest {
 
     @Test
     fun `topic moves to a bold line between the siman and its first seif`() {
-        val first = """<b>דין השכמת הבוקר. ובו ט סעיפים:</b> <i data-commentator="Taz" data-order="1"></i>יתגבר כארי"""
-        val built = build("שולחן ערוך, אורח חיים", listOf(first, "שני"))
+        val first = "<b>דין השכמת הבוקר. ובו ט סעיפים:</b><br>${bh}יתגבר כארי"
+        val built = build(orachChayim, listOf(first, "שני"))
 
         assertEquals(
             listOf(
                 "<h1>שולחן ערוך, אורח חיים</h1>",
                 "<h2>סימן א</h2>",
                 "<b>דין השכמת הבוקר. ובו ט סעיפים:</b>",
-                """(א) <i data-commentator="Taz" data-order="1"></i>יתגבר כארי""",
+                "(א) ${bh}יתגבר כארי",
                 "(ב) שני",
             ),
             built.lines,
         )
+        assertEquals(setOf(2), built.simanTopicLines)
         // Not a navigation entry: the topic line adds no heading.
-        assertEquals(listOf("שולחן ערוך, אורח חיים", "סימן א"), built.headings.map { it.title })
-        // The se'if keeps its ref and its line id.
+        assertEquals(listOf(orachChayim, "סימן א"), built.headings.map { it.title })
+        // The se'if keeps its ref and the line id it had before the split.
         assertEquals(4, built.refs.first().lineIndex)
-        assertContentEquals(IdAllocatorBindings.lineNaturalKeyHash(first), keyHash(built, 3))
+        assertContentEquals(
+            IdAllocatorBindings.lineNaturalKeyHash(cleanSefariaLine(first, collapseInlineBreaks = true)),
+            keyHash(built, 3),
+        )
         assertTrue(lineWasModifiedByCleaning(requireNotNull(built.cleanShifts[3])))
     }
 
     @Test
-    fun `commentator markers inside the topic stay on the seif line`() {
-        val marker = """<i data-commentator="Peleti" data-order="1"></i>"""
-        val built = build("שולחן ערוך, אורח חיים", listOf("<b>בריה אפילו באלף לא בטיל. ובו ${marker}ד' סעיפים:</b> גוף", "שני"))
+    fun `whitespace after the break does not open the seif`() {
+        val built = build("שולחן ערוך, יורה דעה", listOf("<b>מי הם הכשרים לשחוט. ובו י\"ד סעיפים:</b><br> ${bh}הכל שוחטין", "שני"))
 
-        assertEquals("<b>בריה אפילו באלף לא בטיל. ובו ד' סעיפים:</b>", built.lines[2])
-        assertEquals("(א) ${marker}גוף", built.lines[3])
+        assertEquals("(א) ${bh}הכל שוחטין", built.lines[3])
+    }
+
+    @Test
+    fun `commentator markers around the topic stay on the seif line in order`() {
+        val peleti1 = """<i data-commentator="Peleti" data-order="1"></i>"""
+        val peleti2 = """<i data-commentator="Peleti" data-order="2"></i>"""
+        val built = build(
+            "שולחן ערוך, יורה דעה",
+            listOf("$peleti1<b>שמונה ${peleti2}מיני טריפות וסימנם. ובו סעיף אחד:</b><br> שמונה מיני טריפות הן"),
+        )
+
+        assertEquals("<b>שמונה מיני טריפות וסימנם. ובו סעיף אחד:</b>", built.lines[2])
+        assertEquals("$peleti1${peleti2}שמונה מיני טריפות הן", built.lines[3])
     }
 
     @Test
     fun `single seif siman gets its topic line too`() {
-        val built = build("שולחן ערוך, אורח חיים", listOf("<b>כוונת הברכות. ובו סעיף אחד:</b> יכוין"))
+        val built = build(orachChayim, listOf("<b>כוונת הברכות. ובו סעיף אחד:</b><br>יכוין"))
 
         assertEquals(listOf("<b>כוונת הברכות. ובו סעיף אחד:</b>", "יכוין"), built.lines.drop(2))
     }
 
     @Test
-    fun `a bare seif count gets its own line like every other topic`() {
-        val built = build("שולחן ערוך, אורח חיים", listOf("<b>ובו סעיף אחד:</b> טקסט"))
-
-        assertEquals(listOf("<b>ובו סעיף אחד:</b>", "טקסט"), built.lines.drop(2))
-    }
-
-    @Test
-    fun `only the first seif of a siman in the Shulchan Aruch is split`() {
-        val laterSeif = "<b>דין אחר. ובו ב סעיפים:</b> טקסט"
-        assertEquals("(ב) $laterSeif", build("שולחן ערוך, אורח חיים", listOf("ראשון", laterSeif)).lines.last())
-        assertEquals("(א) $laterSeif", build("ספר אחר", listOf(laterSeif, "שני")).lines[2])
+    fun `only a first seif opening with a bold run and a break is split`() {
+        val topic = "<b>דין אחר. ובו ב סעיפים:</b><br>טקסט"
+        assertEquals("(ב) $topic", build(orachChayim, listOf("ראשון", topic)).lines.last())
+        assertEquals("(א) $topic", build("ספר אחר", listOf(topic, "שני")).lines[2])
+        // A bold run the text continues after is not a topic.
+        assertEquals("(א) <b>דין אחר</b> טקסט", build(orachChayim, listOf("<b>דין אחר</b> טקסט", "שני")).lines[2])
+        assertEquals(emptySet(), build(orachChayim, listOf("<b>דין אחר</b> טקסט <b>ב</b><br>ג", "שני")).simanTopicLines)
     }
 
     @Test
     fun `a Topic alt-toc entry opening a siman points at its topic line`() = runBlocking {
-        val heTitle = "שולחן ערוך, אורח חיים"
-        val built = build(heTitle, listOf("<b>דין השכמת הבוקר. ובו ט סעיפים:</b> יתגבר", "שני"))
+        val built = build(orachChayim, listOf("<b>דין השכמת הבוקר. ובו ט סעיפים:</b><br>יתגבר", "שני"))
         val driver = JdbcSqliteDriver(JdbcSqliteDriver.IN_MEMORY)
         val repository = SeforimRepository(":memory:", driver)
         val bookId = repository.insertBook(
             Book(
                 id = 0, categoryId = repository.insertCategory(Category(id = 0, parentId = null, title = "שולחן ערוך", level = 0, order = 0)),
-                sourceId = repository.insertSource("Sefaria"), title = heTitle, heShortDesc = null, notesContent = null,
+                sourceId = repository.insertSource("Sefaria"), title = orachChayim, heShortDesc = null, notesContent = null,
                 order = 0f, totalLines = built.lines.size, isBaseBook = true, hasAltStructures = true,
             ),
         )
         val lineKeyToId = built.lines.indices.associate { i ->
-            (heTitle to i) to repository.insertLine(Line(id = 0, bookId = bookId, lineIndex = i, content = built.lines[i], heRef = null))
+            (orachChayim to i) to repository.insertLine(Line(id = 0, bookId = bookId, lineIndex = i, content = built.lines[i], heRef = null))
         }
         val node = AltNodePayload(
             title = "Laws of Morning Conduct", heTitle = "הלכות הנהגת האדם בבוקר",
@@ -123,18 +140,19 @@ class SefariaSimanTopicLinesTest {
             startingAddress = null, offset = null, children = emptyList(),
         )
         val payload = BookPayload(
-            heTitle = heTitle, enTitle = "Shulchan Arukh, Orach Chayim", categoriesHe = listOf("שולחן ערוך"),
+            heTitle = orachChayim, enTitle = "Shulchan Arukh, Orach Chayim", categoriesHe = listOf("שולחן ערוך"),
             lines = built.lines, refEntries = built.refs, headings = built.headings,
             authors = emptyList(), description = null, heShortDesc = null, pubDates = emptyList(),
-            altStructures = listOf(AltStructurePayload(key = "Topic", title = "Topic", heTitle = heTitle, nodes = listOf(node))),
+            altStructures = listOf(AltStructurePayload(key = "Topic", title = "Topic", heTitle = orachChayim, nodes = listOf(node))),
+            simanTopicLines = built.simanTopicLines,
         )
 
         val bindings = IdAllocatorBindings(InMemoryIdAllocator.load(path = null), repository)
-        SefariaAltTocBuilder(repository, bindings).buildAltTocStructuresForBook(payload, bookId, heTitle, lineKeyToId, built.lines.size)
+        SefariaAltTocBuilder(repository, bindings).buildAltTocStructuresForBook(payload, bookId, orachChayim, lineKeyToId, built.lines.size)
 
         val structureId = repository.getAltTocStructuresForBook(bookId).single().id
         val entry = repository.getAltTocEntriesForStructure(structureId).single { it.text == "הלכות הנהגת האדם בבוקר" }
-        assertEquals(lineKeyToId[heTitle to 2], entry.lineId)
+        assertEquals(lineKeyToId[orachChayim to 2], entry.lineId)
         driver.close()
     }
 }

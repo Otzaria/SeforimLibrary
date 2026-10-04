@@ -84,9 +84,7 @@ internal class SefariaAltTocBuilder(
         val canonicalToLine: Map<String, Pair<Long?, Int?>> = buildMap {
             refsForBook.forEach { entry ->
                 // An entry opening a siman lands on its topic line, not below it.
-                val lineIdx = (entry.lineIndex - 1).let {
-                    if (SefariaSimanTopicLines.isTopicLine(payload.heTitle, payload.lines, it - 1)) it - 1 else it
-                }
+                val lineIdx = (entry.lineIndex - 1).let { if (it - 1 in payload.simanTopicLines) it - 1 else it }
                 val lineId = lineKeyToId[bookPath to lineIdx]
                 val refsForEntry = listOfNotNull(entry.ref, entry.heRef)
                 refsForEntry.forEach { value ->
