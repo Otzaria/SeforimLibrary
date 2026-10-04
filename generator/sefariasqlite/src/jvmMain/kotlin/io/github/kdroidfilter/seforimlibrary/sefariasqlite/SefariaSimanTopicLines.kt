@@ -7,18 +7,28 @@ package io.github.kdroidfilter.seforimlibrary.sefariasqlite
  */
 internal object SefariaSimanTopicLines {
 
+    // Books whose every first-segment `<b>…</b><br>` is the section's topic, checked against the export.
     val bookHeTitles: Set<String> = setOf(
         "שולחן ערוך, אורח חיים",
         "שולחן ערוך, יורה דעה",
         "שולחן ערוך, אבן העזר",
         "שולחן ערוך, חושן משפט",
+        "ערוך השולחן",
+        "ערוך השולחן העתיד",
+        "קסת הסופר",
+        "שמלה חדשה",
+        "שערי אפרים",
+        "אהבת חסד",
+        "כללי התחלת החכמה",
     )
 
     private val INLINE_ITAG = Regex("""<i data-commentator[^>]*></i>""")
     private const val BOLD_RUN = """<b>((?:(?!</b>).)*)</b>"""
 
-    // Commentator markers may precede the bold (יורה דעה כט); `<br>` is the cleaned form of every break.
-    private val TOPIC = Regex("""^((?:${INLINE_ITAG.pattern})*)$BOLD_RUN<br>\s*""")
+    // Commentator markers may precede the bold (שו"ע יו"ד כט), a space the break (ערוך השולחן יו"ד עב);
+    // `<br>` is the cleaned form of every break.
+    private val TOPIC = Regex("""^((?:${INLINE_ITAG.pattern})*)$BOLD_RUN\s*<br>\s*""")
+    private val TOPIC_LINE = Regex("""^$BOLD_RUN$""")
 
     data class Split(val line: String, val seif: String)
 
@@ -36,4 +46,7 @@ internal object SefariaSimanTopicLines {
             seif = markers + rest,
         )
     }
+
+    /** True when stored [content] has the shape of a [Split.line]. */
+    fun isTopicLine(content: String?): Boolean = content != null && TOPIC_LINE.matches(content)
 }
