@@ -19,7 +19,10 @@ import io.github.kdroidfilter.seforimlibrary.dao.repository.SeforimRepository
  *    top-level section (siman/daf) — i.e. the last component of the commentary
  *    ref — counting Sefaria's empty comment slots.
  *  - When `data-order` is absent, `data-label` carries the printed Hebrew
- *    letter whose gematria value is that same component (Mishnah Berurah).
+ *    letter (Mishnah Berurah). Its gematria is the segment number only while
+ *    the section has no unlabeled segment before it, so the resolved comment
+ *    must open with that same printed "(X)"; otherwise the nearest segment
+ *    that does is used.
  *
  * Every anchor is double-checked against the links table: an anchor row is only
  * written when Sefaria's own links CSV already connects the anchored base line
@@ -164,8 +167,12 @@ internal class SefariaInlineAnchors(
             }
         }
         val enTitleByBookId = books.associate { it.bookId to it.enTitle }
+        val linesByPath = books.associate { it.bookPath to it.lines }
+        fun printedLabelValue(entry: RefEntry): Int? =
+            linesByPath[entry.path]?.getOrNull(entry.lineIndex - 1)?.let(::leadingPrintedLabel)
 
         var anchorsInserted = 0L
+        var labelShiftsApplied = 0
         var linesWithItags = 0
         val batch = mutableListOf<LinkAnchor>()
 
@@ -204,20 +211,45 @@ internal class SefariaInlineAnchors(
                         else -> candidates.single()
                     }
 
-                    val targetRef = buildCommentRef(
+                    fun commentRef(segment: Int) = buildCommentRef(
                         baseRef = baseRef,
                         baseEnTitle = book.enTitle,
                         commentaryEnTitle = enTitleByBookId.getValue(targetBookId),
-                        order = order,
+                        order = segment,
                     )
+                    val targetRef = commentRef(order)
                     if (targetRef == null) {
                         skip("base ref without title prefix") { "$baseRef (base ${book.enTitle})" }
                         continue
                     }
-                    val entries = refsByCanonical[canonicalCitation(targetRef)]
+                    var entries = refsByCanonical[canonicalCitation(targetRef)]
                     if (entries.isNullOrEmpty()) {
                         skip("comment ref not found") { targetRef }
                         continue
+                    }
+                    // data-label is the printed number, not the segment: a section opening
+                    // with an unlabeled intro (Mishnah Berurah 645) shifts every comment by one.
+                    if (itag.order == null) {
+                        val printed = printedLabelValue(entries.first())
+                        if (printed != order) {
+                            val shifted = PRINTED_LABEL_SHIFTS.firstNotNullOfOrNull { shift ->
+                                commentRef(order + shift)
+                                    ?.let { refsByCanonical[canonicalCitation(it)] }
+                                    ?.takeIf { it.isNotEmpty() && printedLabelValue(it.first()) == order }
+                            }
+                            when {
+                                shifted != null -> {
+                                    entries = shifted
+                                    labelShiftsApplied++
+                                }
+                                // Commentaries that print no "(X)" keep the plain gematria segment.
+                                printed == null -> Unit
+                                else -> {
+                                    skip("printed label not found near segment") { "$baseRef -> $targetRef" }
+                                    continue
+                                }
+                            }
+                        }
                     }
                     // תווית לתצוגה: המפורשת מהתג, ואם אין — הגימטריה של מספר
                     // ההערה (זו האות המודפסת אצל הפרשנים מבוססי-data-order:
@@ -255,7 +287,10 @@ internal class SefariaInlineAnchors(
             batch.clear()
         }
 
-        logger.i { "Inline anchors: $anchorsInserted anchors from $linesWithItags itag-carrying lines" }
+        logger.i {
+            "Inline anchors: $anchorsInserted anchors from $linesWithItags itag-carrying lines " +
+                "($labelShiftsApplied label-only tags re-aligned to their printed comment)"
+        }
         if (skipCounts.isNotEmpty()) {
             val details = skipCounts.entries
                 .sortedByDescending { it.value }
@@ -267,6 +302,16 @@ internal class SefariaInlineAnchors(
     }
 
 }
+
+/** Nearest offsets first, so the closest segment carrying the printed number wins. */
+private val PRINTED_LABEL_SHIFTS = listOf(1, -1, 2, -2, 3, -3)
+
+private val LEADING_PRINTED_LABEL = Regex("""^\s*\(\s*([א-ת"'׳״]{1,5})\s*\)""")
+private val HTML_TAG = Regex("<[^>]*>")
+
+/** Gematria of the "(כה)" that opens a comment segment, or null when it opens without one. */
+internal fun leadingPrintedLabel(content: String): Int? =
+    LEADING_PRINTED_LABEL.find(content.replace(HTML_TAG, ""))?.groupValues?.get(1)?.let(::gematriaValue)
 
 /**
  * Constructs the comment ref addressed by an itag: the base segment's ref

@@ -116,4 +116,87 @@ class SefariaInlineAnchorsIntegrationTest {
             repo.getLinkAnchors(8).map { Triple(it.charStart, it.charEnd, it.label) },
         )
     }
+
+    /**
+     * Mishnah Berurah 645 opens with an unlabeled intro segment, so printed "(א)" is
+     * segment 2 and Sefaria links each comment by its segment. The label-only itags
+     * must anchor to the comment whose printed number they carry (issue #1724).
+     */
+    @Test
+    fun labelOnlyItagsFollowPrintedNumberPastIntroSegment() = runBlocking {
+        val driver = JdbcSqliteDriver(url = "jdbc:sqlite::memory:")
+        SeforimDb.Schema.create(driver)
+        val repo = SeforimRepository(":memory:", driver)
+
+        val sourceId = repo.insertSource("Sefaria-Test")
+        val catId = repo.insertCategory(Category(0, null, "הלכה", level = 0, order = 1))
+        fun book(id: Long, title: String) = Book(
+            id = id, categoryId = catId, sourceId = sourceId, title = title, heRef = title,
+            authors = emptyList(), pubPlaces = emptyList(), pubDates = emptyList(),
+            heShortDesc = null, notesContent = null, order = id.toFloat(), topics = emptyList(),
+            isBaseBook = id == 1L, totalLines = 3, hasAltStructures = false,
+            hasTeamim = false, hasNekudot = false,
+        )
+        repo.insertBook(book(1, "שולחן ערוך"))
+        repo.insertBook(book(3, "משנה ברורה"))
+
+        val baseContent = "<i data-commentator=\"Mishnah Berurah\" data-label=\"א\"></i>שנפרדו " +
+            "<i data-commentator=\"Mishnah Berurah\" data-label=\"ב\"></i>ולא נדלדלו"
+        val mbLines = listOf(
+            "כתיב בתורה ולקחתם לכם",
+            "(א) שנפרדו - היינו כמו ענפי השבט",
+            "(ב) ולא נדלדלו - דטבע החריות",
+        )
+        repo.insertLinesBatch(
+            listOf(Line(id = 100, bookId = 1, lineIndex = 0, content = baseContent, heRef = "שולחן ערוך תרמה:א")) +
+                mbLines.mapIndexed { i, text ->
+                    Line(id = 301L + i, bookId = 3, lineIndex = i, content = text, heRef = "משנה ברורה תרמה:${i + 1}")
+                }
+        )
+        // As in Sefaria's links CSV: segments 2 and 3 (printed א, ב) on the base line.
+        repo.insertLinksBatch(
+            listOf(302L, 303L).map { target ->
+                Link(id = target, sourceBookId = 1, targetBookId = 3, sourceLineId = 100, targetLineId = target,
+                    targetLineIndex = (target - 301).toInt(), connectionType = ConnectionType.COMMENTARY)
+            }
+        )
+
+        val books = listOf(
+            SefariaInlineAnchors.BookInput(
+                bookId = 1, enTitle = "Shulchan Arukh, Orach Chayim", bookPath = "sa",
+                lines = listOf(baseContent),
+                refsByLineIndex = mapOf(0 to RefEntry("Shulchan Arukh, Orach Chayim 645:1", "שולחן ערוך תרמה:א", "sa", 1)),
+            ),
+            SefariaInlineAnchors.BookInput(
+                bookId = 3, enTitle = "Mishnah Berurah", bookPath = "mb",
+                lines = mbLines,
+                refsByLineIndex = mbLines.indices.associateWith {
+                    RefEntry("Mishnah Berurah 645:${it + 1}", "משנה ברורה תרמה:${it + 1}", "mb", it + 1)
+                },
+            ),
+        )
+        val bookMetaById = mapOf(
+            1L to BookMeta(isBaseBook = true, categoryLevel = 0, priorityRank = 0),
+            3L to BookMeta(
+                isBaseBook = false, categoryLevel = 0, priorityRank = null,
+                dependence = Dependence.COMMENTARY,
+                sefariaDeclaredBaseTextBookIds = setOf(1L),
+                collectiveTitleEn = null,
+            ),
+        )
+        val refsByCanonical = books.flatMap { input ->
+            input.refsByLineIndex.values.map { it.copy(path = input.bookPath) }
+        }.groupBy { canonicalCitation(it.ref) }
+        val lineKeyToId = mapOf("sa" to 0 to 100L) + mbLines.indices.associate { ("mb" to it) to 301L + it }
+
+        SefariaInlineAnchors(repo, Logger.withTag("InlineAnchorsTest")).generate(
+            books = books,
+            bookMetaById = bookMetaById,
+            refsByCanonical = refsByCanonical,
+            lineKeyToId = lineKeyToId,
+        )
+
+        assertEquals(listOf(0 to "א"), repo.getLinkAnchors(302).map { it.charStart to it.label })
+        assertEquals(listOf(7 to "ב"), repo.getLinkAnchors(303).map { it.charStart to it.label })
+    }
 }

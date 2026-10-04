@@ -73,6 +73,15 @@ class SefariaInlineAnchorsTest {
     }
 
     @Test
+    fun readsPrintedLabelOpeningCommentSegment() {
+        // Mishnah Berurah 645:26 — Sefaria segment 26 is printed "(כה)"
+        assertEquals(25, leadingPrintedLabel("(כה) בצפורן - ורוב הפוסקים"))
+        assertEquals(4, leadingPrintedLabel("<b>(ד)</b> דהיינו וכו'"))
+        assertNull(leadingPrintedLabel("כתיב בתורה ולקחתם לכם ביום הראשון"))
+        assertNull(leadingPrintedLabel("בצפורן (כה)"))
+    }
+
+    @Test
     fun buildsCommentRefForSimpleAddress() {
         assertEquals(
             "Turei Zahav on Shulchan Arukh, Orach Chayim 1:7",
