@@ -85,6 +85,25 @@ onnx_runtime() {  # the venv's ONNX Runtime library, which embed-shard and the v
 
 # ─── preflight ─────────────────────────────────────────────────────────────
 group "preflight ($TAG, $MODE)"
+# Resolve symlinks and missing suffixes before touching state or clearing scratch files.
+# NUL output also preserves paths ending in a newline. The build runner uses GNU coreutils.
+canonical() { IFS= read -r -d '' "$2" < <(realpath -m -z -- "$1") || die "could not resolve $1 (GNU realpath is required)"; }
+contains() { [ "$1" = / ] || [ "$2" = "$1" ] || [[ "$2" = "$1/"* ]]; }
+canonical "$WORK" work_path
+canonical "$STATE" state_path
+contains "$work_path" "$state_path" && die "--work $WORK contains the persistent state $STATE"
+# Scratch may be a child of state (the default), but must be disjoint from everything kept
+# across builds, including symlinked caches and custom tool paths outside state.
+PERSISTENT=("$STATE/bin" "$STATE/venv" "$STATE/model-cache" "$STATE/warehouse"
+  "$LEDGER" "$LEDGER.next" "$LEDGER.prev" "$STATE/.lock" "$CLI" "$EXPORT" "$VALIDATE" "$PY")
+# gh and zstd may be command names, or overridden executable paths.
+for tool in "$GH" "$ZSTD"; do case "$tool" in */*) PERSISTENT+=("$tool");; esac; done
+for persistent in "${PERSISTENT[@]}"; do
+  canonical "$persistent" persistent_path
+  if contains "$work_path" "$persistent_path" || contains "$persistent_path" "$work_path"; then
+    die "--work $WORK overlaps persistent path $persistent"
+  fi
+done
 mkdir -p "$STATE"
 exec 9>"$STATE/.lock"; flock -n 9 || die "another vector build or bootstrap holds $STATE/.lock"
 [ -x "$CLI" ] || die "the sidecar CLI is not at $CLI — run bootstrap_runner.sh"
@@ -304,7 +323,7 @@ if [ "$size" -ge "$PART_SIZE" ]; then
   rm "$WORK/files/$STEM.oxv.zst"
 fi
 DATA=()
-while IFS= read -r f; do DATA+=("$f"); done < <(find "$WORK/files" -maxdepth 1 -name "$STEM.oxv.zst*" | sort)
+while IFS= read -r -d '' f; do DATA+=("$f"); done < <(find "$WORK/files" -maxdepth 1 -name "$STEM.oxv.zst*" -print0 | sort -z)
 FILE_ARGS=()
 for f in "${DATA[@]}"; do FILE_ARGS+=(--files "$f"); done
 "$CLI" release-files --release "$REL" --compression zstd "${FILE_ARGS[@]}" --out "$WORK/files/$STEM.manifest.json" | tee "$WORK/release-files.log"
