@@ -181,20 +181,26 @@ class Pins(unittest.TestCase):
         self.assertIn("--features onnx-backend", line)
 
 
+# The release as the API returns it, for the stub gh and the stub curl: its assets, with no
+# digest under NO_DIGEST and no published_at under NO_PUBLISHED_AT.
+RELEASE_JSON = r"""
+release_json() {
+  local f digest
+  for f in "$ASSETS/$1"/*; do
+    digest=""; [ -n "${NO_DIGEST:-}" ] || digest="sha256:$(sha256sum < "$f" | cut -d' ' -f1)"
+    jq -n --arg name "$(basename "$f")" --argjson size "$(stat -c %s "$f")" --arg digest "$digest" \
+      '{name: $name, size: $size, digest: (if $digest == "" then null else $digest end)}'
+  done | jq -s --arg tag "$1" --arg at "${NO_PUBLISHED_AT:+none}" \
+    '{tag_name: $tag, assets: .} + (if $at == "" then {published_at: "2026-09-30T21:38:29Z"} else {} end)'
+}
+"""
+
 STUB_GH = r"""#!/usr/bin/env bash
-echo "gh $*" >> "$CALLS"
+""" + RELEASE_JSON + r"""echo "gh $*" >> "$CALLS"
 if [ "$1" = api ]; then
   case "$2" in
     */commits/v*) echo "${TAG_COMMIT:-c66256253b25c0aa0b13d04e399647496f3b0bee}"; exit 0 ;;
-    */releases/tags/v*)
-      # the release as the API returns it: its assets, with no digest under NO_DIGEST
-      tag=${2##*/}
-      for f in "$ASSETS/$tag"/*; do
-        digest=""; [ -n "${NO_DIGEST:-}" ] || digest="sha256:$(sha256sum < "$f" | cut -d' ' -f1)"
-        jq -n --arg name "$(basename "$f")" --argjson size "$(stat -c %s "$f")" --arg digest "$digest" \
-          '{name: $name, size: $size, digest: (if $digest == "" then null else $digest end)}'
-      done | jq -s --arg tag "$tag" '{tag_name: $tag, published_at: "2026-09-30T21:38:29Z", assets: .}'
-      exit 0 ;;
+    */releases/tags/v*) release_json "${2##*/}"; exit 0 ;;
   esac
   echo "stub gh: api $2" >&2; exit 90
 fi
@@ -221,6 +227,24 @@ case "$cmd" in
     printf '%s\t%s\n' "$name" "$size" >> "$UPLOADED" ;;
   "release edit") ;;
   *) echo "stub gh: $cmd" >&2; exit 90 ;;
+esac
+"""
+
+# The anonymous path, with gh unauthenticated: the release API and the public download URLs.
+# As curl -f does, an HTTP error (CURL_FAIL=api: the API's) exits 22.
+STUB_CURL = r"""#!/usr/bin/env bash
+""" + RELEASE_JSON + r"""echo "curl $*" >> "$CALLS"
+out=/dev/stdout; url=""
+while [ $# -gt 0 ]; do case "$1" in -o) out=$2; shift 2;; --retry|--retry-delay) shift 2;; -*) shift;; *) url=$1; shift;; esac; done
+case "$url" in
+  https://api.github.com/repos/*/releases/tags/*)
+    [ "${CURL_FAIL:-}" != api ] || exit 22
+    release_json "${url##*/}" > "$out" ;;
+  https://github.com/*/releases/download/*)
+    asset="$ASSETS/${url#*/releases/download/}"
+    [ -f "$asset" ] || exit 22
+    cp "$asset" "$out" ;;
+  *) echo "stub curl: $url" >&2; exit 90 ;;
 esac
 """
 
@@ -365,11 +389,12 @@ class Driver(unittest.TestCase):
         r = Path(self.tmp.name)
         self.root, self.calls = r, r / "calls.log"
         (r / "bin").mkdir()
-        for name, body in (("gh", STUB_GH), ("export", STUB_EXPORT), ("cli", STUB_CLI), ("py", STUB_PY), ("zstd", STUB_ZSTD),
-                           ("validate", STUB_VALIDATE)):
-            p = r / "bin" / name
-            p.write_text(body)
-            p.chmod(p.stat().st_mode | stat.S_IEXEC)
+        (r / "net").mkdir()   # on PATH, so no test reaches the network
+        for path, body in ((r / "bin" / "gh", STUB_GH), (r / "bin" / "export", STUB_EXPORT), (r / "bin" / "cli", STUB_CLI),
+                           (r / "bin" / "py", STUB_PY), (r / "bin" / "zstd", STUB_ZSTD), (r / "bin" / "validate", STUB_VALIDATE),
+                           (r / "net" / "curl", STUB_CURL)):
+            path.write_text(body)
+            path.chmod(path.stat().st_mode | stat.S_IEXEC)
         # a release whose index archive is two parts of a tar (the zstd stub passes it through)
         assets = r / "assets" / TAG
         assets.mkdir(parents=True)
@@ -431,7 +456,8 @@ class Driver(unittest.TestCase):
                  OTZARIA_SEMANTIC_CLI=str(self.root / "bin" / "cli"), EXPORT_SEMANTIC_PLAN=str(self.root / "bin" / "export"),
                  VECTOR_PYTHON=str(self.root / "bin" / "py"), GH=str(self.root / "bin" / "gh"), ZSTD=str(self.root / "bin" / "zstd"),
                  VALIDATE_SEMANTIC_VECTORS=str(self.root / "bin" / "validate"),
-                 VECTORS_MIN_FREE_GB="0", OTZARIA_HF_TOKEN="hf_s3cr3t", GITHUB_ACTIONS="")
+                 VECTORS_MIN_FREE_GB="0", OTZARIA_HF_TOKEN="hf_s3cr3t", GITHUB_ACTIONS="",
+                 PATH=str(self.root / "net") + os.pathsep + os.environ["PATH"])
         e.update({k: str(v) for k, v in env.items()})
         p = subprocess.run(["bash", str(DRIVER), "--tag", tag, "--mode", mode, "--state", str(self.state), "--repo", "o/r",
                             *args], capture_output=True, text=True, env=e)
@@ -722,7 +748,7 @@ class Driver(unittest.TestCase):
     def assert_refused_before_the_parts(self, p, calls, needle="provenance"):
         self.assertNotEqual(p.returncode, 0, p.stdout + p.stderr)
         self.assertIn(needle, p.stdout)
-        self.assertFalse([c for c in calls if "release download" in c and ".part-" in c])   # nothing large is fetched
+        self.assertFalse([c for c in calls if ".part-" in c and ("release download" in c or c.startswith("curl "))])   # nothing large is fetched
         self.assertFalse([c for c in calls if c.startswith("export ") or "release create" in c or "release edit" in c])
         self.assertFalse((self.state / "ledger").exists())
 
@@ -819,6 +845,42 @@ class Driver(unittest.TestCase):
                 p, calls = self.run_driver()
                 self.assert_refused_before_the_parts(p, calls, needle)
                 self.assertFalse([c for c in calls if "release download" in c and "seforim-schema6.db.zst" in c])
+
+    def test_without_gh_the_release_is_read_anonymously_and_held_to_its_provenance(self):
+        assets = self.root / "assets" / TAG
+        api = f"curl -fsSL https://api.github.com/repos/o/r/releases/tags/{TAG} -o "
+        download = f"https://github.com/o/r/releases/download/{TAG}/"
+
+        def run(**env):
+            self.calls.unlink(missing_ok=True)
+            p, calls = self.run_driver(GH_UNAUTHENTICATED=1, TO_EMBED=0, **env)
+            self.assertEqual([c for c in calls if c.startswith("gh ")], ["gh auth status"])
+            self.assertFalse([c for c in calls if c.endswith("/seforim-schema6.db.zst") or "seforim-schema6.db.zst.part-" in c])
+            return p, calls
+
+        for label, prov, env, needle in (("this release's index", {}, {}, None),
+                                         ("the audit's v29 provenance", {"libraryReleaseTag": "v29-20260801000000"}, {}, "another release"),
+                                         ("no digest", {}, {"NO_DIGEST": 1}, "no sha256"),
+                                         ("the release API fails", {}, {"CURL_FAIL": "api"}, "could not read the release"),
+                                         ("no published_at", {}, {"NO_PUBLISHED_AT": 1}, "could not read when")):
+            with self.subTest(label):
+                self.write_provenance(**prov)
+                p, calls = run(**env)
+                if needle:
+                    self.assert_refused_before_the_parts(p, calls, needle)
+                    continue
+                self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+                self.assertTrue([c for c in calls if c.startswith(api)])
+                self.assertTrue([c for c in calls if c.endswith(download + "otzaria-library-index.tar.zst.part-001")])
+                self.assertIn("--created-at 2026-09-30T21:38:29Z", calls[self.index_of(calls, "export --index")])
+        with self.subTest("a split DB"):
+            self.write_provenance()
+            (assets / "seforim-schema6.db.zst").unlink()
+            (assets / "seforim-schema6.db.zst.manifest.json").write_text(json.dumps(
+                {"archive": "seforim-schema6.db.zst", "sha256": self.db_sha, "parts": []}))
+            p, calls = run()
+            self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+            self.assertTrue([c for c in calls if c.endswith(download + "seforim-schema6.db.zst.manifest.json")])
 
     def test_a_plan_for_another_release_is_refused(self):
         p, calls = self.run_driver(PLAN_TAG="v29-20260927072953")
