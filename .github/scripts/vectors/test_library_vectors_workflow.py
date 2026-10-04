@@ -7,6 +7,8 @@ the work, the same way by hand. Load-bearing properties, pinned here:
   * it runs only behind a successful index build of a database release (or a manual run
     naming one), and publishing is opt-in;
   * a runner with no warehouse yet plans every text and creates the warehouse on its first add;
+  * a warehouse is verified before the plan reads it: bad data stops the build, and a bad
+    index is rebuilt;
   * a plan of fewer than CPU_EMBED_MAX texts is embedded on the CPU by the sidecar's embed-shard
     (the reference), so the GPU worker never gets a plan its parity certificate cannot cover;
   * a gate failure, an existing vectors release or a damaged index stops it before anything
@@ -256,6 +258,8 @@ while [ $# -gt 0 ]; do case "$1" in --out) out=$2; shift 2;; --warehouse) wareho
 if [ -n "$warehouse" ] && [ ! -f "$warehouse/warehouse.json" ]; then
   echo "Could not open the warehouse: $warehouse/warehouse.json: No such file or directory" >&2; exit 1
 fi
+# and trusts its index unverified: a bad one (index.fault) hides about half the library's vectors
+[ -z "$warehouse" ] || [ ! -f "$warehouse/index.fault" ] || TO_EMBED=3173793
 mkdir -p "$out"
 : > "$out/embed.jsonl"
 jq -n --argjson n "${TO_EMBED:-0}" '{format:"otzaria-embed-plan",version:2,records:$n,plan_sha256:("a"*64),passage_package:{checksum:"4a4a2ae88a86f15ffe6069bfcefc3abd13c207cec5d7aaef52c0c59d752ade46",quantization:"fp32"}}' > "$out/embed-manifest.json"
@@ -265,14 +269,30 @@ jq -n --arg tag "${PLAN_TAG:-v30-20260930165019}" '{format:"otzaria-vector-plan"
 STUB_CLI = r"""#!/usr/bin/env bash
 echo "cli $*" >> "$CALLS"
 sub=$1; shift
-out=""; files=(); verify=""; warehouse=""; create=""; model=""; shards=()
+out=""; files=(); verify=""; warehouse=""; create=""; model=""; shards=(); repair=""
 while [ $# -gt 0 ]; do case "$1" in
   --out) out=$2; shift 2;; --files) files+=("$2"); shift 2;; --verify) verify=1; shift;;
   --warehouse) warehouse=$2; shift 2;; --create) create=1; shift;; --model) model=$2; shift 2;;
-  --shards) shards+=("$2"); shift 2;; --processes) processes=$2; shift 2;; *) shift;; esac; done
+  --shards) shards+=("$2"); shift 2;; --processes) processes=$2; shift 2;; --repair) repair=1; shift;; *) shift;; esac; done
 # as the sidecar does: --create makes a missing warehouse for --model; everything else needs one
 need_warehouse() { [ -f "$warehouse/warehouse.json" ] || { echo "Could not open the warehouse $warehouse" >&2; exit 1; }; }
+# and verifies it first: data.fault stands for a batch that fails its digests (never repaired),
+# index.fault for an index that is not keys.bin's (rebuilt by an add or by --repair)
+verified() {  # <repairs, or "">
+  need_warehouse; rebuilt=""
+  if [ -f "$warehouse/data.fault" ]; then
+    echo "The warehouse failed its check: warehouse $warehouse: batch 2: vectors.f32 does not hash to its digest; data that fails its digest is not repaired: restore the warehouse from a copy, or move it aside and the next build embeds every text again" >&2; exit 1
+  fi
+  [ -f "$warehouse/index.fault" ] || return 0
+  [ -n "$1" ] || { echo "The warehouse failed its check: warehouse $warehouse: index.bin is not the index of keys.bin; the keys are sound, so adding to the warehouse, or warehouse-verify --repair, rebuilds the index from them" >&2; exit 1; }
+  rm "$warehouse/index.fault"; rebuilt=1
+}
 case "$sub" in
+  warehouse-verify)
+    verified "$repair"
+    echo "Verified:        9 record(s) in 2 batch(es), 9216 bytes re-hashed"
+    [ -z "$rebuilt" ] || echo "Index rebuilt:   index.bin is not the index of keys.bin"
+    echo "Took:            0.0 s" ;;
   embed-shard)
     # as the sidecar does: one shard in --out, or with --processes P one per process in shard-NNN
     echo "cli-env OTZARIA_ONNX_RUNTIME=${OTZARIA_ONNX_RUNTIME:-}" >> "$CALLS"
@@ -288,9 +308,9 @@ case "$sub" in
     fi
     found=$(for s in "${shards[@]}"; do find "$s" -name shard-manifest.json; done | wc -l)
     [ "$found" -gt 0 ] || { echo "Nothing to add: no shard-manifest.json under --shards" >&2; exit 1; }
-    need_warehouse ;;
+    verified 1 ;;
   assemble)
-    need_warehouse
+    verified ""
     if [ -n "$verify" ]; then echo '{"gates":"stub"}' > "$out/gates.json"; exit "${VERIFY_EXIT:-0}"; fi
     mkdir -p "$out"; head -c 3000 /dev/urandom > "$out/segment.oxv"
     echo '{"identityDigest":"0123456789abcdef","toLibraryVersion":30}' > "$out/release.json"
@@ -534,6 +554,15 @@ class Driver(unittest.TestCase):
                              env=env, capture_output=True)
         self.assertNotEqual(add.returncode, 0)
         self.assertFalse(missing.exists())
+        # a bad index is refused unless repaired; bad data is refused, repair or not
+        def cli(*args):
+            return subprocess.run([str(self.root / "bin" / "cli"), *args, "--warehouse", str(self.warehouse)],
+                                  env=env, capture_output=True).returncode
+        (self.warehouse / "index.fault").write_text("")
+        self.assertEqual([cli("warehouse-verify"), cli("assemble", "--kind", "base", "--out", str(self.root / "r")),
+                          cli("warehouse-verify", "--repair"), cli("warehouse-verify")], [1, 1, 0, 0])
+        (self.warehouse / "data.fault").write_text("")
+        self.assertEqual([cli("warehouse-verify", "--repair"), cli("warehouse-add", "--shards", str(shard))], [1, 1])
 
     def test_a_runner_with_no_warehouse_yet_plans_every_text_and_creates_it_on_the_first_add(self):
         shutil.rmtree(self.warehouse)
@@ -571,6 +600,44 @@ class Driver(unittest.TestCase):
         self.assertIn("no warehouse.json", p.stdout)
         self.assertFalse([c for c in calls if "release download" in c or c.startswith(("export ", "cli ", "py "))])
         self.assertEqual((self.warehouse / "vectors.f32").stat().st_size, 1024)   # never recreated over
+
+    def test_a_warehouse_is_verified_before_the_index_downloads_and_the_plan_reads_it(self):
+        p, calls = self.run_driver(TO_EMBED=0)
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        checks = [c for c in calls if "warehouse-verify" in c]
+        self.assertEqual(checks, [f"cli warehouse-verify --warehouse {self.warehouse} --repair"])
+        check = calls.index(checks[0])
+        self.assertLess(check, self.index_of(calls, "--pattern otzaria-library-index.tar.zst.part-000"))
+        self.assertLess(check, self.index_of(calls, "export --index"))
+        self.assertIn("\nVerified:        9 record(s)", p.stdout)
+
+    def test_a_runner_with_no_warehouse_yet_has_none_to_verify(self):
+        shutil.rmtree(self.warehouse)
+        p, calls = self.run_driver(TO_EMBED=5)
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertFalse([c for c in calls if "warehouse-verify" in c])
+        self.assertNotIn("Verified:", p.stdout)
+
+    def test_a_warehouse_whose_data_fails_its_digests_stops_the_build_before_the_plan(self):
+        (self.warehouse / "data.fault").write_text("")
+        p, calls = self.run_driver(mode="base", TO_EMBED=int(PIN["CPU_EMBED_MAX"]))
+        self.assertEqual(p.returncode, 1, p.stdout + p.stderr)
+        self.assertIn("::error::warehouse-verify --repair, before the plan: The warehouse failed its check: warehouse "
+                      f"{self.warehouse}: batch 2: vectors.f32 does not hash to its digest; data that fails", p.stdout)
+        self.assertTrue([c for c in calls if "warehouse-verify" in c])
+        self.assertFalse([c for c in calls if c.startswith(("export ", "py ")) or ".part-" in c or "embed-shard" in c
+                          or "warehouse-add" in c or "release create" in c])
+
+    def test_a_warehouse_index_that_is_not_its_keys_is_rebuilt_before_the_plan_and_the_build_goes_on(self):
+        (self.warehouse / "index.fault").write_text("")
+        p, calls = self.run_driver(TO_EMBED=0)
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertIn("\nIndex rebuilt:   ", p.stdout)
+        self.assertFalse((self.warehouse / "index.fault").exists())
+        self.assertLess(self.index_of(calls, "cli warehouse-verify"), self.index_of(calls, "export --index"))
+        # the split read a sound index: no text the warehouse holds went to be embedded
+        self.assertFalse([c for c in calls if "embed_worker.py" in c or "embed-shard" in c or "warehouse-add" in c])
+        self.assertIn("dry run: built and verified", p.stdout)
 
     def test_an_empty_plan_on_a_runner_with_no_warehouse_stops_before_assembling(self):
         shutil.rmtree(self.warehouse)

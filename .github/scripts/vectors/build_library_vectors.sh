@@ -8,7 +8,7 @@
 #               once its provenance names this release, this archive and this release's DB
 #   2 plan      export_semantic_plan v2 over it, split against the warehouse: embed.jsonl holds
 #               only the texts the warehouse has no vector for (every text, on a runner that
-#               has no warehouse yet)
+#               has no warehouse yet); the preflight has run warehouse-verify --repair on it
 #   3 embed     those texts: fewer than CPU_EMBED_MAX on the CPU, with the sidecar's embed-shard
 #               (ONNX Runtime and the fp32 package — the reference, so no parity certificate); more
 #               on the GPU, with embed_worker.py — windows of EMBED_WINDOW records, each a v2 shard
@@ -145,6 +145,12 @@ else
 fi
 CREATED=$(jq -r .published_at "$RELEASE_JSON")
 echo "$CREATED" | grep -Eq '^[0-9]{4}-[0-9]{2}-[0-9]{2}T' || die "could not read when $TAG was published"
+# The plan trusts the warehouse's index: bad data stops the build here, a bad index is rebuilt.
+if [ -z "$FRESH" ]; then
+  checked=$("$CLI" warehouse-verify --warehouse "$WAREHOUSE" --repair 2>&1) \
+    || die "warehouse-verify --repair, before the plan: $checked"
+  echo "$checked"
+fi
 endgroup
 
 # ─── 1 index ───────────────────────────────────────────────────────────────
