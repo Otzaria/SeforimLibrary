@@ -518,7 +518,11 @@ internal class SefariaLinksImporter(
                                 dafAlignedPairs = dafAlignedPairs,
                             ) ?: csvConnectionType
                         } else {
-                            csvConnectionType
+                            reclassifyProvenanceConnectionType(
+                                type = csvConnectionType,
+                                srcMeta = bookMetaById[srcBookId],
+                                tgtMeta = bookMetaById[tgtBookId],
+                            )
                         }
                         // Drop self-commentary / self-targum links. Sefaria ships a handful
                         // of links that point back to the same book (e.g. Genesis → Genesis
@@ -1138,6 +1142,24 @@ internal fun formatPerTypeCounters(metrics: LinkImportMetrics): String = buildSt
     append(" csvResolvedPairs=$resolvedPairs storedWritten=$written")
     append(" (resolvedPairs-written=${resolvedPairs - written}: pairs dropped by the")
     append(" heading/self-link filters or collapsed by INSERT OR IGNORE)")
+}
+
+/**
+ * Sefaria's `Dibur Hamatchil` and `Parshanut` name the tool that generated a link
+ * (one book each: Yalkut Shimoni, Tzror HaMor, Meshech Hochmah), not what the linked
+ * book is. The reader groups commentators by type, so take the type from the book's
+ * own schema instead: a Midrash anthology lands with the Midrashim (Otzaria#1508).
+ */
+internal fun reclassifyProvenanceConnectionType(
+    type: ConnectionType,
+    srcMeta: BookMeta?,
+    tgtMeta: BookMeta?,
+): ConnectionType {
+    if (type != ConnectionType.DIBUR_HAMATCHIL && type != ConnectionType.PARSHANUT) return type
+    val metas = listOfNotNull(srcMeta, tgtMeta)
+    metas.firstNotNullOfOrNull { it.dependence }?.let { return it.toConnectionType() }
+    if (metas.any { it.topCategoryEn == "Midrash" }) return ConnectionType.MIDRASH
+    return ConnectionType.COMMENTARY
 }
 
 internal fun mapCsvConnectionType(raw: String, source: String): ConnectionType {
