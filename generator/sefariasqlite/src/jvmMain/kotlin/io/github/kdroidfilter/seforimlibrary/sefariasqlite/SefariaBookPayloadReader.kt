@@ -216,7 +216,7 @@ internal class SefariaBookPayloadReader(
                 listOf(he) + authorTitles.allNameForms(slug)
             }.distinct()
 
-            val (lines, refs, headings, cleanShifts, lineKeyHashOverrides) = buildBookContent(
+            val (lines, refs, headings, cleanShifts, lineKeyHashOverrides, simanTopicLines) = buildBookContent(
                 schemaObj = schemaObj,
                 textElement = textElement,
                 bookHeTitle = hebrewTitle,
@@ -280,6 +280,7 @@ internal class SefariaBookPayloadReader(
                 singleVersionTitle = singleVersionTitle,
                 cleanShiftByLineIndex = cleanShifts,
                 lineKeyHashOverrides = lineKeyHashOverrides,
+                simanTopicLines = simanTopicLines,
                 versionsMeta = versionsMeta,
                 sourceDirPath = textPath.parent?.toString(),
                 schemaFilePath = schemaPath.toString(),
@@ -487,6 +488,7 @@ internal class SefariaBookPayloadReader(
         val headings: List<Heading>,
         val cleanShifts: Map<Int, Int>,
         val lineKeyHashOverrides: Map<Int, ByteArray>,
+        val simanTopicLines: Set<Int>,
     )
 
     /**
@@ -545,6 +547,7 @@ internal class SefariaBookPayloadReader(
         // See BookPayload.cleanShiftByLineIndex — sparse raw-offset bookkeeping.
         val cleanShifts = HashMap<Int, Int>()
         val lineKeyHashOverrides = if (collectLineKeyOverrides) HashMap<Int, ByteArray>() else null
+        val simanTopicLines = HashSet<Int>()
 
         fun headingTagForLevel(level: Int): Pair<String, String> = when (level) {
             0 -> "<h1>" to "</h1>"
@@ -624,6 +627,7 @@ internal class SefariaBookPayloadReader(
                     childRefOffsets = indexOffsets?.children,
                     cleanShifts = cleanShifts,
                     lineKeyHashOverrides = lineKeyHashOverrides,
+                    simanTopicLines = simanTopicLines,
                     numbersIntegerLeaf = numbersIntegerLeaf(node),
                     labels = labels.section(refPrefix),
                 )
@@ -677,12 +681,13 @@ internal class SefariaBookPayloadReader(
                 childRefOffsets = indexOffsets?.children,
                 cleanShifts = cleanShifts,
                 lineKeyHashOverrides = lineKeyHashOverrides,
+                simanTopicLines = simanTopicLines,
                 numbersIntegerLeaf = numbersIntegerLeaf(schemaObj),
                 labels = labels.section(bookEnTitle),
             )
         }
 
-        return BuiltBookContent(output, refs, headings, cleanShifts, lineKeyHashOverrides.orEmpty())
+        return BuiltBookContent(output, refs, headings, cleanShifts, lineKeyHashOverrides.orEmpty(), simanTopicLines)
     }
 
     private fun recursiveSections(
@@ -711,6 +716,7 @@ internal class SefariaBookPayloadReader(
         // Sparse raw-offset bookkeeping (see BookPayload.cleanShiftByLineIndex).
         cleanShifts: MutableMap<Int, Int>? = null,
         lineKeyHashOverrides: MutableMap<Int, ByteArray>? = null,
+        simanTopicLines: MutableSet<Int>? = null,
         numbersIntegerLeaf: Boolean = false,
         labels: SectionLabels,
     ) {
@@ -733,7 +739,10 @@ internal class SefariaBookPayloadReader(
                     } else {
                         null
                     }
-                    if (topic != null) output += topic.line
+                    if (topic != null) {
+                        simanTopicLines?.add(output.size)
+                        output += topic.line
+                    }
                     val stored = topic?.seif ?: cleaned
                     // Reproduce the old pipeline BEFORE the dashless repair: keeping
                     // a break can either enable or suppress that repair. Collapsing
@@ -899,6 +908,7 @@ internal class SefariaBookPayloadReader(
                 refIndexOffset = nextRefIndexOffset,
                 cleanShifts = cleanShifts,
                 lineKeyHashOverrides = lineKeyHashOverrides,
+                simanTopicLines = simanTopicLines,
                 numbersIntegerLeaf = numbersIntegerLeaf,
                 labels = labels,
             )

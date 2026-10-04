@@ -124,6 +124,8 @@ internal data class BookPayload(
     // Computed from the previous cleaning + dashless-repair pipeline, before the
     // generated prefix. Generated headings/authors never pass through cleaning.
     val lineKeyHashOverrides: Map<Int, ByteArray> = emptyMap(),
+    // Line indices of siman topic lines split off a first se'if (SefariaSimanTopicLines).
+    val simanTopicLines: Set<Int> = emptySet(),
     // All [versionTitle, versionSource] pairs from merged.json's `versions` array
     // (the versions that CONTRIBUTED to the merge). book_version metadata-only
     // fallback when no per-version sibling files exist.
