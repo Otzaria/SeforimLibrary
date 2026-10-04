@@ -424,7 +424,12 @@ internal val HEREF_SEIF_BOOK_TITLES = listOf(
 )
 
 /** One content line as the heRef group reads it. */
-internal data class SeifRefLine(val lineId: Long, val lineIndex: Long, val heRef: String?)
+internal data class SeifRefLine(
+    val lineId: Long,
+    val lineIndex: Long,
+    val heRef: String?,
+    val isSimanTopic: Boolean = false,
+)
 
 private data class SeifimHeadingRow(val id: Long, val parentId: Long?, val heading: SeifimHeading)
 
@@ -485,8 +490,10 @@ internal fun readHeRefSeifimCandidateSnapshots(conn: Connection): List<SeifimBoo
  *
  * Inside a siman nothing is guessed: a line whose heRef is missing, too
  * shallow, does not name its own siman, or repeats a heRef the siman already
- * closed aborts the build. Only an immediately repeated heRef is legitimate —
- * several lines of one se'if — and opens a single leaf.
+ * closed aborts the build. The one ref-less line allowed is the siman's topic
+ * line (SefariaSimanTopicLines), right under its heading. Only an immediately
+ * repeated heRef is legitimate — several lines of one se'if — and opens a
+ * single leaf.
  */
 internal fun computeHeRefSeifMarkers(
     bookTitle: String,
@@ -495,18 +502,21 @@ internal fun computeHeRefSeifMarkers(
 ): List<SeifMarker> {
     val markers = mutableListOf<SeifMarker>()
     var container: String? = null
+    var containerLineIndex = -1L
     var previousRef: String? = null
     val refsInSiman = HashSet<String>()
     for (line in lines) {
         val heading = headingTextByLineIndex[line.lineIndex]
         if (heading != null) {
             container = heading
+            containerLineIndex = line.lineIndex
             previousRef = null
             refsInSiman.clear()
             continue
         }
         val siman = container?.takeIf(::isSimanHeading) ?: continue
         val where = "$bookTitle, line ${line.lineIndex} under '${siman.trim()}'"
+        if (line.heRef == null && line.isSimanTopic && line.lineIndex == containerLineIndex + 1) continue
         val heRef = line.heRef ?: error("Seif marker: no heRef on $where")
         // המפריד הוא "," עם רווח כפול אחרי שם החלק — מקצצים כל מקטע.
         val segments = heRef.split(',').map { it.trim() }
@@ -612,12 +622,12 @@ private fun readBookLineIndex(conn: Connection, bookId: Long): List<Pair<Long, L
 private fun readBookLines(conn: Connection, bookId: Long): List<SeifRefLine> {
     val lines = mutableListOf<SeifRefLine>()
     conn.prepareStatement(
-        "SELECT id, lineIndex, heRef FROM line WHERE bookId = ? ORDER BY lineIndex",
+        "SELECT id, lineIndex, heRef, content FROM line WHERE bookId = ? ORDER BY lineIndex",
     ).use { st ->
         st.setLong(1, bookId)
         st.executeQuery().use { rs ->
             while (rs.next()) {
-                lines += SeifRefLine(rs.getLong(1), rs.getLong(2), rs.getString(3))
+                lines += SeifRefLine(rs.getLong(1), rs.getLong(2), rs.getString(3), SefariaSimanTopicLines.isTopicLine(rs.getString(4)))
             }
         }
     }
