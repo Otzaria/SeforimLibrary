@@ -304,7 +304,7 @@ for f in "${DATA[@]}"; do FILE_ARGS+=(--files "$f"); done
 "$CLI" release-files --release "$REL" --compression zstd "${FILE_ARGS[@]}" --out "$WORK/files/$STEM.manifest.json" | tee "$WORK/release-files.log"
 MANIFEST_SHA=$(sed -n 's/^Manifest SHA-256 \([0-9a-f]\{64\}\)$/\1/p' "$WORK/release-files.log" | tail -n1)
 [ -n "$MANIFEST_SHA" ] || die "release-files printed no manifest SHA-256"
-[ "$(sha256sum "$WORK/files/$STEM.manifest.json" | cut -d' ' -f1)" = "$MANIFEST_SHA" ] || die "the manifest written is not the one release-files names"
+[ "$(sha256sum < "$WORK/files/$STEM.manifest.json" | cut -d' ' -f1)" = "$MANIFEST_SHA" ] || die "the manifest written is not the one release-files names"
 echo "manifest $STEM.manifest.json sha256 $MANIFEST_SHA; data: ${#DATA[@]} file(s)"
 endgroup
 

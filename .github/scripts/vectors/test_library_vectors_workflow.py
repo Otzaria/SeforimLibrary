@@ -190,7 +190,7 @@ if [ "$1" = api ]; then
       # the release as the API returns it: its assets, with no digest under NO_DIGEST
       tag=${2##*/}
       for f in "$ASSETS/$tag"/*; do
-        digest=""; [ -n "${NO_DIGEST:-}" ] || digest="sha256:$(sha256sum "$f" | cut -d' ' -f1)"
+        digest=""; [ -n "${NO_DIGEST:-}" ] || digest="sha256:$(sha256sum < "$f" | cut -d' ' -f1)"
         jq -n --arg name "$(basename "$f")" --argjson size "$(stat -c %s "$f")" --arg digest "$digest" \
           '{name: $name, size: $size, digest: (if $digest == "" then null else $digest end)}'
       done | jq -s --arg tag "$tag" '{tag_name: $tag, published_at: "2026-09-30T21:38:29Z", assets: .}'
@@ -271,7 +271,7 @@ case "$sub" in
     mkdir -p "$out"; head -c 3000 /dev/urandom > "$out/segment.oxv"
     echo '{"identityDigest":"0123456789abcdef","toLibraryVersion":30}' > "$out/release.json"
     for f in ledger-v30.keys pairs-v30.bin ledger-v30.manifest.json; do echo "$f" > "$out/$f"; done ;;
-  release-files) echo '{"files":[]}' > "$out"; echo "=== stem ==="; echo "Manifest SHA-256 $(sha256sum "$out" | cut -d' ' -f1)" ;;
+  release-files) echo '{"files":[]}' > "$out"; echo "=== stem ==="; echo "Manifest SHA-256 $(sha256sum < "$out" | cut -d' ' -f1)" ;;
   *) echo "stub cli: $sub" >&2; exit 90 ;;
 esac
 """
