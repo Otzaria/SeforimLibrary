@@ -5,7 +5,8 @@
 #                            [--state DIR] [--work DIR] [--repo OWNER/NAME]
 #
 #   1 index     download the release's search index (split parts, sha256-checked) and expand it,
-#               once its provenance names this release, this archive and this release's DB
+#               once its provenance names this release, this archive and this release's DB;
+#               then that DB, held to the same digest: schema 5 keeps line text there
 #   2 plan      export_semantic_plan v2 over it, split against the warehouse: embed.jsonl holds
 #               only the texts the warehouse has no vector for (every text, on a runner that
 #               has no warehouse yet); the preflight has run warehouse-verify --repair on it
@@ -218,6 +219,30 @@ rm -f "${parts[@]}"
 INDEX=$WORK/index/index
 [ -f "$INDEX/meta.json" ] || die "the archive holds no index/meta.json"
 echo "index: $(du -sh "$INDEX" | cut -f1), $(jq -r .searchEngineVersion "$WORK/dl/otzaria-library-index.provenance.json") engine"
+# The DB the provenance named, held to that digest: the planner and the validator read official
+# books' line text from it (index schema 5), as the application does.
+DB=$WORK/seforim.db
+if [ -n "$(printf '%s' "$db" | jq -r '.manifest // empty')" ]; then
+  db_manifest="$WORK/dl/$db_name.manifest.json"
+  db_parts=()
+  while IFS= read -r part; do
+    case "$part" in "$db_name".part-*) ;; *) die "$db_name.manifest.json names an unexpected part '$part'" ;; esac
+    echo "${part#"$db_name".part-}" | grep -Eqx '[0-9]+' || die "$db_name.manifest.json names an unexpected part '$part'"
+    db_parts+=("$WORK/dl/$part")
+  done < <(jq -r '.parts[].name' "$db_manifest")
+  [ "${#db_parts[@]}" -gt 0 ] || die "$db_name.manifest.json lists no parts"
+  for part in "${db_parts[@]}"; do fetch "${part##*/}"; done
+  jq -r '.parts[] | "\(.sha256)  \(.name)"' "$db_manifest" | (cd "$WORK/dl" && sha256sum -c --quiet -) || die "a part of $db_name does not hash to its manifest"
+else
+  db_parts=("$WORK/dl/$db_name")
+  fetch "$db_name"
+fi
+whole=$(cat "${db_parts[@]}" | sha256sum | cut -d' ' -f1)
+[ "$whole" = "$db_sha" ] || die "$db_name hashes to $whole, not the $db_sha the release and the index provenance state"
+cat "${db_parts[@]}" | "$ZSTD" -dc --long=31 --memory=2048MB > "$DB" || die "could not expand $db_name"
+rm -f "${db_parts[@]}"
+[ -s "$DB" ] || die "$db_name expanded to nothing"
+echo "database: $db_name, $(du -sh "$DB" | cut -f1)"
 endgroup
 
 # ─── 2 plan ────────────────────────────────────────────────────────────────
@@ -228,7 +253,7 @@ group "2 plan"
 # the plan is split against the warehouse only, never against the previous ledger.
 SPLIT=(--warehouse "$WAREHOUSE")
 if [ -n "$FRESH" ]; then SPLIT=(); echo "no warehouse yet at $WAREHOUSE: every text is planned"; fi
-"$EXPORT" --index "$INDEX" --library-version "$VERSION" --release-tag "$TAG" \
+"$EXPORT" --index "$INDEX" --seforim-db "$DB" --library-version "$VERSION" --release-tag "$TAG" \
   --model "$FAMILY" --passage-quantization "$PASSAGE_QUANTIZATION" \
   ${SPLIT[@]+"${SPLIT[@]}"} --created-at "$CREATED" --out "$WORK/plan" | tee "$WORK/plan.log"
 PLAN=$WORK/plan
@@ -303,7 +328,7 @@ QPKG=$("$PY" "$HERE/model_package.py" fetch --cache "$STATE/model-cache" --check
   || die "could not fetch the query package $QUERY_PACKAGE_CHECKSUM"
 ORT=$(onnx_runtime) || die "the venv holds no ONNX Runtime library for the validator — run bootstrap_runner.sh"
 set +e
-TMPDIR="$WORK" "$VALIDATE" --index "$INDEX" --release "$WORK/release" --plan "$PLAN" \
+TMPDIR="$WORK" "$VALIDATE" --index "$INDEX" --seforim-db "$DB" --release "$WORK/release" --plan "$PLAN" \
   --warehouse "$WAREHOUSE" --model "$QPKG/$QUERY_GRAPH" --model-identity "$FAMILY" --onnx-runtime "$ORT" \
   --threads "$(getconf _NPROCESSORS_ONLN)" --report "$WORK/release/validation.json"
 validated=$?

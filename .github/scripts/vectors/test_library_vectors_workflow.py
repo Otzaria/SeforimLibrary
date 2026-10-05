@@ -9,6 +9,8 @@ the work, the same way by hand. Load-bearing properties, pinned here:
   * a runner with no warehouse yet plans every text and creates the warehouse on its first add;
   * a warehouse is verified before the plan reads it: bad data stops the build, and a bad
     index is rebuilt;
+  * the DB the index provenance names is downloaded, held to that digest, and given to the
+    planner and the validator, which read official books' line text from it (index schema 5);
   * a plan of fewer than CPU_EMBED_MAX texts is embedded on the CPU by the sidecar's embed-shard
     (the reference), so the GPU worker never gets a plan its parity certificate cannot cover;
   * a gate failure, an existing vectors release or a damaged index stops it before anything
@@ -260,8 +262,11 @@ esac
 
 STUB_EXPORT = r"""#!/usr/bin/env bash
 echo "export $*" >> "$CALLS"
-out=""; warehouse=""
-while [ $# -gt 0 ]; do case "$1" in --out) out=$2; shift 2;; --warehouse) warehouse=$2; shift 2;; *) shift;; esac; done
+out=""; warehouse=""; db=""
+while [ $# -gt 0 ]; do case "$1" in --out) out=$2; shift 2;; --warehouse) warehouse=$2; shift 2;; --seforim-db) db=$2; shift 2;; *) shift;; esac; done
+# as export_semantic_plan does on a schema 5 index, which keeps official books' line text in the DB
+[ -n "$db" ] || { echo "Planning failed: the document at DocAddress { segment_ord: 3, doc_id: 38119 } keeps its text in the library database, which cannot be read (pass --seforim-db)" >&2; exit 1; }
+[ -s "$db" ] || { echo "Could not use the library database: $db" >&2; exit 1; }
 # as export_semantic_plan does: a --warehouse is opened, and a directory without warehouse.json is none
 if [ -n "$warehouse" ] && [ ! -f "$warehouse/warehouse.json" ]; then
   echo "Could not open the warehouse: $warehouse/warehouse.json: No such file or directory" >&2; exit 1
@@ -354,7 +359,7 @@ echo "validate $*" >> "$CALLS"
 echo "validate-env TMPDIR=${TMPDIR:-}" >> "$CALLS"
 wrong() { echo "$1" >&2; exit 2; }
 given=" "; releases=0; skips=""
-index=""; vectors=""; plan=""; warehouse=""; model=""; identity=""; ort=""; report=""; threads=""
+index=""; db=""; vectors=""; plan=""; warehouse=""; model=""; identity=""; ort=""; report=""; threads=""
 while [ $# -gt 0 ]; do
   flag=$1
   case "$flag" in
@@ -362,7 +367,7 @@ while [ $# -gt 0 ]; do
       { [ -f "$2/segment.oxv" ] && [ -f "$2/release.json" ]; } || wrong "the releases do not install as a device installs them: $2"
       releases=$((releases + 1)); shift 2; continue ;;
     --skip) case "${2:-}" in G3|G4|G6) skips="$skips $2"; shift 2; continue ;; *) wrong "--skip needs a gate" ;; esac ;;
-    --index|--vectors|--plan|--max-stale-hints|--warehouse|--model|--model-identity|--onnx-runtime|--queries|\
+    --index|--seforim-db|--vectors|--plan|--max-stale-hints|--warehouse|--model|--model-identity|--onnx-runtime|--queries|\
     --sample-queries|--min-recall-10|--min-recall-50|--threads|--report) ;;
     *) wrong "unknown argument $flag" ;;
   esac
@@ -370,7 +375,7 @@ while [ $# -gt 0 ]; do
   case "$given" in *" $flag "*) wrong "$flag is given twice" ;; esac
   given="$given$flag "
   case "$flag" in
-    --index) index=$2 ;; --vectors) vectors=$2 ;; --plan) plan=$2 ;; --warehouse) warehouse=$2 ;; --model) model=$2 ;;
+    --index) index=$2 ;; --seforim-db) db=$2 ;; --vectors) vectors=$2 ;; --plan) plan=$2 ;; --warehouse) warehouse=$2 ;; --model) model=$2 ;;
     --model-identity) identity=$2 ;; --onnx-runtime) ort=$2 ;; --report) report=$2 ;; --threads) threads=$2 ;;
   esac
   shift 2
@@ -384,6 +389,9 @@ if [ -z "$vectors" ] && [ "$releases" -eq 0 ]; then wrong "give --vectors, or on
 g6=""; [ -z "$warehouse" ] || g6=${g6}w; [ -z "$model" ] || g6=${g6}m; [ -z "$identity" ] || g6=${g6}i
 case "$g6" in ""|wmi) ;; *) wrong "G6 needs --warehouse, --model and --model-identity together" ;; esac
 { [ -d "$index" ] && [ -z "${VALIDATE_UNREADABLE:-}" ]; } || wrong "could not validate against the index $index"
+# a schema 5 index keeps official books' line text in the DB
+[ -n "$db" ] || wrong "the index keeps line text in the library database: --seforim-db is required"
+[ -s "$db" ] || wrong "could not use the library database $db"
 [ -z "$plan" ] || [ -f "$plan/plan-manifest.json" ] || wrong "could not read the plan $plan"
 if [ "$g6" = wmi ]; then
   [ -f "$warehouse/warehouse.json" ] || wrong "could not open the warehouse $warehouse"
@@ -407,7 +415,8 @@ for v in $g3 $g4 $g6v; do case "$v" in passed|skipped) ;; *) passed=false ;; esa
 
 STUB_ZSTD = r"""#!/usr/bin/env bash
 echo "zstd $*" >> "$CALLS"
-if [ "$1" = "-dc" ]; then cat; exit 0; fi
+# ZSTD_FAIL fails the DB's expansion (the one with a raised --memory), not the index's
+if [ "$1" = "-dc" ]; then case " $* " in *" --memory=2048MB "*) [ -z "${ZSTD_FAIL:-}" ] || exit 1 ;; esac; cat; exit 0; fi
 in=""; out=""; while [ $# -gt 0 ]; do case "$1" in -o) out=$2; shift 2;; -*) shift;; *) in=$1; shift;; esac; done
 cp "$in" "$out"
 """
@@ -444,8 +453,9 @@ class Driver(unittest.TestCase):
         self.manifest.write_text(json.dumps({
             "schemaVersion": 1, "archive": "otzaria-library-index.tar.zst", "size": len(archive), "sha256": self.archive_sha,
             "parts": [{"name": n, "size": len(b), "sha256": hashlib.sha256(b).hexdigest()} for n, b in parts.items()]}))
-        # the full DB the index was built from: the driver holds the provenance to its digest, never downloads it
+        # the full DB the index was built from: the provenance is held to its digest, and so is its download
         db = b"a stand-in for the release's full database"
+        self.db_bytes = db
         (assets / "seforim-schema6.db.zst").write_bytes(db)
         self.db_sha = hashlib.sha256(db).hexdigest()
         self.provenance = assets / "otzaria-library-index.provenance.json"
@@ -556,9 +566,18 @@ class Driver(unittest.TestCase):
 
     def test_the_stubs_refuse_what_the_real_tools_refuse(self):
         missing, env = self.root / "no-warehouse", dict(os.environ, CALLS=str(self.calls))
-        plan = subprocess.run([str(self.root / "bin" / "export"), "--warehouse", str(missing), "--out", str(self.root / "p")],
-                              env=env, capture_output=True)
-        self.assertNotEqual(plan.returncode, 0)
+        db = self.root / "seforim.db"
+        db.write_text("x")
+        def export(*args):
+            return subprocess.run([str(self.root / "bin" / "export"), *args, "--out", str(self.root / "p")],
+                                  env=env, capture_output=True, text=True)
+        self.assertNotEqual(export("--seforim-db", str(db), "--warehouse", str(missing)).returncode, 0)
+        # a schema 5 index cannot be planned without the DB, nor with one that does not read
+        no_db = export("--warehouse", str(self.warehouse))
+        self.assertNotEqual(no_db.returncode, 0)
+        self.assertIn("pass --seforim-db", no_db.stderr)
+        self.assertNotEqual(export("--seforim-db", str(self.root / "nowhere.db"), "--warehouse", str(self.warehouse)).returncode, 0)
+        self.assertEqual(export("--seforim-db", str(db), "--warehouse", str(self.warehouse)).returncode, 0)
         shard = self.root / "shard"
         shard.mkdir()
         (shard / "shard-manifest.json").write_text("{}")
@@ -669,10 +688,11 @@ class Driver(unittest.TestCase):
         i = self.index_of(calls, "validate --index")
         args = calls[i].split()[1:]
         pairs = dict(zip(args[::2], args[1::2]))
-        self.assertEqual(args[::2], ["--index", "--release", "--plan", "--warehouse", "--model", "--model-identity",
+        self.assertEqual(args[::2], ["--index", "--seforim-db", "--release", "--plan", "--warehouse", "--model", "--model-identity",
                                      "--onnx-runtime", "--threads", "--report"])
         self.assertEqual(pairs, {
-            "--index": str(work / "index" / "index"), "--release": str(work / "release"), "--plan": str(work / "plan"),
+            "--index": str(work / "index" / "index"), "--seforim-db": str(work / "seforim.db"),
+            "--release": str(work / "release"), "--plan": str(work / "plan"),
             "--warehouse": str(self.warehouse), "--model": str(cache / PIN["QUERY_PACKAGE_CHECKSUM"] / PIN["QUERY_GRAPH"]),
             "--model-identity": str(self.state / "bin" / "family-model.json"), "--onnx-runtime": str(self.ort),
             "--threads": pairs["--threads"], "--report": str(work / "release" / "validation.json")})
@@ -715,9 +735,13 @@ class Driver(unittest.TestCase):
         model, ort = self.root / "q.onnx", self.root / "libonnxruntime.so"
         model.write_text("x"); ort.write_text("x")
         g6 = ["--warehouse", str(self.warehouse), "--model", str(model), "--model-identity", str(self.state / "bin" / "family-model.json")]
-        base = ["--index", str(index), "--release", str(release)]
+        db = self.root / "seforim.db"
+        db.write_text("x")
+        base = ["--index", str(index), "--seforim-db", str(db), "--release", str(release)]
         report = self.root / "report.json"
         for args, code in ((base + g6, 0), (base + g6 + ["--onnx-runtime", str(ort), "--plan", str(plan)], 0),
+                           (["--index", str(index), "--release", str(release)] + g6, 2),   # no --seforim-db
+                           (["--index", str(index), "--seforim-db", str(self.root / "nowhere.db"), "--release", str(release)] + g6, 2),
                            (base + ["--report", str(report)], 1),                       # G6 not given: not run
                            (base + g6[:2], 2),                                          # G6 half given
                            (base + g6 + ["--frobnicate", "1"], 2),
@@ -859,32 +883,77 @@ class Driver(unittest.TestCase):
                 p, calls = self.run_driver(mode="base", TO_EMBED=0)
                 self.assert_refused_before_the_parts(p, calls, needle)
 
-    def test_an_index_whose_provenance_is_this_releases_is_built_and_the_database_is_never_downloaded(self):
-        p, calls = self.run_driver(mode="base", TO_EMBED=0)
+    def assert_the_planner_and_the_validator_read_the_database(self, calls):
+        db = self.state / "work" / TAG / "seforim.db"
+        self.assertEqual(db.read_bytes(), self.db_bytes)   # the stub zstd passes it through
+        self.assertTrue([c for c in calls if c.startswith("zstd -dc --long=31 --memory=2048MB")])
+        for tool in ("export --index", "validate --index"):
+            self.assertIn("--seforim-db " + str(db) + " ", calls[self.index_of(calls, tool)])
+        # the compressed DB is removed once expanded; only its manifest, if split, stays
+        self.assertFalse([p for p in (self.state / "work" / TAG / "dl").iterdir()
+                          if p.name.startswith("seforim-schema6.db.zst") and not p.name.endswith(".manifest.json")])
+
+    def test_an_index_whose_provenance_is_this_releases_is_built_with_the_database_held_to_that_digest(self):
+        p, calls = self.run_driver(TO_EMBED=0)   # a dry run keeps its work directory
         self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
         self.assertIn("0.8.7 engine", p.stdout)
         self.assertTrue(self.index_of(calls, "gh api repos/o/r/releases/tags/" + TAG)
                         < self.index_of(calls, "--pattern otzaria-library-index.tar.zst.part-000"))
-        self.assertFalse([c for c in calls if "release download" in c and "seforim" in c])
+        db = next(i for i, c in enumerate(calls) if c.endswith("--pattern seforim-schema6.db.zst"))
+        self.assertLess(self.index_of(calls, "--pattern otzaria-library-index.tar.zst.part-001"), db)
+        self.assertLess(db, self.index_of(calls, "export --index"))
+        self.assert_the_planner_and_the_validator_read_the_database(calls)
+        p, calls = self.run_driver(mode="base", TO_EMBED=0)
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
 
-    def test_a_split_database_is_identified_by_its_manifest_and_its_parts_are_never_downloaded(self):
+    def test_a_split_database_is_identified_by_its_manifest_and_assembled_from_its_parts_held_to_it(self):
         assets = self.root / "assets" / TAG
         (assets / "seforim-schema6.db.zst").unlink()
-        split = {"schemaVersion": 1, "archive": "seforim-schema6.db.zst", "size": 3, "sha256": self.db_sha,
-                 "parts": [{"name": "seforim-schema6.db.zst.part-000", "size": 3, "sha256": "a" * 64}]}
-        for sha, ok in ((self.db_sha, True), ("f" * 64, False), (None, False)):
-            with self.subTest(sha=sha):
+        half = len(self.db_bytes) // 2
+        chunks = {"seforim-schema6.db.zst.part-000": self.db_bytes[:half], "seforim-schema6.db.zst.part-001": self.db_bytes[half:]}
+        for name, b in chunks.items():
+            (assets / name).write_bytes(b)
+        parts = [{"name": n, "size": len(b), "sha256": hashlib.sha256(b).hexdigest()} for n, b in chunks.items()]
+        split = {"schemaVersion": 1, "archive": "seforim-schema6.db.zst", "size": len(self.db_bytes), "sha256": self.db_sha,
+                 "parts": parts}
+        cases = ((split, None, None),
+                 # refused on the manifest alone, before any part (the index's or the DB's) downloads
+                 (dict(split, sha256="f" * 64), "provenance", "before"), (dict(split, sha256=None), "provenance", "before"),
+                 # refused once its parts are read, before anything is planned
+                 (dict(split, parts=[dict(parts[0], sha256="a" * 64), parts[1]]), "does not hash to its manifest", "after"),
+                 (dict(split, parts=parts[::-1]), "hashes to", "after"),
+                 (dict(split, parts=[dict(parts[0], name="../seforim-schema6.db.zst.part-000")]), "unexpected part", "after"),
+                 (dict(split, parts=[dict(parts[0], name="seforim-schema6.db.zst.part-000 x")]), "unexpected part", "after"),
+                 (dict(split, parts=[dict(parts[0], name="seforim-schema6.db.zst.part-")]), "unexpected part", "after"),
+                 (dict(split, parts=[dict(parts[0], name="otzaria-library-index.tar.zst.part-000")]), "unexpected part", "after"),
+                 (dict(split, parts=[]), "lists no parts", "after"))
+        for manifest, needle, when in cases:
+            with self.subTest(manifest=manifest):
                 self.calls.unlink(missing_ok=True)
                 (self.root / "uploaded.tsv").unlink(missing_ok=True)
                 shutil.rmtree(self.state / "ledger", ignore_errors=True)
-                (assets / "seforim-schema6.db.zst.manifest.json").write_text(json.dumps(dict(split, sha256=sha)))
-                p, calls = self.run_driver(mode="base", TO_EMBED=0)
+                (assets / "seforim-schema6.db.zst.manifest.json").write_text(
+                    json.dumps({k: v for k, v in manifest.items() if v is not None}))
+                p, calls = self.run_driver(TO_EMBED=0)
                 self.assertTrue([c for c in calls if "--pattern seforim-schema6.db.zst.manifest.json" in c])
-                self.assertFalse([c for c in calls if "release download" in c and "seforim-schema6.db.zst.part-" in c])
-                if ok:
+                if needle is None:
                     self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+                    for name in chunks:
+                        self.assertTrue([c for c in calls if c.endswith("--pattern " + name)])
+                    self.assert_the_planner_and_the_validator_read_the_database(calls)
+                elif when == "before":
+                    self.assert_refused_before_the_parts(p, calls, needle)
                 else:
-                    self.assert_refused_before_the_parts(p, calls)
+                    self.assertNotEqual(p.returncode, 0, p.stdout + p.stderr)
+                    self.assertIn(needle, p.stdout)
+                    self.assertFalse([c for c in calls if c.startswith("export ") or c.startswith("validate ")])
+                    self.assertFalse((self.state / "work" / TAG / "seforim.db").exists())
+
+    def test_a_database_that_does_not_expand_is_refused_before_the_plan(self):
+        p, calls = self.run_driver(TO_EMBED=0, ZSTD_FAIL=1)
+        self.assertNotEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertIn("could not expand seforim-schema6.db.zst", p.stdout)
+        self.assertFalse([c for c in calls if c.startswith("export ")])
 
     def test_a_release_that_states_no_digest_of_its_database_is_refused(self):
         p, calls = self.run_driver(mode="base", TO_EMBED=0, NO_DIGEST=1)
@@ -996,7 +1065,6 @@ class Driver(unittest.TestCase):
             self.calls.unlink(missing_ok=True)
             p, calls = self.run_driver(GH_UNAUTHENTICATED=1, TO_EMBED=0, **env)
             self.assertEqual([c for c in calls if c.startswith("gh ")], ["gh auth status"])
-            self.assertFalse([c for c in calls if c.endswith("/seforim-schema6.db.zst") or "seforim-schema6.db.zst.part-" in c])
             return p, calls
 
         for label, prov, env, needle in (("this release's index", {}, {}, None),
@@ -1009,19 +1077,26 @@ class Driver(unittest.TestCase):
                 p, calls = run(**env)
                 if needle:
                     self.assert_refused_before_the_parts(p, calls, needle)
+                    self.assertFalse([c for c in calls if c.endswith(download + "seforim-schema6.db.zst")])
                     continue
                 self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
                 self.assertTrue([c for c in calls if c.startswith(api)])
                 self.assertTrue([c for c in calls if c.endswith(download + "otzaria-library-index.tar.zst.part-001")])
+                self.assertTrue([c for c in calls if c.endswith(download + "seforim-schema6.db.zst")])
                 self.assertIn("--created-at 2026-09-30T21:38:29Z", calls[self.index_of(calls, "export --index")])
+                self.assert_the_planner_and_the_validator_read_the_database(calls)
         with self.subTest("a split DB"):
             self.write_provenance()
             (assets / "seforim-schema6.db.zst").unlink()
+            (assets / "seforim-schema6.db.zst.part-000").write_bytes(self.db_bytes)
             (assets / "seforim-schema6.db.zst.manifest.json").write_text(json.dumps(
-                {"archive": "seforim-schema6.db.zst", "sha256": self.db_sha, "parts": []}))
+                {"archive": "seforim-schema6.db.zst", "sha256": self.db_sha,
+                 "parts": [{"name": "seforim-schema6.db.zst.part-000", "size": len(self.db_bytes), "sha256": self.db_sha}]}))
             p, calls = run()
             self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
             self.assertTrue([c for c in calls if c.endswith(download + "seforim-schema6.db.zst.manifest.json")])
+            self.assertTrue([c for c in calls if c.endswith(download + "seforim-schema6.db.zst.part-000")])
+            self.assert_the_planner_and_the_validator_read_the_database(calls)
         with self.subTest("an asset the release lacks stops the build at its download"):
             (assets / "otzaria-library-index.provenance.json").unlink()
             p, calls = run()
