@@ -131,8 +131,10 @@ class Workflow(unittest.TestCase):
 
     def test_the_workflow_is_thin_and_the_driver_does_the_work(self):
         runs = [s for s in self.job["steps"] if "run" in s]
-        self.assertEqual(len(runs), 1)
-        self.assertIn("bash .github/scripts/vectors/build_library_vectors.sh", runs[0]["run"])
+        self.assertEqual(len(runs), 2)
+        # a changed pin is built on the machine before the driver's preflight checks it
+        self.assertIn("bash .github/scripts/vectors/bootstrap_runner.sh", runs[0]["run"])
+        self.assertIn("bash .github/scripts/vectors/build_library_vectors.sh", runs[1]["run"])
         self.assertTrue(DRIVER.exists() and os.access(DRIVER, os.X_OK))
 
     def test_untrusted_values_never_reach_the_shell_as_expressions(self):

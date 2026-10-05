@@ -6,7 +6,7 @@ run-name: library-vectors ${{ inputs.release_tag || github.event.workflow_run.di
 # and the GPU, once the release's search index is stored (build-library-index.yml), and
 # published beside the release as vectors-<tag>. Everything happens in
 # .github/scripts/vectors/build_library_vectors.sh, which runs by hand on that machine the
-# same way; this file only decides when, where, and in which mode.
+# same way, after bootstrap_runner.sh; this file only decides when, where, and in which mode.
 #
 # Nothing is published, and a dry run fails too, unless the release passes two sets of gates:
 # the sidecar's assemble --verify, and the plugin's validate_semantic_vectors on the release
@@ -116,6 +116,13 @@ jobs:
       # support is not proven (test_ci_workflows.SELF_HOSTED_JOBS).
       - name: Checkout SeforimLibrary
         uses: actions/checkout@v4
+
+      # Brings the machine to pins.env: rebuilds only what a changed pin left stale, else a no-op.
+      # The runner service does not source ~/.cargo/env, so cargo is put on PATH here.
+      - name: Bring the build machine to the pins
+        run: |
+          [ ! -d "$HOME/.cargo/bin" ] || export PATH="$HOME/.cargo/bin:$PATH"
+          bash .github/scripts/vectors/bootstrap_runner.sh
 
       - name: Build the vectors
         run: bash .github/scripts/vectors/build_library_vectors.sh --tag "$RELEASE_TAG" --mode "$MODE" --repo "$GITHUB_REPOSITORY"
