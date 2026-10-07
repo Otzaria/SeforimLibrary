@@ -2147,6 +2147,7 @@ class ManualReleaseWorkflowContractTest(unittest.TestCase):
         for task in (
             '":sefariasqlite" to "generateSefariaSqlite"',
             '":sefariasqlite" to "seedAllMetadata"',
+            '":sefariasqlite" to "seedBookNotices"',
             '":otzariasqlite" to "appendOtzariaLines"',
             '":otzariasqlite" to "appendOtzariaLinks"',
             '":generator-common" to "buildLineRefIndex"',
