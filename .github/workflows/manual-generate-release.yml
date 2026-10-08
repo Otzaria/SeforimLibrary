@@ -728,17 +728,11 @@ jobs:
           echo "$java_home/bin" >> "$GITHUB_PATH"
           "$java_home/bin/java" -version
 
-      - name: Verify durable Gradle 9.8.0 toolchain
+      # source_commit may be an old tree pinning an older Gradle; the selector comes
+      # from pipeline control because that tree may predate it.
+      - name: Select the durable Gradle toolchain for source_commit
         shell: bash
-        run: |
-          set -euo pipefail
-          command -v gradle
-          gradle_version="$(gradle --version | awk '/^Gradle / {print $2; exit}')"
-          [ "$gradle_version" = 9.8.0 ] || {
-            echo "::error::the durable runner must provide Gradle 9.8.0; found ${gradle_version:-missing}"
-            exit 1
-          }
-          gradle --version
+        run: bash .pipeline-control/.github/scripts/select_gradle_toolchain.sh "$GITHUB_WORKSPACE"
 
       - name: Grant execute permission for gradlew
         run: chmod +x gradlew
@@ -1052,7 +1046,7 @@ jobs:
           # image — a line change the relink recovery comparison must reject.
           IMAGE_CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/seforimlibrary/textimages"
           mkdir -p "$IMAGE_CACHE_DIR"
-          gradle generateSeforimDb \
+          "$GRADLE" generateSeforimDb \
             -PexportDir="$SEFARIA_EXTRACT_ROOT" \
             -PsourceDir="$OTZARIA_EXTRACT_ROOT" \
             -PreleaseName=${{ steps.release_meta.outputs.release_tag }} \
@@ -1122,7 +1116,7 @@ jobs:
           RAW_SNAPSHOT="$RUNNER_TEMP/lines-snapshot-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.db"
           rm -f "$RAW_SNAPSHOT"
           trap 'rm -f "$RAW_SNAPSHOT"' EXIT
-          gradle :packaging:dumpLines \
+          "$GRADLE" :packaging:dumpLines \
             -PseforimDb=$PWD/build/seforim.db \
             -PlinesSnapshot="$RAW_SNAPSHOT" \
             --no-daemon --stacktrace
@@ -1770,7 +1764,7 @@ jobs:
             rm -rf "$RECOVERY_COMPARE_DIR"
             trap - EXIT
           fi
-          gradle :sefariasqlite:generateLinkerLinks \
+          "$GRADLE" :sefariasqlite:generateLinkerLinks \
             -PseforimDb=$PWD/build/seforim.db \
             -PlinkerArtifacts=$PWD/build/linker/artifacts \
             -PlinkerSidecar=$PWD/build/linker_sidecar.tsv \
@@ -1789,7 +1783,7 @@ jobs:
             echo "::notice::source_commit predates compressLineContent; the DB stays uncompressed"
             exit 0
           fi
-          gradle :generator-common:compressLineContent \
+          "$GRADLE" :generator-common:compressLineContent \
             -PdbPath=$PWD/build/seforim.db \
             --no-daemon --stacktrace
 
@@ -1806,7 +1800,7 @@ jobs:
         run: |
           set -euo pipefail
           ls -l build/seforim.db
-          gradle :generator-common:compactSeforimDb \
+          "$GRADLE" :generator-common:compactSeforimDb \
             -PdbPath=$PWD/build/seforim.db \
             -PscratchDir="$RUNNER_TEMP" \
             --no-daemon --stacktrace
@@ -1928,7 +1922,7 @@ jobs:
           set -euo pipefail
           LAUNCHER=generator/common/build/patch-pipeline-launcher.properties
           rm -f "$LAUNCHER"
-          if gradle :generator-common:patchPipelineLauncher --no-daemon --stacktrace \
+          if "$GRADLE" :generator-common:patchPipelineLauncher --no-daemon --stacktrace \
              && [ -s "$LAUNCHER" ]; then
             echo "launcher spec (classpath elided):"
             grep -v '^classpath=' "$LAUNCHER"

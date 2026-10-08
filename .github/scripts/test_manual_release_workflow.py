@@ -164,12 +164,78 @@ class ManualReleaseWorkflowContractTest(unittest.TestCase):
         self.assertIn('echo "JAVA_HOME=$java_home" >> "$GITHUB_ENV"', java)
 
     def test_durable_host_uses_preinstalled_gradle_without_wrapper_download(self):
-        gradle = self.step("Verify durable Gradle 9.8.0 toolchain")
+        select = self.step("Select the durable Gradle toolchain for source_commit")
 
-        self.assertIn("command -v gradle", gradle)
-        self.assertIn('[ "$gradle_version" = 9.8.0 ]', gradle)
+        # From pipeline control: an old source_commit predates the selector.
+        self.assertIn(
+            'bash .pipeline-control/.github/scripts/select_gradle_toolchain.sh "$GITHUB_WORKSPACE"',
+            select,
+        )
         self.assertNotIn("./gradlew", self.workflow)
         self.assertNotIn("gradle/actions/setup-gradle", self.workflow)
+        selector = (SCRIPTS_DIR / "select_gradle_toolchain.sh").read_text(encoding="utf-8")
+        for download in ("gradlew", "curl", "wget", "services.gradle.org/distributions/gradle-$"):
+            self.assertNotIn(download, selector)
+        # Every Gradle run goes through the selected binary, never a PATH `gradle`.
+        bare = re.compile(r"(^|[\s;(&|!])gradle\s", re.M)
+        for name, text in (("workflow", self.workflow),
+                           ("patch_fan_lib.sh", PATCH_FAN_LIB.read_text(encoding="utf-8"))):
+            code = "\n".join(l for l in text.splitlines() if not l.lstrip().startswith("#"))
+            self.assertIsNone(bare.search(code), f"bare gradle call in {name}")
+        self.assertEqual(self.workflow.count('"$GRADLE" '), 6)
+        order = [self.workflow.index(m) for m in (
+            "      - name: Checkout SeforimLibrary\n",
+            "      - name: Checkout immutable pipeline control scripts\n",
+            "      - name: Verify durable Java 25 toolchain\n",
+            "      - name: Select the durable Gradle toolchain for source_commit\n",
+            '"$GRADLE" generateSeforimDb',
+        )]
+        self.assertEqual(order, sorted(order))
+
+    def run_selector(self, wrapper_url, installed, reports=None):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "tree/gradle/wrapper").mkdir(parents=True)
+            (root / "tree/gradle/wrapper/gradle-wrapper.properties").write_text(
+                f"distributionBase=GRADLE_USER_HOME\ndistributionUrl={wrapper_url}\n", encoding="utf-8")
+            for version in installed:
+                bin_dir = root / f"tc/gradle-{version}/bin"
+                bin_dir.mkdir(parents=True)
+                (bin_dir / "gradle").write_text(
+                    f"#!/bin/sh\necho\necho 'Gradle {(reports or {}).get(version, version)}'\n",
+                    encoding="utf-8")
+                (bin_dir / "gradle").chmod(0o755)
+            env_file = root / "github_env"
+            env_file.write_text("", encoding="utf-8")
+            run = subprocess.run(
+                ["bash", str(SCRIPTS_DIR / "select_gradle_toolchain.sh"), str(root / "tree")],
+                capture_output=True, text=True,
+                env={"PATH": os.environ["PATH"], "GITHUB_ENV": str(env_file),
+                     "OTZARIA_GRADLE_TOOLCHAINS": str(root / "tc")},
+            )
+            return run, env_file.read_text(encoding="utf-8").replace(str(root), "$ROOT")
+
+    def test_gradle_selector_follows_the_checked_out_wrapper(self):
+        url = "https\\://services.gradle.org/distributions/gradle-{}-{}.zip"
+        for version, flavor in (("9.1.0", "bin"), ("9.8.0", "all")):
+            with self.subTest(version):
+                run, env = self.run_selector(url.format(version, flavor), ["9.1.0", "9.8.0"])
+                self.assertEqual(run.returncode, 0, run.stderr)
+                self.assertEqual(env, f"GRADLE=$ROOT/tc/gradle-{version}/bin/gradle\n")
+
+    def test_gradle_selector_fails_loudly(self):
+        url = "https\\://services.gradle.org/distributions/gradle-{}-bin.zip"
+        cases = {
+            "not installed": (url.format("9.9.9"), ["9.1.0", "9.8.0"], None),
+            "reports another version": (url.format("9.8.0"), ["9.8.0"], {"9.8.0": "9.1.0"}),
+            "unparseable url": ("https\\://example.org/gradle-9.8.0-src.zip", ["9.8.0"], None),
+        }
+        for name, (wrapper_url, installed, reports) in cases.items():
+            with self.subTest(name):
+                run, env = self.run_selector(wrapper_url, installed, reports)
+                self.assertNotEqual(run.returncode, 0)
+                self.assertIn("::error::", run.stderr)
+                self.assertEqual(env, "")
 
     def test_phase2_has_dedicated_heap_and_matching_host_headroom(self):
         mount = self.step("Mount RAM-backed build dir (tmpfs)")
@@ -219,7 +285,7 @@ class ManualReleaseWorkflowContractTest(unittest.TestCase):
             self.workflow.index("      - name: Overlay pinned recovery Phase-2 implementation\n"),
             self.workflow.index("      - name: Apply LINKER links (Phase-2)\n"),
         )
-        self.assertIn("gradle :sefariasqlite:generateLinkerLinks", apply_links)
+        self.assertIn('"$GRADLE" :sefariasqlite:generateLinkerLinks', apply_links)
 
     def test_phase2_implementation_commit_is_part_of_release_identity(self):
         lookup = self.step("Find and verify exact provenance")
@@ -251,7 +317,7 @@ class ManualReleaseWorkflowContractTest(unittest.TestCase):
             self.assertNotIn(gone, patch_fan)
             self.assertNotIn(gone, lib)
 
-        gradle_at = lib.index("gradle :generator-common:producePatchAndVerify")
+        gradle_at = lib.index('"${GRADLE:?no Gradle toolchain selected}" :generator-common:producePatchAndVerify')
         # The marker is cleared before the producer runs, so a stale file from
         # an earlier anchor can never skip a good one.
         clear_at = lib.index('rm -f "$PATCH_OUT.unpatchable"')
@@ -455,7 +521,7 @@ class ManualReleaseWorkflowContractTest(unittest.TestCase):
             self.assertIn(transition, patch_fan)
             self.assertLess(
                 patch_fan.index(transition),
-                patch_fan.index("gradle :generator-common:producePatchAndVerify"),
+                patch_fan.index('"${GRADLE:?no Gradle toolchain selected}" :generator-common:producePatchAndVerify'),
             )
         self.assertIn("producing the supported cross-schema delta", patch_fan)
         self.assertIn("is unsupported — skip anchor", patch_fan)
@@ -613,7 +679,7 @@ class ManualReleaseWorkflowContractTest(unittest.TestCase):
         self.assertIn("if: steps.discover.outputs.has_prev == 'true'", launcher_step)
         self.assertIn(f"LAUNCHER={spec}", launcher_step)
         self.assertIn(
-            "gradle :generator-common:patchPipelineLauncher --no-daemon", launcher_step
+            '"$GRADLE" :generator-common:patchPipelineLauncher --no-daemon', launcher_step
         )
         # Opportunistic: a payload commit without the task leaves no spec and
         # the fan falls back to its unchanged serial Gradle loop.
@@ -654,7 +720,7 @@ class ManualReleaseWorkflowContractTest(unittest.TestCase):
             re.findall(r"-D(\w+)=", barrier),
             ["out", "fromVersion", "toVersion", "fromSchemaVersion", "toSchemaVersion"],
         )
-        self.assertIn("gradle :generator-common:writeSchemaBarrier", barrier)
+        self.assertIn('"${GRADLE:?no Gradle toolchain selected}" :generator-common:writeSchemaBarrier', barrier)
         self.assertIn('"barrierMainClass=$launcherBarrierMainClass\\n"', gradle)
         self.assertIn("mainClass.set(schemaBarrierMainClass)", gradle)
         # ZSTD_LEVEL keeps reaching the CLI as an env var on both paths, so the
@@ -1302,7 +1368,7 @@ class ManualReleaseWorkflowContractTest(unittest.TestCase):
         self.assertIn("--rebuilt \"$REBUILT_SNAPSHOT_DB\"", apply_links)
         self.assertLess(
             apply_links.index("verify_relink_recovery_snapshot.py"),
-            apply_links.index("gradle :sefariasqlite:generateLinkerLinks"),
+            apply_links.index('"$GRADLE" :sefariasqlite:generateLinkerLinks'),
         )
 
     def test_weekly_workflow_has_no_actions_artifact_handoffs(self):
