@@ -228,7 +228,7 @@ jobs:
       # Compatibility ... This will become an error in Gradle 8.0" that follows
       # it. jvmToolchain is 25 everywhere (the release runner gates on Java 25)
       # and KGP has no JVM_25 target yet. The Gradle-8 deadline in that text is
-      # stale — this build runs Gradle 9.1 — and the mismatch it reports is
+      # stale — this build runs Gradle 9.8 — and the mismatch it reports is
       # inert: the repo has zero .java sources, so compileJava is NO-SOURCE in
       # every module and produces no bytecode to be inconsistent with. Pinning
       # jvmTarget to 24 to silence it would change a compiler that compiles

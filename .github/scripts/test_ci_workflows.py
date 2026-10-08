@@ -389,6 +389,70 @@ class CiWorkflowTest(unittest.TestCase):
             for db in ("seforim.db.v1", "seforim.db")
         ])
 
+    def run_delta_step(self, step_name, root, workspace_version, selected_runner, has_selector=True):
+        """Runs a step body against fake toolchains and a stub git; returns $GITHUB_ENV."""
+        step = named_step(yaml.safe_load(DELTA.read_text(encoding="utf-8")), step_name)
+        workspace = root / f"ws-{workspace_version}"
+        (workspace / "gradle/wrapper").mkdir(parents=True, exist_ok=True)
+        (workspace / "gradle/wrapper/gradle-wrapper.properties").write_text(
+            "distributionUrl=https\\://services.gradle.org/distributions/"
+            f"gradle-{workspace_version}-bin.zip\n", encoding="utf-8")
+        shutil.rmtree(workspace / ".github", ignore_errors=True)
+        if has_selector:
+            (workspace / ".github/scripts").mkdir(parents=True)
+            shutil.copy(Path(__file__).parent / "select_gradle_toolchain.sh",
+                        workspace / ".github/scripts/select_gradle_toolchain.sh")
+        stubs = root / "stubs"
+        stubs.mkdir(exist_ok=True)
+        (stubs / "git").write_text("#!/bin/sh\necho stub\n", encoding="utf-8")
+        (stubs / "git").chmod(0o755)
+        for version in ("9.1.0", "9.8.0"):
+            gradle = root / f"tc/gradle-{version}/bin/gradle"
+            gradle.parent.mkdir(parents=True, exist_ok=True)
+            gradle.write_text(f"#!/bin/sh\necho 'Gradle {version}'\n", encoding="utf-8")
+            gradle.chmod(0o755)
+        (root / "temp").mkdir(exist_ok=True)
+        env_file = root / "github_env"
+        env_file.write_text("", encoding="utf-8")
+        run = subprocess.run(
+            ["bash", "-c", step["run"]], cwd=workspace, capture_output=True, text=True,
+            env={"PATH": f"{stubs}:{os.environ['PATH']}", "GITHUB_ENV": str(env_file),
+                 "GITHUB_WORKSPACE": str(workspace), "RUNNER_TEMP": str(root / "temp"),
+                 "OTZARIA_GRADLE_TOOLCHAINS": str(root / "tc"), "SELECTED_RUNNER": selected_runner,
+                 "BASELINE_REF": "base", "GITHUB_SHA": "head"},
+        )
+        self.assertEqual(run.returncode, 0, run.stderr + run.stdout)
+        if selected_runner != "ARM64":
+            self.assertEqual(step["env"]["SELECTED_RUNNER"], "${{ inputs.runner_selection }}")
+        return env_file.read_text(encoding="utf-8").replace(str(root), "$ROOT")
+
+    def test_delta_reselects_gradle_after_every_checkout(self):
+        # AGP 8.12.3 (old trees) fails on Gradle 9.8; AGP 9.1.1 needs >= 9.3.1.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(os.path.realpath(tmp))
+            head = self.run_delta_step("Resolve the Gradle entry point", root, "9.8.0", "local")
+            self.assertEqual(head, "GRADLE=$ROOT/tc/gradle-9.8.0/bin/gradle\n")
+            # The baseline may lack the script; only the $RUNNER_TEMP copy runs from here on.
+            base = self.run_delta_step(
+                "Check out the baseline tree for v1", root, "9.1.0", "server-2", has_selector=False)
+            self.assertEqual(base, "GRADLE=$ROOT/tc/gradle-9.1.0/bin/gradle\n")
+            back = self.run_delta_step(
+                "Restore the current tree for v2", root, "9.8.0", "local", has_selector=False)
+            self.assertEqual(back, "GRADLE=$ROOT/tc/gradle-9.8.0/bin/gradle\n")
+        with tempfile.TemporaryDirectory() as tmp:
+            arm = self.run_delta_step("Resolve the Gradle entry point", Path(tmp), "9.8.0", "ARM64")
+            self.assertEqual(arm, "GRADLE=./gradlew\n")
+
+    def test_delta_durable_hosts_never_use_the_wrapper_or_a_path_gradle(self):
+        doc = yaml.safe_load(DELTA.read_text(encoding="utf-8"))
+        names = [step.get("name") for _, _, step in steps_of(doc)]
+        self.assertNotIn("Verify durable Gradle 9.8.0 toolchain", names)
+        for _, _, step in steps_of(doc):
+            body = step.get("run") or ""
+            self.assertIsNone(re.search(r"(^|[\s;(&|!])gradle\s", body, re.M), step.get("name"))
+            if "uses" in step and "setup-gradle" in step["uses"]:
+                self.assertEqual(step.get("if"), "inputs.runner_selection == 'ARM64'")
+
     def test_delta_callers_inherit_the_compressed_pipeline(self):
         # The dry run and the ARM button run this file, not their own copy.
         for caller in ("delta-pipeline-dryrun.yml", "delta-real-diff-arm.yml"):

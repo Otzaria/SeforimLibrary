@@ -55,6 +55,10 @@ internal data class BookMeta(
     // פירוש-על-פירוש: "אבן עזרא על שמות; פירוש הקצר" הוא של אותו מחבר כמו
     // "אבן עזרא על בראשית" שמחוקקי יהודה מצהיר עליו (ר' completeDeclaredBaseFamilies).
     val authorKeys: Set<String> = emptySet(),
+    // Sefaria `Reference` work (dictionary, lexicon…). It explains words of other
+    // texts without being their base or their commentary, so a link between a
+    // reference work and a non-reference book is never oriented.
+    val isReferenceWork: Boolean = false,
 )
 
 /// Base encoded value in [BookPayload.cleanShiftByLineIndex] for a line whose
@@ -142,6 +146,8 @@ internal data class BookPayload(
     val categoriesEn: List<String> = emptyList(),
     // Store lines with their dash dibbur bolded — see SefariaTalmudDibburBold.
     val boldDashDibburim: Boolean = false,
+    // Top-level Sefaria category is `Reference` (dictionaries, lexicons, bibliographies).
+    val isReferenceWork: Boolean = false,
 ) {
     /**
      * Text-only per-line derivations for this book: computed on the parallel

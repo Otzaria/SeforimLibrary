@@ -170,8 +170,8 @@ jobs:
           mv "$PROPS.next" "$PROPS"
 
       # ─── Toolchain ─────────────────────────────────────────────────────────
-      # otzaria-db and server-2 carry a durable Java 25 + Gradle 9.1.0 — the
-      # release build proves it every week, and using them downloads nothing.
+      # otzaria-db and server-2 carry a durable Java 25 and one Gradle per
+      # wrapper version under /opt/otzaria-cache/toolchains; nothing downloads.
       # That also removes what killed run 34461548735: setup-java fetches
       # Temurin through Node, which does not trust the filter's CA
       # ("unable to get local issuer certificate").
@@ -192,19 +192,6 @@ jobs:
           echo "JAVA_HOME=$java_home" >> "$GITHUB_ENV"
           echo "$java_home/bin" >> "$GITHUB_PATH"
           "$java_home/bin/java" -version
-
-      - name: Verify durable Gradle 9.1.0 toolchain
-        if: inputs.runner_selection != 'ARM64'
-        shell: bash
-        run: |
-          set -euo pipefail
-          command -v gradle
-          gradle_version="$(gradle --version | awk '/^Gradle / {print $2; exit}')"
-          [ "$gradle_version" = 9.1.0 ] || {
-            echo "::error::the durable runner must provide Gradle 9.1.0; found ${gradle_version:-missing}"
-            exit 1
-          }
-          gradle --version
 
       # The ARM runner has no durable toolchain, so it keeps the actions. They
       # stay on v4 by the rule the rest of the repo follows: a self-hosted
@@ -237,7 +224,9 @@ jobs:
           if [ "$SELECTED_RUNNER" = "ARM64" ]; then
             echo "GRADLE=./gradlew" >> "$GITHUB_ENV"
           else
-            echo "GRADLE=gradle" >> "$GITHUB_ENV"
+            # A baseline tree may predate the selector, so every checkout runs this copy.
+            install -m 0755 .github/scripts/select_gradle_toolchain.sh "$RUNNER_TEMP/select_gradle_toolchain.sh"
+            bash "$RUNNER_TEMP/select_gradle_toolchain.sh" "$GITHUB_WORKSPACE"
           fi
 
       - name: Install DB workflow dependencies
@@ -423,11 +412,16 @@ jobs:
         if: inputs.baseline_ref != ''
         env:
           BASELINE_REF: ${{ inputs.baseline_ref }}
+          SELECTED_RUNNER: ${{ inputs.runner_selection }}
         run: |
           set -euo pipefail
           git checkout --detach "$BASELINE_REF"
           git submodule update --init --recursive
           echo "v1 baseline tree: $(git rev-parse HEAD)"
+          # The baseline's wrapper may pin an older Gradle than the head's.
+          if [ "$SELECTED_RUNNER" != "ARM64" ]; then
+            bash "$RUNNER_TEMP/select_gradle_toolchain.sh" "$GITHUB_WORKSPACE"
+          fi
 
       - name: Build v1 baseline with the production pipeline
         run: >-
@@ -464,11 +458,16 @@ jobs:
 
       - name: Restore the current tree for v2
         if: inputs.baseline_ref != ''
+        env:
+          SELECTED_RUNNER: ${{ inputs.runner_selection }}
         run: |
           set -euo pipefail
           git checkout --detach "$GITHUB_SHA"
           git submodule update --init --recursive
           echo "v2 tree: $(git rev-parse HEAD)"
+          if [ "$SELECTED_RUNNER" != "ARM64" ]; then
+            bash "$RUNNER_TEMP/select_gradle_toolchain.sh" "$GITHUB_WORKSPACE"
+          fi
 
       - name: Build v2 with the production pipeline
         run: >-

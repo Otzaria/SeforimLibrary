@@ -13,7 +13,7 @@ group = "io.github.kdroidfilter.seforimlibrary"
 kotlin {
     jvmToolchain(libs.versions.jvmToolchain.get().toInt())
 
-    androidLibrary {
+    android {
         namespace = "io.github.kdroidfilter.seforimlibrary"
         compileSdk = 35
         minSdk = 21
@@ -24,7 +24,6 @@ kotlin {
         commonMain.dependencies {
             api(project(":core"))
             implementation(libs.kotlinx.coroutines.core)
-            implementation(libs.kotlinx.coroutines.test)
             implementation(libs.kotlinx.serialization.json)
             implementation(libs.kotlinx.serialization.protobuf)
             implementation(libs.kotlinx.datetime)

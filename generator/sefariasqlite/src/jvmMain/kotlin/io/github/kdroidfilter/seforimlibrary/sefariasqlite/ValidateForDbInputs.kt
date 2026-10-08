@@ -165,6 +165,7 @@ fun main(args: Array<String>) {
             applyGenerations(conn, generations, logger)
             conn.commit()
         }
+        val retitledBooks = DriverManager.getConnection("jdbc:sqlite:$tempDb").use(::loadRetitledBooks)
         runBlocking {
             val driver = JdbcSqliteDriver("jdbc:sqlite:$tempDb")
             val repository = SeforimRepository(tempDb.toString(), driver)
@@ -174,7 +175,7 @@ fun main(args: Array<String>) {
                     Logger.withTag("ValidateForDbAllocator"),
                 )
                 val bindings = IdAllocatorBindings(allocator, repository)
-                applyMetadata(repository, bindings, bulkMetadata, descriptionOverrides, logger)
+                applyMetadata(repository, bindings, bulkMetadata, descriptionOverrides, retitledBooks, logger)
                 applyCategoryDescriptionOverrides(repository, categoryDescriptionOverrides, logger)
             } finally {
                 repository.close()

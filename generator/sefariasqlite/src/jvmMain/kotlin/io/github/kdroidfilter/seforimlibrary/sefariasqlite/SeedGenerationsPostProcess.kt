@@ -179,6 +179,16 @@ internal fun applyGenerations(
 ): GenerationApplyResult {
     if (rows.isEmpty()) return GenerationApplyResult(0, 0, 0)
 
+    val books = ArrayList<Pair<Long, String>>()
+    conn.createStatement().use { st ->
+        st.executeQuery("SELECT id, title FROM book").use { rs ->
+            while (rs.next()) books += rs.getLong(1) to rs.getString(2)
+        }
+    }
+    val exactMap = books.groupBy({ it.second }, { it.first })
+    // Before any write: a row keyed by a renamed book's former title must not be dropped.
+    requireForDbUsesDisplayTitles("generation rows", rows.map { it.first }, exactMap.keys, loadRetitledBooks(conn))
+
     var generationsCreated = 0
     conn.prepareStatement("INSERT OR IGNORE INTO generation(name) VALUES (?)").use { stmt ->
         for (name in rows.map { it.second }.distinct()) {
@@ -193,14 +203,6 @@ internal fun applyGenerations(
             while (rs.next()) nameToId[rs.getString(2)] = rs.getLong(1)
         }
     }
-
-    val books = ArrayList<Pair<Long, String>>()
-    conn.createStatement().use { st ->
-        st.executeQuery("SELECT id, title FROM book").use { rs ->
-            while (rs.next()) books += rs.getLong(1) to rs.getString(2)
-        }
-    }
-    val exactMap = books.groupBy({ it.second }, { it.first })
 
     var linksCreated = 0
     val unmatchedTitles = mutableListOf<String>()

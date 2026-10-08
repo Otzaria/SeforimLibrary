@@ -83,12 +83,20 @@ internal fun aliyahOrdinalLabel(index: Int): String? = ALIYAH_ORDINALS.getOrNull
  * matching `heSectionNames`, so the generated TOC labels fall back gracefully
  * instead of showing English strings mid-Hebrew UI.
  *
- * Returns the original string if no mapping applies, or `null` for blank input.
+ * Returns the original string if no mapping applies, or `null` for blank input
+ * and for unnamed levels: Sefaria uses "Integer" as a placeholder name and shows
+ * those sections by their number alone (its Hebrew refs read "א׳:ב׳", and
+ * "Integer" has no Hebrew term in its dictionary).
  */
 internal fun mapSectionNameToHebrew(base: String?): String? {
     if (base.isNullOrBlank()) return null
-    val norm = base.lowercase()
+    val norm = base.lowercase().trim('\'', '"', ' ')
     return when {
+        // Short tokens are matched exactly: as substrings they would hit unrelated names.
+        norm == "integer" -> null
+        norm == "ot" -> "אות"                // מדרש ילמדנו
+        norm == "dh" -> "דיבור המתחיל"
+        norm == "vav" -> "וו"                // ספר יראים (ווים ועמודים)
         "aliyah" in norm || "aliya" in norm -> ALIYAH_SECTION_LABEL
         "daf" in norm -> "דף"
         "chapter" in norm -> "פרק"
@@ -127,13 +135,31 @@ internal fun mapSectionNameToHebrew(base: String?): String? {
         "page" in norm -> "עמוד"             // גנזי מצרים, הלכות ספר תורה
         "word" in norm -> "מילה"             // מחברת מנחם
         "room" in norm -> "חדר"              // רב פנינים על משלי
-        norm == "vav" -> "וו"                // ספר יראים (ווים ועמודים)
-        norm == "ot" -> "אות"                // מדרש ילמדנו (short — exact match only)
         "paragraph" in norm -> "פסקה"
         "line" in norm -> "שורה"
         "column" in norm -> "טור"
         "folio" in norm -> "דף"
         "segment" in norm -> "קטע"
+        "footnote" in norm -> "הערה"
+        "pararaph" in norm -> "פסקה"
+        "passuk" in norm -> "פסוק"
+        "tosefta" in norm -> "תוספתא"
+        "midrash" in norm -> "מדרש"
+        "drush" in norm -> "דרוש"
+        "remez" in norm -> "רמז"
+        "inyan" in norm -> "ענין"
+        "mitzvah" in norm -> "מצוה"
+        "piyyut" in norm -> "פיוט"
+        "hadran" in norm -> "הדרן"
+        "kovetz" in norm -> "קובץ"
+        // Generic English words are matched exactly so they cannot catch longer names.
+        norm == "gate" || "sha'ar" in norm -> "שער"
+        norm == "essay" -> "מאמר"
+        norm == "statement" -> "סימן"
+        norm == "letter" -> "אות"
+        norm == "chamber" -> "חדר"
+        norm == "window" -> "חלון"
+        norm == "book" -> "ספר"
         else -> base
     }
 }

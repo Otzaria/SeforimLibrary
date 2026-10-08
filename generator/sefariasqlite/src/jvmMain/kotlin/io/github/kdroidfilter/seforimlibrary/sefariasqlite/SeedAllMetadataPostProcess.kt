@@ -20,6 +20,7 @@ import kotlinx.serialization.json.jsonPrimitive
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.Paths
+import java.sql.DriverManager
 import java.time.Instant
 import kotlin.io.path.exists
 import kotlin.system.exitProcess
@@ -70,6 +71,7 @@ fun main(args: Array<String>) = runBlocking {
         downloadRequiredForDbFile(CATEGORY_DESCRIPTIONS_FILE, logger),
     )
 
+    val retitledBooks = DriverManager.getConnection("jdbc:sqlite:$dbPath").use(::loadRetitledBooks)
     val driver = JdbcSqliteDriver(url = "jdbc:sqlite:$dbPath")
     val repository = SeforimRepository(dbPath.toString(), driver)
     // The repository init downgrades the GLOBAL kermit severity to Assert;
@@ -90,7 +92,7 @@ fun main(args: Array<String>) = runBlocking {
         // write.  Otherwise a missing late category could leave earlier book/pub
         // metadata committed even though the task reports failure.
         val categoryPlan = planCategoryDescriptionOverrides(repository, categoryOverrides)
-        val result = applyMetadata(repository, bindings, bulk, descriptions, logger)
+        val result = applyMetadata(repository, bindings, bulk, descriptions, retitledBooks, logger)
         val categoryResult = applyCategoryDescriptionPlan(repository, categoryPlan, logger)
         // This stage writes straight to the on-disk DB (no VACUUM INTO), so there
         // is no persist step for the snapshot to run ahead of.
@@ -349,12 +351,16 @@ internal suspend fun applyMetadata(
     bindings: IdAllocatorBindings,
     bulk: Map<String, BulkMetadata>,
     descriptions: Map<String, Description>,
+    retitledBooks: List<RetitledBook>,
     logger: Logger,
 ): MetadataResult {
     // Keys on both sides are trimmed: the CSV/JSON parsers trim every title, but a
     // Sefaria heTitle can arrive with a trailing space (one v28 book did), and an
     // untrimmed DB key could then never match its own ForDB row.
     val bookIdsByTitle = repository.getAllBookTitleIds().groupBy({ it.second.trim() }, { it.first })
+    // Before any write: this stage has no transaction to roll back.
+    requireForDbUsesDisplayTitles(ALL_METADATA_FILE, bulk.keys, bookIdsByTitle.keys, retitledBooks)
+    requireForDbUsesDisplayTitles(METADATA_CHANGES_FILE, descriptions.keys, bookIdsByTitle.keys, retitledBooks)
 
     var updated = 0
     // Names, not just a count: `unmatched=1116` (24.5% of the ForDB metadata

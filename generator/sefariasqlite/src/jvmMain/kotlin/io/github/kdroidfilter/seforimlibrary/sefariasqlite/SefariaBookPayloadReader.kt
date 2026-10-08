@@ -204,12 +204,10 @@ internal class SefariaBookPayloadReader(
             // bare "אברהם יצחק הכהן קוק" become "הרב אברהם יצחק הכהן קוק".
             // Without authors.json this resolves to the schema name unchanged.
             val authorEntries = schemaJson["authors"]?.jsonArray?.mapNotNull { author ->
-                val entry = author.jsonObject
-                entry["he"]?.stringOrNull()?.let { he ->
-                    val slug = entry["slug"]?.stringOrNull()
-                    he to slug
+                resolveSefariaAuthorName(author)?.let { he ->
+                    he to author.jsonObject["slug"]?.stringOrNull()
                 }
-            } ?: emptyList()
+            }.orEmpty()
             val authors = authorEntries.map { (he, slug) -> authorTitles.displayName(slug, he) }
             // Keep every form for blacklist matching — see BookPayload.authorMatchKeys.
             val authorMatchKeys = authorEntries.flatMap { (he, slug) ->
@@ -256,6 +254,8 @@ internal class SefariaBookPayloadReader(
             val collectiveTitleEn = collectiveTitleObj?.get("en")?.stringOrNull()?.trim()?.takeIf { it.isNotEmpty() }
             val collectiveTitleHe = collectiveTitleObj?.get("he")?.stringOrNull()?.trim()?.takeIf { it.isNotEmpty() }
             val titleAliasKeys = extractTitleAliasKeys(schemaJson, schemaObj)
+            val isReferenceWork = schemaJson["categories"]?.jsonArray
+                ?.firstOrNull()?.jsonPrimitive?.contentOrNull == "Reference"
 
             BookPayload(
                 heTitle = hebrewTitle,
@@ -287,6 +287,7 @@ internal class SefariaBookPayloadReader(
                 preferredVersionFileName = preferredPath?.fileName?.name,
                 categoriesEn = categoriesEn,
                 boldDashDibburim = SefariaTalmudDibburBold.appliesTo(categoriesEn, dependence, lines),
+                isReferenceWork = isReferenceWork,
             )
         }.onFailure { e ->
             // גרסה מוצהרת שחסרה בייצוא היא שגיאת קלט — לא בולעים אותה.
@@ -691,7 +692,7 @@ internal class SefariaBookPayloadReader(
     }
 
     private fun recursiveSections(
-        sectionNames: List<String>,
+        sectionNames: List<String?>,
         text: JsonElement?,
         depth: Int,
         level: Int,
@@ -791,7 +792,8 @@ internal class SefariaBookPayloadReader(
         }
         if (text !is JsonArray) return
         val index = (sectionNames.size - depth).coerceAtLeast(0)
-        val sectionName = sectionNames.getOrNull(index) ?: ""
+        // null marks an unnamed level (Sefaria "Integer"): its heading is the bare number.
+        val sectionName = sectionNames.getOrElse(index) { "" }
 
         val nonEmptyCount = if (depth == 1) {
             text.count { !it.isTriviallyEmpty() }
@@ -855,16 +857,17 @@ internal class SefariaBookPayloadReader(
             if (numbered) labels.count(selfLabelled)
             val nextLinePrefix = if (numbered && !selfLabelled) "($letter) " else ""
 
-            if (depth > 1 && sectionName.isNotBlank() && isReferenceable) {
+            if (depth > 1 && sectionName?.isBlank() != true && isReferenceable) {
                 val tag = when (level) {
                     1 -> "<h2>" to "</h2>"
                     2 -> "<h3>" to "</h3>"
                     3 -> "<h4>" to "</h4>"
                     else -> "<h5>" to "</h5>"
                 }
-                output += "${tag.first}$sectionName $letter${tag.second}"
+                val title = sectionName?.let { "$it $letter" } ?: letter
+                output += "${tag.first}$title${tag.second}"
                 headings += Heading(
-                    title = "$sectionName $letter",
+                    title = title,
                     level = level,
                     lineIndex = output.size - 1
                 )
@@ -960,8 +963,9 @@ internal class SefariaBookPayloadReader(
      * top-level Hebrew label (e.g. "תשובה", "סימן") was never filled in; the
      * English `sectionNames` still has it. Without this fallback the importer
      * skips the matching heading and responsa-style books end up with no TOC.
+     * A null entry marks an unnamed level (see [mapSectionNameToHebrew]).
      */
-    private fun readHeSectionNames(obj: JsonObject): List<String> {
+    private fun readHeSectionNames(obj: JsonObject): List<String?> {
         val he = obj["heSectionNames"]?.jsonArray?.map { it.jsonPrimitive.contentOrNull.orEmpty() } ?: emptyList()
         val en = obj["sectionNames"]?.jsonArray?.map { it.jsonPrimitive.contentOrNull.orEmpty() } ?: emptyList()
         val size = maxOf(he.size, en.size)
@@ -972,7 +976,7 @@ internal class SefariaBookPayloadReader(
                 heVal
             } else {
                 val enVal = en.getOrNull(idx)?.trim().orEmpty()
-                mapSectionNameToHebrew(enVal.ifBlank { null }).orEmpty()
+                if (enVal.isEmpty()) "" else mapSectionNameToHebrew(enVal)
             }
         }
     }

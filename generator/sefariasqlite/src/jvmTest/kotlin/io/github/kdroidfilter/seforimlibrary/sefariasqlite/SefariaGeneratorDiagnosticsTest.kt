@@ -111,13 +111,13 @@ class SefariaGeneratorDiagnosticsTest {
 
     private fun generationsDb() = DriverManager.getConnection("jdbc:sqlite::memory:").apply {
         createStatement().use { st ->
-            st.execute("CREATE TABLE book (id INTEGER PRIMARY KEY, title TEXT NOT NULL)")
+            st.execute("CREATE TABLE book (id INTEGER PRIMARY KEY, title TEXT NOT NULL, heRef TEXT)")
             st.execute("CREATE TABLE generation (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT UNIQUE)")
             st.execute(
                 "CREATE TABLE book_generation (bookId INTEGER NOT NULL, generationId INTEGER NOT NULL, " +
                     "PRIMARY KEY (bookId, generationId))",
             )
-            st.execute("INSERT INTO book VALUES (1, 'ברכות')")
+            st.execute("INSERT INTO book (id, title) VALUES (1, 'ברכות')")
         }
     }
 

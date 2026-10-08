@@ -61,7 +61,7 @@ write_barrier() {  # <target-version> <anchor-schema> <tag>
       -DfromSchemaVersion="$ANCHOR_SCHEMA" -DtoSchemaVersion="$THIS_SCHEMA" \
       "$BARRIER_MAIN_CLASS" || RC=$?
   else
-    gradle :generator-common:writeSchemaBarrier \
+    "${GRADLE:?no Gradle toolchain selected}" :generator-common:writeSchemaBarrier \
       -Pout="$OUT" \
       -PfromVersion="$TARGET_VER" -PtoVersion="$THIS_VER" \
       -PfromSchemaVersion="$ANCHOR_SCHEMA" -PtoSchemaVersion="$THIS_SCHEMA" \
@@ -300,7 +300,7 @@ produce_anchor() {  # <offset> <target-version> <tag>
       -DfromVersion=$TARGET_VER -DtoVersion=$THIS_VER \
       "$PATCH_MAIN_CLASS" || PRODUCE_RC=$?
   else
-    gradle :generator-common:producePatchAndVerify \
+    "${GRADLE:?no Gradle toolchain selected}" :generator-common:producePatchAndVerify \
       -PprevDb=$PWD/$PREV_DB \
       -PnewDb=$PWD/build/seforim.db \
       -Pout=$PATCH_OUT \
