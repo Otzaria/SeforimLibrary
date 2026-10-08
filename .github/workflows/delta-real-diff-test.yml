@@ -170,7 +170,7 @@ jobs:
           mv "$PROPS.next" "$PROPS"
 
       # ─── Toolchain ─────────────────────────────────────────────────────────
-      # otzaria-db and server-2 carry a durable Java 25 + Gradle 9.1.0 — the
+      # otzaria-db and server-2 carry a durable Java 25 + Gradle 9.8.0 — the
       # release build proves it every week, and using them downloads nothing.
       # That also removes what killed run 34461548735: setup-java fetches
       # Temurin through Node, which does not trust the filter's CA
@@ -193,15 +193,15 @@ jobs:
           echo "$java_home/bin" >> "$GITHUB_PATH"
           "$java_home/bin/java" -version
 
-      - name: Verify durable Gradle 9.1.0 toolchain
+      - name: Verify durable Gradle 9.8.0 toolchain
         if: inputs.runner_selection != 'ARM64'
         shell: bash
         run: |
           set -euo pipefail
           command -v gradle
           gradle_version="$(gradle --version | awk '/^Gradle / {print $2; exit}')"
-          [ "$gradle_version" = 9.1.0 ] || {
-            echo "::error::the durable runner must provide Gradle 9.1.0; found ${gradle_version:-missing}"
+          [ "$gradle_version" = 9.8.0 ] || {
+            echo "::error::the durable runner must provide Gradle 9.8.0; found ${gradle_version:-missing}"
             exit 1
           }
           gradle --version

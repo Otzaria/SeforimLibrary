@@ -164,10 +164,10 @@ class ManualReleaseWorkflowContractTest(unittest.TestCase):
         self.assertIn('echo "JAVA_HOME=$java_home" >> "$GITHUB_ENV"', java)
 
     def test_durable_host_uses_preinstalled_gradle_without_wrapper_download(self):
-        gradle = self.step("Verify durable Gradle 9.1.0 toolchain")
+        gradle = self.step("Verify durable Gradle 9.8.0 toolchain")
 
         self.assertIn("command -v gradle", gradle)
-        self.assertIn('[ "$gradle_version" = 9.1.0 ]', gradle)
+        self.assertIn('[ "$gradle_version" = 9.8.0 ]', gradle)
         self.assertNotIn("./gradlew", self.workflow)
         self.assertNotIn("gradle/actions/setup-gradle", self.workflow)
 
