@@ -204,12 +204,10 @@ internal class SefariaBookPayloadReader(
             // bare "אברהם יצחק הכהן קוק" become "הרב אברהם יצחק הכהן קוק".
             // Without authors.json this resolves to the schema name unchanged.
             val authorEntries = schemaJson["authors"]?.jsonArray?.mapNotNull { author ->
-                val entry = author.jsonObject
-                entry["he"]?.stringOrNull()?.let { he ->
-                    val slug = entry["slug"]?.stringOrNull()
-                    he to slug
+                resolveSefariaAuthorName(author)?.let { he ->
+                    he to author.jsonObject["slug"]?.stringOrNull()
                 }
-            } ?: emptyList()
+            }.orEmpty()
             val authors = authorEntries.map { (he, slug) -> authorTitles.displayName(slug, he) }
             // Keep every form for blacklist matching — see BookPayload.authorMatchKeys.
             val authorMatchKeys = authorEntries.flatMap { (he, slug) ->
