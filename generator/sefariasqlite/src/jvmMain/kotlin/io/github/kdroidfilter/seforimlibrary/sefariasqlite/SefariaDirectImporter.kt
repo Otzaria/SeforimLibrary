@@ -352,6 +352,7 @@ class SefariaDirectImporter(
                 collectiveTitleEn = payload.collectiveTitleEn,
                 topCategoryEn = payload.categoriesEn.firstOrNull(),
                 authorKeys = resolvedAuthors.mapTo(HashSet()) { it.name },
+                isReferenceWork = payload.isReferenceWork,
             )
             if (payload.declaredBaseTextTitleKeys.isNotEmpty()) {
                 pendingDeclaredKeysByBookId[bookId] = payload.declaredBaseTextTitleKeys

@@ -256,6 +256,8 @@ internal class SefariaBookPayloadReader(
             val collectiveTitleEn = collectiveTitleObj?.get("en")?.stringOrNull()?.trim()?.takeIf { it.isNotEmpty() }
             val collectiveTitleHe = collectiveTitleObj?.get("he")?.stringOrNull()?.trim()?.takeIf { it.isNotEmpty() }
             val titleAliasKeys = extractTitleAliasKeys(schemaJson, schemaObj)
+            val isReferenceWork = schemaJson["categories"]?.jsonArray
+                ?.firstOrNull()?.jsonPrimitive?.contentOrNull == "Reference"
 
             BookPayload(
                 heTitle = hebrewTitle,
@@ -287,6 +289,7 @@ internal class SefariaBookPayloadReader(
                 preferredVersionFileName = preferredPath?.fileName?.name,
                 categoriesEn = categoriesEn,
                 boldDashDibburim = SefariaTalmudDibburBold.appliesTo(categoriesEn, dependence, lines),
+                isReferenceWork = isReferenceWork,
             )
         }.onFailure { e ->
             // גרסה מוצהרת שחסרה בייצוא היא שגיאת קלט — לא בולעים אותה.
