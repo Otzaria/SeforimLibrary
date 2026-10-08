@@ -109,6 +109,25 @@ jobs:
       - name: Validate the library update announcer
         run: python .github/scripts/library_announce/test_library_update_announce.py
 
+  # The weekly books-blacklist check (.github/scripts/blacklist). Its tests are offline and
+  # not a release gate, so outside the contract loop above.
+  blacklist:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Validate the books blacklist checker
+        run: python .github/scripts/blacklist/test_books_blacklist_check.py
+
   # The library-vectors build's suites (.github/scripts/vectors): its workflow, driver and
   # bootstrap run against stub tools, and the GPU worker's shard contract. Not a release gate,
   # so outside the contract loop above. NumPy lets the worker's small-plan tests run its real
