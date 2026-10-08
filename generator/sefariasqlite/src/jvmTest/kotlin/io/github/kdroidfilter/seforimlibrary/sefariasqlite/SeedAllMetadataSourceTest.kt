@@ -30,7 +30,7 @@ class SeedAllMetadataSourceTest {
         val bulk = mapOf("תבונה" to BulkMetadata(pubDates = listOf(1900), pubPlaceHe = "ירושלים"))
         val bindings = IdAllocatorBindings(InMemoryIdAllocator.load(path = null), repo)
 
-        val result = applyMetadata(repo, bindings, bulk, emptyMap(), Logger.withTag("test"))
+        val result = applyMetadata(repo, bindings, bulk, emptyMap(), emptyList(), Logger.withTag("test"))
 
         assertEquals(1, result.updated)
         assertEquals(natlId, repo.getBook(bookId)?.sourceId, "seedAllMetadata must not overwrite the book source")
@@ -58,7 +58,7 @@ class SeedAllMetadataSourceTest {
         )
         val bindings = IdAllocatorBindings(InMemoryIdAllocator.load(path = null), repo)
 
-        val result = applyMetadata(repo, bindings, bulk, emptyMap(), Logger.withTag("test"))
+        val result = applyMetadata(repo, bindings, bulk, emptyMap(), emptyList(), Logger.withTag("test"))
 
         assertEquals(1, result.updated)
         assertEquals(2, result.unmatched)
@@ -86,7 +86,7 @@ class SeedAllMetadataSourceTest {
         )
         val bindings = IdAllocatorBindings(InMemoryIdAllocator.load(path = null), repo)
 
-        val result = applyMetadata(repo, bindings, emptyMap(), descriptions, Logger.withTag("test"))
+        val result = applyMetadata(repo, bindings, emptyMap(), descriptions, emptyList(), Logger.withTag("test"))
 
         assertEquals(1, result.updated)
         assertEquals(0, result.unmatched)

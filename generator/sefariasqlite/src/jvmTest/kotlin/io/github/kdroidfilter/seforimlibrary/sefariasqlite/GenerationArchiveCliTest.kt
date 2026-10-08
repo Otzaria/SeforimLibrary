@@ -82,10 +82,10 @@ class GenerationArchiveCliTest {
             val db = root.resolve("fixture.db")
             DriverManager.getConnection("jdbc:sqlite:$db").use { conn ->
                 conn.createStatement().use { st ->
-                    st.execute("CREATE TABLE book (id INTEGER PRIMARY KEY, title TEXT NOT NULL)")
+                    st.execute("CREATE TABLE book (id INTEGER PRIMARY KEY, title TEXT NOT NULL, heRef TEXT)")
                     st.execute("CREATE TABLE generation (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT UNIQUE)")
                     st.execute("CREATE TABLE book_generation (bookId INTEGER, generationId INTEGER, PRIMARY KEY(bookId,generationId))")
-                    st.execute("INSERT INTO book VALUES (1, 'Old title')")
+                    st.execute("INSERT INTO book (id, title) VALUES (1, 'Old title')")
                 }
             }
             // Newer rename stages require the same stable-id state that real generation creates.
