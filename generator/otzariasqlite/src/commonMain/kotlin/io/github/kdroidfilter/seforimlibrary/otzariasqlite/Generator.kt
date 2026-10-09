@@ -257,16 +257,8 @@ class DatabaseGenerator(
 
     private fun comparableLabel(raw: String): String = CategoryLabels.comparable(raw)
 
-    private fun normalizeCategorySegments(rawTitle: String): List<String> {
-        val cleaned = normalizeHebrewLabel(rawTitle)
-        return when (cleaned) {
-            "תלמוד בבלי" -> listOf("תלמוד בבלי")
-            "תלמוד ירושלמי", "תלמוד ירושלים" -> listOf("תלמוד ירושלמי")
-            "תנך", "תנ\"ך", "תנ״ך" -> listOf("תנ״ך")
-            "שות", "שו\"ת", "שו״ת" -> listOf("שו״ת")
-            else -> listOf(cleaned)
-        }
-    }
+    // Shared with validateForDbInputs, which maps library folders to their categories.
+    private fun normalizeCategorySegments(rawTitle: String): List<String> = CategoryLabels.folderSegments(rawTitle)
 
     private data class CategoryPlacement(
         val id: Long,
@@ -321,13 +313,7 @@ class DatabaseGenerator(
         )
     }
 
-    private fun normalizeBookTitle(rawTitle: String): String {
-        val base = normalizeHebrewLabel(rawTitle)
-        return when (base) {
-            "תנך", "תנ\"ך" -> "תנ״ך"
-            else -> base
-        }
-    }
+    private fun normalizeBookTitle(rawTitle: String): String = CategoryLabels.bookTitle(rawTitle)
 
     /** Returns true only when a dependant-style title explicitly names [baseTitle]. */
     private fun titleDeclaresDependencyOn(dependantTitle: String, baseTitle: String): Boolean {
