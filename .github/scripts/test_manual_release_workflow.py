@@ -2632,6 +2632,8 @@ class ManualReleaseWorkflowContractTest(unittest.TestCase):
             'if args.require_all and os.environ.get(DRIFT_ENV, "").strip() == "":', run_all
         )
         self.assertIn("--require-all", qa)
+        # Acronyms follow the latest Acronymizer, so check9 compares to the exact file used.
+        self.assertIn("--acronym-db generator/otzariasqlite/build/acronymizer/acronymizer.db", qa)
 
     def test_unreadable_sefaria_schemas_are_named_or_fail_the_check(self):
         common = (QA_DIR / "common.py").read_text(encoding="utf-8")

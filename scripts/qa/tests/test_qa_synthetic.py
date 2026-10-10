@@ -70,7 +70,7 @@ def _make_db(path, books=(), bbt=(), links=(), conn_types=(), lines=(),
     conn = sqlite3.connect(path)
     conn.executescript("""
         CREATE TABLE source(id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE);
-        CREATE TABLE book(id INTEGER PRIMARY KEY, heRef TEXT, dependenceType TEXT,
+        CREATE TABLE book(id INTEGER PRIMARY KEY, title TEXT, heRef TEXT, dependenceType TEXT,
             collectiveTitleHe TEXT, collectiveTitleEn TEXT, isBaseBook INTEGER DEFAULT 0,
             orderIndex REAL DEFAULT 999, sourceId INTEGER NOT NULL DEFAULT 1);
         CREATE TABLE book_base_text(bookId INTEGER, baseBookId INTEGER);
@@ -673,19 +673,80 @@ def test_check8_schema6_line_content():
         _check("check8 schema 6 line_content יתום → FAIL", rc != 0)
 
 
+def _make_acronymizer(path, entries):
+    # entries: (title, [acronym, ...]) — סכמת SeforimAcronymizer
+    conn = sqlite3.connect(path)
+    conn.executescript("""
+        CREATE TABLE Books(id INTEGER PRIMARY KEY, title TEXT NOT NULL);
+        CREATE TABLE Acronyms(id INTEGER PRIMARY KEY, acronym TEXT NOT NULL UNIQUE);
+        CREATE TABLE BookAcronyms(id INTEGER PRIMARY KEY, book_id INTEGER NOT NULL,
+            acronym_id INTEGER NOT NULL, UNIQUE(book_id, acronym_id));
+    """)
+    acr_ids = {}
+    for book_id, (title, acronyms) in enumerate(entries, start=1):
+        conn.execute("INSERT INTO Books VALUES(?,?)", (book_id, title))
+        for a in acronyms:
+            if a not in acr_ids:
+                acr_ids[a] = len(acr_ids) + 1
+                conn.execute("INSERT INTO Acronyms VALUES(?,?)", (acr_ids[a], a))
+            conn.execute("INSERT INTO BookAcronyms(book_id, acronym_id) VALUES(?,?)",
+                         (book_id, acr_ids[a]))
+    conn.commit()
+    conn.close()
+
+
 def test_check9_acronyms():
-    print("check9: book_acronym ריקה או מתכווצת → FAIL")
+    print("check9: book_acronym תואם בדיוק לקובץ ה-Acronymizer")
+    books = [(1, "משנה ברורה", None, None, None, None, 0, 999, SRC_SEFARIA),
+             (2, "ספר ששמו שונה", None, None, None, None, 0, 999, SRC_SEFARIA),
+             (3, 'קיצור שו"ע', None, None, None, None, 0, 999, SRC_SEFARIA)]
+    good = [(1, "מב"), (2, "שם ישן"), (3, "קשוע")]
+
+    def db(path, acronyms):
+        _make_db(path, acronyms=acronyms)
+        conn = sqlite3.connect(path)
+        conn.executemany("INSERT INTO book(id,title,heRef,dependenceType,collectiveTitleHe,"
+                         "collectiveTitleEn,isBaseBook,orderIndex,sourceId) "
+                         "VALUES(?,?,?,?,?,?,?,?,?)", books)
+        conn.commit()
+        conn.close()
+
     with tempfile.TemporaryDirectory() as d:
-        ok, empty = os.path.join(d, "ok.db"), os.path.join(d, "empty.db")
-        _make_db(ok)
-        _make_db(empty, acronyms=())
-        rc, _out = _run("check9_acronyms.py", "--db", ok)
-        _check("check9 כינוי אחד, שער כבוי → PASS", rc == 0)
-        rc, _out = _run("check9_acronyms.py", "--db", empty)
+        acr = os.path.join(d, "acronymizer.db")
+        # ניקוי: ניקוד/גרשיים מוסרים, כפילות אחרי ניקוי נופלת, שם הספר עצמו נופל;
+        # ספר 3 נמצא בכתיב בלי מירכאות; לספר 2 אין רשומה (כינוי משינוי שם).
+        _make_acronymizer(acr, [("משנה ברורה", ["מ״ב", "מב", "מִ״ב", "משנה ברורה"]),
+                                ("קיצור שוע", ["קשו״ע"]),
+                                ("ספר שאינו בספרייה", ["ספש"])])
+        cases = {"ok": good,
+                 "missing": [t for t in good if t != (3, "קשוע")],
+                 "extra": good + [(1, "זבל")],
+                 "empty": []}
+        paths = {}
+        for name, acronyms in cases.items():
+            paths[name] = os.path.join(d, f"{name}.db")
+            db(paths[name], acronyms)
+
+        rc, out = _run("check9_acronyms.py", "--db", paths["ok"], "--acronym-db", acr)
+        _check("check9 תואם לקובץ המקור → PASS", rc == 0, out.strip().splitlines()[-3:])
+        _check("check9 מדווח על כינויים משינוי שם", "1 ב-1 ספרים" in out, out)
+        rc, out = _run("check9_acronyms.py", "--db", paths["missing"], "--acronym-db", acr)
+        _check("check9 כינוי חסר ב-DB → FAIL", rc != 0 and "קשוע" in out, out)
+        rc, out = _run("check9_acronyms.py", "--db", paths["extra"], "--acronym-db", acr)
+        _check("check9 כינוי עודף ב-DB → FAIL", rc != 0 and "זבל" in out, out)
+        rc, out = _run("check9_acronyms.py", "--db", paths["empty"], "--acronym-db", acr)
         _check("check9 טבלה ריקה → FAIL", rc != 0)
-        rc, _out = _run("check9_acronyms.py", "--db", ok,
-                        env_extra={"QA_DRIFT_MAX_SHRINK_PCT": "2"})
-        _check("check9 כינוי אחד מול snapshot מלא, שער 2% → FAIL", rc != 0)
+        rc, out = _run("check9_acronyms.py", "--db", paths["ok"],
+                       "--acronym-db", os.path.join(d, "missing.db"))
+        _check("check9 קובץ מקור חסר → FAIL", rc != 0)
+        empty_acr = os.path.join(d, "empty_acr.db")
+        _make_acronymizer(empty_acr, [])
+        rc, out = _run("check9_acronyms.py", "--db", paths["ok"], "--acronym-db", empty_acr)
+        _check("check9 קובץ מקור ריק → FAIL", rc != 0)
+        # הבדיקה לא תלויה במספר-בסיס: גם עם שער הסחיפה פעיל היא עוברת
+        rc, out = _run("check9_acronyms.py", "--db", paths["ok"], "--acronym-db", acr,
+                       env_extra={"QA_DRIFT_MAX_SHRINK_PCT": "2"})
+        _check("check9 שער סחיפה פעיל לא משפיע → PASS", rc == 0, out)
 
 
 def main():

@@ -16,15 +16,15 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 from common import DRIFT_ENV  # noqa: E402
 
-# (script, needs_sefaria_dir, accepts_expect_snapshot, needs_metrics)
-SCRIPTS = [("check3_elucidation.py", False, False, False),
-           ("check5_import_metrics.py", False, False, True),
-           ("check7_provenance.py", False, True, False),
-           ("check8_integrity.py", False, False, False),
-           ("check9_acronyms.py", False, False, False),
-           ("check1_dependence_count.py", True, True, False),
-           ("check2_book_base_text.py", True, True, False),
-           ("check6_metadata_rowbyrow.py", True, True, False)]
+# (script, needs_sefaria_dir, accepts_expect_snapshot, needs_metrics, needs_acronym_db)
+SCRIPTS = [("check3_elucidation.py", False, False, False, False),
+           ("check5_import_metrics.py", False, False, True, False),
+           ("check7_provenance.py", False, True, False, False),
+           ("check8_integrity.py", False, False, False, False),
+           ("check9_acronyms.py", False, False, False, True),
+           ("check1_dependence_count.py", True, True, False, False),
+           ("check2_book_base_text.py", True, True, False, False),
+           ("check6_metadata_rowbyrow.py", True, True, False, False)]
 
 
 def main():
@@ -35,6 +35,9 @@ def main():
     ap.add_argument("--metrics",
                     help="נתיב <db>.link-import-metrics.json לבדיקה 5; "
                          "בהיעדרו בדיקה 5 מדולגת (אין ניחוש נתיב ברירת-מחדל)")
+    ap.add_argument("--acronym-db",
+                    help="ה-acronymizer.db שהבנייה השתמשה בו, לבדיקה 9; "
+                         "בהיעדרו בדיקה 9 מדולגת")
     ap.add_argument("--sefaria-stage", action="store_true",
                     help="ה-DB הוא DB בשלב-ספריא (טרם צבירת havrouta/otzaria/linker); "
                          "מחמיר את הצלבת ה-DB בבדיקה 5 מ-≥ ל-==")
@@ -55,14 +58,19 @@ def main():
         sys.exit(1)
 
     results = []
-    for name, needs_sefaria, accepts_snapshot, needs_metrics in SCRIPTS:
+    for name, needs_sefaria, accepts_snapshot, needs_metrics, needs_acronyms in SCRIPTS:
         if needs_sefaria and not args.sefaria_dir:
             results.append((name, "SKIP", "אין --sefaria-dir", "--sefaria-dir"))
             continue
         if needs_metrics and not args.metrics:
             results.append((name, "SKIP", "אין --metrics", "--metrics"))
             continue
+        if needs_acronyms and not args.acronym_db:
+            results.append((name, "SKIP", "אין --acronym-db", "--acronym-db"))
+            continue
         cmd = [sys.executable, os.path.join(HERE, name), "--db", args.db]
+        if needs_acronyms:
+            cmd += ["--acronym-db", args.acronym_db]
         if needs_sefaria:
             cmd += ["--sefaria-dir", args.sefaria_dir]
         if needs_metrics:

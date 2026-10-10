@@ -33,7 +33,7 @@ schema אחד (למשל `export/` המכיל רק `table_of_contents.json`) — 
 
 ### שער סחיפה מול ה-reference snapshot
 
-בדיקות 1/2/6/7/9 נושאות baselines קשיחים. בנוסף להשוואה הפנימית (DB מול schemas) הן
+בדיקות 1/2/6/7 נושאות baselines קשיחים. בנוסף להשוואה הפנימית (DB מול schemas) הן
 מעבירות כל מדד סָפוּר דרך `gate_snapshot_drift`: התכווצות מעבר ל-
 `QA_DRIFT_MAX_SHRINK_PCT` אחוזים מה-baseline היא `::error::` ויציאה 1; כל הפרש אחר
 (התכווצות קטנה יותר, או גדילה) הוא `::warning::` עם המספרים.
@@ -56,10 +56,11 @@ schema אחד (למשל `export/` המכיל רק `table_of_contents.json`) — 
 ```
 python3 scripts/qa/run_all.py --db seforim.db \
   --sefaria-dir generator/sefariasqlite/build/sefaria/export \
-  --metrics seforim.db.link-import-metrics.json
+  --metrics seforim.db.link-import-metrics.json \
+  --acronym-db generator/otzariasqlite/build/acronymizer/acronymizer.db
 ```
 
-בלי `--sefaria-dir` — בדיקות 1/2/6 מדולגות (רק 3/5/7/8 רצות). בלי `--metrics` —
+בלי `--sefaria-dir` — בדיקות 1/2/6 מדולגות. בלי `--acronym-db` — בדיקה 9 מדולגת. בלי `--metrics` —
 בדיקה 5 מדולגת עם שורת SKIP מפורשת; ‏run_all **אינו** מנחש את נתיב ברירת-המחדל
 `<db>.link-import-metrics.json` (ללא fallbacks — הדו"ח נבדק רק כשמורים עליו במפורש).
 
@@ -95,6 +96,7 @@ release יש להעביר `--require-all`: אז **כל** דילוג הופך א�
 | `check6_metadata_rowbyrow.py` | 10.6 | שורה-שורה לפי heRef: dependenceType, collectiveTitleHe/En; ‏baseline 5,821 ספרים מותאמים | `--db --sefaria-dir [--expect-snapshot]` |
 | `check7_provenance.py` | 10.7 | baseProvenance 1/2, זוגות מוסקים, עקביות מכוונת (source,target) מול book_base_text, הרכב דרגות פר ספר-מקור (סדר ה-SOURCE עצמו — בבדיקת ה-dao, ר' להלן) | `--db [--expect-snapshot]` |
 | `check8_integrity.py` | 10.8 | `PRAGMA quick_check` + `PRAGMA foreign_key_check` | `--db` |
+| `check9_acronyms.py` | — | `book_acronym` מול ה-acronymizer.db שהבנייה השתמשה בו: לכל ספר עם רשומה בקובץ — בדיוק הכינויים שהגנרטור נותן (חיפוש כותרת + ניקוי של `AcronymizerLookup`); כינויים בספר בלי רשומה — רק משינויי שם, נספרים. אין baseline: הקובץ מתעדכן בכוונה | `--db --acronym-db` |
 
 ## סינון source='Sefaria' (בדיקות 1/2/6)
 

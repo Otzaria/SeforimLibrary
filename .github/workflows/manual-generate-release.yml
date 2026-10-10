@@ -1886,6 +1886,7 @@ jobs:
             --db build/seforim.db \
             --sefaria-dir "$SEFARIA_EXTRACT_ROOT" \
             --metrics build/seforim.db.link-import-metrics.json \
+            --acronym-db generator/otzariasqlite/build/acronymizer/acronymizer.db \
             --require-all
 
       # ─── Schema fingerprint of the DB this build publishes ─────────────────
