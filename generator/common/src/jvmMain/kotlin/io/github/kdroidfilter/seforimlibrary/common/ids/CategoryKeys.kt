@@ -55,4 +55,21 @@ object CategoryLabels {
     /** [comparable] applied to every segment of a `/`-separated category path. */
     fun comparablePath(path: String): String =
         path.split('/').map { comparable(it) }.filter { it.isNotEmpty() }.joinToString("/")
+
+    /** The category titles the Otzaria stage creates for one library folder name. */
+    fun folderSegments(raw: String): List<String> =
+        when (val cleaned = normalize(raw)) {
+            "תלמוד בבלי" -> listOf("תלמוד בבלי")
+            "תלמוד ירושלמי", "תלמוד ירושלים" -> listOf("תלמוד ירושלמי")
+            "תנך", "תנ\"ך", "תנ״ך" -> listOf("תנ״ך")
+            "שות", "שו\"ת", "שו״ת" -> listOf("שו״ת")
+            else -> listOf(cleaned)
+        }
+
+    /** The book.title the Otzaria stage gives a library file stem. */
+    fun bookTitle(rawStem: String): String =
+        when (val base = normalize(rawStem)) {
+            "תנך", "תנ\"ך" -> "תנ״ך"
+            else -> base
+        }
 }

@@ -50,7 +50,7 @@ import kotlin.system.exitProcess
  */
 private const val ALL_METADATA_FILE = "all_metadata.json"
 private const val METADATA_CHANGES_FILE = "sefaria_metadata_changes.csv"
-private val CATEGORY_DESCRIPTIONS_FILE = FOR_DB_CSV_FILES.getValue("categoryDescriptions")
+internal val CATEGORY_DESCRIPTIONS_FILE = FOR_DB_CSV_FILES.getValue("categoryDescriptions")
 
 private val json = Json { ignoreUnknownKeys = true }
 

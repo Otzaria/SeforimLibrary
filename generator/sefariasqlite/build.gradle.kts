@@ -361,6 +361,7 @@ tasks.register<JavaExec>("seedAllMetadata") {
 // Usage:
 //   ./gradlew :sefariasqlite:validateForDbInputs -PseforimDb=/path/to/seforim.db \
 //       [-PforDbArchive=/path/to/fordb_latest.zip -PforDbSha256=<64-hex>]
+//       [-PlibraryTreeBase=/path/base.tree -PlibraryTreeCandidate=/path/candidate.tree]
 tasks.register<JavaExec>("validateForDbInputs") {
     group = "verification"
     description = "Dry-run all ForDB rename/move rules against a seforim.db (rollback, all-failures report)."
@@ -376,6 +377,10 @@ tasks.register<JavaExec>("validateForDbInputs") {
     } else {
         val defaultDbPath = rootProject.layout.buildDirectory.file("seforim.db").get().asFile.absolutePath
         systemProperty("seforimDb", defaultDbPath)
+    }
+    // NUL-separated library file lists (release commit, candidate commit); both or neither.
+    for (p in listOf("libraryTreeBase", "libraryTreeCandidate")) {
+        if (project.hasProperty(p)) systemProperty(p, project.property(p) as String)
     }
 
     jvmArgs = listOf("-Xmx$generatorHeap", "-XX:+UseG1GC")

@@ -126,6 +126,14 @@ fun main(args: Array<String>) {
     // Parsed here all the same, so a malformed row fails this gate instead of
     // the Sefaria import, hours into a release build.
     val authorCanonicalNames = SefariaAuthorCanonicalNames.load(logger)
+    // Library file lists at the release's library commit and at the candidate commit.
+    val baseTreePath = System.getProperty("libraryTreeBase")?.takeIf { it.isNotBlank() }
+    val candidateTreePath = System.getProperty("libraryTreeCandidate")?.takeIf { it.isNotBlank() }
+    require((baseTreePath == null) == (candidateTreePath == null)) {
+        "libraryTreeBase and libraryTreeCandidate must be given together"
+    }
+    val libraryTrees = baseTreePath?.let { readLibraryTree(Path.of(it)) to readLibraryTree(Path.of(candidateTreePath!!)) }
+    if (libraryTrees == null) logger.w { "No library trees given: categories of removed library folders are not checked" }
 
     DriverManager.getConnection("jdbc:sqlite:$dbPath").use { conn ->
         conn.autoCommit = false
@@ -156,12 +164,18 @@ fun main(args: Array<String>) {
         if (Files.exists(sourceBuildState)) {
             Files.copy(sourceBuildState, tempBuildState, StandardCopyOption.REPLACE_EXISTING)
         }
+        var lostCategories: Map<Long, String> = emptyMap()
         DriverManager.getConnection("jdbc:sqlite:$tempDb").use { conn ->
             conn.autoCommit = false
             val replayFailures = collectForDbRuleFailures(
                 conn, categoryRenames, categoryMoves, bookRenames, bookMoves, logger,
             )
             check(replayFailures.isEmpty()) { "rename/move replay unexpectedly diverged on the validation copy" }
+            lostCategories = libraryTrees?.let { (base, candidate) ->
+                findCategoriesLostWithLibraryFolders(
+                    conn, base, candidate, categoryRenames, bookRenames, categoryMoves, bookMoves,
+                )
+            }.orEmpty()
             applyGenerations(conn, generations, logger)
             conn.commit()
         }
@@ -175,6 +189,7 @@ fun main(args: Array<String>) {
                     Logger.withTag("ValidateForDbAllocator"),
                 )
                 val bindings = IdAllocatorBindings(allocator, repository)
+                failOnLostCategoryDescriptions(repository, categoryDescriptionOverrides, lostCategories)
                 applyMetadata(repository, bindings, bulkMetadata, descriptionOverrides, retitledBooks, logger)
                 applyCategoryDescriptionOverrides(repository, categoryDescriptionOverrides, logger)
             } finally {
