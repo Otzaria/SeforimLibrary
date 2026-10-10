@@ -126,6 +126,7 @@ fun main(args: Array<String>) {
     // Parsed here all the same, so a malformed row fails this gate instead of
     // the Sefaria import, hours into a release build.
     val authorCanonicalNames = SefariaAuthorCanonicalNames.load(logger)
+    val bookNotices = loadBookNoticeRows(logger)
 
     DriverManager.getConnection("jdbc:sqlite:$dbPath").use { conn ->
         conn.autoCommit = false
@@ -181,13 +182,21 @@ fun main(args: Array<String>) {
                 repository.close()
             }
         }
+        // Warnings only: this DB is the last published one, without new or private books.
+        // The build itself (seedBookNotices) fails on an unmatched protection row.
+        DriverManager.getConnection("jdbc:sqlite:$tempDb").use { conn ->
+            conn.autoCommit = false
+            applyBookNotices(conn, bookNotices, logger, strict = false)
+            conn.commit()
+        }
         logger.i {
             "ForDB validation passed all real consumers: ${categoryRenames.size} category renames, " +
                 "${categoryMoves.size} category moves, ${bookRenames.size} book renames, " +
                 "${bookMoves.size} book moves, ${generations.size} generation rows, " +
                 "${bulkMetadata.size} bulk metadata rows, ${descriptionOverrides.size} description overrides, " +
                 "${categoryDescriptionOverrides.size} category-description overrides, " +
-                "${authorCanonicalNames.size} author renames. Original DB/buildstate untouched."
+                "${authorCanonicalNames.size} author renames, ${bookNotices.banners.size} banner rows, " +
+                "${bookNotices.protections.size} protection rows. Original DB/buildstate untouched."
         }
     } finally {
         tempDir.toFile().deleteRecursively()
