@@ -106,8 +106,12 @@ internal fun parseTableOfContentsOrders(
         logger.e(e) { "Error parsing table_of_contents.json" }
     }
 
+    categoryOrders.putAll(CATEGORY_ORDER_OVERRIDES)
     return Pair(categoryOrders, bookOrders)
 }
+
+// Sefaria lists Bavli reference works before the Rishonim; we place them after all commentators.
+internal val CATEGORY_ORDER_OVERRIDES = mapOf("תלמוד בבלי/ספרות עזר" to 65)
 
 internal fun normalizePriorityEntry(raw: String): String {
     var entry = raw.trim().replace('\\', '/')
