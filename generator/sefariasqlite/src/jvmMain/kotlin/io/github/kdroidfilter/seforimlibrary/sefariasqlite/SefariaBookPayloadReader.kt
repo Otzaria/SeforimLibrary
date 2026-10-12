@@ -809,8 +809,9 @@ internal class SefariaBookPayloadReader(
 
         val prefixesLeaf = addressTypes.getOrNull(addressTypes.size - depth) != "Integer" || numbersIntegerLeaf
 
-        // Their segments open with their own printed marker (upstream 641666f4).
-        val selfLabeledBook = hasSelfLabeledSegments(bookEnTitle)
+        // Their segments open with their own printed marker (upstream 641666f4), or the
+        // base text letters them its own way.
+        val selfLabeledBook = hasSelfLabeledSegments(bookEnTitle) || isLetteredByBaseText(bookEnTitle)
 
         // Items that drop the generated prefix because they already carry their own
         // label for that same number. Most shapes are enough alone. Two can also be

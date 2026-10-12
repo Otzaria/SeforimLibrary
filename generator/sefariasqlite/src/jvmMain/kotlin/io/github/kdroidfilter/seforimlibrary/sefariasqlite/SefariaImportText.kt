@@ -53,6 +53,18 @@ private val SELF_LABELED_SEGMENT_BOOKS = setOf("Mishnah Berurah")
 
 internal fun hasSelfLabeledSegments(bookEnTitle: String): Boolean = bookEnTitle in SELF_LABELED_SEGMENT_BOOKS
 
+// Books whose notes the base text letters in a series of its own (Sefaria keeps it only in
+// the itags' data-label: … י, כ, ל …, "•" for an unlettered note), so a generated
+// "(letter) " contradicts the letter the reader sees there (Otzaria/otzaria#1979).
+// Yoreh De'ah's itags have no data-label: its anchors show the note number, as the label does.
+private val BASE_TEXT_LETTERED_BOOKS = setOf(
+    "Be'er HaGolah on Shulchan Arukh, Orach Chayim",
+    "Be'er HaGolah on Shulchan Arukh, Even HaEzer",
+    "Be'er HaGolah on Shulchan Arukh, Choshen Mishpat",
+)
+
+internal fun isLetteredByBaseText(bookEnTitle: String): Boolean = bookEnTitle in BASE_TEXT_LETTERED_BOOKS
+
 // Books whose unnamed ("Integer") segments are the printed numbered paragraphs (אותיות)
 // readers navigate by: each segment gets its "(letter) " label and its own TOC entry
 // (kdroidFilter/Zayit#509).
