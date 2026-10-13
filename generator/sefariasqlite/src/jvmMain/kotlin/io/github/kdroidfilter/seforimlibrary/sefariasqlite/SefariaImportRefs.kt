@@ -28,8 +28,9 @@ internal fun toGematria(num: Int): String {
     // Check cache first
     gematriaCache[num]?.let { return it }
 
-    val thousands = num / 1000
-    var remainder = num % 1000
+    // Below 1200 the print repeats tav ("תתר" for a thousand), like Sefaria does.
+    val thousands = if (num < 1200) 0 else num / 1000
+    var remainder = if (num < 1200) num else num % 1000
     val builder = StringBuilder()
     if (thousands > 0) {
         builder.append(toGematria(thousands)).append(' ')

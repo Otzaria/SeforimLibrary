@@ -1108,7 +1108,7 @@ private fun ownLabel(item: JsonElement, number: Int, variants: Boolean): LabelKi
 }
 
 // Inverse of toGematria, for validating printed markers.
-private val gematriaToInt: Map<String, Int> = (1..999).associateBy { toGematria(it) }
+private val gematriaToInt: Map<String, Int> = (1..1199).associateBy { toGematria(it) }
 
 /** מבנה סכמה שהמייבא לא יודע לפרש — נפילה רועשת במקום דילוג שקט על הספר. */
 internal class SefariaSchemaException(message: String) : IllegalStateException(message)
