@@ -178,8 +178,14 @@ internal class RenamedBookTitles(private val threshold: Double = BookRenameDetec
             val old = titleWords(oldTitle)
             val new = titleWords(newTitle)
             if (old.isEmpty() || new.isEmpty()) return false
-            return old.containsAll(new) || new.containsAll(old)
+            return containsAllWords(old, new) || containsAllWords(new, old)
         }
+
+        // A definite article added or dropped is a respelling ("גר"א" → "הגר"א").
+        private fun containsAllWords(whole: Set<String>, part: Set<String>): Boolean =
+            part.all { w ->
+                w in whole || "ה$w" in whole || (w.length > 2 && w[0] == 'ה' && w.drop(1) in whole)
+            }
 
         /** The comparison key for "is this the same title": the Acronymizer's sanitizing, without quotes. */
         fun normalizedTitle(title: String): String =
