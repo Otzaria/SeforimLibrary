@@ -123,14 +123,20 @@ class DatabaseGenerator(
      * line 0 of a book whose BOM is now stripped). The allocator reuses the seed id
      * filed under it when [content]'s own key is new, so the line keeps its id.
      * Line 0 is a book's first line, so its occurrence index is 0 in either scheme.
+     * Also the whole line a split line's first piece came from, at [legacyOccurrence].
      */
-    private fun stableLineId(bookId: Long, content: String, legacyContent: String? = null): Long {
+    private fun stableLineId(
+        bookId: Long,
+        content: String,
+        legacyContent: String? = null,
+        legacyOccurrence: Int = 0,
+    ): Long {
         val hash = IdAllocatorBindings.normalisedContentHash(content)
         val occurrence = nextLineOccurrence(bookId, hash)
         val legacy = legacyContent?.let {
             io.github.kdroidfilter.seforimlibrary.common.ids.LegacyLineKey(
                 IdAllocatorBindings.normalisedContentHash(it),
-                0,
+                legacyOccurrence,
             )
         }
         return allocator.lineId(bookId, hash, occurrence, legacy)
@@ -368,6 +374,14 @@ class DatabaseGenerator(
     private var hearotMergeExtraHash: Map<String, ByteArray> = emptyMap()
     // Planned bases whose merge has not been applied yet — must drain to empty.
     private val pendingHearotMergeBases = mutableSetOf<String>()
+
+    // Long-line split (see [LongLineSplit]); tests lower the thresholds.
+    internal var longLineSplitConfig = LongLineSplit.Config()
+    private val longLineSplitTitles = mutableSetOf<String>()
+    private var longLineSplitAddedLines = 0
+    // Links phase: bookId → the split re-run on its source (null: stored unsplit).
+    private val lineSplitByBook = HashMap<Long, LongLineSplit.Result?>()
+    private var importedOtzariaFiles: Map<BookKey, Path>? = null
 
     // No-op kept for call-site compatibility. The IdAllocator (seeded from
     // build_state.db) now handles cross-build id continuation — see DELTA_UPDATE_PLAN.md §3.5.
@@ -667,6 +681,7 @@ class DatabaseGenerator(
                 logger.i { "Building category_closure table (phase 1)..." }
                 repository.rebuildCategoryClosure()
             }
+            otzariaSourceHashes = mixLongLineSplitIntoSourceHashes(otzariaSourceHashes)
             recordSourceHashesAtEndOfImport()
             checkNoLostBookIds(bookIdContinuity)
         } catch (e: Throwable) {
@@ -991,6 +1006,77 @@ class DatabaseGenerator(
             md.update(extra)
             BookSourceHash(md.digest(), value.lastSeenVersion)
         }
+    }
+
+    /** Folds the split version into the source hash of each book whose long lines were split. */
+    private fun mixLongLineSplitIntoSourceHashes(
+        hashes: Map<BookKey, BookSourceHash>,
+    ): Map<BookKey, BookSourceHash> {
+        if (longLineSplitTitles.isEmpty()) return hashes
+        logger.i { "Split long lines in ${longLineSplitTitles.size} books (+$longLineSplitAddedLines lines)" }
+        return hashes.mapValues { (key, value) ->
+            if (key.canonicalHeTitle !in longLineSplitTitles) return@mapValues value
+            val md = java.security.MessageDigest.getInstance("SHA-256")
+            md.update(value.hash)
+            md.update("long-line-split:${LongLineSplit.VERSION}".toByteArray())
+            BookSourceHash(md.digest(), value.lastSeenVersion)
+        }
+    }
+
+    // Havrouta books stay unsplit: GenerateHavroutaLinks maps their links by the txt line numbers.
+    private fun splitLongLines(bookTitle: String, lines: List<String>): LongLineSplit.Result =
+        if (bookTitle.startsWith("חברותא על ") || bookTitle.startsWith("הערות על חברותא")) {
+            LongLineSplit.unsplit(lines)
+        } else {
+            LongLineSplit.split(lines, longLineSplitConfig)
+        }
+
+    /**
+     * The split [processBookContent] gave [book], re-run on the same source so the links
+     * phase can map txt line numbers; null when stored unsplit. Must match the stored lines.
+     */
+    private suspend fun lineSplitFor(book: Book): LongLineSplit.Result? {
+        if (book.id in lineSplitByBook) return lineSplitByBook[book.id]
+        val result = computeLineSplit(book)
+        lineSplitByBook[book.id] = result
+        if (result != null) {
+            logger.i { "Long lines split in '${book.title}': ${result.source.size} txt lines → ${result.lines.size} lines" }
+        }
+        return result
+    }
+
+    private suspend fun computeLineSplit(book: Book): LongLineSplit.Result? {
+        if (book.id in sefariaBookIds || book.totalLines <= 0) return null
+        // Every split line leaves a first piece of at least targetChars.
+        if (repository.getBookCharCounts(book.id).none { it >= longLineSplitConfig.targetChars }) return null
+        val sourceName = repository.getSourceById(book.sourceId)?.name ?: "Unknown"
+        val path = checkNotNull(importedOtzariaFiles()[BookKey(sourceName, book.title)]) {
+            "No imported txt file to reproduce the lines of '${book.title}' ($sourceName)"
+        }
+        val lines = Utf8Bom.stripFirstLine(path.readText(Charsets.UTF_8).lines())
+        val merged = hearotMergePlans[book.title]?.let { HearotCompanionMerge.mergeLines(book.title, lines, it) } ?: lines
+        val split = splitLongLines(book.title, merged)
+        val stored = repository.getLines(book.id, 0, book.totalLines - 1)
+        check(split.lines.size == stored.size && stored.all { it.content == split.lines.getOrNull(it.lineIndex) }) {
+            "Long-line split of '${book.title}' does not reproduce its ${stored.size} stored lines"
+        }
+        return split.takeIf { it.isSplit }
+    }
+
+    /** The file each Otzaria book was imported from, for the links phase (which then plans the notes merge too). */
+    private suspend fun importedOtzariaFiles(): Map<BookKey, Path> {
+        importedOtzariaFiles?.let { return it }
+        // Initialized only when phase 1 ran in this instance, which planned the merge already.
+        if (!::libraryRoot.isInitialized) {
+            libraryRoot = sourceDirectory.resolve("אוצריא")
+            if (libraryRoot.exists()) {
+                loadSourcesFromManifest()
+                buildHearotMergePlans()
+            }
+        }
+        val files = if (libraryRoot.exists()) collectCurrentBooks() else emptyMap()
+        importedOtzariaFiles = files
+        return files
     }
 
     /**
@@ -1352,14 +1438,20 @@ class DatabaseGenerator(
             }
         }
 
+        val split = splitLongLines(bookTitle, lines)
+        if (split.isSplit) {
+            longLineSplitTitles += bookTitle
+            longLineSplitAddedLines += split.lines.size - lines.size
+        }
+
         // Process each line one by one, handling TOC entries as we go
-        val tocStats = processLinesWithTocEntries(bookId, bookTitle, categoryId, lines, firstLineHadBom)
+        val tocStats = processLinesWithTocEntries(bookId, bookTitle, categoryId, split, firstLineHadBom)
 
         // Update the total number of lines
-        repository.updateBookTotalLines(bookId, lines.size)
+        repository.updateBookTotalLines(bookId, split.lines.size)
 
         BookContentStats(
-            lines = lines.size,
+            lines = split.lines.size,
             tocEntries = tocStats.tocEntries,
             tocEntriesWithChildren = tocStats.tocEntriesWithChildren,
         )
@@ -1377,24 +1469,33 @@ class DatabaseGenerator(
      * Processes lines of a book, identifying and creating TOC entries.
      *
      * @param bookId The ID of the book in the database
-     * @param lines The lines of the book content
+     * @param split The lines of the book content, long ones split
      */
     private suspend fun processLinesWithTocEntries(
         bookId: Long,
         bookTitle: String,
         categoryId: Long,
-        lines: List<String>,
+        split: LongLineSplit.Result,
         firstLineHadBom: Boolean = false,
     ): BookContentStats {
         logger.d { "Processing lines and TOC entries together for book ID: $bookId" }
+        val lines = split.lines
 
-        // Line 0 of a book whose BOM was stripped keeps the id earlier builds gave it.
-        fun lineIdFor(lineIndex: Int, line: String): Long =
-            if (lineIndex == 0 && firstLineHadBom) {
-                stableLineId(bookId, line, legacyContent = Utf8Bom.legacyFirstLineContent(line))
-            } else {
-                stableLineId(bookId, line)
+        // A split line's first piece and a BOM-stripped line 0 keep the ids earlier builds gave them.
+        val splitWholeLineOccurrences = HashMap<java.nio.ByteBuffer, Int>()
+        fun lineIdFor(lineIndex: Int, line: String): Long {
+            val whole = split.splitSourceOfFirstPiece(lineIndex)
+            return when {
+                whole != null -> {
+                    val key = java.nio.ByteBuffer.wrap(IdAllocatorBindings.normalisedContentHash(whole))
+                    val occurrence = splitWholeLineOccurrences.merge(key, 1, Int::plus)!! - 1
+                    stableLineId(bookId, line, legacyContent = whole, legacyOccurrence = occurrence)
+                }
+                lineIndex == 0 && firstLineHadBom ->
+                    stableLineId(bookId, line, legacyContent = Utf8Bom.legacyFirstLineContent(line))
+                else -> stableLineId(bookId, line)
             }
+        }
 
         // Structure pour stocker toutes les entrées TOC créées
         data class TocEntryData(
@@ -1451,7 +1552,8 @@ class DatabaseGenerator(
                 }
 
                 val parentId = (level - 1 downTo 1).firstNotNullOfOrNull { parentStack[it] }
-                val (currentTocEntryId, tocTextStableId) = stableTocEntryId(bookId, level, plainText, lineIndex)
+                val (currentTocEntryId, tocTextStableId) =
+                    stableTocEntryId(bookId, level, plainText, split.sourceIndex(lineIndex))
                 val currentLineId = lineIdFor(lineIndex, line)
 
                 // Stocker l'info de cette entrée pour la deuxième passe
@@ -1789,6 +1891,7 @@ class DatabaseGenerator(
                     hearotMergePlans[key.canonicalHeTitle]
                         ?.let { HearotCompanionMerge.mergeLines(key.canonicalHeTitle, lines, it) } ?: lines
                 }
+                ?.let { splitLongLines(key.canonicalHeTitle, it).lines }
                 ?.map(IdAllocatorBindings::normalisedContentHash)
         }
         val aliases = continuity.registerAliases(
@@ -1946,6 +2049,8 @@ class DatabaseGenerator(
             headingLineIds.addAll(headingIds)
         }
         logger.i { "Heading lines tracked for filtering: ${headingLineIds.size}" }
+        // Up front, outside the per-link catch, so a split that does not reproduce fails the build.
+        for (book in booksById.values) lineSplitFor(book)
         // Deterministic connection-type ids (enum order), matching the Sefaria importer.
         ConnectionType.values().forEach { bindings.upsertConnectionType(it.name) }
         val linksDir = sourceDirectory.resolve("links")
@@ -2131,8 +2236,19 @@ class DatabaseGenerator(
 
                 if (sourceIsSefaria && targetBook.id in sefariaBookIds) continue
 
-                val sourceLineIndex = (linkData.line_index_1.toInt() - 1).coerceAtLeast(0)
-                val targetLineIndex = (linkData.line_index_2.toInt() - 1).coerceAtLeast(0)
+                // The JSON numbers txt lines; a split line's side lands on its first piece, or on
+                // the piece holding the word anchor, and a whole-line side spans every piece.
+                val sourceSplit = lineSplitFor(sourceBook)
+                val targetSplit = lineSplitFor(targetBook)
+                val sourceTxtLine = (linkData.line_index_1.toInt() - 1).coerceAtLeast(0)
+                val targetTxtLine = (linkData.line_index_2.toInt() - 1).coerceAtLeast(0)
+                val sourcePiece = sourceSplit?.takeIf { it.pieceCount(sourceTxtLine) > 1 }?.let { split ->
+                    linkData.start?.let { split.locate(sourceTxtLine, it.toInt(), linkData.end?.toInt()) }
+                }
+                val sourceLineIndex = sourcePiece?.lineIndex ?: sourceSplit?.firstIndex(sourceTxtLine) ?: sourceTxtLine
+                val targetLineIndex = targetSplit?.firstIndex(targetTxtLine) ?: targetTxtLine
+                val sourceEnd = rangeEndIndex(sourceSplit, linkData.line_index_1_end, sourceTxtLine, sourcePiece != null)
+                val targetEnd = rangeEndIndex(targetSplit, linkData.line_index_2_end, targetTxtLine, anchored = false)
 
                 val sourceLineId = getLineIdCached(sourceBook.id, sourceLineIndex)
                 if (sourceLineId == null) continue
@@ -2188,15 +2304,15 @@ class DatabaseGenerator(
                 touchedLinkIds += linkId
                 // Anchor is source-side; skip when flipped (that line is now the stored target).
                 if (!flip) {
-                    buildLinkAnchor(linkData, linkId, sourceLineId, bookTitle)?.let { anchorBatch += it }
+                    buildLinkAnchor(linkData, linkId, sourceLineId, bookTitle, sourcePiece)?.let { anchorBatch += it }
                 }
                 // Range side 0 = stored source, 1 = stored target; the flip swaps each file's end.
                 if (flip) {
-                    queueRangeSide(linkData.line_index_2_end, targetBook.id, targetLineIndex, linkId, 0, bookTitle, rangeBatch, coverageBatch)
-                    queueRangeSide(linkData.line_index_1_end, sourceBook.id, sourceLineIndex, linkId, 1, bookTitle, rangeBatch, coverageBatch)
+                    queueRangeSide(targetEnd, targetBook.id, targetLineIndex, linkId, 0, bookTitle, rangeBatch, coverageBatch)
+                    queueRangeSide(sourceEnd, sourceBook.id, sourceLineIndex, linkId, 1, bookTitle, rangeBatch, coverageBatch)
                 } else {
-                    queueRangeSide(linkData.line_index_1_end, sourceBook.id, sourceLineIndex, linkId, 0, bookTitle, rangeBatch, coverageBatch)
-                    queueRangeSide(linkData.line_index_2_end, targetBook.id, targetLineIndex, linkId, 1, bookTitle, rangeBatch, coverageBatch)
+                    queueRangeSide(sourceEnd, sourceBook.id, sourceLineIndex, linkId, 0, bookTitle, rangeBatch, coverageBatch)
+                    queueRangeSide(targetEnd, targetBook.id, targetLineIndex, linkId, 1, bookTitle, rangeBatch, coverageBatch)
                 }
                 processed++
             } catch (_: Exception) {
@@ -2229,7 +2345,7 @@ class DatabaseGenerator(
      * excluded). Reversed/missing/heading ends are logged and dropped.
      */
     private suspend fun queueRangeSide(
-        rawEnd: Double?,
+        rangeEnd: Int?,
         bookId: Long,
         startLineIndex: Int,
         linkId: Long,
@@ -2238,7 +2354,7 @@ class DatabaseGenerator(
         ranges: MutableList<LinkRange>,
         coverage: MutableList<LinkCoverage>,
     ) {
-        val endLineIndex = (rawEnd ?: return).toInt() - 1
+        val endLineIndex = rangeEnd ?: return
         // Degenerate range (end == start): a plain single-line link, nothing to record.
         if (endLineIndex == startLineIndex) return
         val endLineId = if (endLineIndex > startLineIndex) getLineIdCached(bookId, endLineIndex) else null
@@ -2255,18 +2371,40 @@ class DatabaseGenerator(
     }
 
     /**
+     * Stored line a ranged side ends on, from the JSON's 1-based txt [rawEnd]; with no
+     * end (or a degenerate one), a whole split line (no word anchor) still spans its pieces.
+     */
+    private fun rangeEndIndex(split: LongLineSplit.Result?, rawEnd: Double?, txtLine: Int, anchored: Boolean): Int? {
+        val end = rawEnd?.let { it.toInt() - 1 }
+        if (end != null && end != txtLine) return split?.lastIndex(end) ?: end
+        if (split == null || anchored || split.pieceCount(txtLine) <= 1) return null
+        return split.lastIndex(txtLine)
+    }
+
+    /**
      * Word-level anchor of a link, when the JSON entry carries one. The JSON
      * `start`/`end` are raw char offsets into the source line's stored content;
      * they are converted here to the visible-char coordinate space the
-     * `link_anchor` table mandates (see Database.sq).
+     * `link_anchor` table mandates (see Database.sq). [splitPiece]: already
+     * converted, the source line being split.
      */
     private suspend fun buildLinkAnchor(
         linkData: LinkData,
         linkId: Long,
         sourceLineId: Long,
         bookTitle: String,
+        splitPiece: LongLineSplit.PiecePosition? = null,
     ): LinkAnchor? {
         val rawStart = linkData.start?.toInt() ?: return null
+        if (splitPiece != null) {
+            return LinkAnchor(
+                linkId = linkId,
+                side = 0,
+                charStart = splitPiece.charStart,
+                charEnd = splitPiece.charEnd,
+                label = anchorLabelFromHeRef(linkData.heRef_2),
+            )
+        }
         val content = repository.getLine(sourceLineId)?.content
         if (content == null || rawStart < 0 || rawStart > content.length) {
             logger.w {
@@ -2401,8 +2539,10 @@ class DatabaseGenerator(
         // entry starting on a shared line wins (same rule as the Sefaria builder).
         val anchorByLineIndex = mutableMapOf<Int, Long>()
 
+        // node.line numbers txt lines; a split one maps to its first piece.
+        val split = lineSplitFor(book)
         suspend fun addNode(node: AltTocNodeData, level: Int, parentId: Long?, parentPath: String): Boolean {
-            val lineIndex = node.line.toInt() - 1
+            val lineIndex = (node.line.toInt() - 1).let { split?.firstIndex(it) ?: it }
             val lineId = getLineIdCached(book.id, lineIndex)
             if (lineId == null) {
                 logger.w { "Alt-toc node '${node.heTitle}' line ${node.line.toInt()} out of range in ${book.title} — node dropped" }
