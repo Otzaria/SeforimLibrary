@@ -84,6 +84,19 @@ class SefariaBookPayloadReaderTest {
         assertTrue(payload.inferredBaseTextTitleKeys.isNotEmpty())
     }
 
+    @Test
+    fun readsHebrewPubPlace() = runBlocking {
+        val payload = readSingle("Tur", "Tur", schemaJson, mergedJson)
+
+        assertEquals(listOf("ליבורנו, איטליה"), payload.pubPlaces)
+    }
+
+    @Test
+    fun knownHebrewPubYearReplacesGregorian() {
+        assertEquals("ה׳תקמ״ח", hebrewPubDate("נועם אלימלך", "1787"))
+        assertEquals("1700", hebrewPubDate("נועם אלימלך", "1700"))
+    }
+
     companion object {
         private fun readSingle(folder: String, title: String, schema: String, merged: String) = runBlocking {
             val tempDir = Files.createTempDirectory("seforim-test")
@@ -146,6 +159,11 @@ class SefariaBookPayloadReaderTest {
             {
               "title": "Tur",
               "heTitle": "טור",
+              "pubPlace": "Livorno, Italy",
+              "pubPlaceString": {
+                "en": "Livorno, Italy",
+                "he": "ליבורנו, איטליה"
+              },
               "schema": {
                 "title": "Tur",
                 "heTitle": "טור",
