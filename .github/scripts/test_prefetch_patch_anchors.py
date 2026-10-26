@@ -1287,7 +1287,8 @@ class PatchFanDriverSandboxTest(unittest.TestCase):
             "${{ steps.discover.outputs.db_version }}", "27"
         ).replace("\r\n", "\n")
 
-    def run_fan(self, publish_v25_asset=True, this_schema=5, anchor_provenance_schema=None):
+    def run_fan(self, publish_v25_asset=True, this_schema=5, anchor_provenance_schema=None,
+                anchor_schema=5):
         import tempfile
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -1326,9 +1327,11 @@ class PatchFanDriverSandboxTest(unittest.TestCase):
             _mkparents(root / "build" / "seforim.db").write_bytes(b"db" * 512)
             (root / "build" / "seforim.db.buildstate.zst").write_bytes(b"bs" * 512)
             write(root / "prior-versions.tsv", "26\tv26-x\n25\tv25-x\n")
-            (root / "assets" / "v26-x" / "seforim.db.zst").write_bytes(b"v26" * 4096)
+            # Anchors at schema >= 6 publish only their schema-named full DB.
+            anchor_asset = "seforim.db.zst" if anchor_schema < 6 else f"seforim-schema{anchor_schema}.db.zst"
+            (root / "assets" / "v26-x" / anchor_asset).write_bytes(b"v26" * 4096)
             if publish_v25_asset:
-                (root / "assets" / "v25-x" / "seforim.db.zst").write_bytes(b"v25" * 4096)
+                (root / "assets" / "v25-x" / anchor_asset).write_bytes(b"v25" * 4096)
             write(
                 _mkparents(root / "generator" / "common" / "build"
                            / "patch-pipeline-launcher.properties"),
@@ -1338,11 +1341,11 @@ class PatchFanDriverSandboxTest(unittest.TestCase):
             )
             write(root / "bin" / "gh", STUB_GH, executable=True)
             write(root / "bin" / "python3", STUB_PYTHON3, executable=True)
-            # This build's DB answers STUB_THIS_SCHEMA, every anchor schema 5.
+            # This build's DB answers STUB_THIS_SCHEMA, every anchor STUB_ANCHOR_SCHEMA.
             write(
                 root / "bin" / "sqlite3",
                 '#!/bin/sh\ncase "$1" in *build/seforim.db) echo "${STUB_THIS_SCHEMA:-5}" ;;'
-                ' *) echo 5 ;; esac\n',
+                ' *) echo "${STUB_ANCHOR_SCHEMA:-5}" ;; esac\n',
                 executable=True,
             )
             write(
@@ -1417,6 +1420,7 @@ class PatchFanDriverSandboxTest(unittest.TestCase):
                 RELEASE_TAG="v27-sandbox",
                 SOURCE_COMMIT="deadbeef",
                 STUB_THIS_SCHEMA=str(this_schema),
+                STUB_ANCHOR_SCHEMA=str(anchor_schema),
                 DOWNLOAD_LOG=str(root / "downloads.log"),
             )
             result = subprocess.run(
@@ -1514,6 +1518,19 @@ class PatchFanDriverSandboxTest(unittest.TestCase):
         self.assertRegex(out, r"done in \d+s: patch-v26-v27\.db\.zst \S+, verify=barrier")
         self.assertIn("::notice::patch fan: 2 anchor(s) get the schema 6 full-rebase barrier", out)
         self.assertNotIn("patch fan produced no patch", out)
+
+    def test_a_schema_7_build_patches_schema_6_anchors_through_the_serial_download(self):
+        # v32/v30 publish only seforim-schema6.db.zst: the stub's asset lookup
+        # misses it, so the prefetch gives up and the serial download must find it.
+        result = self.run_fan(this_schema=7, anchor_schema=6)
+        out = result.stdout
+        self.assertEqual(result.returncode, 0, out + result.stderr[-2000:])
+        for tag in ("v26-x", "v25-x"):
+            self.assertIn(f"{tag}/seforim-schema6.db.zst", result.downloads)
+        self.assertEqual(out.count("schema 6 → 7 — producing the supported cross-schema delta"), 2)
+        self.assertNotIn("is unsupported — skip anchor", out)
+        self.assertRegex(out, r"anchor 2/2 v25-x \(offset 2, v25 → v27\) done in \d+s: "
+                              r"patch-v25-v27\.db\.zst \S+, verify=ok")
 
 
 def _mkparents(path):

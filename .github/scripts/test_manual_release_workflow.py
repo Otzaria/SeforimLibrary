@@ -599,8 +599,13 @@ class ManualReleaseWorkflowContractTest(unittest.TestCase):
         # v34 (schema 7) skipped its v32/v30 anchors as "6 -> 7 unsupported" because
         # the bump to 7 never reached this hand-written gate.
         tables = PATCH_TABLES_KT.read_text(encoding="utf-8")
-        current = int(re.search(r"CURRENT_DB_SCHEMA_VERSION: Int = (\d+)", tables).group(1))
-        split = int(re.search(r"LINE_CONTENT_SPLIT_SCHEMA_VERSION: Int = (\d+)", tables).group(1))
+        versions = {}
+        for name in ("CURRENT_DB_SCHEMA_VERSION", "LINE_CONTENT_SPLIT_SCHEMA_VERSION"):
+            m = re.search(name + r"(?::\s*Int)?\s*=\s*(\d+)", tables)
+            self.assertIsNotNone(m, f"PatchTables.kt format changed: no {name} constant found")
+            versions[name] = int(m.group(1))
+        current = versions["CURRENT_DB_SCHEMA_VERSION"]
+        split = versions["LINE_CONTENT_SPLIT_SCHEMA_VERSION"]
         contracts = {int(v) for v in re.findall(r"^\s+(\d+) -> PATCH_TABLES", tables, re.M)}
         self.assertIn(f'[ "$1" -lt {split} ] && [ "$2" -ge {split} ]', self.fan_lib)
 

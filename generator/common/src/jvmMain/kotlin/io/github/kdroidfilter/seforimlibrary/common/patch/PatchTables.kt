@@ -18,8 +18,8 @@ internal data class PatchTable(
     val updatable: Boolean,
 )
 
-// Bumping this? Also add the transition to produce_anchor's list in .github/scripts/patch_fan_lib.sh,
-// or the fan skips every older anchor (test_manual_release_workflow.py checks).
+// Bumping this? Also add the transition to produce_anchor's list in .github/scripts/patch_fan_lib.sh, or the
+// fan skips every older-schema anchor past the line_content split (test_manual_release_workflow.py checks).
 /** Current `seforim.db` schema produced by this revision. */
 internal const val CURRENT_DB_SCHEMA_VERSION: Int = 7
 
