@@ -209,10 +209,13 @@ produce_anchor() {  # <offset> <target-version> <tag>
     # Under `set -e` a failed download used to end this subshell with
     # nothing but gh's own bare stderr, and the driver could only say
     # "exit code 1". Name the release, the asset and gh's reason.
-    # This build's own schema name first (a delta needs an equal schema),
-    # then the legacy name every schema <= 5 release carries.
-    DB_ASSETS=$(full_db_asset_name "$THIS_SCHEMA") || return 1
-    [ "$DB_ASSETS" = "$LEGACY_FULL_DB_ASSET" ] || DB_ASSETS="$DB_ASSETS $LEGACY_FULL_DB_ASSET"
+    # Every schema a delta can start from (this one down to the line_content
+    # split), then the legacy name every schema <= 5 release carries.
+    DB_ASSETS=""
+    for ((ASSET_SCHEMA = THIS_SCHEMA; ASSET_SCHEMA >= 6; ASSET_SCHEMA--)); do
+      DB_ASSETS="$DB_ASSETS$(full_db_asset_name "$ASSET_SCHEMA") " || return 1
+    done
+    DB_ASSETS="$DB_ASSETS$LEGACY_FULL_DB_ASSET"
     DB_ASSET=""
     for CANDIDATE in $DB_ASSETS; do
       if download_full_db_by_name "$TAG" "$CANDIDATE" "$ANCHOR_DIR" \
