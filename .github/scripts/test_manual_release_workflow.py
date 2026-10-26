@@ -48,6 +48,7 @@ PATCH_PIPELINE_CLI = (
     / "io" / "github" / "kdroidfilter" / "seforimlibrary" / "common" / "patch"
     / "PatchPipelineCli.kt"
 )
+PATCH_TABLES_KT = PATCH_PIPELINE_CLI.with_name("PatchTables.kt")
 PATCH_SIZE_GUARD = (
     Path(__file__).parents[2]
     / "generator/common/src/jvmMain/kotlin/io/github/kdroidfilter/seforimlibrary"
@@ -580,6 +581,7 @@ class ManualReleaseWorkflowContractTest(unittest.TestCase):
             '[ "$PREV_SCHEMA" = 2 ] && [ "$THIS_SCHEMA" = 5 ]',
             '[ "$PREV_SCHEMA" = 3 ] && [ "$THIS_SCHEMA" = 5 ]',
             '[ "$PREV_SCHEMA" = 4 ] && [ "$THIS_SCHEMA" = 5 ]',
+            '[ "$PREV_SCHEMA" = 6 ] && [ "$THIS_SCHEMA" = 7 ]',
         )
         for transition in supported:
             self.assertIn(transition, patch_fan)
@@ -592,6 +594,24 @@ class ManualReleaseWorkflowContractTest(unittest.TestCase):
         self.assertNotIn("cross-schema delta unsupported", patch_fan)
         self.assertNotIn('[ "$PREV_SCHEMA" = 1 ] && [ "$THIS_SCHEMA" = 2 ]', patch_fan)
         self.assertNotIn('[ "$PREV_SCHEMA" = 1 ] && [ "$THIS_SCHEMA" = 3 ]', patch_fan)
+
+    def test_patch_fan_gate_admits_every_delta_into_the_current_schema(self):
+        # v34 (schema 7) skipped its v32/v30 anchors as "6 -> 7 unsupported" because
+        # the bump to 7 never reached this hand-written gate.
+        tables = PATCH_TABLES_KT.read_text(encoding="utf-8")
+        current = int(re.search(r"CURRENT_DB_SCHEMA_VERSION: Int = (\d+)", tables).group(1))
+        split = int(re.search(r"LINE_CONTENT_SPLIT_SCHEMA_VERSION: Int = (\d+)", tables).group(1))
+        contracts = {int(v) for v in re.findall(r"^\s+(\d+) -> PATCH_TABLES", tables, re.M)}
+        self.assertIn(f'[ "$1" -lt {split} ] && [ "$2" -ge {split} ]', self.fan_lib)
+
+        gate = re.findall(
+            r'\[ "\$PREV_SCHEMA" = (\d+) \] && \[ "\$THIS_SCHEMA" = (\d+) \]', self.fan_lib
+        )
+        into_current = {int(prev) for prev, this in gate if int(this) == current}
+        # Below the split the barrier answers first, so only these anchors reach the gate.
+        self.assertEqual(into_current, set(range(split, current)))
+        for prev in into_current:
+            self.assertIn(prev, contracts, f"the producer has no schema-{prev} contract")
 
     def test_patch_fan_produces_two_anchors_at_a_time(self):
         # Run 33865604251 spent 2015 s in the fan, 284–382 s per anchor, on work
