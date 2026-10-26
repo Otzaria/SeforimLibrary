@@ -249,7 +249,8 @@ produce_anchor() {  # <offset> <target-version> <tag>
   # Explicitly supported schema transitions. The producer derives
   # contract promotions from both signed schema versions, rebuilds
   # newly tracked tables from a full snapshot, and verifies a real
-  # apply. Unknown transitions remain fail-closed per anchor.
+  # apply. Unknown transitions remain fail-closed per anchor; a bump of
+  # CURRENT_DB_SCHEMA_VERSION (PatchTables.kt) adds its transition here.
   if [ "$PREV_SCHEMA" != "$THIS_SCHEMA" ]; then
     if { [ "$PREV_SCHEMA" = 2 ] && [ "$THIS_SCHEMA" = 3 ]; } || \
        { [ "$PREV_SCHEMA" = 1 ] && [ "$THIS_SCHEMA" = 4 ]; } || \
@@ -258,7 +259,8 @@ produce_anchor() {  # <offset> <target-version> <tag>
        { [ "$PREV_SCHEMA" = 1 ] && [ "$THIS_SCHEMA" = 5 ]; } || \
        { [ "$PREV_SCHEMA" = 2 ] && [ "$THIS_SCHEMA" = 5 ]; } || \
        { [ "$PREV_SCHEMA" = 3 ] && [ "$THIS_SCHEMA" = 5 ]; } || \
-       { [ "$PREV_SCHEMA" = 4 ] && [ "$THIS_SCHEMA" = 5 ]; }; then
+       { [ "$PREV_SCHEMA" = 4 ] && [ "$THIS_SCHEMA" = 5 ]; } || \
+       { [ "$PREV_SCHEMA" = 6 ] && [ "$THIS_SCHEMA" = 7 ]; }; then
       echo "schema $PREV_SCHEMA → $THIS_SCHEMA — producing the supported cross-schema delta"
     else
       echo "schema $PREV_SCHEMA → $THIS_SCHEMA is unsupported — skip anchor"
