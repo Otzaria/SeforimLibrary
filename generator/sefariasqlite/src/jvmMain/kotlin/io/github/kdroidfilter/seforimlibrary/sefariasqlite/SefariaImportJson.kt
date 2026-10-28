@@ -18,7 +18,7 @@ internal fun JsonElement?.isTriviallyEmpty(): Boolean {
         null, JsonNull -> true
         is JsonPrimitive -> this.contentOrNull.isNullOrBlank() && this.booleanOrNull == null
         is JsonArray -> this.isEmpty() || this.all { it.isTriviallyEmpty() }
-        is JsonObject -> this.isEmpty()
+        is JsonObject -> this.values.all { it.isTriviallyEmpty() }
     }
 }
 

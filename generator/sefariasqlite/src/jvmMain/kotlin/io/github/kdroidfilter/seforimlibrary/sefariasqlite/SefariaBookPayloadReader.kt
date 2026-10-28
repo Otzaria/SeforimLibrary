@@ -649,6 +649,8 @@ internal class SefariaBookPayloadReader(
             refPrefix: String,
             heRefPrefix: String
         ) {
+            // A schema node Sefaria has no text for gets no heading either.
+            if (text.isTriviallyEmpty()) return
             val nodeTitle = node["heTitle"]?.stringOrNull()?.takeIf { it.isNotBlank() }
                 ?: node["title"]?.stringOrNull()?.takeIf { it.isNotBlank() }
             val hasTitle = nodeTitle != null
@@ -661,8 +663,6 @@ internal class SefariaBookPayloadReader(
                     lineIndex = output.size - 1
                 )
             }
-
-            if (text !is JsonArray && text !is JsonPrimitive && text !is JsonObject) return
 
             if (node.containsKey("nodes")) {
                 val children = node["nodes"]?.jsonArray ?: JsonArray(emptyList())
