@@ -135,6 +135,7 @@ fun main(args: Array<String>) {
     val libraryTrees = baseTreePath?.let { readLibraryTree(Path.of(it)) to readLibraryTree(Path.of(candidateTreePath!!)) }
     if (libraryTrees == null) logger.w { "No library trees given: categories of removed library folders are not checked" }
     val bookNotices = loadBookNoticeRows(logger)
+    val collectiveTitles = loadCollectiveTitleRows(logger)
 
     DriverManager.getConnection("jdbc:sqlite:$dbPath").use { conn ->
         conn.autoCommit = false
@@ -202,6 +203,7 @@ fun main(args: Array<String>) {
         DriverManager.getConnection("jdbc:sqlite:$tempDb").use { conn ->
             conn.autoCommit = false
             applyBookNotices(conn, bookNotices, logger, strict = false)
+            applyCollectiveTitles(conn, collectiveTitles, logger)
             conn.commit()
         }
         // Fails like the build on a missing list or an unreadable row; unmatched refs only warn.
@@ -215,7 +217,8 @@ fun main(args: Array<String>) {
                 "${bulkMetadata.size} bulk metadata rows, ${descriptionOverrides.size} description overrides, " +
                 "${categoryDescriptionOverrides.size} category-description overrides, " +
                 "${authorCanonicalNames.size} author renames, ${bookNotices.banners.size} banner rows, " +
-                "${bookNotices.protections.size} protection rows, $divineNameOverrides divine-name override rows. " +
+                "${bookNotices.protections.size} protection rows, ${collectiveTitles.size} collective-title rows, " +
+                "$divineNameOverrides divine-name override rows. " +
                 "Original DB/buildstate untouched."
         }
     } finally {
