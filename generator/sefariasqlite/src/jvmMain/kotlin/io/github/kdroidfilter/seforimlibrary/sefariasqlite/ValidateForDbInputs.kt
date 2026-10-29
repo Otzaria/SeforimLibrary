@@ -47,8 +47,11 @@ internal fun collectForDbRuleFailures(
     bookRenames: List<Pair<String, String>>,
     bookMoves: List<BookMove>,
     logger: Logger,
+    categoryDescriptionOverrides: List<CategoryDescriptionOverride> = emptyList(),
 ): List<ForDbRuleFailure> {
     val failures = mutableListOf<ForDbRuleFailure>()
+    val descriptionOverridesByPath = categoryDescriptionOverrides.associateBy { it.canonicalPath }
+    val mergeConflicts = CategoryMergeConflicts()
 
     fun <T> section(name: String, items: List<T>, describe: (T) -> String, apply: (T) -> Unit) {
         for ((index, item) in items.withIndex()) {
@@ -57,29 +60,43 @@ internal fun collectForDbRuleFailures(
             // follow it.  applyBookMove can create a destination leaf before a later
             // assertion fails, so catch-without-savepoint produces false cascades.
             val savepoint = conn.setSavepoint("fordb_${name.replace('.', '_')}_$index")
+            val conflictsBeforeRule = mergeConflicts.snapshot()
             try {
                 apply(item)
                 conn.releaseSavepoint(savepoint)
             } catch (e: Exception) {
                 conn.rollback(savepoint)
                 conn.releaseSavepoint(savepoint)
+                mergeConflicts.restore(conflictsBeforeRule)
                 failures += ForDbRuleFailure(name, describe(item), e.message ?: e.toString())
             }
         }
     }
 
-    // EXACT build order — RenameCategoriesPostProcess.main applies in this sequence.
-    section("category_renames.csv", categoryRenames, { "'${it.oldName}' -> '${it.newName}'" }) {
-        renameOrMergeCategory(conn, it, logger)
-    }
-    section("category_moves.csv", categoryMoves, { "'${it.sourcePath}' -> '${it.destParentPath}'" }) {
-        applyCategoryMove(conn, it, logger)
-    }
-    section("book_renames.csv", bookRenames, { "'${it.first}' -> '${it.second}'" }) {
-        renameBookTitle(conn, it.first, it.second, logger)
-    }
-    section("book_moves.csv", bookMoves, { "'${it.name}': '${it.sourcePath}' -> '${it.destPath}'" }) {
-        applyBookMove(conn, it, logger)
+    // Deferred description conflicts are judged only on the final tree. A failure
+    // there invalidates the whole pass, including the merges that discarded values.
+    val passSavepoint = conn.setSavepoint("fordb_rule_pass")
+    try {
+        // EXACT build order — RenameCategoriesPostProcess.main applies in this sequence.
+        section("category_renames.csv", categoryRenames, { "'${it.oldName}' -> '${it.newName}'" }) {
+            renameOrMergeCategory(conn, it, logger, descriptionOverridesByPath, mergeConflicts)
+        }
+        section("category_moves.csv", categoryMoves, { "'${it.sourcePath}' -> '${it.destParentPath}'" }) {
+            applyCategoryMove(conn, it, logger)
+        }
+        section("book_renames.csv", bookRenames, { "'${it.first}' -> '${it.second}'" }) {
+            renameBookTitle(conn, it.first, it.second, logger)
+        }
+        section("book_moves.csv", bookMoves, { "'${it.name}': '${it.sourcePath}' -> '${it.destPath}'" }) {
+            applyBookMove(conn, it, logger)
+        }
+        val unresolved = mergeConflicts.failures(conn, descriptionOverridesByPath)
+        if (unresolved.isNotEmpty()) {
+            conn.rollback(passSavepoint)
+            failures += unresolved.map { ForDbRuleFailure("category_renames.csv", "merged descriptions", it) }
+        }
+    } finally {
+        conn.releaseSavepoint(passSavepoint)
     }
     return failures
 }
@@ -139,7 +156,9 @@ fun main(args: Array<String>) {
     DriverManager.getConnection("jdbc:sqlite:$dbPath").use { conn ->
         conn.autoCommit = false
         val failures = try {
-            collectForDbRuleFailures(conn, categoryRenames, categoryMoves, bookRenames, bookMoves, logger)
+            collectForDbRuleFailures(
+                conn, categoryRenames, categoryMoves, bookRenames, bookMoves, logger, categoryDescriptionOverrides,
+            )
         } finally {
             conn.rollback() // dry-run only — the DB is NEVER mutated by this task
         }
@@ -169,7 +188,7 @@ fun main(args: Array<String>) {
         DriverManager.getConnection("jdbc:sqlite:$tempDb").use { conn ->
             conn.autoCommit = false
             val replayFailures = collectForDbRuleFailures(
-                conn, categoryRenames, categoryMoves, bookRenames, bookMoves, logger,
+                conn, categoryRenames, categoryMoves, bookRenames, bookMoves, logger, categoryDescriptionOverrides,
             )
             check(replayFailures.isEmpty()) { "rename/move replay unexpectedly diverged on the validation copy" }
             lostCategories = libraryTrees?.let { (base, candidate) ->
