@@ -394,6 +394,7 @@ class SefariaDirectImporter(
             )
 
             payload.lines.forEachIndexed { idx, content ->
+                precomputed.reserveOmittedLineOccurrences(bookId, idx, lineOccurrences, legacyLineOccurrences)
                 val refEntry = refsByLineIndex[idx]
                 // Keyed on the raw segment only — neither heRef nor the generated
                 // prefix. Both hashes come from the parse worker, used as-is.
