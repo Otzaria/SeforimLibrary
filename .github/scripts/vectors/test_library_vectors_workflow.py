@@ -245,6 +245,11 @@ class Pins(unittest.TestCase):
         self.assertRegex(pins["QUERY_PACKAGE_CHECKSUM"], r"^[0-9a-f]{64}$")      # G6 measures the int8 query model
         self.assertTrue(pins["QUERY_GRAPH"].endswith("-int8.onnx"))
 
+    def test_every_pinned_rotation_is_committed_at_its_digest(self):
+        for entry in PIN["ROTATIONS"].strip('"').split():
+            family, digest = entry.split("=")
+            self.assertEqual(hashlib.sha256((HERE / "rotation" / f"{family}.bin").read_bytes()).hexdigest(), digest)
+
     def test_the_family_released_applications_install_is_built_first_under_its_own_tag(self):
         # the application asks for exactly releases/tags/vectors-<tag>; the windows family
         # must not match its library-tag pattern ^v(\d+)- nor that tag
@@ -672,7 +677,8 @@ class Driver(unittest.TestCase):
                 prov[key] = value
         self.provenance.write_text(json.dumps(prov))
 
-    def run_driver(self, mode="dry-run", tag=TAG, args=(), driver=DRIVER, **env):
+    def run_driver(self, mode="dry-run", tag=TAG, args=(), driver=None, **env):
+        driver = driver or self.unpinned_driver()
         e = dict(os.environ, CALLS=str(self.calls), ASSETS=str(self.root / "assets"), UPLOADED=str(self.root / "uploaded.tsv"),
                  RELEASE_FILE_ARGS=str(self.root / "release-file-args.json"),
                  OTZARIA_SEMANTIC_CLI=str(self.root / "bin" / "cli"), EXPORT_SEMANTIC_PLAN=str(self.root / "bin" / "export"),
@@ -1722,16 +1728,28 @@ class Driver(unittest.TestCase):
         self.assertIn("fit-rotation wrote no rotation that hashes to the epoch it printed", p.stdout)
         self.assertFalse([c for c in calls if "assemble --kind" in c or "release create" in c])
 
-    def driver_with_rotation(self, pinned):
-        """A copy of the driver whose pins.env pins rotation/<windows>.bin at `pinned`."""
-        copy = self.root / "scripts"
+    def driver_with_rotation(self, pinned, copy_name="scripts"):
+        """A copy of the driver whose pins.env pins rotation/<windows>.bin at `pinned` ("" pins none)."""
+        copy = self.root / copy_name
         shutil.copytree(HERE, copy / "vectors")
         shutil.copy(SCRIPTS / "db_asset_names.sh", copy / "db_asset_names.sh")
         (copy / "vectors" / "rotation").mkdir(exist_ok=True)
         (copy / "vectors" / "rotation" / f"{WINDOWS}.bin").write_bytes(b"the committed rotation")
         pins = copy / "vectors" / "pins.env"
-        pins.write_text(pins.read_text().replace('ROTATIONS=""', f'ROTATIONS="{WINDOWS}={pinned}"'))
+        rotations = f'ROTATIONS="{WINDOWS}={pinned}"' if pinned else 'ROTATIONS=""'
+        pins.write_text(re.sub(r"^ROTATIONS=.*$", rotations, pins.read_text(), count=1, flags=re.M))
         return copy / "vectors" / DRIVER.name
+
+    def unpinned_driver(self):
+        """The driver with no rotation pinned, so a new rot192-i8i4 epoch fits one, as the tests expect."""
+        driver = self.root / "unpinned" / "vectors" / DRIVER.name
+        return driver if driver.exists() else self.driver_with_rotation("", "unpinned")
+
+    def test_the_committed_pins_start_a_new_windows_base_in_the_committed_rotation(self):
+        p, calls = self.run_driver(mode="base", TO_EMBED=0, driver=DRIVER, args=("--family", WINDOWS))
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertFalse([c for c in calls if "fit-rotation" in c])
+        self.assertIn(f"--rotation {HERE / 'rotation' / (WINDOWS + '.bin')} ", calls[self.index_of(calls, "cli assemble --kind base")])
 
     def test_a_pinned_rotation_is_held_to_its_digest_and_never_fitted(self):
         good = hashlib.sha256(b"the committed rotation").hexdigest()
