@@ -920,7 +920,9 @@ internal class SefariaBookPayloadReader(
         // ("<br>א." opens a list of topics). Those count only when another item of
         // the array carries its own label too.
         val ownLabelled: BooleanArray? = if (depth == 1 && nonEmptyCount > 1 && prefixesLeaf && !selfLabeledBook) {
-            val found = text.mapIndexed { idx, item -> ownLabel(item, idx + 1, labels.variants) }
+            val found = text.mapIndexed { idx, item ->
+                ownLabel(item, idx + 1, labels.variants, namedSeifLabels = bookEnTitle == "Shulchan Arukh HaRav")
+            }
             val corroborated = found.count { it != null } >= 2
             BooleanArray(text.size) { idx -> found[idx]?.let { it == LabelKind.PLAIN || corroborated } == true }
         } else {
@@ -1130,6 +1132,12 @@ private val OWN_LABEL_REGEX = Regex(
 // The numeral is all there is inside a bold run: the shape of a short dibbur too.
 private val BOLD_ONLY_LABEL_REGEX = Regex("""^\s*(?:<[^>]+>\s*)*<b>\s*$LABEL_TOKEN\s*[.:]?\s*</b>""")
 
+// HaRav's own "[סעיף ג]" marker (otzaria#3508). In commentaries the same
+// wording can cite the base text, so it does not suppress their segment labels.
+private val OWN_SEIF_LABEL_REGEX = Regex(
+    """^\s*(?:<[^>]+>\s*)*\[\s*סעיף\s+$LABEL_TOKEN\s*\](?=[\s<:.]|$)"""
+)
+
 // A heading the item opens with: tag-wrapped text alone on its first line, the
 // label right after the break ("<big><strong>סימן א. …</strong></big><br>א. מיד",
 // קשר גודל). Text outside the tags before the break (a bold dibbur and its
@@ -1204,15 +1212,20 @@ private class SectionLabels(val variants: Boolean, val repeatedWalk: Boolean) {
 private enum class LabelKind { PLAIN, MAYBE_DIBBUR }
 
 /** How the item carries its own label for [number], or null when it carries none for it. */
-private fun ownLabel(item: JsonElement, number: Int, variants: Boolean): LabelKind? {
+private fun ownLabel(item: JsonElement, number: Int, variants: Boolean, namedSeifLabels: Boolean): LabelKind? {
     val content = (item as? JsonPrimitive)?.takeIf { it.isString }?.content ?: return null
     fun at(text: String, regex: Regex) = labelToken(regex, text)?.let { token ->
         markerValue(token) == number || variants && variantValue(token) == number
     } == true
     if (at(content, BOLD_ONLY_LABEL_REGEX)) return LabelKind.MAYBE_DIBBUR
     if (at(content, OWN_LABEL_REGEX)) return LabelKind.PLAIN
+    if (namedSeifLabels && at(content, OWN_SEIF_LABEL_REGEX)) return LabelKind.PLAIN
     val afterHeading = LEADING_HEADING_REGEX.find(content)?.let { content.substring(it.range.last + 1) } ?: return null
-    return if (at(afterHeading, OWN_LABEL_REGEX)) LabelKind.MAYBE_DIBBUR else null
+    return if (at(afterHeading, OWN_LABEL_REGEX) || namedSeifLabels && at(afterHeading, OWN_SEIF_LABEL_REGEX)) {
+        LabelKind.MAYBE_DIBBUR
+    } else {
+        null
+    }
 }
 
 // Inverse of toGematria, for validating printed markers.

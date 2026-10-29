@@ -3,19 +3,23 @@ package io.github.kdroidfilter.seforimlibrary.sefariasqlite
 import co.touchlab.kermit.Logger
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonPrimitive
 import java.nio.file.Files
 import kotlin.test.Test
 import kotlin.test.assertContains
+import kotlin.test.assertEquals
+import kotlin.test.assertNull
 
 // Shulchan Arukh HaRav's Hilchot Ribit and Choshen Mishpat are "פסקה" leaves that the print numbers.
 class SefariaNumberedParagraphSectionsTest {
 
-    private fun readBook(): BookPayload = runBlocking {
+    private fun readBook(loans: List<String> = listOf("הלואה ראשון", "הלואה שני")): BookPayload = runBlocking {
         val tempDir = Files.createTempDirectory("seforim-test")
         val schemaDir = Files.createDirectories(tempDir.resolve("schemas"))
         val bookDir = Files.createDirectories(tempDir.resolve("json").resolve("Shulchan Arukh HaRav"))
         Files.writeString(schemaDir.resolve("Shulchan_Arukh_HaRav.json"), schemaJson)
-        Files.writeString(bookDir.resolve("merged.json"), mergedJson)
+        Files.writeString(bookDir.resolve("merged.json"), mergedJson(loans))
         val reader = SefariaBookPayloadReader(
             Json { ignoreUnknownKeys = true; coerceInputValues = true },
             Logger.withTag("SefariaNumberedParagraphSectionsTest")
@@ -39,6 +43,24 @@ class SefariaNumberedParagraphSectionsTest {
         assertContains(lines, "הקדמה שני")
     }
 
+    @Test
+    fun nativeSeifLabelsReplaceOnlyTheirMatchingGeneratedNumbers() {
+        // The shape reported in otzaria#3508, including a label after an opening heading.
+        val nativeLines = listOf(
+            "<b>הלכות הלואה</b><br>[סעיף א] ראשון",
+            "<b>[סעיף ב]</b> שני",
+            "[סעיף ג] כלים שנתבשל בהן חמץ בפסח",
+        )
+        val book = readBook(nativeLines + listOf("רביעי בלי סימון", "[סעיף ט] מספר אחר"))
+        nativeLines.forEach { line ->
+            assertContains(book.lines, line)
+            assertEquals(1, book.lines.count { it == line })
+            assertNull(book.cleanShiftByLineIndex[book.lines.indexOf(line)])
+        }
+        assertContains(book.lines, "(ד) רביעי בלי סימון")
+        assertContains(book.lines, "(ה) [סעיף ט] מספר אחר")
+    }
+
     companion object {
         private fun paragraphNode(title: String) = """
             {"nodeType": "JaggedArrayNode", "depth": 1, "addressTypes": ["Integer"],
@@ -60,11 +82,11 @@ class SefariaNumberedParagraphSectionsTest {
              ]}}
         """.trimIndent()
 
-        private val mergedJson = """
+        private fun mergedJson(loans: List<String>) = """
             {"title": "Shulchan Arukh HaRav", "heTitle": "שולחן ערוך הרב", "text": {
               "Introduction by the Author's Sons": ["הקדמה ראשון", "הקדמה שני"],
               "Yoreh Deah": {"Laws of Interest and Iska": ["רבית ראשון", "רבית שני"]},
-              "Choshen Mishpat": {"Laws of Loans": ["הלואה ראשון", "הלואה שני"]}
+              "Choshen Mishpat": {"Laws of Loans": ${JsonArray(loans.map(::JsonPrimitive))}}
             }}
         """.trimIndent()
     }
