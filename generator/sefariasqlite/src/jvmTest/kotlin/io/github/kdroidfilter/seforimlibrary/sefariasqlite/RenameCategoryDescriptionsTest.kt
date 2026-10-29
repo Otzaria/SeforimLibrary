@@ -261,6 +261,7 @@ class RenameCategoryDescriptionsTest {
                 statement.execute(
                     "CREATE TABLE category (" +
                         "id INTEGER PRIMARY KEY, parentId INTEGER, title TEXT NOT NULL, " +
+                        "level INTEGER NOT NULL DEFAULT 0, orderIndex INTEGER NOT NULL DEFAULT 999, " +
                         "heShortDesc TEXT, heDesc TEXT)",
                 )
                 statement.execute(

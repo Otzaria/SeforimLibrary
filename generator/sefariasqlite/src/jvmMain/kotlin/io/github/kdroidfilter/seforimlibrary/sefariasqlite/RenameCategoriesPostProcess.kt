@@ -178,8 +178,9 @@ fun main(args: Array<String>) {
 
             var totalRenamed = 0
             var totalMerged = 0
+            val mergeConflicts = CategoryMergeConflicts()
             runSection("Category renames", categoryRenames, logger) { rule ->
-                val result = renameOrMergeCategory(conn, rule, logger, descriptionOverridesByPath)
+                val result = renameOrMergeCategory(conn, rule, logger, descriptionOverridesByPath, mergeConflicts)
                 when (result) {
                     is RenameResult.Renamed -> totalRenamed += result.count
                     is RenameResult.Merged -> totalMerged += result.booksMoved
@@ -202,6 +203,8 @@ fun main(args: Array<String>) {
                 applyBookMove(conn, move, logger, leafIds)
             }
 
+            val unresolved = mergeConflicts.failures(conn, descriptionOverridesByPath)
+            check(unresolved.isEmpty()) { unresolved.joinToString("\n") }
             conn.commit()
             logger.i {
                 "Post-process done: categories renamed=$totalRenamed merged=$totalMerged moved=$categoriesMoved; " +
@@ -403,6 +406,8 @@ internal sealed class RenameResult {
  * as the Otzaria append does when it files a library folder under an existing
  * category, so it never leaves two siblings on one canonical path. Description
  * conflicts are resolved by [descriptionOverrides]; see [resolveMergedDescriptions].
+ * A complete rule pass supplies [mergeConflicts] and validates it after all renames
+ * and moves, so an override must address the surviving category's final path.
  *
  * @param descriptionOverrides sefaria_category_changes.csv rows by canonical path.
  * @return The result of the operation
@@ -412,6 +417,7 @@ internal fun renameOrMergeCategory(
     rule: CategoryRename,
     logger: Logger,
     descriptionOverrides: Map<String, CategoryDescriptionOverride> = emptyMap(),
+    mergeConflicts: CategoryMergeConflicts? = null,
 ): RenameResult {
     val oldName = rule.oldName
     val newName = rule.newName
@@ -423,15 +429,27 @@ internal fun renameOrMergeCategory(
 
     var totalRenamed = 0
     var totalBooksMoved = 0
+    var merged = false
 
-    for ((sourceId, parentId) in sourceCats) {
+    for ((sourceId, _) in sourceCats) {
+        // An earlier recursive merge may have removed this source or reparented it.
+        // Never use the parent snapshot taken before the first merge.
+        val current = conn.prepareStatement("SELECT parentId FROM category WHERE id = ?").use { stmt ->
+            stmt.setLong(1, sourceId)
+            stmt.executeQuery().use { rs ->
+                if (rs.next()) sourceId to rs.getLong(1).let { if (rs.wasNull()) null else it } else null
+            }
+        } ?: continue
+        val parentId = current.second
         // Check if a target category with newName exists under the same parent
         val targetId = findCategoryByNameAndParent(conn, newName, parentId)
 
         if (targetId != null && targetId != sourceId) {
-            // Resolve descriptions across the whole merged subtree before any destructive step.
-            val steps = planCategoryMerge(conn, sourceId, targetId, descriptionOverrides)
+            // Plan the whole subtree before moving books or deleting categories.
+            val steps = planCategoryMerge(conn, sourceId, targetId, descriptionOverrides, mergeConflicts != null)
             val booksMoved = applyCategoryMerge(conn, steps)
+            for (step in steps) mergeConflicts?.recordMerge(step.sourceId, step.targetId, step.conflictingFields)
+            merged = true
             val subCatsMoved = steps.sumOf { it.reparentedChildren.size }
             logger.i {
                 "Merged '$oldName' (id=$sourceId) into '$newName' (id=$targetId): $booksMoved books, " +
@@ -450,7 +468,7 @@ internal fun renameOrMergeCategory(
         }
     }
 
-    return if (totalBooksMoved > 0) {
+    return if (merged) {
         RenameResult.Merged(totalBooksMoved)
     } else {
         RenameResult.Renamed(totalRenamed)
@@ -479,6 +497,49 @@ private data class StoredCategoryDescriptions(
     val heDesc: String?,
 )
 
+/**
+ * Tracks discarded, conflicting fields by category identity throughout one rule pass.
+ * Required edits follow a source into subsequent merge targets; path reuse cannot settle them.
+ * Validate [failures] before committing, against the tree after every rename/move.
+ */
+internal class CategoryMergeConflicts {
+    private val requiredEdits = mutableMapOf<Long, Set<String>>()
+
+    fun snapshot(): Map<Long, Set<String>> = requiredEdits.toMap()
+
+    fun restore(snapshot: Map<Long, Set<String>>) {
+        requiredEdits.clear()
+        requiredEdits.putAll(snapshot)
+    }
+
+    fun recordMerge(sourceId: Long, targetId: Long, fields: Set<String>) {
+        val combined = requiredEdits.remove(sourceId).orEmpty() + requiredEdits[targetId].orEmpty() + fields
+        if (combined.isNotEmpty()) requiredEdits[targetId] = combined
+    }
+
+    fun failures(conn: Connection, overrides: Map<String, CategoryDescriptionOverride>): List<String> =
+        requiredEdits.mapNotNull { (id, fields) ->
+            val path = categoryCanonicalPath(conn, id)
+            val override = overrides[path]
+            val unresolved = fields.filter { field ->
+                val edit = if (field == "heShortDesc") override?.shortEdit else override?.longEdit
+                edit == null || edit == DescriptionEdit.Keep
+            }
+            if (unresolved.isEmpty()) null else
+                "Merged category id=$id at final path '$path' has conflicting ${unresolved.joinToString()} " +
+                    "without a Replace/Clear override at that final path"
+        }
+}
+
+private fun readCategoryDescriptions(conn: Connection, categoryId: Long): StoredCategoryDescriptions =
+    conn.prepareStatement("SELECT heShortDesc, heDesc FROM category WHERE id = ?").use { stmt ->
+        stmt.setLong(1, categoryId)
+        stmt.executeQuery().use { result ->
+            check(result.next()) { "Category id=$categoryId disappeared during merge" }
+            StoredCategoryDescriptions(result.getString(1), result.getString(2))
+        }
+    }
+
 /** Preserves non-conflicting descriptions when one category is merged into another. */
 internal fun mergeCategoryDescriptions(
     conn: Connection,
@@ -493,9 +554,9 @@ internal fun mergeCategoryDescriptions(
  * The target's descriptions once [sourceId] is merged into [targetId]. A value on one
  * side only is kept, as is a value both sides share. Differing values fail the merge,
  * unless ForDB settles that field: a row in [descriptionOverrides] at the target's
- * canonical path that replaces or clears it. The target then keeps its own value,
- * which seedAllMetadata overwrites. The path is the target's current one, so a row
- * written for a path the category only reaches later still fails the merge.
+ * canonical path that replaces or clears it. A complete rule pass defers the
+ * decision to CategoryMergeConflicts, which checks the surviving category's final
+ * path. Standalone calls without a tracker remain strict at the current path.
  *
  * @return null when the target's descriptions stay as they are.
  */
@@ -504,36 +565,28 @@ private fun resolveMergedDescriptions(
     sourceId: Long,
     targetId: Long,
     descriptionOverrides: Map<String, CategoryDescriptionOverride>,
+    source: StoredCategoryDescriptions = readCategoryDescriptions(conn, sourceId),
+    target: StoredCategoryDescriptions = readCategoryDescriptions(conn, targetId),
+    targetPath: () -> String = { categoryCanonicalPath(conn, targetId) },
+    deferConflicts: Boolean = false,
+    onConflict: (String) -> Unit = {},
 ): StoredCategoryDescriptions? {
-    fun read(categoryId: Long): StoredCategoryDescriptions =
-        conn.prepareStatement(
-            "SELECT heShortDesc, heDesc FROM category WHERE id = ?",
-        ).use { stmt ->
-            stmt.setLong(1, categoryId)
-            stmt.executeQuery().use { result ->
-                check(result.next()) { "Category id=$categoryId disappeared during merge" }
-                StoredCategoryDescriptions(
-                    heShortDesc = result.getString(1),
-                    heDesc = result.getString(2),
-                )
-            }
-        }
-
-    val override by lazy { descriptionOverrides[categoryCanonicalPath(conn, targetId)] }
+    val override by lazy { descriptionOverrides[targetPath()] }
 
     fun resolve(field: String, source: String?, target: String?, edit: () -> DescriptionEdit?): String? = when {
         source == null -> target
         target == null -> source
         source == target -> target
-        edit().let { it != null && it != DescriptionEdit.Keep } -> target
+        deferConflicts || edit().let { it != null && it != DescriptionEdit.Keep } -> {
+            onConflict(field)
+            target
+        }
         else -> error(
             "Cannot merge category id=$sourceId into id=$targetId: " +
                 "conflicting $field values",
         )
     }
 
-    val source = read(sourceId)
-    val target = read(targetId)
     val mergedShort = resolve("heShortDesc", source.heShortDesc, target.heShortDesc) { override?.shortEdit }
     val mergedLong = resolve("heDesc", source.heDesc, target.heDesc) { override?.longEdit }
     if (mergedShort == target.heShortDesc && mergedLong == target.heDesc) return null
@@ -579,40 +632,61 @@ private class CategoryMergeStep(
     val descriptions: StoredCategoryDescriptions?,
     /** Source subcategories with no same-titled sibling under the target; they move as they are. */
     val reparentedChildren: List<Long>,
+    val conflictingFields: Set<String>,
 )
 
 /**
  * Pairs [sourceId] with [targetId], then each source subcategory with the target's
- * subcategory of the same normalized title, recursively. Read-only: every
- * description conflict fails here, before the merge changes anything.
+ * subcategory using the Otzaria append's CategoryLabels.comparable matching.
+ * Shadow descriptions and children include earlier planned merges into the same
+ * target. Planning is read-only; standalone conflicts fail before any mutation.
  */
 private fun planCategoryMerge(
     conn: Connection,
     sourceId: Long,
     targetId: Long,
     descriptionOverrides: Map<String, CategoryDescriptionOverride>,
+    deferConflicts: Boolean,
 ): List<CategoryMergeStep> {
     val steps = mutableListOf<CategoryMergeStep>()
-    fun visit(source: Long, target: Long) {
-        val targetChildren = mutableMapOf<String, Long>()
-        for ((id, title) in childCategories(conn, target)) {
-            targetChildren.putIfAbsent(normalizeCategoryPathSegment(title), id)
+    val descriptions = mutableMapOf<Long, StoredCategoryDescriptions>()
+    val children = mutableMapOf<Long, MutableMap<String, Pair<Long, String>>>()
+
+    fun stored(id: Long) = descriptions.getOrPut(id) { readCategoryDescriptions(conn, id) }
+    fun targetChildren(id: Long) = children.getOrPut(id) {
+        mutableMapOf<String, Pair<Long, String>>().apply {
+            for (child in childCategories(conn, id)) putIfAbsent(CategoryLabels.comparable(child.second), child)
         }
+    }
+
+    fun visit(source: Long, target: Long, targetPath: String) {
+        val conflicts = mutableSetOf<String>()
+        val merged = resolveMergedDescriptions(
+            conn, source, target, descriptionOverrides, stored(source), stored(target),
+            targetPath = { targetPath }, deferConflicts = deferConflicts, onConflict = { conflicts += it },
+        )
+        if (merged != null) descriptions[target] = merged
+        val targetChildren = targetChildren(target)
         val reparented = mutableListOf<Long>()
-        val nested = mutableListOf<Pair<Long, Long>>()
-        for ((id, title) in childCategories(conn, source)) {
-            val match = targetChildren[normalizeCategoryPathSegment(title)]
-            if (match == null) reparented += id else nested += id to match
-        }
         steps += CategoryMergeStep(
             sourceId = source,
             targetId = target,
-            descriptions = resolveMergedDescriptions(conn, source, target, descriptionOverrides),
+            descriptions = merged,
             reparentedChildren = reparented,
+            conflictingFields = conflicts,
         )
-        for ((childSource, childTarget) in nested) visit(childSource, childTarget)
+        for ((id, title) in childCategories(conn, source)) {
+            val key = CategoryLabels.comparable(title)
+            val match = targetChildren[key]
+            if (match == null) {
+                reparented += id
+                targetChildren[key] = id to title
+            } else {
+                visit(id, match.first, "$targetPath/${normalizeCategoryPathSegment(match.second)}")
+            }
+        }
     }
-    visit(sourceId, targetId)
+    visit(sourceId, targetId, categoryCanonicalPath(conn, targetId))
     return steps
 }
 
@@ -636,7 +710,7 @@ private fun applyCategoryMerge(conn: Connection, steps: List<CategoryMergeStep>)
 }
 
 private fun childCategories(conn: Connection, parentId: Long): List<Pair<Long, String>> =
-    conn.prepareStatement("SELECT id, title FROM category WHERE parentId = ? ORDER BY id").use { stmt ->
+    conn.prepareStatement("SELECT id, title FROM category WHERE parentId = ? ORDER BY orderIndex, title, id").use { stmt ->
         stmt.setLong(1, parentId)
         stmt.executeQuery().use { rs ->
             buildList {
