@@ -3,6 +3,7 @@ package io.github.kdroidfilter.seforimlibrary.sefariasqlite
 import io.github.kdroidfilter.seforimlibrary.common.countVisibleChars
 import io.github.kdroidfilter.seforimlibrary.common.ids.IdAllocatorBindings
 import io.github.kdroidfilter.seforimlibrary.common.ids.LegacyLineKey
+import io.github.kdroidfilter.seforimlibrary.common.ids.LineOccurrenceCounter
 import io.github.kdroidfilter.seforimlibrary.core.models.PubDate
 import kotlinx.serialization.Serializable
 
@@ -128,6 +129,9 @@ internal data class BookPayload(
     // Computed from the previous cleaning + dashless-repair pipeline, before the
     // generated prefix. Generated headings/authors never pass through cleaning.
     val lineKeyHashOverrides: Map<Int, ByteArray> = emptyMap(),
+    // Removed empty-node lines, grouped by the next retained line's index.
+    // They still consume occurrence slots so later identical headings keep their ids.
+    val omittedLinesBefore: Map<Int, List<OmittedSefariaLine>> = emptyMap(),
     // Line indices of siman topic lines split off a first se'if (SefariaSimanTopicLines).
     val simanTopicLines: Set<Int> = emptySet(),
     // All [versionTitle, versionSource] pairs from merged.json's `versions` array
@@ -186,7 +190,23 @@ internal class LinePrecompute(
     legacyLineKeyHashes: Array<ByteArray>,
     lineCharCounts: IntArray,
     lineIsHeading: BooleanArray,
+    omittedLineKeysBefore: Map<Int, List<OmittedLineKeys>> = emptyMap(),
 ) {
+    private var omittedLineKeysBefore: Map<Int, List<OmittedLineKeys>> = omittedLineKeysBefore
+
+    /** Reserve removed lines in both key schemes without allocating or storing their ids. */
+    fun reserveOmittedLineOccurrences(
+        bookId: Long,
+        lineIndex: Int,
+        occurrences: LineOccurrenceCounter,
+        legacyOccurrences: LineOccurrenceCounter,
+    ) {
+        omittedLineKeysBefore[lineIndex]?.forEach { keys ->
+            occurrences.next(bookId, keys.contentHash)
+            legacyOccurrences.next(bookId, keys.legacyContentHash)
+        }
+    }
+
     /// Per line, the natural-key hash of the raw segment (generated prefixes stripped).
     var lineKeyHashes: Array<ByteArray>? = lineKeyHashes
         private set
@@ -212,6 +232,7 @@ internal class LinePrecompute(
         legacyLineKeyHashes = null
         lineCharCounts = null
         lineIsHeading = null
+        omittedLineKeysBefore = emptyMap()
     }
 }
 
@@ -221,11 +242,9 @@ internal class LinePrecompute(
  * key hash, the visible char count, the heading flag, the lineIndex → RefEntry
  * lookup, and the book-level teamim/nekudot flags.
  *
- * This is pure code motion. Each value is produced by the exact same expression
- * the loop used, over [BookPayload.lines] in ascending index order, so the loop
- * keeps calling `nextLineOccurrence` / `allocator.lineId` with byte-identical
- * arguments in an unchanged sequence — see the ordering invariant in
- * [SefariaDirectImporter].
+ * Omitted empty-node lines get hashes too: the insert loop reserves their
+ * occurrence slots before the next retained line. This keeps each surviving
+ * line's natural and legacy key identical to its key before heading removal.
  */
 internal fun BookPayload.precomputeLineData(): BookPayload {
     val refsByLineIndex = refEntries.associateBy { it.lineIndex - 1 }
@@ -252,6 +271,17 @@ internal fun BookPayload.precomputeLineData(): BookPayload {
         legacyLineKeyHashes = legacyHashes as Array<ByteArray>,
         lineCharCounts = charCounts,
         lineIsHeading = isHeading,
+        omittedLineKeysBefore = omittedLinesBefore.mapValues { (_, lines) ->
+            lines.map { omitted ->
+                OmittedLineKeys(
+                    contentHash = omitted.keyHashOverride ?: IdAllocatorBindings.lineNaturalKeyHash(omitted.content),
+                    legacyContentHash = LegacyLineKey.hash(
+                        SefariaSameTractateRefs.strip(omitted.content, sameTractateHeTitle),
+                        omitted.heRef,
+                    ),
+                )
+            }
+        },
     )
     return this
 }
@@ -309,8 +339,20 @@ internal data class PendingCharLevelAnchor(
 internal data class Heading(
     val title: String,
     val level: Int,
-    val lineIndex: Int
+    val lineIndex: Int,
+    // TOC natural keys predate empty-heading removal and include this position.
+    val keyLineIndex: Int = lineIndex,
 )
+
+/** A removed line's old key inputs; retained only for occurrence accounting. */
+internal data class OmittedSefariaLine(
+    val content: String,
+    val heRef: String?,
+    val keyHashOverride: ByteArray?,
+)
+
+/** Hashes prepared on the parse worker for a removed line's two key schemes. */
+internal class OmittedLineKeys(val contentHash: ByteArray, val legacyContentHash: ByteArray)
 
 internal data class AltStructurePayload(
     val key: String,

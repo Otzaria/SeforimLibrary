@@ -38,11 +38,12 @@ internal class SefariaTocInserter(
             val parent = levelStack.lastOrNull()?.second
             val lineIdForHeading = lineKeyToId[bookPath to h.lineIndex]
             val textId = bindings.upsertTocText(h.title)
-            // Encode line index alongside textId so that two distinct headings
+            // Encode the original line index alongside textId so that two distinct headings
             // sharing the same title under the same parent (legit in Sefaria's
-            // sources) resolve to distinct stable tocEntry ids.
+            // sources) resolve to distinct stable tocEntry ids. Compaction of
+            // empty schema headings must not change these keys.
             ancestorPathStack.addLast(textId)
-            val ancestorPath = ancestorPathStack.joinToString("/") + "@${h.lineIndex}"
+            val ancestorPath = ancestorPathStack.joinToString("/") + "@${h.keyLineIndex}"
             val entry = bindings.assignTocEntryId(
                 TocEntry(
                     id = 0,

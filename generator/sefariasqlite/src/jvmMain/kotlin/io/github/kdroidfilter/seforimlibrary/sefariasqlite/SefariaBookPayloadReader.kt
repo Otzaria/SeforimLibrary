@@ -267,7 +267,7 @@ internal class SefariaBookPayloadReader(
             } + authors).distinct()
 
             val sameTractateHeTitle = sameTractateHeTitle(schemaJson, schemaObj, schemaDir, schemaLookup)
-            val (lines, refs, headings, cleanShifts, lineKeyHashOverrides, simanTopicLines) = SefariaSameTractateRefs.apply(
+            val (lines, refs, headings, cleanShifts, lineKeyHashOverrides, simanTopicLines, omittedLinesBefore) = SefariaSameTractateRefs.apply(
                 buildBookContent(
                     schemaObj = schemaObj,
                     textElement = textElement,
@@ -336,6 +336,7 @@ internal class SefariaBookPayloadReader(
                 singleVersionTitle = singleVersionTitle,
                 cleanShiftByLineIndex = cleanShifts,
                 lineKeyHashOverrides = lineKeyHashOverrides,
+                omittedLinesBefore = omittedLinesBefore,
                 simanTopicLines = simanTopicLines,
                 versionsMeta = versionsMeta,
                 sourceDirPath = textPath.parent?.toString(),
@@ -569,6 +570,7 @@ internal class SefariaBookPayloadReader(
         val cleanShifts: Map<Int, Int>,
         val lineKeyHashOverrides: Map<Int, ByteArray>,
         val simanTopicLines: Set<Int>,
+        val omittedLinesBefore: Map<Int, List<OmittedSefariaLine>> = emptyMap(),
     )
 
     /**
@@ -628,6 +630,7 @@ internal class SefariaBookPayloadReader(
         val cleanShifts = HashMap<Int, Int>()
         val lineKeyHashOverrides = if (collectLineKeyOverrides) HashMap<Int, ByteArray>() else null
         val simanTopicLines = HashSet<Int>()
+        val omittedLineIndices = HashSet<Int>()
 
         fun headingTagForLevel(level: Int): Pair<String, String> = when (level) {
             0 -> "<h1>" to "</h1>"
@@ -649,13 +652,13 @@ internal class SefariaBookPayloadReader(
             refPrefix: String,
             heRefPrefix: String
         ) {
-            // A schema node Sefaria has no text for gets no heading either.
-            if (text.isTriviallyEmpty()) return
+            val empty = text.isTriviallyEmpty()
             val nodeTitle = node["heTitle"]?.stringOrNull()?.takeIf { it.isNotBlank() }
                 ?: node["title"]?.stringOrNull()?.takeIf { it.isNotBlank() }
             val hasTitle = nodeTitle != null
             if (hasTitle && level > 0) {
                 val tag = headingTagForLevel(level)
+                if (empty) omittedLineIndices += output.size
                 output += "${tag.first}$nodeTitle${tag.second}"
                 headings += Heading(
                     title = nodeTitle,
@@ -663,6 +666,10 @@ internal class SefariaBookPayloadReader(
                     lineIndex = output.size - 1
                 )
             }
+
+            // Walk in the original order, including empty descendants. Their
+            // headings consume occurrence slots even though they are not stored.
+            if (text == null) return
 
             if (node.containsKey("nodes")) {
                 val children = node["nodes"]?.jsonArray ?: JsonArray(emptyList())
@@ -683,6 +690,7 @@ internal class SefariaBookPayloadReader(
                     processNode(childNode, childText, level + 1, nextRefPrefix, nextHeRefPrefix)
                 }
             } else {
+                val firstContentLine = output.size
                 val sectionNames = readHeSectionNames(node)
                 val depth = node["depth"]?.jsonPrimitive?.intOrNullSafe() ?: sectionNames.size
                 val addressTypes = node["addressTypes"]?.jsonArray?.mapNotNull { it.jsonPrimitive.contentOrNull } ?: emptyList()
@@ -711,6 +719,7 @@ internal class SefariaBookPayloadReader(
                     numbersIntegerLeaf = numbersIntegerLeaf(node, refPrefix),
                     labels = labels.section(refPrefix),
                 )
+                if (empty) omittedLineIndices.addAll(firstContentLine until output.size)
             }
         }
 
@@ -767,7 +776,49 @@ internal class SefariaBookPayloadReader(
             )
         }
 
-        return BuiltBookContent(output, refs, headings, cleanShifts, lineKeyHashOverrides.orEmpty(), simanTopicLines)
+        if (omittedLineIndices.isEmpty()) {
+            return BuiltBookContent(output, refs, headings, cleanShifts, lineKeyHashOverrides.orEmpty(), simanTopicLines)
+        }
+
+        // Compact affected books once, in place. Keep the old key positions and
+        // removed lines' occurrence slots while all display/ref offsets use the
+        // compacted positions. Books without empty headings take the fast path.
+        val newIndex = IntArray(output.size)
+        val omittedRefs = refs.asSequence()
+            .filter { it.lineIndex - 1 in omittedLineIndices }
+            .associateBy { it.lineIndex - 1 }
+        val omittedLinesBefore = LinkedHashMap<Int, MutableList<OmittedSefariaLine>>()
+        var nextIndex = 0
+        for (oldIndex in output.indices) {
+            if (oldIndex in omittedLineIndices) {
+                if (collectLineKeyOverrides) {
+                    omittedLinesBefore.getOrPut(nextIndex) { ArrayList() }.add(
+                        OmittedSefariaLine(output[oldIndex], omittedRefs[oldIndex]?.heRef, lineKeyHashOverrides?.get(oldIndex)),
+                    )
+                }
+            } else {
+                newIndex[oldIndex] = nextIndex
+                output[nextIndex++] = output[oldIndex]
+            }
+        }
+        output.subList(nextIndex, output.size).clear()
+        refs.removeAll { it.lineIndex - 1 in omittedLineIndices }
+        refs.replaceAll { ref ->
+            val index = newIndex[ref.lineIndex - 1] + 1
+            if (index == ref.lineIndex) ref else ref.copy(lineIndex = index)
+        }
+        headings.removeAll { it.lineIndex in omittedLineIndices }
+        headings.replaceAll { heading -> heading.copy(lineIndex = newIndex[heading.lineIndex]) }
+        fun <T> remap(values: Map<Int, T>): Map<Int, T> = buildMap {
+            for ((index, value) in values) {
+                if (index !in omittedLineIndices) put(newIndex[index], value)
+            }
+        }
+        return BuiltBookContent(
+            output, refs, headings, remap(cleanShifts), remap(lineKeyHashOverrides.orEmpty()),
+            simanTopicLines.filterNot { it in omittedLineIndices }.mapTo(HashSet()) { newIndex[it] },
+            omittedLinesBefore,
+        )
     }
 
     private fun recursiveSections(
