@@ -50,13 +50,13 @@ MIRRORED_USES = {
     "Install Rust (stable) with rustup": {"uses": "dtolnay/rust-toolchain@stable"},
 }
 
-# The comment-free run of FLUTTER_BUILD; the index build runs it once, without the secret.
+# The comment-free run of FLUTTER_BUILD; the index build runs it once.
 FLUTTER_BUILD_RUN = """set -eo pipefail
 tries=0
 : > "$GITHUB_WORKSPACE/build_linux.log"
 until [ $tries -ge 3 ]
 do
-if flutter build linux --verbose --dart-define=BIO_OBF_KEY=${{ secrets.BIO_OBF_KEY }} "--dart-define=OTZARIA_BUILD_COMMIT=$(git rev-parse --short=12 HEAD)" 2>&1 | tee -a "$GITHUB_WORKSPACE/build_linux.log"; then
+if flutter build linux --verbose "--dart-define=OTZARIA_BUILD_COMMIT=$(git rev-parse --short=12 HEAD)" 2>&1 | tee -a "$GITHUB_WORKSPACE/build_linux.log"; then
 break
 fi
 tries=$((tries+1))
