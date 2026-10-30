@@ -269,7 +269,11 @@ class ManualReleaseWorkflowContractTest(unittest.TestCase):
             "generator/sefariasqlite/src/jvmMain/kotlin/io/github/kdroidfilter/"
             "seforimlibrary/sefariasqlite/SefariaRangeRefs.kt"
         )
-        for source in (disk_allocator, importer, range_refs):
+        target_refs = (
+            "generator/sefariasqlite/src/jvmMain/kotlin/io/github/kdroidfilter/"
+            "seforimlibrary/sefariasqlite/LinkerTargetResolution.kt"
+        )
+        for source in (disk_allocator, importer, range_refs, target_refs):
             self.assertIn(source, checkout)
             self.assertIn(f"            {source}\n", overlay)
         self.assertIn("if: inputs.relink_recovery_run_id != ''", overlay)

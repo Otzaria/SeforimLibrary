@@ -414,6 +414,46 @@ class GenerateLinkerLinksTest {
     }
 
     @Test
+    fun unavailableTargetsAndRangeEndsCreateNeitherLinkNorAnchor() {
+        for (target in listOf("Genesis 1:99", "Genesis 1:1-99", "Genesis 1:99-100")) {
+            val body = record(4, 15, base = 0).replace("Genesis 1:1", target)
+            val run = runLinkerMain(body, strict = null)
+            assertEquals(null, run.failure, target)
+            assertEquals(0L, run.links, target)
+            assertTrue(run.anchorRanges.isEmpty(), target)
+            assertTrue(run.targetSpans.isEmpty(), target)
+        }
+    }
+
+    @Test
+    fun aStaleRangeEndCannotLeaveAPartialLink() {
+        val targets = listOf(
+            RefEntry("Genesis 1:1", "בראשית א א", "Genesis", 1),
+            RefEntry("Genesis 1:2", "בראשית א ב", "Genesis", 2),
+        )
+        val run = runLinkerMain(record(4, 15, base = 0, target = "Genesis 1:1-2"), strict = null,
+            targets = targets, prepareDb = { connection ->
+                connection.createStatement().use { it.execute("UPDATE line SET heRef='wrong' WHERE id=11") }
+            })
+        assertEquals(null, run.failure)
+        assertEquals(0L, run.links)
+        assertTrue(run.anchorRanges.isEmpty())
+        assertTrue(run.targetSpans.isEmpty())
+    }
+
+    @Test
+    fun strictImportKeepsValidRecordsWhileOmittingUnavailableTargets() {
+        val body = record(4, 15, base = 0) + "\n" +
+            record(4, 15, base = 0, target = "Genesis 1:99") + "\n" +
+            record(4, 15, base = 0, target = "Genesis 1:1-99") + "\n"
+        val run = runLinkerMain(body, strict = "true")
+        assertEquals(null, run.failure)
+        assertEquals(1L, run.links)
+        assertEquals(listOf(4 to 15), run.anchorRanges)
+        assertEquals(listOf(0 to null), run.targetSpans)
+    }
+
+    @Test
     fun theLinkerReadsTheLineWithItsNotesAndAnAnchorInANoteKeepsItsPlace() {
         val stored = "see Genesis 1:1 and again"
         val notes = listOf(15 to "Genesis 1:1")
