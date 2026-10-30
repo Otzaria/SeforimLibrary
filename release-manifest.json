@@ -16,6 +16,19 @@
         "url": "https://github.com/Otzaria/SeforimLibrary/releases/download/v35-20261030043240/build_provenance.json"
       },
       {
+        "apiUrl": "https://api.github.com/repos/Otzaria/SeforimLibrary/releases/assets/691491549",
+        "contentType": "text/markdown; charset=utf-8",
+        "createdAt": "2026-10-30T08:43:59Z",
+        "digest": "sha256:f13c880af0f18826d2eb357d3394e035f2f0d5f3be5a857193014c3752afa405",
+        "id": "RA_kwDOQ6kTXM4pN1Ld",
+        "label": "",
+        "name": "library-changes.md",
+        "size": 31517,
+        "state": "uploaded",
+        "updatedAt": "2026-10-30T08:44:00Z",
+        "url": "https://github.com/Otzaria/SeforimLibrary/releases/download/v35-20261030043240/library-changes.md"
+      },
+      {
         "apiUrl": "https://api.github.com/repos/Otzaria/SeforimLibrary/releases/assets/691412594",
         "contentType": "application/json",
         "createdAt": "2026-10-30T08:10:48Z",
