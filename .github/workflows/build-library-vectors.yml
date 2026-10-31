@@ -48,6 +48,8 @@ on:
           - all
           - meivin-round2-onnx
           - meivin-round2-windows-onnx
+          - meivin-qa491-onnx
+          - meivin-qa491-windows-onnx
 
 permissions:
   contents: write

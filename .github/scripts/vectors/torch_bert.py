@@ -1,4 +1,4 @@
-"""A batched PyTorch re-implementation of the Meivin Round 2 fp32 ONNX graph.
+"""A batched PyTorch re-implementation of the reviewed Meivin fp32 ONNX exports.
 
 The weights are read straight from the package's ONNX file (its initializers), never
 re-exported. The graph's own structure is followed node for node: word + token-type +
@@ -20,6 +20,7 @@ batch computes what batch-1 runs of the graph compute.
 from __future__ import annotations
 
 import numpy as np
+import re
 import torch
 
 PAD_L = 16
@@ -28,7 +29,6 @@ ROLES = {
     "q": "attention/self/query", "k": "attention/self/key", "v": "attention/self/value",
     "o": "attention/output/dense", "f1": "intermediate/dense", "f2": "output/dense",
 }
-PREFIX = "encoder.backbone."
 
 
 def load_weights(path: str) -> dict:
@@ -46,7 +46,13 @@ def load_weights(path: str) -> dict:
             raise ValueError(f"{out_name} is produced by {n.op_type}, not MatMul: not the fp32 graph")
         return inits[n.input[1]]
 
-    p = PREFIX
+    # The reviewed exports differ only in the outer module's namespace.
+    prefixes = [p for p in ("encoder.", "") if p + "backbone.embeddings.word_embeddings.weight" in inits]
+    if len(prefixes) != 1:
+        raise ValueError("expected exactly one supported fp32 BERT namespace")
+    outer = prefixes[0]
+    node_prefix = "/" + outer.replace(".", "/")
+    p = outer + "backbone."
     W = {
         "word": inits[p + "embeddings.word_embeddings.weight"],
         "pos": inits[p + "embeddings.position_embeddings.weight"],
@@ -55,16 +61,28 @@ def load_weights(path: str) -> dict:
         "layers": [],
     }
     i = 0
-    while f"/encoder/backbone/encoder/layer.{i}/attention/self/query/MatMul_output_0" in by_out:
-        lp, ip = f"/encoder/backbone/encoder/layer.{i}/", p + f"encoder.layer.{i}."
+    while f"{node_prefix}backbone/encoder/layer.{i}/attention/self/query/MatMul_output_0" in by_out:
+        lp, ip = f"{node_prefix}backbone/encoder/layer.{i}/", p + f"encoder.layer.{i}."
         layer = {r: {"w": matmul(lp + role + "/MatMul_output_0"),
                      "b": inits[ip + role.replace("/", ".") + ".bias"]} for r, role in ROLES.items()}
         layer["ln1"] = (inits[ip + "attention.output.LayerNorm.weight"], inits[ip + "attention.output.LayerNorm.bias"])
         layer["ln2"] = (inits[ip + "output.LayerNorm.weight"], inits[ip + "output.LayerNorm.bias"])
         W["layers"].append(layer)
         i += 1
-    W["proj"] = matmul("/encoder/projection/MatMul_output_0")
-    W["proj_ln"] = (inits["encoder.projection_norm.weight"], inits["encoder.projection_norm.bias"])
+    if not W["layers"]:
+        raise ValueError("the fp32 BERT graph contains no complete attention layer")
+    declared_layers = {int(match.group(1)) for name in inits
+                       if (match := re.fullmatch(re.escape(p) + r"encoder\.layer\.(\d+)\.attention\.self\.query\.bias", name))}
+    if declared_layers != set(range(i)):
+        raise ValueError("the fp32 BERT graph has an incomplete or non-contiguous attention stack")
+    W["proj"] = matmul(node_prefix + "projection/MatMul_output_0")
+    W["proj_ln"] = (inits[outer + "projection_norm.weight"], inits[outer + "projection_norm.bias"])
+    for n in m.graph.node:
+        if n.op_type == "LayerNormalization":
+            expected = 1e-5 if n.output[0] == node_prefix + "projection_norm/LayerNormalization_output_0" else 1e-12
+            eps = next((a.f for a in n.attribute if a.name == "epsilon"), 1e-5)
+            if not np.isclose(eps, expected, rtol=1e-6, atol=0):
+                raise ValueError(f"{n.output[0]} has unsupported LayerNorm epsilon {eps}")
     return W
 
 

@@ -310,6 +310,14 @@ class PackageChecksum(unittest.TestCase):
         self.assertEqual(mp.checksum_of_entries([tok, fp32]), "4a4a2ae88a86f15ffe6069bfcefc3abd13c207cec5d7aaef52c0c59d752ade46")
         self.assertEqual(mp.checksum_of_entries([int8, tok]), "9e408407922b4aab26dd148cbe4b9a0e573c65591cfc799ba28e991d77d9d065")
 
+    def test_the_qa491_packages_bind_the_published_filenames(self):
+        tok = ("tokenizer.json", 2191362, "0664287976ecb078bdfd8f5e5515dc87d8cb7f985a79a481aa1cdf7a7321c0e9")
+        fp32 = ("document.fp32.onnx", 168145648, "46ba402ce20693d0a3b65aa557a368a3535bbb2a5a1f559d848e803788f7b667")
+        int8 = ("query.int8.onnx", 42625431, "82b87180616cee55357b90858f327f4d98b86b2e5589f6771d50b788ad383597")
+        self.assertEqual(mp.checksum_of_entries([tok, fp32]), "5f80c47d3310a21fcc0c2f541fbb5732ba254555ef45afc2712cab63c8a33059")
+        self.assertEqual(mp.checksum_of_entries([int8, tok]), "e90a67be02c077990c7bc2a6485f6872769ac2a71eb9779d25ceb1fcd97ac9b3")
+        self.assertNotEqual(mp.checksum_of_entries([tok, fp32]), mp.checksum_of_entries([tok, ("model.onnx", *fp32[1:])]))
+
     def test_a_package_that_is_not_the_plans_or_not_the_familys_is_refused(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -381,6 +389,26 @@ class Fetch(unittest.TestCase):
                                     **(revision or {"revision": "main"}))
         self.assertNotIn("s3cr3t", out.getvalue())
         return root, out.getvalue()
+
+    def test_a_nested_hub_graph_keeps_the_bound_local_package_filename(self):
+        root, _ = self.fetch(revision="a" * 40, remote_graph="onnx/g.onnx")
+        self.assertEqual((root / "g.onnx").read_bytes(), b"graph")
+        self.assertEqual(mp.package_checksum(root, "g.onnx"), self.checksum)
+        self.assertTrue(any(path.endswith("/onnx/g.onnx") for _, path, _ in Hub.seen))
+
+    def test_cache_only_refuses_missing_or_damaged_bytes_without_a_network_request(self):
+        with self.assertRaisesRegex(mp.PackageError, "verified cache seed"):
+            self.fetch(revision="a" * 40, cache_only=True)
+        self.assertEqual(Hub.seen, [])
+        root, _ = self.fetch()
+        Hub.seen = []
+        self.fetch(cache_only=True)
+        self.assertEqual(Hub.seen, [])
+        (root / "g.onnx").write_bytes(b"damaged")
+        with self.assertRaisesRegex(mp.PackageError, "verified cache seed"):
+            self.fetch(cache_only=True)
+        self.assertEqual(Hub.seen, [])
+        self.assertEqual((root / "g.onnx").read_bytes(), b"damaged")
 
     def test_the_package_is_fetched_with_the_token_verified_and_then_served_from_the_cache(self):
         root, log = self.fetch()
@@ -538,6 +566,54 @@ class Reimplementation(unittest.TestCase):
         import torch_bert as tb
         with self.assertRaises(ValueError):
             tb.MeivinTorch(self.weights(), mode="int8", device="cpu", heads=4)
+
+    def test_the_fp32_loader_reads_both_reviewed_export_namespaces(self):
+        try:
+            import onnx
+            from onnx import helper, numpy_helper
+        except ImportError:
+            self.skipTest("ONNX is not installed")
+        import torch_bert as tb
+        wanted = self.weights()
+        for outer in ("encoder.", ""):
+            p, node_prefix = outer + "backbone.", "/" + outer.replace(".", "/")
+            arrays = {p + "embeddings.word_embeddings.weight": wanted["word"],
+                      p + "embeddings.position_embeddings.weight": wanted["pos"],
+                      p + "embeddings.token_type_embeddings.weight": wanted["tt"],
+                      p + "embeddings.LayerNorm.weight": wanted["emb_ln"][0],
+                      p + "embeddings.LayerNorm.bias": wanted["emb_ln"][1],
+                      outer + "projection_norm.weight": wanted["proj_ln"][0],
+                      outer + "projection_norm.bias": wanted["proj_ln"][1], "projection_weight": wanted["proj"]}
+            nodes = [helper.make_node("MatMul", ["pool", "projection_weight"], [node_prefix + "projection/MatMul_output_0"])]
+            for i, layer in enumerate(wanted["layers"]):
+                lp, ip = node_prefix + f"backbone/encoder/layer.{i}/", p + f"encoder.layer.{i}."
+                for role, path in tb.ROLES.items():
+                    weight = f"weight_{i}_{role}"
+                    arrays[weight] = layer[role]["w"]
+                    arrays[ip + path.replace("/", ".") + ".bias"] = layer[role]["b"]
+                    nodes.append(helper.make_node("MatMul", ["hidden", weight], [lp + path + "/MatMul_output_0"]))
+                for key, path in (("ln1", "attention.output.LayerNorm"), ("ln2", "output.LayerNorm")):
+                    arrays[ip + path + ".weight"], arrays[ip + path + ".bias"] = layer[key]
+            graph = helper.make_graph(nodes, "loader_fixture", [], [], [numpy_helper.from_array(v, k) for k, v in arrays.items()])
+            with tempfile.TemporaryDirectory() as tmp:
+                file = Path(tmp) / "model.onnx"
+                onnx.save(helper.make_model(graph), file)
+                got = tb.load_weights(str(file))
+                bad = onnx.ModelProto()
+                bad.CopyFrom(helper.make_model(graph))
+                bad.graph.node.add().CopyFrom(helper.make_node(
+                    "LayerNormalization", ["x", outer + "projection_norm.weight", outer + "projection_norm.bias"],
+                    [node_prefix + "projection_norm/LayerNormalization_output_0"], epsilon=1e-3))
+                onnx.save(bad, file)
+                with self.assertRaisesRegex(ValueError, "unsupported LayerNorm epsilon"):
+                    tb.load_weights(str(file))
+            self.assertEqual(len(got["layers"]), len(wanted["layers"]))
+            self.assertTrue(np.array_equal(got["proj"], wanted["proj"]))
+            self.assertTrue(np.array_equal(got["word"], wanted["word"]))
+            for a, b in zip(got["layers"], wanted["layers"]):
+                for role in tb.ROLES:
+                    self.assertTrue(np.array_equal(a[role]["w"], b[role]["w"]))
+                    self.assertTrue(np.array_equal(a[role]["b"], b[role]["b"]))
 
 
 if __name__ == "__main__":
