@@ -68,7 +68,7 @@ build_bin() {  # <name> <repo> <rev> <package dir in the repo> [cargo args...]
   echo "$build" > "$STATE/bin/$name.build"
   if [ "$name" = otzaria-semantic-search ]; then
     rm -rf "$STATE/bin/families" "$STATE/bin/family-model.json" "$STATE/bin/chunking.json"
-    for family in $FAMILY_CONFIGS; do
+    for family in $FAMILY_CONFIGS ${OPT_IN_FAMILY_CONFIGS:-}; do
       config=${family%%:*}
       mkdir -p "$STATE/bin/families/${config##*/}"
       cp "$STATE/build/src/$config/model.json" "$STATE/build/src/$config/chunking.json" "$STATE/bin/families/${config##*/}/"
@@ -85,7 +85,7 @@ if [ -n "$PLUGIN_REV" ]; then
 else
   echo "export_semantic_plan, validate_semantic_vectors: PLUGIN_REV is not pinned — the build can neither plan nor validate"
 fi
-for family in $FAMILY_CONFIGS; do
+for family in $FAMILY_CONFIGS ${OPT_IN_FAMILY_CONFIGS:-}; do
   config=${family%%:*}
   [ -f "$STATE/bin/families/${config##*/}/chunking.json" ] \
     || { echo "bin/families/${config##*/}/chunking.json missing: rebuild the sidecar CLI (remove bin/otzaria-semantic-search.rev)" >&2; exit 1; }
