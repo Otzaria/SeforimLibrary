@@ -36,7 +36,7 @@ import model_package  # noqa: E402
 import vector_shard  # noqa: E402
 
 WORKER_NAME = "seforim-gpu-worker"
-WORKER_VERSION = "1.0"
+WORKER_VERSION = "1.1"
 MAX_TOKENS = 256          # the cap the worker truncates to, held to the family's
 POOLING = "in-graph"      # the graph pools; so does the re-implementation
 GOLDEN_TEXTS = HERE / "parity_golden_texts.json"
@@ -61,6 +61,8 @@ def parse_args(argv=None):
     ap.add_argument("--revision", default=model_package.DEFAULT_REVISION)
     ap.add_argument("--token-env", default=model_package.DEFAULT_TOKEN_ENV)
     ap.add_argument("--graph", default="seforim-embed-round2-fp32.onnx")
+    ap.add_argument("--remote-graph", help="graph path on the hub, when its local package filename differs")
+    ap.add_argument("--cache-only", action="store_true", help="require a verified package already in the cache")
     ap.add_argument("--mode", default="mixed", choices=("mixed", "fp32"))
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--token-budget", type=int, default=32768)
@@ -82,7 +84,8 @@ def resolve_package(a, plan) -> Path:
         return a.model_dir
     cache = a.cache or Path(os.environ.get("OTZARIA_VECTOR_MODEL_CACHE") or "/opt/otzaria-cache/vector-models")
     return model_package.fetch_package(cache, plan["passage_package"]["checksum"], a.graph, repo=a.repo,
-                                       revision=a.revision, token_env=a.token_env, log=log)
+                                       revision=a.revision, token_env=a.token_env, log=log,
+                                       remote_graph=a.remote_graph, cache_only=a.cache_only)
 
 
 def main(argv=None) -> int:
