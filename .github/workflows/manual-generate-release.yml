@@ -588,6 +588,7 @@ jobs:
             generator/common/src/jvmMain/kotlin/io/github/kdroidfilter/seforimlibrary/common/ids/DiskBackedLinkIdAllocator.kt
             generator/sefariasqlite/src/jvmMain/kotlin/io/github/kdroidfilter/seforimlibrary/sefariasqlite/GenerateLinkerLinks.kt
             generator/sefariasqlite/src/jvmMain/kotlin/io/github/kdroidfilter/seforimlibrary/sefariasqlite/SefariaRangeRefs.kt
+            generator/sefariasqlite/src/jvmMain/kotlin/io/github/kdroidfilter/seforimlibrary/sefariasqlite/LinkerTargetResolution.kt
           persist-credentials: false
 
       # `gh` gives GH_TOKEN precedence over GITHUB_TOKEN. Verify the repository
@@ -1673,6 +1674,7 @@ jobs:
             generator/common/src/jvmMain/kotlin/io/github/kdroidfilter/seforimlibrary/common/ids/DiskBackedLinkIdAllocator.kt
             generator/sefariasqlite/src/jvmMain/kotlin/io/github/kdroidfilter/seforimlibrary/sefariasqlite/GenerateLinkerLinks.kt
             generator/sefariasqlite/src/jvmMain/kotlin/io/github/kdroidfilter/seforimlibrary/sefariasqlite/SefariaRangeRefs.kt
+            generator/sefariasqlite/src/jvmMain/kotlin/io/github/kdroidfilter/seforimlibrary/sefariasqlite/LinkerTargetResolution.kt
           )
           # The pinned Phase-2 writes LINKER anchors on the full line (note bodies in place).
           # A payload whose buildLineNoteIndex still remaps link_anchor to the stored line

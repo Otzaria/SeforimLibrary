@@ -27,7 +27,7 @@ import java.sql.DriverManager
  * clickable, delta-stable in-app links.
  *
  * For each artifact record `(book_key, line_index, start, end, target_ref)`:
- *  • target ← `resolveRefs(target_ref)` (the SAME resolver Sefaria links use) → a RefEntry;
+ *  • target ← `resolveLinkerTarget(target_ref)` → an exact segment or proven section;
  *    its (path, lineIndex) maps to a lineId via the sidecar → `targetLineId`.
  *  • source ← `BookKey(source_name, canonical_he_title)` → `bookId` (built from the DB:
  *    `source.name` + `COALESCE(book.heRef, book.title)`), then `(bookId, line_index)` → lineId.
@@ -140,17 +140,6 @@ fun main(args: Array<String>) = runBlocking {
             allRefs.add(RefEntry(row.ref, row.heRef, row.path, row.lineIndex))
         }
         val refsByCanonical = allRefs.groupBy { canonicalCitation(it.ref) }
-        val refsByBase = HashMap<String, RefEntry>()
-        // lastByBase — the base's LAST segment: closes the scope of section-level
-        // citations (a whole amud/chapter) so the app can show/load the full range.
-        val lastByBase = HashMap<String, RefEntry>()
-        for (e in allRefs) {
-            val base = canonicalBase(e.ref)
-            val existing = refsByBase[base]
-            if (existing == null || e.lineIndex < existing.lineIndex) refsByBase[base] = e
-            val existingLast = lastByBase[base]
-            if (existingLast == null || e.lineIndex > existingLast.lineIndex) lastByBase[base] = e
-        }
         // A whole daf, chapter or amud of a commentary is not a segment ref (otzaria#2490).
         val sections = SectionRefIndex.build(allRefs)
         logger.i { "Sidecar: ${allRefs.size} refs, ${refsByCanonical.size} canonical keys" }
@@ -340,13 +329,9 @@ fun main(args: Array<String>) = runBlocking {
                     // Contract check FIRST, before any skip path (unresolved target,
                     // self-link) can hide a hash-less record from -PlinkerStrict.
                     if (rec.source_hash == null) missingSourceHash++
-                    // target: resolveRefs → RefEntry → lineId (sidecar) → (bookId, 0-based idx) via lineMeta
-                    val targetCandidates = resolveRefs(rec.target_ref, refsByCanonical, refsByBase)
-                        .distinctBy { it.path to it.lineIndex }
-                    if (targetCandidates.size > 1) { ambiguousTarget++; continue }
-                    // Only a citation with no segment-level match can name a whole section.
-                    val section = if (targetCandidates.isEmpty()) sectionTarget(rec.target_ref, sections) else null
-                    val tgtEntry = targetCandidates.singleOrNull() ?: section?.first
+                    // Never widen an unavailable explicit address to its parent chapter.
+                    val target = resolveLinkerTarget(rec.target_ref, refsByCanonical, sections) { ambiguousTarget++ }
+                    val tgtEntry = target?.first
                     val tgtLineId = tgtEntry?.let { lineIdByRefKey[it.path to it.lineIndex] }
                     val tgtMeta = tgtLineId?.let { lineMeta[it] }
                     if (tgtLineId == null || tgtMeta == null) { unresolvedTarget++; continue }
@@ -355,6 +340,21 @@ fun main(args: Array<String>) = runBlocking {
                     if (!targetIdentityMatches(tgtEntry, tgtMeta.bookId, tgtMeta.lineIndex, tgtMeta.heRef, expectedTargetBookId)) {
                         targetIdentityMismatch++
                         continue
+                    }
+                    // Validate the complete requested scope BEFORE allocating or writing
+                    // anything. A stale/missing end must not leave a shortened start link.
+                    val endEntry = target?.last
+                    val endLineId = endEntry?.let { lineIdByRefKey[it.path to it.lineIndex] }
+                    val endMeta = endLineId?.let { lineMeta[it] }
+                    if (endEntry != null) {
+                        val expectedEndKey = stableBookKeyByPath[endEntry.path]
+                        val expectedEndBookId = expectedEndKey?.let { bookIdByKey[it] }
+                        if (endLineId == null || endMeta == null ||
+                            !targetIdentityMatches(endEntry, endMeta.bookId, endMeta.lineIndex, endMeta.heRef, expectedEndBookId)
+                        ) {
+                            targetIdentityMismatch++
+                            continue
+                        }
                     }
                     // source: BookKey → bookId → (bookId, line_index) → lineId
                     val srcBookId = bookIdByKey[rec.book_key.source_name to rec.book_key.canonical_he_title]
@@ -403,25 +403,10 @@ fun main(args: Array<String>) = runBlocking {
 
                     // Multi-line citation scope (whole amud/section or dashed range) →
                     // remember its end for a link_range(side=1) row.
-                    val endEntry = section?.second
-                        ?: resolveRefEnd(rec.target_ref, refsByCanonical, refsByBase, lastByBase)
-                    if (endEntry != null &&
-                        endEntry.path == tgtEntry.path &&
-                        endEntry.lineIndex > tgtEntry.lineIndex
-                    ) {
-                        val endLineId = lineIdByRefKey[endEntry.path to endEntry.lineIndex]
-                        val endMeta = endLineId?.let { lineMeta[it] }
-                        val expectedEndKey = stableBookKeyByPath[endEntry.path]
-                        val expectedEndBookId = expectedEndKey?.let { bookIdByKey[it] }
-                        if (endLineId != null && endMeta != null &&
-                            targetIdentityMatches(endEntry, endMeta.bookId, endMeta.lineIndex, endMeta.heRef, expectedEndBookId)
-                        ) {
-                            val prev = rangeEndByLink[linkId]
-                            if (prev == null || endMeta.lineIndex > prev.second) {
-                                rangeEndByLink[linkId] = endLineId to endMeta.lineIndex
-                            }
-                        } else if (endLineId != null || endMeta != null) {
-                            targetIdentityMismatch++
+                    if (endLineId != null && endMeta != null && endMeta.lineIndex > tgtMeta.lineIndex) {
+                        val prev = rangeEndByLink[linkId]
+                        if (prev == null || endMeta.lineIndex > prev.second) {
+                            rangeEndByLink[linkId] = endLineId to endMeta.lineIndex
                         }
                     }
                     if (linkBatch.size >= 5000) flush()
