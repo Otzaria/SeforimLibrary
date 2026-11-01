@@ -656,7 +656,7 @@ build_family() {  # <name> <release prefix> <codec, or ""> <alias threshold, or 
       OTZARIA_ONNX_RUNTIME=$ORT "$CLI" embed-shard --plan "$PLAN" --model-file "$PKG/$MODEL_GRAPH" \
         --processes "$CPU_PROCESSES" --threads "$CPU_THREADS" --out "$FW/shards/cpu"
     else
-      EMBEDDED_BY="seforim-gpu-worker 1.0"
+      EMBEDDED_BY="seforim-gpu-worker 1.1"
       skip=0; n=0
       while [ "$skip" -lt "$TO_EMBED" ]; do
         "$PY" "$HERE/embed_worker.py" --plan "$PLAN" --out "$FW/shards/$(printf 's%03d' "$n")" \
