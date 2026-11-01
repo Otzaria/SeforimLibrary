@@ -119,7 +119,7 @@ def _download(url: str, dest: Path, token: Optional[str], timeout: int = 120) ->
 
 def fetch_package(cache: Path, checksum: str, graph: str, repo: str = DEFAULT_REPO,
                   revision: str = DEFAULT_REVISION, token_env: str = DEFAULT_TOKEN_ENV,
-                  hub: str = HUB, log=None) -> Path:
+                  hub: str = HUB, log=None, remote_graph: Optional[str] = None, cache_only: bool = False) -> Path:
     """The package with `checksum`, in `cache/<checksum>/`: verified if present, else fetched.
 
     A cached copy that does not hash to `checksum` is removed and fetched again; a fetched
@@ -138,11 +138,14 @@ def fetch_package(cache: Path, checksum: str, graph: str, repo: str = DEFAULT_RE
             if log:
                 log(f"package {checksum[:12]} found in the cache, checksum verified")
             return root
+        if cache_only:
+            raise PackageError(f"package {checksum} is missing or damaged in {root}; this family requires a verified cache seed")
         for f in files:
             (root / f).unlink(missing_ok=True)
         token = os.environ.get(token_env) or None
         for f in files:
-            url = f"{hub.rstrip('/')}/{repo}/resolve/{urllib.parse.quote(revision, safe='')}/{urllib.parse.quote(f)}"
+            remote = remote_graph if f == graph and remote_graph else f
+            url = f"{hub.rstrip('/')}/{repo}/resolve/{urllib.parse.quote(revision, safe='')}/{urllib.parse.quote(remote)}"
             if log:
                 log(f"fetching {url}" + (" (authenticated)" if token else " (anonymous)"))
             _download(url, root / f, token)
@@ -166,6 +169,8 @@ def main(argv=None) -> int:
     f.add_argument("--cache", required=True, type=Path)
     f.add_argument("--checksum", required=True)
     f.add_argument("--graph", required=True)
+    f.add_argument("--remote-graph", help="graph path on the hub, when its local package filename differs")
+    f.add_argument("--cache-only", action="store_true", help="refuse a missing or damaged cache package without downloading")
     f.add_argument("--repo", default=DEFAULT_REPO)
     f.add_argument("--revision", default=DEFAULT_REVISION)
     f.add_argument("--token-env", default=DEFAULT_TOKEN_ENV)
@@ -173,7 +178,8 @@ def main(argv=None) -> int:
     a = ap.parse_args(argv)
     try:
         root = fetch_package(a.cache, a.checksum, a.graph, repo=a.repo, revision=a.revision, token_env=a.token_env,
-                             hub=a.hub, log=lambda message: print(message, file=sys.stderr, flush=True))
+                             hub=a.hub, log=lambda message: print(message, file=sys.stderr, flush=True),
+                             remote_graph=a.remote_graph, cache_only=a.cache_only)
     except PackageError as error:
         print(f"model_package: {error}", file=sys.stderr)
         return 2

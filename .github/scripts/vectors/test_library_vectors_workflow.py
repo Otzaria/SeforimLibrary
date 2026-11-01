@@ -31,8 +31,8 @@ the work, the same way by hand. Load-bearing properties, pinned here:
     prerelease vectors-ledger-<tag>, which a runner that lost its own restores;
   * a new rot192-i8i4 epoch takes the rotation pins.env pins, else the one the runner fitted
     before, else fits one, kept and backed up after a publish; every validation reports G6's recall;
-  * it builds every family of FAMILY_CONFIGS from one index and one warehouse, in its order, each
-    published as its own <prefix>-<tag>: the first, which released applications install, is
+  * it builds every family of FAMILY_CONFIGS from one index, sharing warehouses only within a
+    passage package, in its order, each published as its own <prefix>-<tag>: the first family is
     published before a later family runs, and a later family's failure leaves it published.
 
 The YAML assertions read the parsed workflow; the driver's are made by running it against stub
@@ -46,6 +46,7 @@ import io
 import json
 import os
 import re
+import shlex
 import shutil
 import stat
 import subprocess
@@ -75,12 +76,16 @@ PIN = dict(line.split("=", 1) for line in PINS.read_text().splitlines() if line 
 TAG = "v30-20260930165019"
 TAG_COMMIT = "c66256253b25c0aa0b13d04e399647496f3b0bee"   # the commit TAG names (the stub gh's answer)
 # (name, release prefix) of each family, in build order
-FAMILIES = [(c.split(":")[0].rsplit("/", 1)[-1], c.split(":")[1]) for c in PIN["FAMILY_CONFIGS"].strip('"').split()]
+CONFIGURED_FAMILIES = [(c.split(":")[0].rsplit("/", 1)[-1], c.split(":")[1]) for c in PIN["FAMILY_CONFIGS"].strip('"').split()]
+# Existing regression scenarios select Round2 explicitly; adoption tests exercise every family.
+FAMILIES = CONFIGURED_FAMILIES[:2]
+OPT_IN_FAMILIES = [(c.split(":")[0].rsplit("/", 1)[-1], c.split(":")[1]) for c in PIN.get("OPT_IN_FAMILY_CONFIGS", "").strip('"').split()]
 LEGACY, WINDOWS = FAMILIES[0][0], FAMILIES[1][0]
 # family -> (recall@10, recall@50) floors pins.env sets below the validator's own
 G6_FLOORS = dict((e.split("=")[0], tuple(e.split("=")[1].split(","))) for e in PIN.get("G6_FLOORS", "").strip('"').split())
 ROTATION_KEY = f"{FAMILIES[1][0]}.fp32-4a4a2ae8"   # the windows family's rotation, fitted on the stub warehouse
 CHUNKING_IDENTITY = {"meivin-round2-onnx": 2685558872390372738, "meivin-round2-windows-onnx": 320260894818558297}
+CHUNKING_IDENTITY.update({"meivin-qa491-onnx": 2685558872390372738, "meivin-qa491-windows-onnx": 320260894818558297})
 
 
 def run_text(job):
@@ -143,7 +148,7 @@ class Workflow(unittest.TestCase):
                 gh = root / "gh"
                 gh.write_text(textwrap.dedent(f"""\
                     #!/usr/bin/env bash
-                    if [ "$1" = api ]; then cat {PINS}; exit; fi
+                    if [ "$1" = api ]; then cat {shlex.quote(str(PINS))}; exit; fi
                     state=$(sed -n "s/^$3=//p" {root / "releases"})
                     [ -n "$state" ] || exit 1
                     case " $* " in *" --json "*) [ "$state" = draft ] && echo true || echo false ;; esac
@@ -167,7 +172,7 @@ class Workflow(unittest.TestCase):
         self.assertIn("delete any draft", log)
         output, log = gate({f"{first}-{TAG}": "published", f"{second}-{TAG}": "published", f"{second}-delta-{TAG}": "draft"})
         self.assertIn(f"Incomplete: {second}-delta-{TAG} (draft)", log)
-        output, log = gate({f"{first}-{TAG}": "published", f"{second}-{TAG}": "published"})
+        output, log = gate({f"{prefix}-{TAG}": "published" for _, prefix in CONFIGURED_FAMILIES})
         self.assertIn("proceed=false", output)
         self.assertNotIn("Incomplete:", log)
         # a release not built yet, or a draft a failed publish left, still reaches the driver
@@ -178,7 +183,7 @@ class Workflow(unittest.TestCase):
 
     def test_a_manual_run_builds_every_family_or_one_alone(self):
         family = self.doc[True]["workflow_dispatch"]["inputs"]["family"]
-        self.assertEqual(family["options"], ["all"] + [name for name, _ in FAMILIES])
+        self.assertEqual(family["options"], ["all"] + [name for name, _ in CONFIGURED_FAMILIES + OPT_IN_FAMILIES])
         self.assertEqual(family["default"], "all")
         # a run the index workflow triggers has no inputs: every family
         self.assertEqual(self.job["env"]["FAMILY"], "${{ inputs.family }}")
@@ -230,10 +235,41 @@ class Workflow(unittest.TestCase):
         self.assertEqual(doc[True]["release"]["types"], ["published"])
         (job,) = doc["jobs"].values()
         self.assertIn("github.event.release.prerelease == false", job["if"])
-        self.assertIn("select((.draft|not) and (.prerelease|not))", run_text(job))
+        self.assertIn("select((.draft|not) and (.prerelease|not) and (.tag_name | test(", run_text(job))
+        if not shutil.which("jq"):
+            self.skipTest("jq unavailable")
+        query = re.search(r"--jq '([^']*tag_name[^']*)'", run_text(job)).group(1)
+        releases = [{"tag_name": tag, "draft": draft, "prerelease": prerelease}
+                    for tag, draft, prerelease in [(TAG, False, False),
+                                                  ("v31-20261001120000", True, False),
+                                                  ("v32-20261002120000", False, True),
+                                                  ("vectors-qa491-" + TAG, False, False),
+                                                  ("vectors-qa491-windows-" + TAG, False, False)]]
+        result = subprocess.run(["jq", "-r", query], input=json.dumps(releases),
+                                text=True, capture_output=True, check=True)
+        self.assertEqual([json.loads(line)["tagName"] for line in result.stdout.splitlines()], [TAG])
 
 
 class Pins(unittest.TestCase):
+    def test_qa491_uses_its_immutable_profile_and_restores_default_packages(self):
+        profile = dict(line.split("=", 1) for line in (HERE / "model-pins/qa491.env").read_text().splitlines()
+                       if line and not line.startswith("#") and "=" in line)
+        self.assertRegex(profile["MODEL_REVISION"], r"^[0-9a-f]{40}$")
+        self.assertEqual(profile["MODEL_REQUIRE_CACHE"], "true")
+        self.assertEqual(profile["MODEL_REQUIRE_PRERELEASE"], "false")
+        self.assertEqual(profile["MODEL_GRAPH"], "document.fp32.onnx")
+        self.assertEqual(profile["QUERY_GRAPH"], "query.int8.onnx")
+        script = '''HERE=$1; . "$HERE/pins.env"; . "$HERE/model_profiles.sh"
+MIN_FREE_GB=7
+select_model_profile meivin-qa491-onnx
+printf '%s %s %s %s %s\\n' "$PASSAGE_PACKAGE_CHECKSUM" "$QUERY_GRAPH" "$MODEL_REQUIRE_CACHE" "$MODEL_REQUIRE_PRERELEASE" "$MIN_FREE_GB"
+select_model_profile meivin-round2-onnx
+printf '%s %s %s %s %s\\n' "$PASSAGE_PACKAGE_CHECKSUM" "$QUERY_GRAPH" "$MODEL_REQUIRE_CACHE" "$MODEL_REQUIRE_PRERELEASE" "$MIN_FREE_GB"
+'''
+        p = subprocess.run(["bash", "-c", script, "profiles", str(HERE)], capture_output=True, text=True, check=True)
+        self.assertEqual(p.stdout.splitlines(), [profile["PASSAGE_PACKAGE_CHECKSUM"] + " query.int8.onnx true false 7",
+                                                PIN["PASSAGE_PACKAGE_CHECKSUM"] + " " + PIN["QUERY_GRAPH"] + " false false 7"])
+
     def test_the_sidecar_and_the_planner_are_pinned_to_full_commits(self):
         pins = dict(line.split("=", 1) for line in PINS.read_text().splitlines()
                     if line and not line.startswith("#") and "=" in line)
@@ -253,9 +289,12 @@ class Pins(unittest.TestCase):
     def test_the_family_released_applications_install_is_built_first_under_its_own_tag(self):
         # the application asks for exactly releases/tags/vectors-<tag>; the windows family
         # must not match its library-tag pattern ^v(\d+)- nor that tag
-        self.assertEqual(FAMILIES, [("meivin-round2-onnx", "vectors"), ("meivin-round2-windows-onnx", "vectors-windows")])
-        self.assertEqual(len({name for name, _ in FAMILIES}), len(FAMILIES))
-        for _, prefix in FAMILIES[1:]:
+        self.assertEqual(CONFIGURED_FAMILIES, [("meivin-round2-onnx", "vectors"),
+                                    ("meivin-round2-windows-onnx", "vectors-windows"),
+                                    ("meivin-qa491-onnx", "vectors-qa491"),
+                                    ("meivin-qa491-windows-onnx", "vectors-qa491-windows")])
+        self.assertEqual(len({name for name, _ in CONFIGURED_FAMILIES}), len(CONFIGURED_FAMILIES))
+        for _, prefix in CONFIGURED_FAMILIES[1:]:
             self.assertIsNone(re.match(r"^v(\d+)-", f"{prefix}-{TAG}"))
             self.assertNotEqual(f"{prefix}-{TAG}", f"vectors-{TAG}")
         self.assertNotIn("FAMILY_CONFIG", PIN)
@@ -381,7 +420,8 @@ fi
 mkdir -p "$out"
 : > "$out/embed.jsonl"
 [ -z "$model" ] || cp "$model" "$out/model.json"   # what the stub assemble derives the identity digest from
-jq -n --argjson n "${TO_EMBED:-0}" '{format:"otzaria-embed-plan",version:2,records:$n,plan_sha256:("a"*64),passage_package:{checksum:"4a4a2ae88a86f15ffe6069bfcefc3abd13c207cec5d7aaef52c0c59d752ade46",quantization:"fp32"}}' > "$out/embed-manifest.json"
+package=$(jq -r '.passage_package_checksum // "4a4a2ae88a86f15ffe6069bfcefc3abd13c207cec5d7aaef52c0c59d752ade46"' "$model")
+jq -n --arg checksum "$package" --argjson n "${TO_EMBED:-0}" '{format:"otzaria-embed-plan",version:2,records:$n,plan_sha256:("a"*64),passage_package:{checksum:$checksum,quantization:"fp32"}}' > "$out/embed-manifest.json"
 family=""; [ -z "$model" ] || family=$(sha256sum < "$model" | cut -c1-16)
 jq -n --arg tag "${PLAN_TAG:-v30-20260930165019}" --arg family "$family" --arg text "${PLAN_IDENTITY:-stub}" --argjson prev "$prev_version" \
   '{format:"otzaria-vector-plan",version:1,identity:{family:$family,text:$text},library_release_tag:$tag,
@@ -488,8 +528,8 @@ case "$sub" in
       --argjson keep "${keep:-false}" '{identityDigest: $d, kind: $kind, fromLibraryVersion: (if $kind == "delta" then $from else 0 end),
         toLibraryVersion: 30} + (if $keep == 1 then {keptEpoch: true} else {} end)' > "$out/release.json"
     for f in ledger-v30.keys pairs-v30.bin; do echo "$f" > "$out/$f"; done
-    jq -n --argjson since "$([ "$kind" = delta ] && echo 777 || echo 0)" --argjson codec "$epoch" --arg threshold "$threshold" \
-      '{library_version: 30, passage_package: {checksum: "4a4a2ae88a86f15ffe6069bfcefc3abd13c207cec5d7aaef52c0c59d752ade46"}, deltas_since_base: $since,
+    jq -n --arg package "$(jq -r .passage_package.checksum "$plan/embed-manifest.json")" --argjson since "$([ "$kind" = delta ] && echo 777 || echo 0)" --argjson codec "$epoch" --arg threshold "$threshold" \
+      '{library_version: 30, passage_package: {checksum: $package}, deltas_since_base: $since,
         codec: $codec, alias_threshold: (if $threshold == "" then null else ($threshold | tonumber) end)}' \
       > "$out/ledger-v30.manifest.json"
     if [ "$(jq -r .chunking_identity "$plan/model.json")" = 320260894818558297 ]; then
@@ -511,6 +551,7 @@ while [ $# -gt 0 ]; do case "$1" in --out) out=$2; shift 2;; --cache) cache=$2; 
   --checksum) checksum=$2; shift 2;; --graph) graph=$2; shift 2;; *) shift;; esac; done
 case "$script" in
   */model_package.py)   # fetch: the verified package's directory on stdout
+    if [ "${QA491_CACHE_MISSING:-}" = 1 ] && [ "$graph" = document.fp32.onnx ]; then exit 1; fi
     mkdir -p "$cache/$checksum"; : > "$cache/$checksum/$graph"; echo "$cache/$checksum" ;;
   *)                    # the GPU worker: a shard in --out
     mkdir -p "$out"; for f in vectors.f32 keys.bin shard-manifest.json; do : > "$out/$f"; done ;;
@@ -644,15 +685,21 @@ class Driver(unittest.TestCase):
         self.write_provenance()
         self.state = r / "state"
         (self.state / "bin").mkdir(parents=True)
-        for name, _ in FAMILIES:
+        for name, _ in CONFIGURED_FAMILIES + OPT_IN_FAMILIES:
             family = self.state / "bin" / "families" / name
             family.mkdir(parents=True)
-            (family / "model.json").write_text(json.dumps({"family_id": "stub", "chunking_identity": CHUNKING_IDENTITY[name]}))
-            (family / "chunking.json").write_text("{}")
+            model = {"family_id": "stub", "chunking_identity": CHUNKING_IDENTITY[name]}
+            if "qa491" in name:
+                model["passage_package_checksum"] = "5f80c47d3310a21fcc0c2f541fbb5732ba254555ef45afc2712cab63c8a33059"
+            (family / "model.json").write_text(json.dumps(model))
+            (family / "chunking.json").write_text(json.dumps({"chunking_version": 2 if "windows" in name else 1}))
         # a runner that has built before: its warehouse (the driver's path for the fp32 package)
         self.warehouse = self.state / "warehouse" / "fp32-4a4a2ae8"
         self.warehouse.mkdir(parents=True)
         (self.warehouse / "warehouse.json").write_text("{}")
+        qa491_warehouse = self.state / "warehouse/fp32-5f80c47d"
+        qa491_warehouse.mkdir(parents=True)
+        (qa491_warehouse / "warehouse.json").write_text("{}")
         self.ort = self.state / "venv/lib/python3.12/site-packages/onnxruntime/capi/libonnxruntime.so.1.28.0"
         self.ort.parent.mkdir(parents=True)
         self.ort.write_bytes(b"")
@@ -677,8 +724,10 @@ class Driver(unittest.TestCase):
                 prov[key] = value
         self.provenance.write_text(json.dumps(prov))
 
-    def run_driver(self, mode="dry-run", tag=TAG, args=(), driver=None, **env):
+    def run_driver(self, mode="dry-run", tag=TAG, args=(), driver=None, all_families=False, **env):
         driver = driver or self.unpinned_driver()
+        if "--family" not in args and not all_families:
+            args = (*args, "--family", LEGACY, "--family", WINDOWS)
         e = dict(os.environ, CALLS=str(self.calls), ASSETS=str(self.root / "assets"), UPLOADED=str(self.root / "uploaded.tsv"),
                  RELEASE_FILE_ARGS=str(self.root / "release-file-args.json"),
                  OTZARIA_SEMANTIC_CLI=str(self.root / "bin" / "cli"), EXPORT_SEMANTIC_PLAN=str(self.root / "bin" / "export"),
@@ -698,6 +747,104 @@ class Driver(unittest.TestCase):
 
     def model(self, name):
         return self.state / "bin" / "families" / name / "model.json"
+
+    def test_qa491_uses_a_fresh_package_warehouse_and_cache_only(self):
+        shutil.rmtree(self.state / "warehouse/fp32-5f80c47d")
+        p, calls = self.run_driver(TO_EMBED=4000, args=("--family", "meivin-qa491-onnx"))
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        warehouse = self.state / "warehouse/fp32-5f80c47d"
+        self.assertTrue((warehouse / "warehouse.json").exists())
+        self.assertTrue((self.warehouse / "warehouse.json").exists())
+        self.assertEqual((self.warehouse / "warehouse.json").read_text(), "{}")
+        self.assertIn("no warehouse yet at " + str(warehouse), p.stdout)
+        self.assertTrue(all("--cache-only" in c for c in calls if "model_package.py fetch" in c))
+        self.assertTrue(any("--graph document.fp32.onnx" in c for c in calls))
+        self.assertTrue(any("--graph query.int8.onnx" in c for c in calls))
+        self.assertFalse(any("export --index" in c and "/meivin-round2-" in c for c in calls))
+        self.assertLess(self.index_of(calls, "--cache-only"), self.index_of(calls, "release download"))
+
+    def test_qa491_accepts_stable_publication_with_cache_only_packages(self):
+        for name, prefix in [("meivin-qa491-onnx", "vectors-qa491"),
+                             ("meivin-qa491-windows-onnx", "vectors-qa491-windows")]:
+            with self.subTest(family=name):
+                p, calls = self.run_driver(mode="base", TO_EMBED=0, LIBRARY_VECTORS_PRERELEASE="false",
+                                           args=("--family", name))
+                self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+                created = calls[self.index_of(calls, f"gh release create {prefix}-{TAG} ")]
+                self.assertIn("--prerelease=false", created)
+                self.assertTrue(any("model_package.py fetch" in c and "--cache-only" in c for c in calls))
+
+    def assert_every_family_is_built_in_order(self, p, calls):
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        expected = ["meivin-round2-onnx", "meivin-round2-windows-onnx",
+                    "meivin-qa491-onnx", "meivin-qa491-windows-onnx"]
+        exports = [c for c in calls if c.startswith("export --index")]
+        self.assertEqual(len(exports), len(expected))
+        for call, name in zip(exports, expected):
+            self.assertIn(f"--model {self.model(name)} ", call)
+        for name, prefix in [("meivin-round2-onnx", "vectors"),
+                             ("meivin-round2-windows-onnx", "vectors-windows"),
+                             ("meivin-qa491-onnx", "vectors-qa491"),
+                             ("meivin-qa491-windows-onnx", "vectors-qa491-windows")]:
+            self.assertTrue(any(c.startswith(f"gh release edit {prefix}-{TAG} ") for c in calls), name)
+        self.assertLess(self.index_of(calls, f"gh release edit vectors-windows-{TAG} "),
+                        self.index_of(calls, f"--model {self.model('meivin-qa491-onnx')} "))
+        self.assertTrue((self.warehouse / "warehouse.json").exists())
+        self.assertTrue((self.state / "warehouse/fp32-5f80c47d/warehouse.json").exists())
+
+    def test_automatic_builds_qa491_after_both_legacy_families(self):
+        p, calls = self.run_driver(mode="auto", TO_EMBED=0, all_families=True)
+        self.assert_every_family_is_built_in_order(p, calls)
+
+    def test_all_builds_qa491_after_both_legacy_families(self):
+        p, calls = self.run_driver(mode="base", TO_EMBED=0, args=("--family", "all"))
+        self.assert_every_family_is_built_in_order(p, calls)
+
+    def test_legacy_selection_needs_no_qa491_cache_and_keeps_its_own_packages(self):
+        p, calls = self.run_driver(mode="base", TO_EMBED=0, QA491_CACHE_MISSING=1,
+                                   args=("--family", LEGACY, "--family", WINDOWS))
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        exports = [c for c in calls if c.startswith("export --index")]
+        self.assertEqual(len(exports), 2)
+        for call, name in zip(exports, [LEGACY, WINDOWS]):
+            self.assertIn(f"--model {self.model(name)} ", call)
+            self.assertIn(f"--warehouse {self.warehouse} ", call)
+        self.assertFalse(any("document.fp32.onnx" in c or "query.int8.onnx" in c for c in calls))
+
+    def test_automatic_requires_verified_qa491_cache_before_building(self):
+        p, calls = self.run_driver(mode="auto", TO_EMBED=0, QA491_CACHE_MISSING=1, all_families=True)
+        self.assertEqual(p.returncode, 1, p.stdout + p.stderr)
+        self.assertIn("needs a verified cache seed", p.stdout)
+        self.assertFalse(any(c.startswith("export ") or "release download" in c or "embed_worker.py" in c for c in calls))
+
+    def test_qa491_uses_the_frozen_published_rotation_without_fitting(self):
+        name = "meivin-qa491-windows-onnx"
+        p, calls = self.run_driver(mode="base", TO_EMBED=0, driver=DRIVER, args=("--family", name))
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertFalse([c for c in calls if "fit-rotation" in c])
+        self.assertIn(f"--rotation {HERE / 'rotation' / (name + '.bin')} ",
+                      calls[self.index_of(calls, "cli assemble --kind base")])
+
+    def test_qa491_windows_fits_a_new_rotation_and_preserves_old_family_ledgers(self):
+        old = self.state / "ledger/abcdef01"
+        old.mkdir(parents=True)
+        old_bytes = json.dumps({"published": "vectors-windows-v29-20260927072953"})
+        (old / "published.json").write_text(old_bytes)
+        name = "meivin-qa491-windows-onnx"
+        p, calls = self.run_driver(mode="base", TO_EMBED=50001, args=("--family", name))
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertEqual((old / "published.json").read_text(), old_bytes)
+        fit = [c for c in calls if c.startswith("cli fit-rotation")]
+        self.assertEqual(len(fit), 1)
+        self.assertIn("warehouse/fp32-5f80c47d", fit[0])
+        gpu = calls[self.index_of(calls, "embed_worker.py")]
+        self.assertIn("--graph document.fp32.onnx", gpu)
+        self.assertIn("--cache-only", gpu)
+        rotation = self.state / "ledger/rotations" / (name + ".fp32-5f80c47d.bin")
+        self.assertTrue(rotation.exists())
+        self.assertTrue(any(c.startswith(f"gh release edit vectors-qa491-windows-{TAG} ") for c in calls))
+        self.assertFalse(any(c.startswith("gh release create vectors-windows-") for c in calls))
+        self.assertTrue(any("vectors-qa491-windows.rotation-" in c for c in calls if "gh release upload" in c))
 
     def id8(self, name):
         """The first 8 of the identity digest the stub assemble gives the family."""
@@ -726,7 +873,7 @@ class Driver(unittest.TestCase):
         self.assertIn("--skip 0 --take", workers[0])
         self.assertFalse([c for c in calls if "cli embed-shard" in c
                           or ("model_package.py" in c and PIN["PASSAGE_PACKAGE_CHECKSUM"] in c)])   # not the CPU path
-        self.assertIn('"worker":"seforim-gpu-worker 1.0"', calls[self.index_of(calls, "cli assemble --kind base")])
+        self.assertIn('"worker":"seforim-gpu-worker 1.1"', calls[self.index_of(calls, "cli assemble --kind base")])
         add = self.index_of(calls, "cli warehouse-add")
         self.assertGreater(add, self.index_of(calls, "embed_worker.py"))
         self.assertIn("--plan", calls[add])
@@ -1481,7 +1628,7 @@ class Driver(unittest.TestCase):
         self.calls.unlink()
         p, calls = self.run_driver(TO_EMBED=0, args=("--family", "all"))
         self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
-        self.assertEqual(len([c for c in calls if c.startswith("export --index")]), len(FAMILIES))
+        self.assertEqual(len([c for c in calls if c.startswith("export --index")]), len(CONFIGURED_FAMILIES))
 
     def test_a_family_that_is_not_pinned_is_refused_before_anything_runs(self):
         for args, needle in ((("--family", "meivin-round2"), "is not a family of FAMILY_CONFIGS"),
@@ -1998,7 +2145,7 @@ if [ "$1" = clone ]; then           # git clone -q --filter=blob:none <url> <des
   url=${@: -2:1}; dest=${@: -1}
   mkdir -p "$dest"
   case "$url" in *otzaria-semantic-search*)
-    for family in meivin-round2-onnx meivin-round2-windows-onnx; do
+    for family in meivin-round2-onnx meivin-round2-windows-onnx meivin-qa491-onnx meivin-qa491-windows-onnx; do
       mkdir -p "$dest/config/models/$family"
       echo "{\"family_id\":\"$family\"}" > "$dest/config/models/$family/model.json"
       echo '{"chunking_version":1}' > "$dest/config/models/$family/chunking.json"
@@ -2071,7 +2218,7 @@ class Bootstrap(unittest.TestCase):
             self.assertTrue(os.access(b / name, os.X_OK), name)
             self.assertEqual((b / f"{name}.rev").read_text().strip(), rev, name)
             self.assertEqual((b / f"{name}.build").read_text().strip(), build, name)
-        for name, _ in FAMILIES:
+        for name, _ in CONFIGURED_FAMILIES + OPT_IN_FAMILIES:
             self.assertEqual(json.loads((b / "families" / name / "model.json").read_text()), {"family_id": name})
             self.assertTrue((b / "families" / name / "chunking.json").exists())
         self.assertFalse((b / "family-model.json").exists() or (b / "chunking.json").exists())
@@ -2088,7 +2235,7 @@ class Bootstrap(unittest.TestCase):
         p, calls = self.run_bootstrap()
         self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
         self.assertFalse((b / "family-model.json").exists() or (b / "chunking.json").exists())
-        self.assertEqual(sorted(d.name for d in (b / "families").iterdir()), sorted(n for n, _ in FAMILIES))
+        self.assertEqual(sorted(d.name for d in (b / "families").iterdir()), sorted(n for n, _ in CONFIGURED_FAMILIES + OPT_IN_FAMILIES))
 
     def test_pip_is_handed_the_system_ca_bundle_unless_it_is_told_another(self):
         for env, expected in (({}, str(self.ca)), ({"PIP_CERT": "/elsewhere/bundle.pem"}, "/elsewhere/bundle.pem"),

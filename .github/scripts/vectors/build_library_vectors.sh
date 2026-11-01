@@ -5,7 +5,7 @@
 #                            [--family all|NAME]... [--state DIR] [--work DIR] [--repo OWNER/NAME]
 #
 # Every family in FAMILY_CONFIGS (pins.env), in its order, or those --family names (a family is
-# its config directory's name), is built from the one index and the one warehouse:
+# its config directory's name), is built from one index and its passage package's warehouse:
 #
 #   1 index     download the release's search index (split parts, sha256-checked) and expand it,
 #               once its provenance names this release, this archive and this release's DB;
@@ -54,7 +54,8 @@
 # A family that fails stops the build there and the families before it stay published; retry it
 # alone with --family NAME. The first family, which applications install, never waits on a later one.
 #
-# The warehouse (no recipe in its identity) is shared. A new family's first build can embed millions
+# A warehouse (no recipe in its identity) is shared by families with the same passage package.
+# A new package's first build can embed millions
 # of texts; if needed, --family NAME --mode dry-run fills the warehouse beforehand (a dry run keeps them).
 #
 # LIBRARY_VECTORS_PRERELEASE (true unless "false") publishes each release as a prerelease:
@@ -71,6 +72,8 @@ set -euo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd)
 # shellcheck source=pins.env
 . "$HERE/pins.env"
+# shellcheck source=model_profiles.sh
+. "$HERE/model_profiles.sh"
 # shellcheck source=../db_asset_names.sh
 . "$HERE/../db_asset_names.sh"   # FULL_DB_ASSET_JQ: the release's full DB, which the index is built from
 
@@ -95,10 +98,12 @@ case "$PRERELEASE" in true|false) ;; *) echo "::error::LIBRARY_VECTORS_PRERELEAS
 # The families built: <name>, <release prefix>, <codec> ("" for the sidecar's) and <alias
 # threshold> ("" for none), in FAMILY_CONFIGS's order
 NAMES=(); PREFIXES=(); CODECS=(); THRESHOLDS=()
-for family in $FAMILY_CONFIGS; do
+for family in $FAMILY_CONFIGS ${OPT_IN_FAMILY_CONFIGS:-}; do
   IFS=: read -r config prefix codec threshold extra <<< "$family"
   name=${config##*/}
   [ -z "$extra" ] || { echo "::error::FAMILY_CONFIGS entry '$family' has fields past <alias threshold>"; exit 64; }
+  # Opt-in families are built only by name; automatic runs and `all` keep released families.
+  if [[ " ${OPT_IN_FAMILY_CONFIGS:-} " == *" $family "* ]] && [ "${#WANTED[@]}" -eq 0 ]; then continue; fi
   if [ "${#WANTED[@]}" -gt 0 ] && [[ " ${WANTED[*]} " != *" $name "* ]]; then continue; fi
   NAMES+=("$name"); PREFIXES+=("$prefix"); CODECS+=("$codec"); THRESHOLDS+=("$threshold")
 done
@@ -121,7 +126,6 @@ VALIDATE=${VALIDATE_SEMANTIC_VECTORS:-$STATE/bin/validate_semantic_vectors}
 PY=${VECTOR_PYTHON:-$STATE/venv/bin/python}
 GH=${GH:-gh}
 ZSTD=${ZSTD:-zstd}
-WAREHOUSE=$STATE/warehouse/$PASSAGE_QUANTIZATION-${PASSAGE_PACKAGE_CHECKSUM:0:8}
 LEDGERS=$STATE/ledger   # one ledger per family identity: ledger/<identityDigest[0:8]>
 PART_SIZE=1992294400
 export HSA_ENABLE_DXG_DETECTION=1
@@ -185,15 +189,34 @@ fi
 for name in "${NAMES[@]}"; do
   [ -f "$STATE/bin/families/$name/model.json" ] || die "$STATE/bin/families/$name/model.json is missing — run bootstrap_runner.sh"
 done
-[ -n "${MODEL_REVISION:-}" ] || die "pins.env pins no MODEL_REVISION: the model is fetched at a commit, never a branch"
+for name in "${NAMES[@]}"; do
+  select_model_profile "$name" || die "no valid model profile for $name"
+  if [ "${MODEL_REQUIRE_PRERELEASE:-false}" = true ] && [ "$PRERELEASE" != true ]; then
+    die "$name requires prerelease=true; promote it separately after the full builds pass"
+  fi
+  if [ "${MODEL_REQUIRE_CACHE:-false}" = true ]; then
+    for role in passage query; do
+      if [ "$role" = passage ]; then checksum=$PASSAGE_PACKAGE_CHECKSUM; graph=$MODEL_GRAPH
+      else checksum=$QUERY_PACKAGE_CHECKSUM; graph=$QUERY_GRAPH; fi
+      "$PY" "$HERE/model_package.py" fetch --cache "$STATE/model-cache" --checksum "$checksum" \
+        --graph "$graph" --cache-only >/dev/null || die "the $role package for $name needs a verified cache seed"
+    done
+  fi
+done
+select_model_profile ""
 for tool in jq sha256sum split tar; do command -v "$tool" >/dev/null || die "$tool is required"; done
 MIN_FREE_GB=${VECTORS_MIN_FREE_GB:-$MIN_FREE_GB}
 need_free_space
 # The warehouse, or none yet: then the first family plans every text and its add creates it. A
 # directory holding files but no warehouse.json is neither, and --create would empty it.
-if [ ! -f "$WAREHOUSE/warehouse.json" ] && [ -n "$(ls -A "$WAREHOUSE" 2>/dev/null)" ]; then
-  die "$WAREHOUSE holds files but no warehouse.json: it is not a warehouse (move it aside to start a new one)"
-fi
+for name in "${NAMES[@]}"; do
+  select_model_profile "$name"
+  warehouse=$STATE/warehouse/$PASSAGE_QUANTIZATION-${PASSAGE_PACKAGE_CHECKSUM:0:8}
+  if [ ! -f "$warehouse/warehouse.json" ] && [ -n "$(ls -A "$warehouse" 2>/dev/null)" ]; then
+    die "$warehouse holds files but no warehouse.json: it is not a warehouse (move it aside to start a new one)"
+  fi
+done
+select_model_profile ""
 # The single ledger a build of one family kept in ledger/ itself moves under its family's
 # identity, which its published manifest's name carries.
 [ -e "$LEDGERS" ] || [ ! -d "$LEDGERS.migrating" ] || mv "$LEDGERS.migrating" "$LEDGERS"
@@ -240,11 +263,19 @@ fi
 CREATED=$(jq -r .published_at "$RELEASE_JSON")
 echo "$CREATED" | grep -Eq '^[0-9]{4}-[0-9]{2}-[0-9]{2}T' || die "could not read when $TAG was published"
 # The plan trusts the warehouse's index: bad data stops the build here, a bad index is rebuilt.
-if [ -f "$WAREHOUSE/warehouse.json" ]; then
-  checked=$("$CLI" warehouse-verify --warehouse "$WAREHOUSE" --repair 2>&1) \
-    || die "warehouse-verify --repair, before the plan: $checked"
-  echo "$checked"
-fi
+checked_warehouses=" "
+for name in "${NAMES[@]}"; do
+  select_model_profile "$name"
+  warehouse=$STATE/warehouse/$PASSAGE_QUANTIZATION-${PASSAGE_PACKAGE_CHECKSUM:0:8}
+  [[ "$checked_warehouses" != *" $warehouse "* ]] || continue
+  checked_warehouses="$checked_warehouses$warehouse "
+  if [ -f "$warehouse/warehouse.json" ]; then
+    checked=$("$CLI" warehouse-verify --warehouse "$warehouse" --repair 2>&1) \
+      || die "warehouse-verify --repair, before the plan: $checked"
+    echo "$checked"
+  fi
+done
+select_model_profile ""
 endgroup
 
 # ─── 1 index ───────────────────────────────────────────────────────────────
@@ -582,8 +613,12 @@ prune_family_ledgers() {  # <prefix> <ledger kept>: the family's ledgers of earl
 
 build_family() {  # <name> <release prefix> <codec, or ""> <alias threshold, or "">: steps 2 to 7 of one family, in a subshell of its own
   local name=$1 prefix=$2 codec=$3 threshold=$4
-  local FAMILY=$STATE/bin/families/$name/model.json FW=$WORK/$name RELEASE_TAG=$prefix-$TAG FRESH="" first
-  first=${FAMILY_CONFIGS%% *}; first=${first%%:*}; first=${first##*/}
+  select_model_profile "$name"
+  local WAREHOUSE=$STATE/warehouse/$PASSAGE_QUANTIZATION-${PASSAGE_PACKAGE_CHECKSUM:0:8}
+  local CACHE_POLICY=()
+  [ "${MODEL_REQUIRE_CACHE:-false}" != true ] || CACHE_POLICY=(--cache-only)
+  local FAMILY=$STATE/bin/families/$name/model.json FW=$WORK/$name RELEASE_TAG=$prefix-$TAG FRESH="" anchor
+  anchor=${FAMILY_CONFIGS%% *}; anchor=${anchor%%:*}; anchor=${anchor##*/}
   need_free_space   # the families before this one hold space too
   mkdir -p "$FW/shards" "$FW/files"
   PREV=""; PV=""; PREV_TAG=""; PREV_RELEASE=""; PREVIOUS=(); CHAIN=(); ROTATION=""; ROTATION_FITTED=""
@@ -613,7 +648,7 @@ build_family() {  # <name> <release prefix> <codec, or ""> <alias threshold, or 
       # Few texts: ONNX Runtime with the fp32 package on this CPU, the reference itself, which needs
       # no parity certificate (the GPU worker's could not sample 1,000 texts from fewer than 959).
       PKG=$("$PY" "$HERE/model_package.py" fetch --cache "$STATE/model-cache" --checksum "$PASSAGE_PACKAGE_CHECKSUM" \
-        --graph "$MODEL_GRAPH" --repo "$MODEL_REPO" --revision "$MODEL_REVISION" --token-env OTZARIA_HF_TOKEN) \
+        --graph "$MODEL_GRAPH" --remote-graph "${MODEL_REMOTE_GRAPH:-}" --repo "$MODEL_REPO" --revision "$MODEL_REVISION" --token-env OTZARIA_HF_TOKEN ${CACHE_POLICY[@]+"${CACHE_POLICY[@]}"}) \
         || die "could not fetch the passage package $PASSAGE_PACKAGE_CHECKSUM"
       ORT=$(onnx_runtime) || die "the venv holds no ONNX Runtime library for embed-shard — run bootstrap_runner.sh"
       echo "on the CPU: embed-shard in $CPU_PROCESSES process(es) of $CPU_THREADS thread(s), ONNX Runtime $ORT"
@@ -621,12 +656,12 @@ build_family() {  # <name> <release prefix> <codec, or ""> <alias threshold, or 
       OTZARIA_ONNX_RUNTIME=$ORT "$CLI" embed-shard --plan "$PLAN" --model-file "$PKG/$MODEL_GRAPH" \
         --processes "$CPU_PROCESSES" --threads "$CPU_THREADS" --out "$FW/shards/cpu"
     else
-      EMBEDDED_BY="seforim-gpu-worker 1.0"
+      EMBEDDED_BY="seforim-gpu-worker 1.1"
       skip=0; n=0
       while [ "$skip" -lt "$TO_EMBED" ]; do
         "$PY" "$HERE/embed_worker.py" --plan "$PLAN" --out "$FW/shards/$(printf 's%03d' "$n")" \
           --skip "$skip" --take "$EMBED_WINDOW" --cache "$STATE/model-cache" \
-          --repo "$MODEL_REPO" --revision "$MODEL_REVISION" --graph "$MODEL_GRAPH" --token-env OTZARIA_HF_TOKEN
+          --repo "$MODEL_REPO" --revision "$MODEL_REVISION" --graph "$MODEL_GRAPH" --remote-graph "${MODEL_REMOTE_GRAPH:-}" --token-env OTZARIA_HF_TOKEN ${CACHE_POLICY[@]+"${CACHE_POLICY[@]}"}
         skip=$((skip + EMBED_WINDOW)); n=$((n + 1))
       done
     fi
@@ -680,7 +715,7 @@ build_family() {  # <name> <release prefix> <codec, or ""> <alias threshold, or 
 
   group "5 validate the release ($name) on its index: G3 coverage, G4 resolution, G6 retrieval"
   QPKG=$("$PY" "$HERE/model_package.py" fetch --cache "$STATE/model-cache" --checksum "$QUERY_PACKAGE_CHECKSUM" \
-    --graph "$QUERY_GRAPH" --repo "$MODEL_REPO" --revision "$MODEL_REVISION" --token-env OTZARIA_HF_TOKEN) \
+    --graph "$QUERY_GRAPH" --remote-graph "${QUERY_REMOTE_GRAPH:-}" --repo "$MODEL_REPO" --revision "$MODEL_REVISION" --token-env OTZARIA_HF_TOKEN ${CACHE_POLICY[@]+"${CACHE_POLICY[@]}"}) \
     || die "could not fetch the query package $QUERY_PACKAGE_CHECKSUM"
   ORT=$(onnx_runtime) || die "the venv holds no ONNX Runtime library for the validator — run bootstrap_runner.sh"
   validated release "$FW/release/validation.json" "$FW/release" \
@@ -720,9 +755,11 @@ build_family() {  # <name> <release prefix> <codec, or ""> <alias threshold, or 
   {
     echo "Semantic vectors for library release $TAG (base)."
     echo
-    if [ "$name" != "$first" ]; then
+    if [ "$name" != "$anchor" ]; then
       echo "Family: \`$name\`, chunking identity \`$(jq -r .chunking_identity "$FAMILY")\`."
       echo
+    fi
+    if [ "$(jq -r .chunking_version "$STATE/bin/families/$name/chunking.json")" = 2 ]; then
       jq -er '.gates[] | select(.gate == "G3") | .metrics |
         select([.standaloneTextChars, .windowedStandaloneChars, .unwindowedStandaloneChars, .partiallyWindowedStandaloneLines, .unwindowedStandaloneLines, .borrowedContextLines] |
           all(type == "number" and . >= 0)) |
