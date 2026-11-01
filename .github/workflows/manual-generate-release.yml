@@ -3063,7 +3063,7 @@ jobs:
           # Keep stderr and separate "no release yet" from "the query failed".
           LATEST_ERR="$RUNNER_TEMP/gh-release-view.err"
           if LATEST_RAW=$(gh release view --json tagName,name,publishedAt,assets 2>"$LATEST_ERR"); then
-            LATEST_JSON=$(jq -cS 'del(.assets[].downloadCount)' <<<"$LATEST_RAW")
+            LATEST_JSON=$(jq -cS 'if (.tagName | test("^v[0-9]+-[0-9]{14}$")) then del(.assets[].downloadCount) else error("latest release is not a database release") end' <<<"$LATEST_RAW")
             LATEST_ARG=(--argjson latest "$LATEST_JSON")
             echo "manifest: latest release $(jq -r .tagName <<<"$LATEST_JSON") published $(jq -r .publishedAt <<<"$LATEST_JSON")"
           elif grep -qEi 'release not found|404: not found \(https://api\.github\.com/repos/[^)]*/releases' "$LATEST_ERR"; then
@@ -3074,7 +3074,7 @@ jobs:
             exit 1
           fi
           ALL_RELEASES=$(gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
-            --jq '.[] | select((.draft|not) and (.prerelease|not)) | {tagName:.tag_name,name:.name,publishedAt:.published_at} | @json' \
+            --jq '.[] | select((.draft|not) and (.prerelease|not) and (.tag_name | test("^v[0-9]+-[0-9]{14}$"))) | {tagName:.tag_name,name:.name,publishedAt:.published_at} | @json' \
             | jq -sc '.')
           # Derive the timestamp from immutable release state.  A verified reuse
           # must regenerate the same bytes instead of committing a wall-clock-only

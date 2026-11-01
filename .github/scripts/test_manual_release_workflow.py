@@ -3009,6 +3009,53 @@ class ManualReleaseWorkflowContractTest(unittest.TestCase):
         self.assertIn("manifest: committed $(git rev-parse --short HEAD) and pushed", manifest)
         self.assertIn("manifest: unchanged at $(git rev-parse --short HEAD)", manifest)
 
+    def test_release_manifest_history_contains_only_published_database_tags(self):
+        def release(tag):
+            return dict(tag_name=tag, name=tag, published_at="2026-11-01T00:00:00Z",
+                        draft=False, prerelease=False)
+
+        releases = [
+            release("v35-20261030081000"),
+            release("vectors-qa491-v35-20261030081000"),
+            release("vectors-qa491-windows-v35-20261030081000"),
+            release("v34-20261001081000"),
+            {**release("v36-20261101081000"), "prerelease": True},
+            {**release("v37-20261101081000"), "draft": True},
+            release("v38-2026110108100"),
+            release("v39-202611010810000"),
+            release("v40-20261101081000-extra"),
+        ]
+        for path, name in (
+            (WORKFLOW, "Regenerate and push the release manifest"),
+            (MANIFEST_WORKFLOW, "Generate release manifest JSON"),
+        ):
+            with self.subTest(workflow=path.name):
+                doc = yaml.safe_load(path.read_text(encoding="utf-8"))
+                body = next(step["run"] for job in doc["jobs"].values()
+                            for step in job["steps"] if step.get("name") == name)
+                query = re.search(r"--jq '([^']+)'", body).group(1)
+                rows = subprocess.run(["jq", "-r", query], input=json.dumps(releases),
+                                      text=True, capture_output=True, check=True)
+                history = subprocess.run(["jq", "-sc", "."], input=rows.stdout,
+                                         text=True, capture_output=True, check=True)
+                self.assertEqual([r["tagName"] for r in json.loads(history.stdout)],
+                                 ["v35-20261030081000", "v34-20261001081000"])
+
+    def test_release_manifest_rejects_non_database_latest(self):
+        for path in (WORKFLOW, MANIFEST_WORKFLOW):
+            body = path.read_text(encoding="utf-8")
+            query = re.search(r"LATEST_JSON=\$\(jq -cS '([^']+)'", body).group(1)
+            for tag in ("v35-20261030081000", "vectors-qa491-v35-20261030081000"):
+                with self.subTest(workflow=path.name, tag=tag):
+                    latest = {"tagName": tag, "assets": [{"downloadCount": 9, "name": "db"}]}
+                    result = subprocess.run(["jq", "-cS", query], input=json.dumps(latest),
+                                            text=True, capture_output=True)
+                    if tag.startswith("v35-"):
+                        self.assertEqual(result.returncode, 0, result.stderr)
+                        self.assertEqual(json.loads(result.stdout)["assets"], [{"name": "db"}])
+                    else:
+                        self.assertNotEqual(result.returncode, 0)
+
     def test_cross_repo_dispatches_record_what_they_asked_for(self):
         saga = self.step("Dispatch zero-trust lookup key")
         relink = self.step("Run LinkerToOtzaria relink on this snapshot (and wait)")
