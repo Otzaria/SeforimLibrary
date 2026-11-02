@@ -95,7 +95,6 @@ RAW_BUNDLE_STEP = "Find and prepare Linux packages"
 STEPS = [
     ("Prepare container base tools", "M"),
     ("Clone repository", "M"),
-    ("Check if commit message is a version tag", "S"),
     ("Set up Flutter", "M"),
     ("Set up Flutter (aarch64, from git)", "M"),
     ("Create Google Calendar Credentials", "S"),
