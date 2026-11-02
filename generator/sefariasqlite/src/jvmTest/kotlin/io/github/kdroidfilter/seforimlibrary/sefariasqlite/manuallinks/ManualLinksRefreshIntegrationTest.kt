@@ -200,6 +200,36 @@ class ManualLinksRefreshIntegrationTest {
         assertTrue(error.message!!.contains("is Sefaria↔Sefaria"))
     }
 
+    @Test
+    fun aLocalToLocalRecordKeepsItsStartUntouched() {
+        val fixture = fixture("יעד א,", start = 5, targetIsSefaria = false)
+        val original = fixture.linkFile.readText()
+
+        val bootstrap = ManualLinksRefresh(fixture.arguments, logger).run()
+
+        assertEquals("ok", bootstrap.status)
+        val records = ManualLinksJson.readStrict(bootstrap.reportPath).get("records")
+        assertEquals(0, records.get("relevant").intValue())
+        assertEquals(1, records.get("irrelevant").intValue())
+        assertEquals(original, fixture.output.resolve("MoreBooks/links/מקומי_links.json").readText())
+
+        val lineage = feedOutputBackIntoTheCheckout(fixture)
+        val refresh = ManualLinksRefresh(rerun(fixture, lineage, ManualLinksMode.REFRESH, "refresh"), logger).run()
+
+        assertEquals("no_op", refresh.status)
+        assertEquals(original, fixture.output.parent.resolve("refresh/MoreBooks/links/מקומי_links.json").readText())
+    }
+
+    @Test
+    fun startOnALocalSourceWithASefariaTargetIsFatal() {
+        val fixture = fixture("יעד א,", start = 5)
+
+        val error = assertFailsWith<IllegalArgumentException> {
+            ManualLinksRefresh(fixture.arguments, logger).run()
+        }
+        assertTrue(error.message!!.contains("start is allowed only on a Sefaria source"))
+    }
+
     /** Turns a completed bootstrap into the next run's input checkout and returns its lineage. */
     private fun feedOutputBackIntoTheCheckout(fixture: Fixture): Path {
         Files.copy(
@@ -241,6 +271,8 @@ class ManualLinksRefreshIntegrationTest {
         adapter: String = "morebooks_heref_v1",
         duplicateTargetBook: Boolean = false,
         sourceIsSefaria: Boolean = false,
+        start: Int? = null,
+        targetIsSefaria: Boolean = true,
     ): Fixture {
         val temp = Files.createTempDirectory("manual-links-integration")
         val repository = Files.createDirectories(temp.resolve("repo"))
@@ -254,7 +286,7 @@ class ManualLinksRefreshIntegrationTest {
                     "line_index_1": 1,
                     "heRef_2": ${jsonText(heRef)},
                     "path_2": ${jsonText("folder\\" + targetHeTitle + ".txt")},
-                    "line_index_2": 99,
+                    "line_index_2": 99,${start?.let { "\n                    \"start\": $it," } ?: ""}
                     "unknown": "preserved"
                   }
                 ]
@@ -277,7 +309,8 @@ class ManualLinksRefreshIntegrationTest {
             """.trimIndent(),
         )
         val export = Files.createDirectories(temp.resolve("export/database_export"))
-        writeSefariaBook(export, "Target", targetHeTitle)
+        // A Sefaria book under another title keeps the export non-empty.
+        writeSefariaBook(export, "Target", if (targetIsSefaria) targetHeTitle else "אחר")
         if (duplicateTargetBook) writeSefariaBook(export, "Target Two", targetHeTitle)
         if (sourceIsSefaria) writeSefariaBook(export, "Local Source", "מקומי")
         val metadata = temp.resolve("release_metadata.json")

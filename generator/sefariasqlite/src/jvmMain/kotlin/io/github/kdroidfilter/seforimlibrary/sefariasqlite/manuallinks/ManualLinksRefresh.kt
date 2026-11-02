@@ -503,8 +503,9 @@ internal class ManualLinksRefresh(
                 require(!record.has("end") || (!managedSource && !managedTarget)) {
                     "$path[$recordIndex]: unsupported_sefaria_range"
                 }
-                require(!record.has("start") || managedSource) {
-                    "$path[$recordIndex]: start is allowed only on a Sefaria source with an anchor hash"
+                // Like `end`: a local↔local record is out of scope and its offsets are never rewritten.
+                require(!record.has("start") || managedSource || !managedTarget) {
+                    "$path[$recordIndex]: start is allowed only on a Sefaria source with an anchor hash or a local↔local record"
                 }
 
                 when {
