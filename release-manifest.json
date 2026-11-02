@@ -16,6 +16,19 @@
         "url": "https://github.com/Otzaria/SeforimLibrary/releases/download/v36-20261101064231/build_provenance.json"
       },
       {
+        "apiUrl": "https://api.github.com/repos/Otzaria/SeforimLibrary/releases/assets/699582978",
+        "contentType": "text/markdown; charset=utf-8",
+        "createdAt": "2026-11-01T21:32:03Z",
+        "digest": "sha256:f3e06126ffce475db2143928adf59e36e27856ee3f79828ff7030d48dd93616f",
+        "id": "RA_kwDOQ6kTXM4pssoC",
+        "label": "",
+        "name": "library-changes.md",
+        "size": 8792,
+        "state": "uploaded",
+        "updatedAt": "2026-11-01T21:32:04Z",
+        "url": "https://github.com/Otzaria/SeforimLibrary/releases/download/v36-20261101064231/library-changes.md"
+      },
+      {
         "apiUrl": "https://api.github.com/repos/Otzaria/SeforimLibrary/releases/assets/699503643",
         "contentType": "application/json",
         "createdAt": "2026-11-01T20:57:11Z",
@@ -194,16 +207,6 @@
       "name": "v36-20261101064231",
       "publishedAt": "2026-11-01T21:22:49Z",
       "tagName": "v36-20261101064231"
-    },
-    {
-      "name": "Library vectors v35-20261030043240",
-      "publishedAt": "2026-10-31T22:55:28Z",
-      "tagName": "vectors-qa491-windows-v35-20261030043240"
-    },
-    {
-      "name": "Library vectors v35-20261030043240",
-      "publishedAt": "2026-10-31T20:22:01Z",
-      "tagName": "vectors-qa491-v35-20261030043240"
     },
     {
       "name": "v35-20261030043240",
