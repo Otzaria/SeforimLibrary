@@ -597,6 +597,8 @@ status
   `pending_anchor_hash`, ורק אם אותה transaction מסווגת את המקור Sefaria,
   מזריקה ref+hash ומאמתת offset; pending כלשהו ב־output הוא כשל. לאחר פתרון
   דורשים `start <= rawContent.length` ביחידות UTF-16 של Kotlin.
+  ברשומה מקומית↔מקומית (מחוץ ל־scope) `start` מותר ונשמר כמות שהוא; רשומה
+  שמקורה מקומי ויעדה Sefaria עם `start` — כשל.
 - `end`, אם יתווסף בעתיד לרשומה שב־scope, הוא כשל
   `unsupported_sefaria_range`; אין לפרש אותו או לתקן אותו אוטומטית.
 - סדר הרשומות והשדות הקיימים נשמר.
