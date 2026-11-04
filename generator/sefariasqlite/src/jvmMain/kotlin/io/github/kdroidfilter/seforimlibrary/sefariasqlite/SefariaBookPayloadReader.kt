@@ -783,6 +783,7 @@ internal class SefariaBookPayloadReader(
                     simanTopicLines = simanTopicLines,
                     numbersIntegerLeaf = numbersIntegerLeaf(node, refPrefix),
                     labels = labels.section(refPrefix),
+                    titleSegmentHeadings = titleSegmentHeadings,
                 )
                 if (empty) {
                     omittedLineIndices.addAll(firstContentLine until output.size)
@@ -793,7 +794,6 @@ internal class SefariaBookPayloadReader(
                     if (firstRef != null && firstRef.ref !in preservedTitleRefs) {
                         // The heading takes over the ref only when no edition
                         // needs a separate text overlay at this address.
-                        omittedLineIndices += firstContentLine
                         titleSegmentHeadings[firstContentLine] = firstContentLine - 1
                     }
                 }
@@ -850,9 +850,11 @@ internal class SefariaBookPayloadReader(
                 simanTopicLines = simanTopicLines,
                 numbersIntegerLeaf = numbersIntegerLeaf(schemaObj),
                 labels = labels.section(bookEnTitle),
+                titleSegmentHeadings = titleSegmentHeadings,
             )
         }
 
+        omittedLineIndices += titleSegmentHeadings.keys
         if (omittedLineIndices.isEmpty()) {
             return BuiltBookContent(output, refs, headings, cleanShifts, lineKeyHashOverrides.orEmpty(), simanTopicLines)
         }
@@ -931,6 +933,8 @@ internal class SefariaBookPayloadReader(
         simanTopicLines: MutableSet<Int>? = null,
         numbersIntegerLeaf: Boolean = false,
         labels: SectionLabels,
+        // Omitted segment line -> the section heading it repeats (see walkBook).
+        titleSegmentHeadings: MutableMap<Int, Int>? = null,
     ) {
         // Leaf when depth reached zero, OR when the data is shallower than the
         // schema declares (e.g. Keter Malkhut: schema says depth=2 but most
@@ -1091,6 +1095,7 @@ internal class SefariaBookPayloadReader(
                 else -> ""
             }
 
+            var sectionTitle: String? = null
             if (depth > 1 && sectionName?.isBlank() != true && isReferenceable) {
                 val tag = when (level) {
                     1 -> "<h2>" to "</h2>"
@@ -1111,6 +1116,7 @@ internal class SefariaBookPayloadReader(
                     level = level,
                     lineIndex = output.size - 1
                 )
+                sectionTitle = title
             }
 
             // Paragraph/ref offset from index_offsets_by_depth (Zohar-style):
@@ -1146,7 +1152,14 @@ internal class SefariaBookPayloadReader(
                 simanTopicLines = simanTopicLines,
                 numbersIntegerLeaf = numbersIntegerLeaf,
                 labels = labels,
+                titleSegmentHeadings = titleSegmentHeadings,
             )
+            if (sectionTitle != null && titleSegmentHeadings != null && lineCountBefore < output.size &&
+                repeatsSectionTitle(output[lineCountBefore], sectionTitle) &&
+                refEntries.asReversed().any { it.lineIndex == lineCountBefore + 1 }
+            ) {
+                titleSegmentHeadings[lineCountBefore] = lineCountBefore - 1
+            }
 
             // The paragraph's TOC entry points at the paragraph line itself, so the
             // text gets no extra heading line.
@@ -1253,6 +1266,12 @@ private fun titleText(content: String): String =
 private fun repeatsNodeTitle(line: String, nodeTitle: String): Boolean {
     val text = titleText(line)
     return '<' !in text && text.isNotEmpty() && text == titleText(nodeTitle)
+}
+
+// [sectionTitle] ends in its generated number, which the segment may print with a geresh: "דרוש ד':".
+private fun repeatsSectionTitle(line: String, sectionTitle: String): Boolean {
+    val text = titleText(line).let { if (it.endsWith('\'') || it.endsWith('׳')) it.dropLast(1) else it }
+    return '<' !in text && text.isNotEmpty() && text == sectionTitle
 }
 
 /** `match_templates[].scope` values that make an alt-struct node citable alone. */
