@@ -267,7 +267,7 @@ internal class SefariaBookPayloadReader(
             } + authors).distinct()
 
             val sameTractateHeTitle = sameTractateHeTitle(schemaJson, schemaObj, schemaDir, schemaLookup)
-            val (lines, refs, headings, cleanShifts, lineKeyHashOverrides, simanTopicLines, omittedLinesBefore) = SefariaSameTractateRefs.apply(
+            val (lines, refs, headings, cleanShifts, lineKeyHashOverrides, simanTopicLines, omittedLinesBefore, titleSegmentHeadingLines) = SefariaSameTractateRefs.apply(
                 buildBookContent(
                     schemaObj = schemaObj,
                     textElement = textElement,
@@ -337,6 +337,7 @@ internal class SefariaBookPayloadReader(
                 cleanShiftByLineIndex = cleanShifts,
                 lineKeyHashOverrides = lineKeyHashOverrides,
                 omittedLinesBefore = omittedLinesBefore,
+                titleSegmentHeadingLines = titleSegmentHeadingLines,
                 simanTopicLines = simanTopicLines,
                 versionsMeta = versionsMeta,
                 sourceDirPath = textPath.parent?.toString(),
@@ -571,6 +572,7 @@ internal class SefariaBookPayloadReader(
         val lineKeyHashOverrides: Map<Int, ByteArray>,
         val simanTopicLines: Set<Int>,
         val omittedLinesBefore: Map<Int, List<OmittedSefariaLine>> = emptyMap(),
+        val titleSegmentHeadingLines: Set<Int> = emptySet(),
     )
 
     /**
@@ -631,6 +633,8 @@ internal class SefariaBookPayloadReader(
         val lineKeyHashOverrides = if (collectLineKeyOverrides) HashMap<Int, ByteArray>() else null
         val simanTopicLines = HashSet<Int>()
         val omittedLineIndices = HashSet<Int>()
+        // Omitted segment line -> the heading line that takes over its ref.
+        val titleSegmentHeadings = HashMap<Int, Int>()
 
         fun headingTagForLevel(level: Int): Pair<String, String> = when (level) {
             0 -> "<h1>" to "</h1>"
@@ -719,7 +723,17 @@ internal class SefariaBookPayloadReader(
                     numbersIntegerLeaf = numbersIntegerLeaf(node, refPrefix),
                     labels = labels.section(refPrefix),
                 )
-                if (empty) omittedLineIndices.addAll(firstContentLine until output.size)
+                if (empty) {
+                    omittedLineIndices.addAll(firstContentLine until output.size)
+                } else if (nodeTitle != null && level > 0 && firstContentLine < output.size &&
+                    repeatsNodeTitle(output[firstContentLine], nodeTitle) &&
+                    refs.asReversed().any { it.lineIndex == firstContentLine + 1 }
+                ) {
+                    // A first segment that only repeats the node title folds into the heading,
+                    // which then carries its ref.
+                    omittedLineIndices += firstContentLine
+                    titleSegmentHeadings[firstContentLine] = firstContentLine - 1
+                }
             }
         }
 
@@ -802,9 +816,9 @@ internal class SefariaBookPayloadReader(
             }
         }
         output.subList(nextIndex, output.size).clear()
-        refs.removeAll { it.lineIndex - 1 in omittedLineIndices }
+        refs.removeAll { it.lineIndex - 1 in omittedLineIndices && it.lineIndex - 1 !in titleSegmentHeadings }
         refs.replaceAll { ref ->
-            val index = newIndex[ref.lineIndex - 1] + 1
+            val index = newIndex[titleSegmentHeadings[ref.lineIndex - 1] ?: (ref.lineIndex - 1)] + 1
             if (index == ref.lineIndex) ref else ref.copy(lineIndex = index)
         }
         headings.removeAll { it.lineIndex in omittedLineIndices }
@@ -814,10 +828,14 @@ internal class SefariaBookPayloadReader(
                 if (index !in omittedLineIndices) put(newIndex[index], value)
             }
         }
+        val titleSegmentHeadingLines = titleSegmentHeadings.values.mapTo(HashSet()) { newIndex[it] }
+        // Char offsets into the folded segment do not index the heading's text.
+        val shifts = remap(cleanShifts) + titleSegmentHeadingLines.associateWith { CLEAN_MODIFIED }
         return BuiltBookContent(
-            output, refs, headings, remap(cleanShifts), remap(lineKeyHashOverrides.orEmpty()),
+            output, refs, headings, shifts, remap(lineKeyHashOverrides.orEmpty()),
             simanTopicLines.filterNot { it in omittedLineIndices }.mapTo(HashSet()) { newIndex[it] },
             omittedLinesBefore,
+            titleSegmentHeadingLines,
         )
     }
 
@@ -1160,6 +1178,19 @@ private val NUMBERED_PARAGRAPH_SECTIONS = listOf(
     "Shulchan Arukh HaRav, Yoreh Deah, ",
     "Shulchan Arukh HaRav, Choshen Mishpat, ",
 )
+
+// Pure emphasis only: any other tag (an <i data-commentator> marker, <sup>, <br>…) keeps the segment.
+private val TITLE_EMPHASIS_TAG = Regex("</?(?:b|strong|big|small)>", RegexOption.IGNORE_CASE)
+private val TITLE_SPACES = Regex("\\s+")
+
+// Exact text only: with vowels ignored, "אָבִֽינוּ מַלְכֵּֽנוּ" would pass for the title of the prayer it opens.
+private fun titleText(content: String): String =
+    content.replace(TITLE_EMPHASIS_TAG, "").replace(TITLE_SPACES, " ").trim().trimEnd('.', ':').trimEnd()
+
+private fun repeatsNodeTitle(line: String, nodeTitle: String): Boolean {
+    val text = titleText(line)
+    return '<' !in text && text.isNotEmpty() && text == titleText(nodeTitle)
+}
 
 /** `match_templates[].scope` values that make an alt-struct node citable alone. */
 private val ALONE_MATCH_TEMPLATE_SCOPES = setOf("any", "alone")

@@ -121,6 +121,9 @@ internal class SefariaVersionsImporter(
             val lineId = lineKeyToId[input.bookPath to (entry.lineIndex - 1)] ?: return@forEach
             if (mergedLineIdByRef.putIfAbsent(entry.ref, lineId) != null) duplicateRefs++
         }
+        val titleSegmentRefs = payload.refEntries
+            .filter { it.lineIndex - 1 in payload.titleSegmentHeadingLines }
+            .mapTo(HashSet()) { it.ref }
 
         for (file in versionFiles) {
             val doc = runCatching { json.parseToJsonElement(file.readText()).jsonObject }.getOrNull()
@@ -163,6 +166,8 @@ internal class SefariaVersionsImporter(
             val rows = ArrayList<VersionLine>(walk.refs.size)
             val seenRefs = HashSet<String>(walk.refs.size)
             walk.refs.forEach { ref ->
+                // A title folded into its heading (in either walk) has no text of its own to vary.
+                if (ref.lineIndex - 1 in walk.titleSegmentHeadingLines || ref.ref in titleSegmentRefs) return@forEach
                 if (!seenRefs.add(ref.ref)) {
                     duplicateRefs++
                     return@forEach
