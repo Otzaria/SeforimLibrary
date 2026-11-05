@@ -48,17 +48,21 @@ object GeneratorPipelineProbe {
         }
         Logger.setMinSeverity(Severity.Warn)
         val allocator = InMemoryIdAllocator.load(path = null)
-        val sampler = MemorySampler()
+        val profile = java.lang.Boolean.getBoolean("seforim.generator.probeProfile")
+        val sampler = MemorySampler(profile)
         try {
             System.gc()
             sampler.start()
+            if (profile) profileStage("lines-start")
             val start = System.nanoTime()
             DatabaseGenerator(fixture, repo, allocator = allocator).generateLinesOnly()
             val linesEnd = System.nanoTime()
+            if (profile) profileStage("links-start")
             // Production starts phase two in a new process; do not depend on phase-one caches.
             DatabaseGenerator(fixture, repo, allocator = allocator).generateLinksOnly()
             val linksEnd = System.nanoTime()
             sampler.close()
+            if (profile) profileStage("complete")
             val metrics = buildJsonObject {
                 put("booksRequested", books)
                 put("linesPerBookRequested", lines)
@@ -71,8 +75,13 @@ object GeneratorPipelineProbe {
                 put("sampleIntervalMs", 10)
                 put("sampledPeakHeapBytes", sampler.peakHeap.get())
                 put("sampledPeakRssBytes", sampler.peakRss.get())
+                if (profile) {
+                    put("sampledPeakHeapEpochMs", sampler.peakHeapEpochMs.get())
+                    put("sampledPeakRssEpochMs", sampler.peakRssEpochMs.get())
+                }
                 put("processPeakRssBytes", rss("VmHWM:"))
                 put("javaVersion", System.getProperty("java.version"))
+                put("javaHome", System.getProperty("java.home"))
                 put("os", System.getProperty("os.name"))
                 put("availableProcessors", Runtime.getRuntime().availableProcessors())
                 put("maxHeapBytes", Runtime.getRuntime().maxMemory())
@@ -85,6 +94,14 @@ object GeneratorPipelineProbe {
             sampler.close()
             repo.close()
         }
+    }
+
+    /** Wall-clock and VM uptime align the profiled phases with JFR and GC logs. */
+    private fun profileStage(stage: String) {
+        println(
+            "generator-probe-stage=$stage epochMillis=${System.currentTimeMillis()} " +
+                "uptimeMs=${ManagementFactory.getRuntimeMXBean().uptime}",
+        )
     }
 
     private fun createFixture(root: Path, books: Int, lines: Int) {
@@ -160,9 +177,11 @@ object GeneratorPipelineProbe {
             ?.substringAfter(':')?.trim()?.substringBefore(' ')?.toLong()?.times(1024) ?: -1L
     }.getOrDefault(-1)
 
-    private class MemorySampler : AutoCloseable {
+    private class MemorySampler(private val recordPeakTimes: Boolean) : AutoCloseable {
         val peakHeap = AtomicLong()
         val peakRss = AtomicLong(-1)
+        val peakHeapEpochMs = AtomicLong()
+        val peakRssEpochMs = AtomicLong()
         private val running = AtomicBoolean(false)
         private var thread: Thread? = null
         fun start() {
@@ -170,8 +189,12 @@ object GeneratorPipelineProbe {
             thread = Thread({
                 while (running.get()) {
                     val runtime = Runtime.getRuntime()
-                    peakHeap.accumulateAndGet(runtime.totalMemory() - runtime.freeMemory(), ::maxOf)
-                    peakRss.accumulateAndGet(rss("VmRSS:"), ::maxOf)
+                    val heap = runtime.totalMemory() - runtime.freeMemory()
+                    if (recordPeakTimes && heap > peakHeap.get()) peakHeapEpochMs.set(System.currentTimeMillis())
+                    peakHeap.accumulateAndGet(heap, ::maxOf)
+                    val resident = rss("VmRSS:")
+                    if (recordPeakTimes && resident > peakRss.get()) peakRssEpochMs.set(System.currentTimeMillis())
+                    peakRss.accumulateAndGet(resident, ::maxOf)
                     try { Thread.sleep(10) } catch (_: InterruptedException) { break }
                 }
             }, "generator-probe-memory").apply { isDaemon = true; start() }

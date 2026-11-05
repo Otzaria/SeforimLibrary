@@ -35,6 +35,15 @@ gradle.projectsEvaluated {
              generator.property('probeBooks'), generator.property('probeLines'))
         maxHeapSize = '1g'
         systemProperty('seforim.generator.inputBufferMiB', generator.property('generatorInputBufferMiB'))
+        def recording = generator.findProperty('probeJfr')
+        if (recording != null) {
+            jvmArgs("-XX:StartFlightRecording=filename=${recording},settings=profile,dumponexit=true")
+            systemProperty('seforim.generator.probeProfile', 'true')
+        }
+        def gcLog = generator.findProperty('probeGcLog')
+        if (gcLog != null) {
+            jvmArgs("-Xlog:gc*,gc+heap=debug:file=${gcLog}:time,uptime,level,tags:filecount=0")
+        }
     }
 }
 '''
@@ -75,6 +84,8 @@ def main():
     parser.add_argument('--candidate', type=Path, required=True)
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--input-buffer-mib', type=int, default=8)
+    parser.add_argument('--profile-medium', action='store_true',
+                        help='After ordinary measurements, repeat the same medium fixture with JFR and GC logging')
     args = parser.parse_args()
     baseline, candidate, output = (path.resolve() for path in (args.baseline, args.candidate, args.output))
     if baseline == candidate:
@@ -95,6 +106,7 @@ def main():
         'probeHeap': '1g',
         'cases': [],
         'timingIsInformational': True,
+        'mediumProfilingEnabled': args.profile_medium,
     }
     (output / 'provenance.json').write_text(json.dumps(provenance, indent=2) + '\n')
 
@@ -136,6 +148,45 @@ def main():
             f'{metrics["candidate"]["sampledPeakHeapBytes"] / 1024 / 1024:.1f} MiB heap',
             flush=True,
         )
+
+    if args.profile_medium:
+        profiles = output / 'profiles'
+        profiles.mkdir()
+        fixture = output / 'medium/fixture'
+        metrics = {}
+        for label, root in [('baseline', baseline), ('candidate', candidate)]:
+            destination = profiles / label
+            # Both VM logs are opened before main(), so their directory must exist.
+            destination.mkdir()
+            recording = destination / 'recording.jfr'
+            command = gradle_command(root) + [
+                '--init-script', str(init), ':otzariasqlite:generatorComparisonProbe',
+                f'-PprobeFixture={fixture}', f'-PprobeOutput={destination}',
+                '-PprobeBooks=24', '-PprobeLines=500',
+                f'-PgeneratorInputBufferMiB={args.input_buffer_mib}',
+                f'-PprobeJfr={recording}', f'-PprobeGcLog={destination / "gc.log"}',
+            ]
+            run_logged(command, root, destination / 'probe.log')
+            metrics[label] = json.loads((destination / 'metrics.json').read_text(encoding='utf-8'))
+            # Use the exact JVM that executed the probe, even if Gradle selected
+            # a toolchain different from the shell's JAVA_HOME.
+            jfr = Path(metrics[label]['javaHome']) / 'bin' / ('jfr.exe' if os.name == 'nt' else 'jfr')
+            run_logged(
+                [str(jfr), 'print', '--json', '--stack-depth', '12', '--events',
+                 'jdk.ObjectAllocationSample,jdk.GCHeapSummary,jdk.GarbageCollection', str(recording)],
+                root, destination / 'events.json',
+            )
+        run_logged(
+            [sys.executable, str(candidate / 'tool/perf/generator_compare.py'),
+             str(profiles / 'baseline/seforim.db'), str(profiles / 'candidate/seforim.db')],
+            candidate, profiles / 'parity.json',
+        )
+        provenance['profiledMedium'] = {
+            'instrumentation': 'JFR profile and GC/heap logging; separate from ordinary measurements',
+            'equal': json.loads((profiles / 'parity.json').read_text(encoding='utf-8'))['equal'],
+            **metrics,
+        }
+        (output / 'summary.json').write_text(json.dumps(provenance, indent=2) + '\n')
     return 0
 
 

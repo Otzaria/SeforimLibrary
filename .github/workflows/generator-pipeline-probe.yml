@@ -70,7 +70,8 @@ jobs:
           python3 candidate/tool/perf/generator_pipeline_ci.py \
             --baseline "$GITHUB_WORKSPACE/baseline" \
             --candidate "$GITHUB_WORKSPACE/candidate" \
-            --output "$RUNNER_TEMP/generator-pipeline"
+            --output "$RUNNER_TEMP/generator-pipeline" \
+            --profile-medium
 
       - name: Upload comparisons, phase times, heap/RSS and logs
         if: always()
@@ -86,4 +87,7 @@ jobs:
             ${{ runner.temp }}/generator-pipeline/*/*.log
             ${{ runner.temp }}/generator-pipeline/*/parity.json
             ${{ runner.temp }}/generator-pipeline/*/*/metrics.json
+            ${{ runner.temp }}/generator-pipeline/profiles/*/*.log
+            ${{ runner.temp }}/generator-pipeline/profiles/*/events.json
+            ${{ runner.temp }}/generator-pipeline/profiles/*/recording.jfr
             candidate/generator/otzariasqlite/build/test-results/jvmTest/*.xml

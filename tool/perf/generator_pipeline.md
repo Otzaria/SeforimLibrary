@@ -152,6 +152,31 @@ because other changes can intentionally alter content or schema. It publishes
 measurement, comparison and JVM test reports as artifacts; elapsed time and
 memory measurements do not decide pass/fail.
 
+The workflow also passes `--profile-medium`. After all three ordinary cases,
+this repeats the existing medium fixture in fresh baseline/candidate JVMs with
+JFR's `profile` configuration and GC/heap logging. These diagnostic runs have
+their own `profiles/baseline` and `profiles/candidate` outputs; their timings
+must not be combined with the uninstrumented measurements. No GC is forced
+during either measured generation phase. The probe's existing pre-run GC is
+unchanged.
+
+Each profile includes `metrics.json`, `gc.log`, `recording.jfr`, the phase
+wall-clock/uptime markers in `probe.log`, and `events.json`. The latter is
+exported by the exact probe JVM's `jfr` tool and contains allocation samples,
+before/after-GC heap summaries and collection events with 12-frame stacks.
+Profile metrics also timestamp the sampled heap/RSS maxima so they can be
+located relative to phase boundaries and collections.
+Allocation samples are estimates, and heap remaining after a young collection
+is not necessarily the complete live set. Use the phase markers and collection
+types when comparing these data. The profiled databases also undergo the same
+strict parity comparison. No production sources are changed to enable this
+diagnosis.
+
+The profiling options and JSON export are documented in the JDK 25
+[`java`](https://docs.oracle.com/en/java/javase/25/docs/specs/man/java.html)
+and [`jfr`](https://docs.oracle.com/en/java/javase/25/docs/specs/man/jfr.html)
+command references.
+
 For larger or repeated measurements, run the same fixture sizes and JVM flags
 in separate JVM processes with the probe directly. Reuse
 the **same fixture directory**, because the original link importer used native
