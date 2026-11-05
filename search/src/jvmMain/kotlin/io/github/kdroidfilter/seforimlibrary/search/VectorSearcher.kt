@@ -1,14 +1,10 @@
 package io.github.kdroidfilter.seforimlibrary.search
 
 import org.apache.lucene.document.IntPoint
-import org.apache.lucene.index.DirectoryReader
 import org.apache.lucene.search.BooleanClause
 import org.apache.lucene.search.BooleanQuery
-import org.apache.lucene.search.IndexSearcher
 import org.apache.lucene.search.KnnFloatVectorQuery
 import org.apache.lucene.search.Query
-import org.apache.lucene.store.FSDirectory
-import org.apache.lucene.store.NIOFSDirectory
 import java.io.Closeable
 import java.nio.file.Path
 
@@ -24,14 +20,7 @@ data class DenseHit(val lineId: Long, val bookId: Long, val score: Float)
  * Returns line ids that are joined back to the DB by the caller.
  */
 class VectorSearcher(indexDir: Path) : Closeable {
-    // GraalVM native image can't instantiate MMapDirectory's MemorySegmentIndexInputProvider
-    // (Panama foreign downcalls) — use NIOFSDirectory there, like LuceneSearchEngine does.
-    private val dir =
-        if (System.getProperty("org.graalvm.nativeimage.imagecode") != null) {
-            NIOFSDirectory(indexDir)
-        } else {
-            FSDirectory.open(indexDir)
-        }
+    private val searchers = ManagedIndexSearchers(indexDir)
 
     private fun filterQuery(baseBookOnly: Boolean, bookIds: Collection<Long>?): Query? {
         val b = BooleanQuery.Builder()
@@ -47,8 +36,8 @@ class VectorSearcher(indexDir: Path) : Closeable {
     }
 
     fun search(query: FloatArray, k: Int, baseBookOnly: Boolean = false, bookIds: Collection<Long>? = null): List<DenseHit> {
-        DirectoryReader.open(dir).use { reader ->
-            val searcher = IndexSearcher(reader)
+        searchers.acquire().use { lease ->
+            val searcher = lease.searcher
             val knn = KnnFloatVectorQuery("vec", query, k, filterQuery(baseBookOnly, bookIds))
             val top = searcher.search(knn, k)
             val stored = searcher.storedFields()
@@ -63,5 +52,9 @@ class VectorSearcher(indexDir: Path) : Closeable {
         }
     }
 
-    override fun close() = dir.close()
+    /** Refresh committed changes early; each search also checks automatically. */
+    fun refresh() = searchers.refresh()
+
+    /** Close before replacing the index directory; in-flight searches may finish. */
+    override fun close() = searchers.close()
 }

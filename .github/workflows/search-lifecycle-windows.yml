@@ -1,0 +1,40 @@
+name: Search lifecycle on Windows
+
+on:
+  pull_request:
+    branches: [otzaria]
+    paths:
+      - 'search/**'
+      - 'gradle/**'
+      - '.github/workflows/search-lifecycle-windows.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  search-lifecycle:
+    runs-on: windows-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          submodules: true
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '25'
+      - uses: gradle/actions/setup-gradle@v5
+        with:
+          cache-read-only: true
+      - name: Check native reader disposal and index replacement
+        shell: pwsh
+        run: >-
+          ./gradlew.bat :search:jvmTest --no-daemon --no-configuration-cache
+          --max-workers=2 '-Dorg.gradle.jvmargs=-Xmx2g'
+          '-Pkotlin.compiler.execution.strategy=in-process'
+      - uses: actions/upload-artifact@v6
+        if: always()
+        with:
+          name: windows-search-test-results
+          path: search/build/test-results/jvmTest/*.xml
+          retention-days: 7
