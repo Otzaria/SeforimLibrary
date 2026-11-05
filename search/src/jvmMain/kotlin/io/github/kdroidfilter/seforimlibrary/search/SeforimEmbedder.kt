@@ -33,38 +33,19 @@ class SeforimEmbedder private constructor(
     val dim: Int = 384
 
     private val tokenizer: HuggingFaceTokenizer = HuggingFaceTokenizer.newInstance(tokenizerJson)
-    private val env: OrtEnvironment = OrtEnvironment.getEnvironment()
-    private val session: OrtSession = openSession(env, onnxModel)
+    private val env: OrtEnvironment
+    private val session: OwnedOnnxSession<OrtSession, OrtSession.SessionOptions>
+    private var tokenizerClosed = false
 
-    // The stock Maven `onnxruntime` artifact is CPU-only on desktop JVM. Hardware EPs only
-    // work if a capable native is bundled: CUDA (swap to the onnxruntime_gpu artifact +
-    // system CUDA/cuDNN, NVIDIA), or DirectML/CoreML (custom ORT build). They're opt-in via
-    // -DseforimEmbedGpu=true / SEFORIM_EMBED_GPU=1; otherwise an optimized CPU session
-    // (full graph opt + all cores). int8 is already CPU-friendly.
-    private fun openSession(env: OrtEnvironment, model: Path): OrtSession {
-        val wantGpu = System.getProperty("seforimEmbedGpu")?.toBoolean() == true ||
-            System.getenv("SEFORIM_EMBED_GPU")?.toBoolean() == true
-        if (wantGpu) {
-            val eps = listOf<Pair<String, (OrtSession.SessionOptions) -> Unit>>(
-                "CUDA" to { it.addCUDA(0) },
-                "DirectML" to { it.addDirectML(0) },
-                "CoreML" to { it.addCoreML() },
-            )
-            for ((name, add) in eps) {
-                runCatching {
-                    val o = OrtSession.SessionOptions().apply {
-                        setOptimizationLevel(OrtSession.SessionOptions.OptLevel.ALL_OPT); add(this)
-                    }
-                    return env.createSession(model.toString(), o).also { logger.i { "ONNX EP: $name (GPU)" } }
-                }
-            }
-            logger.i { "No GPU EP available in this build; using CPU" }
+    init {
+        try {
+            // This is ORT's shared, JVM-lifetime singleton, not an owned per-embedder resource.
+            env = OrtEnvironment.getEnvironment()
+            session = openOnnxSession(env, onnxModel)
+        } catch (failure: Throwable) {
+            closeAfterFailure(tokenizer, failure)
+            throw failure
         }
-        val o = OrtSession.SessionOptions().apply {
-            setOptimizationLevel(OrtSession.SessionOptions.OptLevel.ALL_OPT)
-            runCatching { setIntraOpNumThreads(Runtime.getRuntime().availableProcessors()) }
-        }
-        return env.createSession(model.toString(), o)
     }
 
     // v5 models were trained on final-folded text; queries must be normalized
@@ -72,7 +53,7 @@ class SeforimEmbedder private constructor(
     private val normalize: (String) -> String = HebrewV5Normalizer::clean
 
     /** Embed a single text (normalized like the corpus) into a normalized float[dim]. */
-    fun embed(text: String): FloatArray {
+    fun embed(text: String): FloatArray = session.useSession { ortSession ->
         val enc = tokenizer.encode(normalize(text))
         var ids = enc.ids
         var mask = enc.attentionMask
@@ -82,18 +63,30 @@ class SeforimEmbedder private constructor(
         }
         OnnxTensor.createTensor(env, arrayOf(ids)).use { idsT ->
             OnnxTensor.createTensor(env, arrayOf(mask)).use { maskT ->
-                session.run(mapOf("input_ids" to idsT, "attention_mask" to maskT)).use { res ->
+                ortSession.run(mapOf("input_ids" to idsT, "attention_mask" to maskT)).use { res ->
                     @Suppress("UNCHECKED_CAST")
-                    return (res[0].value as Array<FloatArray>)[0]
+                    (res[0].value as Array<FloatArray>)[0]
                 }
             }
         }
     }
 
+    @Synchronized
     override fun close() {
-        session.close()
-        env.close()
-        tokenizer.close()
+        try {
+            session.close()
+        } catch (failure: Throwable) {
+            closeAfterFailure(AutoCloseable { closeTokenizer() }, failure)
+            throw failure
+        }
+        closeTokenizer()
+    }
+
+    private fun closeTokenizer() {
+        if (!tokenizerClosed) {
+            tokenizer.close()
+            tokenizerClosed = true
+        }
     }
 
     companion object {
