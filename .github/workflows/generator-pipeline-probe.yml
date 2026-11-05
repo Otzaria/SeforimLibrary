@@ -1,0 +1,89 @@
+name: Generator pipeline parity and measurements
+
+on:
+  pull_request:
+    paths:
+      - 'generator/otzariasqlite/**'
+      - 'generator/common/**'
+      - 'dao/**'
+      - 'core/**'
+      - 'tool/perf/generator_*'
+      - '.github/workflows/generator-pipeline-probe.yml'
+  workflow_dispatch:
+    inputs:
+      baseline_ref:
+        description: 'Baseline branch, tag or commit to compare against the selected workflow ref'
+        required: true
+        default: 'otzaria'
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: generator-pipeline-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  compare:
+    # Content/schema feature PRs can intentionally change the DB. Automatic
+    # equality checks are scoped to performance branches; manual runs are open
+    # to any ref and always record their exact baseline/candidate commits.
+    if: github.event_name == 'workflow_dispatch' || startsWith(github.head_ref, 'perf/generator-')
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - name: Checkout candidate
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          path: candidate
+          persist-credentials: false
+
+      - name: Checkout unchanged baseline
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.pull_request.base.sha || inputs.baseline_ref }}
+          path: baseline
+          persist-credentials: false
+
+      - name: Install the same JBR 25 as the main JVM test workflow
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 3 --output "$RUNNER_TEMP/generator-jbr.tar.gz" \
+            'https://cache-redirector.jetbrains.com/intellij-jbr/jbrsdk-25.0.1-linux-x64-b268.52.tar.gz'
+          mkdir -p "$RUNNER_TEMP/generator-jbr"
+          tar -xzf "$RUNNER_TEMP/generator-jbr.tar.gz" -C "$RUNNER_TEMP/generator-jbr"
+          GENERATOR_JAVA_HOME=$(find "$RUNNER_TEMP/generator-jbr" -mindepth 1 -maxdepth 1 -type d -print -quit)
+          test -x "$GENERATOR_JAVA_HOME/bin/java"
+          printf 'JAVA_HOME=%s\n' "$GENERATOR_JAVA_HOME" >> "$GITHUB_ENV"
+          printf '%s/bin\n' "$GENERATOR_JAVA_HOME" >> "$GITHUB_PATH"
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v5
+        with:
+          cache-read-only: true
+
+      - name: Test and compare the baseline and candidate
+        run: |
+          python3 candidate/tool/perf/generator_pipeline_ci.py \
+            --baseline "$GITHUB_WORKSPACE/baseline" \
+            --candidate "$GITHUB_WORKSPACE/candidate" \
+            --output "$RUNNER_TEMP/generator-pipeline"
+
+      - name: Upload comparisons, phase times, heap/RSS and logs
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: generator-pipeline-${{ github.run_id }}
+          if-no-files-found: warn
+          retention-days: 14
+          path: |
+            ${{ runner.temp }}/generator-pipeline/provenance.json
+            ${{ runner.temp }}/generator-pipeline/summary.json
+            ${{ runner.temp }}/generator-pipeline/candidate-tests.log
+            ${{ runner.temp }}/generator-pipeline/*/*.log
+            ${{ runner.temp }}/generator-pipeline/*/parity.json
+            ${{ runner.temp }}/generator-pipeline/*/*/metrics.json
+            candidate/generator/otzariasqlite/build/test-results/jvmTest/*.xml

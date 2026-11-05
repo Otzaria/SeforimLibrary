@@ -1253,6 +1253,28 @@ class SeforimRepository(databasePath: String, private val driver: SqlDriver) : L
             ).executeAsList().map { it.toModel() }
         }
 
+    /** Index/id projection for bounded importer lookups; never loads line text. */
+    suspend fun getLineIdIndexPairs(bookId: Long, startIndex: Int, endIndex: Int): List<Pair<Int, Long>> =
+        withContext(Dispatchers.IO) {
+            if (endIndex < startIndex) return@withContext emptyList()
+            driver.executeQuery(
+                identifier = null,
+                sql = "SELECT lineIndex, id FROM line WHERE bookId = ? AND lineIndex BETWEEN ? AND ? ORDER BY lineIndex",
+                mapper = { cursor ->
+                    val pairs = ArrayList<Pair<Int, Long>>()
+                    while (cursor.next().value) {
+                        pairs.add(checkNotNull(cursor.getLong(0)).toInt() to checkNotNull(cursor.getLong(1)))
+                    }
+                    QueryResult.Value(pairs)
+                },
+                parameters = 3,
+            ) {
+                bindLong(0, bookId)
+                bindLong(1, startIndex.toLong())
+                bindLong(2, endIndex.toLong())
+            }.value
+        }
+
     suspend fun getLinesByIds(ids: Collection<Long>): List<Line> =
         withContext(Dispatchers.IO) {
             if (ids.isEmpty()) return@withContext emptyList()

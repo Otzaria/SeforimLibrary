@@ -42,7 +42,9 @@ class OtzariaGeneratorDiagnosticsTest {
     // severity to Assert — the capture must be installed AFTER the repository.
 
     private class Capture : LogWriter() {
-        val lines = mutableListOf<Pair<Severity, String>>()
+        // The bounded input producer logs from Dispatchers.IO while the serial
+        // database consumer logs on its own context. Iteration must be safe too.
+        val lines = java.util.concurrent.CopyOnWriteArrayList<Pair<Severity, String>>()
         override fun log(severity: Severity, message: String, tag: String, throwable: Throwable?) {
             lines += severity to message
         }

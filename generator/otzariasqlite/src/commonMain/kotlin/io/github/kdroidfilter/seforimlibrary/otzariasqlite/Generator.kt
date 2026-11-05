@@ -18,18 +18,25 @@ import io.github.kdroidfilter.seforimlibrary.core.models.*
 import io.github.kdroidfilter.seforimlibrary.core.text.HebrewTextUtils
 import io.github.kdroidfilter.seforimlibrary.core.text.normalizeAuthorName
 import io.github.kdroidfilter.seforimlibrary.dao.repository.SeforimRepository
-import kotlinx.coroutines.async
-import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
+import kotlinx.serialization.ExperimentalSerializationApi
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.SerializationException
+import kotlinx.serialization.encodeToString
+import kotlinx.serialization.json.DecodeSequenceMode
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.decodeToSequence
 import org.jsoup.Jsoup
 import org.jsoup.safety.Safelist
 import java.io.File
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.Paths
+import java.util.LinkedHashMap
 import kotlin.io.path.exists
 import kotlin.io.path.extension
 import kotlin.io.path.nameWithoutExtension
@@ -43,6 +50,7 @@ import kotlin.io.path.readText
  * @property repository The repository used to store the generated data
  */
 private const val LINE_FLUSH_THRESHOLD = 1000
+private const val LINE_ID_PAGE_SIZE = 4096
 private const val SEFARIA_SOURCE = "Sefaria"
 
 /**
@@ -90,6 +98,9 @@ private data class LegacyAuthoredLinkKey(
     val connectionType: ConnectionType,
 )
 
+/** A batched SQL write must never be swallowed by malformed-link tolerance. */
+private class LinkBatchWriteFailure(cause: Exception) : RuntimeException("Failed writing link batch", cause)
+
 class DatabaseGenerator(
     private val sourceDirectory: Path,
     private val repository: SeforimRepository,
@@ -99,7 +110,15 @@ class DatabaseGenerator(
     private val buildVersion: Int = 0,
     // Accept previous books changing id (logged instead of failing the build).
     private val allowBookIdLoss: Boolean = false,
+    // Retained inputs and line-batch budget; use the environment/system property
+    // documented in BoundedGeneratorInput.kt to tune forked generator runs.
+    private val inputBufferBytes: Long = configuredGeneratorInputBytes(),
+    private val inputSpillDirectory: Path? = null,
 ) {
+
+    init { require(inputBufferBytes >= 1024) { "inputBufferBytes must be at least 1024" } }
+
+    private val inputPartBytes = inputBufferBytes / 3
 
     private val logger = Logger.withTag("DatabaseGenerator")
     private val bindings = IdAllocatorBindings(allocator, repository)
@@ -175,8 +194,12 @@ class DatabaseGenerator(
     // In-memory caches to accelerate link processing using available RAM
     private var booksByTitle: Map<String, Book> = emptyMap()
     private var booksById: Map<Long, Book> = emptyMap()
-    // For each bookId, maps lineIndex -> lineId (0 means missing)
-    private val lineIdCache = mutableMapOf<Long, LongArray>()
+    // Fixed-size, byte-capped LRU pages; a single link must not load an entire
+    // book's text, or leave every referenced book's IDs resident for the phase.
+    private data class LineIdPageKey(val bookId: Long, val firstIndex: Int)
+    private val lineIdCache = LinkedHashMap<LineIdPageKey, LongArray>(16, 0.75f, true)
+    private var lineIdCacheBytes = 0L
+    private val maxLineIdCacheBytes = minOf(4L * 1024 * 1024, maxOf(32_768L, inputPartBytes))
     // Track line IDs that are headings (contain <h1>, <h2>, etc.)
     private val headingLineIds = mutableSetOf<Long>()
     // Track book IDs that come from Sefaria sources (skip Otzaria links for these)
@@ -355,12 +378,14 @@ class DatabaseGenerator(
             .trim()
     }
 
-    // Book contents cache: maps library-relative key -> list of lines
-    private val bookContentCache = mutableMapOf<String, List<String>>()
+    // Metadata only: same depth-first directory order as processDirectory.
+    private var bookContentOrder: List<Path> = emptyList()
+    private var bookInputPipeline: OrderedInputPipeline? = null
+    private val remainingBookInputs = mutableMapOf<BookKey, Int>()
 
     // ===== Companion-notes merge ('הערות על X' → inline footnotes) =====
     // base title → (0-based base line → note lines in reading order)
-    private var hearotMergePlans: Map<String, Map<Int, List<String>>> = emptyMap()
+    private var hearotMergePlans: MutableMap<String, Map<Int, List<String>>> = mutableMapOf()
     // Companion books consumed by the merge — never imported as standalone books.
     private var mergedHearotTitles: Set<String> = emptySet()
     // base title → sha256(companion file ‖ links json), mixed into the base book's
@@ -518,18 +543,18 @@ class DatabaseGenerator(
                 } catch (_: Exception) { 0 }
                 logger.i { "Planned to process approximately $totalBooksToProcess books" }
                 startBookImport(totalBooksToProcess)
+                planBookContentOrder(libraryPath)
 
                 // Process priority books first (if any), then process the full library
                 runCatching {
                     processPriorityBooks(loadMetadata = { metadata })
                 }.onFailure { e ->
+                    if (e is CancellationException) throw e
                     logger.w(e) { "Failed processing priority list; continuing with full generation" }
                 }
 
                 logger.i { "🚀 Starting to process library directory: $libraryPath" }
-                // Preload all book .txt contents into RAM for faster processing
-                preloadAllBookContents(libraryPath)
-                processDirectory(libraryPath, null, 0, metadata)
+                processDirectoryWithBoundedInput(libraryPath, metadata)
                 assertAllHearotMergesApplied()
                 logger.i { bookImportSummary("Otzaria book import") }
                 carryAcronymsAcrossRenames()
@@ -569,6 +594,9 @@ class DatabaseGenerator(
 
             logger.e(e) { "Error during generation${bookBreadcrumb()}" }
             throw e
+        } finally {
+            releaseBookInputState()
+            releaseLinkInputState()
         }
     }
 
@@ -652,12 +680,14 @@ class DatabaseGenerator(
                 } catch (_: Exception) { 0 }
                 logger.i { "Planned to process approximately $totalBooksToProcess books (phase 1)" }
                 startBookImport(totalBooksToProcess)
+                planBookContentOrder(libraryPath)
 
                 runCatching { processPriorityBooks(loadMetadata = { metadata }) }
-                    .onFailure { e -> logger.w(e) { "Failed processing priority list; continuing with full generation (phase 1)" } }
-                // Preload all book .txt contents into RAM for faster processing
-                preloadAllBookContents(libraryPath)
-                processDirectory(libraryPath, null, 0, metadata)
+                    .onFailure { e ->
+                        if (e is CancellationException) throw e
+                        logger.w(e) { "Failed processing priority list; continuing with full generation (phase 1)" }
+                    }
+                processDirectoryWithBoundedInput(libraryPath, metadata)
                 assertAllHearotMergesApplied()
                 checkPlannedBooksImported()
                 logger.i { bookImportSummary("Otzaria book import (phase 1)") }
@@ -675,6 +705,8 @@ class DatabaseGenerator(
             logger.e(e) { "Error during phase 1${bookBreadcrumb()}" }
             throw e
         } finally {
+            releaseBookInputState()
+            headingLineIds.clear()
             runCatching { enableForeignKeys() }
             runCatching { repository.setSynchronousNormal() }
             runCatching { repository.setJournalModeWal() }
@@ -696,6 +728,7 @@ class DatabaseGenerator(
                 processAltTocStructures()
             }
         } finally {
+            releaseLinkInputState()
             runCatching { enableForeignKeys() }
             runCatching { repository.setSynchronousNormal() }
             runCatching { repository.setJournalModeWal() }
@@ -740,67 +773,92 @@ class DatabaseGenerator(
         }
     }
 
-    // Ensure we have lineIndex -> lineId mapping for the given book in memory
-    private suspend fun ensureLineIndexCache(bookId: Long) {
-        if (lineIdCache.containsKey(bookId)) return
-        val totalLines = booksById[bookId]?.totalLines ?: repository.getBook(bookId)?.totalLines ?: 0
-        val arr = LongArray(totalLines.coerceAtLeast(0)) { 0L }
-        // Use existing repository.getLines to load ids and indices; content is ignored here
-        val lines = if (totalLines > 0) repository.getLines(bookId, 0, totalLines - 1) else emptyList()
-        for (ln in lines) {
-            val idx = ln.lineIndex
-            if (idx >= 0 && idx < arr.size) arr[idx] = ln.id
-        }
-        lineIdCache[bookId] = arr
-        logger.d { "Loaded ${lines.size} line id/index pairs for book $bookId into memory" }
-    }
-
-    // Lookup helper using the RAM cache
     private suspend fun getLineIdCached(bookId: Long, lineIndex: Int): Long? {
-        ensureLineIndexCache(bookId)
-        val arr = lineIdCache[bookId] ?: return null
-        if (lineIndex < 0 || lineIndex >= arr.size) return null
-        val id = arr[lineIndex]
+        val totalLines = booksById[bookId]?.totalLines ?: repository.getBook(bookId)?.totalLines ?: 0
+        if (lineIndex < 0 || lineIndex >= totalLines) return null
+        val firstIndex = lineIndex / LINE_ID_PAGE_SIZE * LINE_ID_PAGE_SIZE
+        val key = LineIdPageKey(bookId, firstIndex)
+        val page = lineIdCache[key] ?: run {
+            val length = minOf(LINE_ID_PAGE_SIZE, totalLines - firstIndex)
+            val ids = LongArray(length)
+            for ((index, id) in repository.getLineIdIndexPairs(bookId, firstIndex, firstIndex + length - 1)) {
+                ids[index - firstIndex] = id
+            }
+            val bytes = ids.size.toLong() * Long.SIZE_BYTES
+            while (lineIdCache.isNotEmpty() && lineIdCacheBytes + bytes > maxLineIdCacheBytes) {
+                val oldest = lineIdCache.entries.iterator()
+                lineIdCacheBytes -= oldest.next().value.size.toLong() * Long.SIZE_BYTES
+                oldest.remove()
+            }
+            lineIdCache[key] = ids
+            lineIdCacheBytes += bytes
+            ids
+        }
+        val id = page[lineIndex - firstIndex]
         return if (id == 0L) null else id
     }
 
-    // Preload all book file contents into RAM, keyed by library-relative path
-    private suspend fun preloadAllBookContents(libraryPath: Path) {
-        // Avoid reloading if already populated
-        if (bookContentCache.isNotEmpty()) return
-        logger.i { "Preloading book contents into RAM from $libraryPath ..." }
-        val files = Files.walk(libraryPath).use { s ->
-            s.filter { Files.isRegularFile(it) && it.extension == "txt" }
-                .filter { p ->
-                    val fileName = p.fileName.toString()
-                    // Skip files explicitly blacklisted by name
-                    if (fileNameBlacklist.contains(fileName)) {
-                        logger.d { "Skipping preload for blacklisted file '$fileName'" }
-                        return@filter false
-                    }
-                    // Skip blacklisted sources when known
-                    val rel = runCatching { toLibraryRelativeKey(p) }.getOrElse { p.fileName.toString() }
-                    val src = manifestSourcesByRel[rel] ?: "Unknown"
-                    if (sourceBlacklist.contains(src)) {
-                        logger.d { "Skipping preload for blacklisted source '$src': $rel" }
-                        return@filter false
-                    }
-                    true
-                }
-                .toList()
+    private fun releaseLinkInputState() {
+        lineIdCache.clear()
+        lineIdCacheBytes = 0
+        booksById = emptyMap()
+        booksByTitle = emptyMap()
+        sefariaBookIds.clear()
+        headingLineIds.clear()
+    }
+
+    private fun orderedDirectoryEntries(directory: Path): List<Path> =
+        Files.list(directory).use { stream ->
+            stream.sorted { a, b -> a.fileName.toString().compareTo(b.fileName.toString()) }.toList()
         }
-        // Parallelize reads
-        val loaded = coroutineScope {
-            files.map { p ->
-                async {
-                    val key = toLibraryRelativeKey(p)
-                    val content = p.readText(Charsets.UTF_8)
-                    key to content.lines()
+
+    /** Metadata/order pass: no book text is kept while the traversal is planned. */
+    private fun planBookContentOrder(libraryPath: Path) {
+        val paths = ArrayList<Path>()
+        fun visit(directory: Path) {
+            for (entry in orderedDirectoryEntries(directory)) {
+                when {
+                    Files.isDirectory(entry) -> visit(entry)
+                    Files.isRegularFile(entry) && entry.extension == "txt" && entry.parent != libraryPath -> {
+                        val title = normalizeBookTitle(entry.nameWithoutExtension)
+                        if (entry.fileName.toString() !in fileNameBlacklist && title !in mergedHearotTitles &&
+                            getSourceNameFor(entry) !in sourceBlacklist
+                        ) paths.add(entry)
+                    }
                 }
-            }.awaitAll()
+            }
         }
-        for ((k, v) in loaded) bookContentCache[k] = v
-        logger.i { "Preloaded ${bookContentCache.size} books into RAM" }
+        visit(libraryPath)
+        bookContentOrder = paths
+        remainingBookInputs.clear()
+        for (path in paths) {
+            val key = BookKey(getSourceNameFor(path), normalizeBookTitle(path.nameWithoutExtension))
+            remainingBookInputs[key] = (remainingBookInputs[key] ?: 0) + 1
+        }
+    }
+
+    private suspend fun processDirectoryWithBoundedInput(
+        libraryPath: Path,
+        metadata: Map<String, BookMetadata>,
+    ) = coroutineScope {
+        val paths = bookContentOrder.filter { toLibraryRelativeKey(it) !in processedPriorityBookKeys }
+        logger.i { "Preparing ${paths.size} books in order (input budget=$inputBufferBytes bytes; oversized inputs spill)" }
+        val pipeline = OrderedInputPipeline(this, paths) { prepareBookInput(it, inputPartBytes, inputSpillDirectory) }
+        bookInputPipeline = pipeline
+        try {
+            processDirectory(libraryPath, null, 0, metadata)
+        } finally {
+            bookInputPipeline = null
+            pipeline.close()
+        }
+    }
+
+    private fun releaseBookInputState() {
+        bookContentOrder = emptyList()
+        remainingBookInputs.clear()
+        lineOccurrenceByBook.clear()
+        tocAncestorStackByBook.clear()
+        hearotMergePlans.clear()
     }
 
     /** Title of the book a link's path_2 points at (mirrors processLinksForBook). */
@@ -821,7 +879,7 @@ class DatabaseGenerator(
      * links are completed upstream.
      */
     private suspend fun buildHearotMergePlans() {
-        hearotMergePlans = emptyMap()
+        hearotMergePlans = mutableMapOf()
         mergedHearotTitles = emptySet()
         hearotMergeExtraHash = emptyMap()
         pendingHearotMergeBases.clear()
@@ -868,12 +926,20 @@ class DatabaseGenerator(
         noteSkippedHeadingFiles(jsonFiles.size - linkFiles.size)
         for (jsonFile in linkFiles) {
             val baseTitle = normalizeBookTitle(jsonFile.nameWithoutExtension.removeSuffix("_links"))
-            val jsonBytes = runCatching { Files.readAllBytes(jsonFile) }.getOrNull() ?: continue
-            val allEntries = parseLinksFromJson(jsonBytes.toString(Charsets.UTF_8), baseTitle)
-            val companionEntries = allEntries.filter {
-                HearotCompanionMerge.isMergeableCompanionTitle(
-                    normalizeBookTitle(linkTargetTitleOf(it.path_2))
-                )
+            val companionEntries = ArrayList<LinkData>()
+            val anchoredBaseLines = HashSet<Int>()
+            prepareLinkInput(jsonFile, baseTitle).use { input ->
+                input.useLines { records ->
+                    for (record in records) {
+                        currentCoroutineContext().ensureActive()
+                        val entry = json.decodeFromString<LinkData>(record)
+                        if (entry.start != null) anchoredBaseLines += entry.line_index_1.toInt() - 1
+                        if (HearotCompanionMerge.isMergeableCompanionTitle(
+                                normalizeBookTitle(linkTargetTitleOf(entry.path_2))
+                            )
+                        ) companionEntries.add(entry)
+                    }
+                }
             }
             if (companionEntries.isEmpty()) continue
 
@@ -889,7 +955,10 @@ class DatabaseGenerator(
                 standalone += "$baseTitle (base file at library root is never imported)"
                 continue
             }
-            val baseLines = Utf8Bom.stripFirstLine(basePath.readText(Charsets.UTF_8).lines())
+            val baseFootnoteLines = HashSet<Int>()
+            val baseLineCount = scanBookInput(basePath) { index, line ->
+                if (line.contains("class=\"footnote")) baseFootnoteLines += index
+            }
 
             val byHearot = companionEntries
                 .groupBy { normalizeBookTitle(linkTargetTitleOf(it.path_2)) }
@@ -902,63 +971,89 @@ class DatabaseGenerator(
                     standalone += "$hearotTitle (ranged companion links)"
                     continue
                 }
-                val hearotBytes = Files.readAllBytes(hearotPath)
-                val hearotLines = Utf8Bom.stripFirstLine(hearotBytes.toString(Charsets.UTF_8).lines())
+                val referenced = entries.map { it.line_index_2.toInt() - 1 }.toSet()
+                val hearotLines = HashMap<Int, String>()
+                var unlinked = 0
+                val hearotLineCount = scanBookInput(hearotPath) { index, line ->
+                    if (index in referenced) hearotLines[index] = line
+                    else if (line.isNotBlank() && !headingLineRegex.containsMatchIn(line)) unlinked++
+                }
                 if (entries.any {
-                        it.line_index_1.toInt() - 1 !in baseLines.indices ||
-                            it.line_index_2.toInt() - 1 !in hearotLines.indices
+                        it.line_index_1.toInt() - 1 !in 0 until baseLineCount ||
+                            it.line_index_2.toInt() - 1 !in 0 until hearotLineCount
                     }
                 ) {
                     standalone += "$hearotTitle (companion links out of file range)"
                     continue
                 }
-                val referenced = entries.map { it.line_index_2.toInt() - 1 }.toSet()
-                val unlinked = hearotLines.withIndex().count { (j, l) ->
-                    j !in referenced && l.isNotBlank() && !headingLineRegex.containsMatchIn(l)
-                }
                 if (unlinked > 0) {
                     standalone += "$hearotTitle ($unlinked unlinked note lines)"
                     continue
                 }
-                val badNote = referenced.firstNotNullOfOrNull { j -> unmergeableNoteReason(hearotLines[j]) }
+                val badNote = referenced.firstNotNullOfOrNull { j -> unmergeableNoteReason(hearotLines.getValue(j)) }
                 if (badNote != null) {
                     standalone += "$hearotTitle ($badNote)"
                     continue
                 }
                 val noteLineIdxs = entries.map { it.line_index_1.toInt() - 1 }.toSet()
-                if (noteLineIdxs.any { baseLines[it].contains("class=\"footnote") }) {
+                if (noteLineIdxs.any { it in baseFootnoteLines }) {
                     standalone += "$hearotTitle (base line already carries inline footnotes)"
                     continue
                 }
                 // Word-anchored links measure raw offsets against the ORIGINAL line;
                 // an in-place merge would shift them (see buildLinkAnchor).
-                if (allEntries.any { it.start != null && it.line_index_1.toInt() - 1 in noteLineIdxs }) {
+                if (noteLineIdxs.any { it in anchoredBaseLines }) {
                     standalone += "$hearotTitle (word-anchored links on note lines)"
                     continue
                 }
                 val perLine = plans.getOrPut(baseTitle) { sortedMapOf() }
                 for (e in entries.sortedBy { it.line_index_2 }) {
                     perLine.getOrPut(e.line_index_1.toInt() - 1) { mutableListOf() }
-                        .add(hearotLines[e.line_index_2.toInt() - 1])
+                        .add(hearotLines.getValue(e.line_index_2.toInt() - 1))
                 }
                 merged += hearotTitle
                 mergedPairs++
                 totalNotes += entries.size
                 val md = java.security.MessageDigest.getInstance("SHA-256")
                 extra[baseTitle]?.let { md.update(it) }
-                md.update(hearotBytes)
-                md.update(jsonBytes)
+                updateDigestFromFile(md, hearotPath)
+                updateDigestFromFile(md, jsonFile)
                 extra[baseTitle] = md.digest()
             }
         }
 
-        hearotMergePlans = plans
+        hearotMergePlans.putAll(plans)
         mergedHearotTitles = merged
         hearotMergeExtraHash = extra
         pendingHearotMergeBases.addAll(plans.keys)
         if (mergedPairs > 0 || standalone.isNotEmpty()) {
             logger.i { "📝 Companion-notes merge plan: $mergedPairs pairs, $totalNotes notes → inline footnotes" }
             standalone.forEach { logger.w { "📝 Companion notes stay standalone: $it" } }
+        }
+    }
+
+    private suspend fun scanBookInput(path: Path, consume: (Int, String) -> Unit): Int {
+        val context = currentCoroutineContext()
+        return Files.newInputStream(path).reader(Charsets.UTF_8).use { reader ->
+            var count = 0
+            for (raw in reader.exactLineSequence { context.ensureActive() }) {
+                check(count < Int.MAX_VALUE) { "Too many lines in $path" }
+                consume(count, if (count == 0) Utf8Bom.strip(raw) else raw)
+                count++
+            }
+            count
+        }
+    }
+
+    private suspend fun updateDigestFromFile(digest: java.security.MessageDigest, path: Path) {
+        Files.newInputStream(path).use { input ->
+            val buffer = ByteArray(8192)
+            while (true) {
+                currentCoroutineContext().ensureActive()
+                val count = input.read(buffer)
+                if (count < 0) break
+                digest.update(buffer, 0, count)
+            }
         }
     }
 
@@ -1332,36 +1427,46 @@ class DatabaseGenerator(
     ): BookContentStats = coroutineScope {
         logger.d { "Processing content for book ID: $bookId" }
 
-        // Prefer preloaded content from RAM if available
-        val key = toLibraryRelativeKey(path)
-        val fileLines = bookContentCache[key] ?: run {
-            val content = path.readText(Charsets.UTF_8)
-            content.lines()
-        }
-        // A UTF-8 BOM would hide line 0's <h1> from detectHeaderLevel (no title in the TOC).
-        val rawLines = Utf8Bom.stripFirstLine(fileLines)
-        val firstLineHadBom = rawLines !== fileLines
-        // Inject companion notes as inline footnotes when a merge plan exists
-        val plan = hearotMergePlans[bookTitle]
-        val lines = if (plan == null) rawLines else {
-            val stats = HearotCompanionMerge.MergeStats()
-            HearotCompanionMerge.mergeLines(bookTitle, rawLines, plan, stats).also {
-                pendingHearotMergeBases.remove(bookTitle)
-                logger.d { "📝 '$bookTitle': merged companion notes — ${stats.inPlace} anchored in place, ${stats.appended} appended" }
+        val input = bookInputPipeline?.take(path)
+            ?: prepareBookInput(path, inputPartBytes, inputSpillDirectory)
+        input.use {
+            val plan = hearotMergePlans[bookTitle]
+            plan?.keys?.sorted()?.forEach { index ->
+                check(index in 0 until input.size) {
+                    "hearot merge for '$bookTitle': base line $index out of range (${input.size} lines)"
+                }
             }
+            val mergeStats = HearotCompanionMerge.MergeStats()
+            val tocStats = input.useLines { rawLines ->
+                val lines = rawLines.mapIndexed { index, raw ->
+                    val line = if (index == 0) Utf8Bom.strip(raw) else raw
+                    val notes = plan?.get(index)
+                    if (notes == null) line else HearotCompanionMerge.mergeLine(bookTitle, line, index, notes, mergeStats)
+                }
+                processLinesWithTocEntries(bookId, bookTitle, categoryId, lines, input.size, input.firstLineHasBom)
+            }
+            repository.updateBookTotalLines(bookId, input.size)
+            if (plan != null) {
+                pendingHearotMergeBases.remove(bookTitle)
+                logger.d { "📝 '$bookTitle': merged companion notes — ${mergeStats.inPlace} anchored in place, ${mergeStats.appended} appended" }
+            }
+
+            // Duplicate source/title paths retain their occurrence state until the
+            // final import, preserving the old allocation order for such inputs.
+            val key = BookKey(getSourceNameFor(path), bookTitle)
+            val remaining = (remainingBookInputs[key] ?: 1) - 1
+            if (remaining <= 0) {
+                remainingBookInputs.remove(key)
+                lineOccurrenceByBook.remove(bookId)
+                tocAncestorStackByBook.remove(bookId)
+                if (bookTitle in hearotMergePlans && remainingBookInputs.keys.none { it.canonicalHeTitle == bookTitle }) {
+                    hearotMergePlans.remove(bookTitle)
+                }
+            } else {
+                remainingBookInputs[key] = remaining
+            }
+            BookContentStats(input.size, tocStats.tocEntries, tocStats.tocEntriesWithChildren)
         }
-
-        // Process each line one by one, handling TOC entries as we go
-        val tocStats = processLinesWithTocEntries(bookId, bookTitle, categoryId, lines, firstLineHadBom)
-
-        // Update the total number of lines
-        repository.updateBookTotalLines(bookId, lines.size)
-
-        BookContentStats(
-            lines = lines.size,
-            tocEntries = tocStats.tocEntries,
-            tocEntriesWithChildren = tocStats.tocEntriesWithChildren,
-        )
     }
 
     /** Per-book counters folded into the per-book DEBUG line and the phase summary. */
@@ -1382,7 +1487,8 @@ class DatabaseGenerator(
         bookId: Long,
         bookTitle: String,
         categoryId: Long,
-        lines: List<String>,
+        lines: Sequence<String>,
+        totalLines: Int,
         firstLineHadBom: Boolean = false,
     ): BookContentStats {
         logger.d { "Processing lines and TOC entries together for book ID: $bookId" }
@@ -1395,34 +1501,28 @@ class DatabaseGenerator(
                 stableLineId(bookId, line)
             }
 
-        // Structure pour stocker toutes les entrées TOC créées
-        data class TocEntryData(
-            val id: Long,
-            val parentId: Long?,
-            val level: Int,
-            val text: String,
-            val lineIndex: Int
-        )
-
-        val allTocEntries = mutableListOf<TocEntryData>()
+        var tocEntryCount = 0
         val parentStack = mutableMapOf<Int, Long>()
-        val entriesByParent = mutableMapOf<Long?, MutableList<Long>>()
+        val parentIds = linkedSetOf<Long>()
+        val lastChildByParent = linkedMapOf<Long?, Long>()
         var currentOwningTocEntryId: Long? = null
-        val lineTocBuffer = ArrayList<Pair<Long, Long>>(minOf(lines.size, 200_000))
+        val lineTocBuffer = ArrayList<Pair<Long, Long>>(LINE_FLUSH_THRESHOLD)
         // Batch line inserts + the FK back-link updates that depend on them.
         // JFR showed each `repository.insertLine` ≈ 1 withContext(Dispatchers.IO)
         // switch + 1 prepareStatement, run 4M times. Buffering collapses the
         // dispatcher churn and lets us flush via insertLinesBatch.
         val lineBuffer = ArrayList<Line>(LINE_FLUSH_THRESHOLD)
+        var lineBufferBytes = 0L
         val tocEntryLineIdUpdates = ArrayList<Pair<Long, Long>>()
         val lineTocEntryUpdates = ArrayList<Pair<Long, Long>>()
         // Line ticks: silent for small books, ≥10% (or 60 s) apart for large ones.
-        val lineTicks = LineTickGate(totalLines = lines.size)
+        val lineTicks = LineTickGate(totalLines = totalLines)
 
         suspend fun flushLineBatch() {
             if (lineBuffer.isEmpty()) return
             repository.insertLinesBatch(lineBuffer)
             lineBuffer.clear()
+            lineBufferBytes = 0L
             // Flush back-link updates only after the lines exist in the DB.
             if (tocEntryLineIdUpdates.isNotEmpty()) {
                 repository.bulkUpdateTocEntryLineIds(tocEntryLineIdUpdates)
@@ -1432,10 +1532,17 @@ class DatabaseGenerator(
                 repository.bulkUpdateLineTocEntryIds(lineTocEntryUpdates)
                 lineTocEntryUpdates.clear()
             }
+            if (lineTocBuffer.isNotEmpty()) {
+                repository.bulkUpsertLineToc(lineTocBuffer)
+                lineTocBuffer.clear()
+            }
         }
 
         // PREMIÈRE PASSE : Créer toutes les entrées et lignes
         for ((lineIndex, line) in lines.withIndex()) {
+            currentCoroutineContext().ensureActive()
+            val bytes = retainedStringBytes(line) + 128L
+            if (lineBuffer.isNotEmpty() && bytes > inputPartBytes - lineBufferBytes) flushLineBatch()
             val level = detectHeaderLevel(line)
             // Merged footnotes on a heading line must not leak into the TOC text
             val plainText = if (level > 0) cleanHtml(HearotCompanionMerge.stripFootnotes(line)) else ""
@@ -1453,14 +1560,8 @@ class DatabaseGenerator(
                 val (currentTocEntryId, tocTextStableId) = stableTocEntryId(bookId, level, plainText, lineIndex)
                 val currentLineId = lineIdFor(lineIndex, line)
 
-                // Stocker l'info de cette entrée pour la deuxième passe
-                allTocEntries.add(TocEntryData(
-                    id = currentTocEntryId,
-                    parentId = parentId,
-                    level = level,
-                    text = plainText,
-                    lineIndex = lineIndex
-                ))
+                tocEntryCount++
+                parentId?.let { parentIds.add(it) }
 
                 // Créer l'entrée TOC avec hasChildren = false par défaut
                 val tocEntry = TocEntry(
@@ -1477,7 +1578,7 @@ class DatabaseGenerator(
 
                 val tocEntryId = repository.insertTocEntry(tocEntry)
                 parentStack[level] = tocEntryId
-                entriesByParent.getOrPut(parentId) { mutableListOf() }.add(tocEntryId)
+                lastChildByParent[parentId] = tocEntryId
                 currentOwningTocEntryId = tocEntryId
 
                 // Buffer the line — id is allocator-stable so we know it before insert.
@@ -1515,12 +1616,9 @@ class DatabaseGenerator(
                 }
             }
 
-            if (lineBuffer.size >= LINE_FLUSH_THRESHOLD) {
+            lineBufferBytes += bytes
+            if (lineBuffer.size >= LINE_FLUSH_THRESHOLD || lineBufferBytes >= inputPartBytes) {
                 flushLineBatch()
-            }
-            if (lineTocBuffer.size >= 200_000) {
-                repository.bulkUpsertLineToc(lineTocBuffer)
-                lineTocBuffer.clear()
             }
 
             if (lineTicks.shouldTick(lineIndex)) {
@@ -1530,25 +1628,18 @@ class DatabaseGenerator(
 
         // Flush remaining line + back-link buffers
         flushLineBatch()
-        // Flush buffered line→toc mappings in bulk
-        repository.bulkUpsertLineToc(lineTocBuffer)
 
         // DEUXIÈME PASSE : Mettre à jour isLastChild et hasChildren
         logger.d { "Updating isLastChild and hasChildren for book ID: $bookId" }
 
-        // Créer un set des IDs qui ont des enfants
-        val parentIds = allTocEntries.mapNotNull { it.parentId }.toSet()
-
         // Collect hasChildren + isLastChild ids and flush them in a single batch
         // (replaces 2 × per-row update calls; was up to ~2k withContext switches
         // per book on large hierarchies).
-        val hasChildrenIds = allTocEntries.asSequence().filter { it.id in parentIds }.map { it.id }.toList()
-        val lastChildIds = entriesByParent.values.mapNotNull { it.lastOrNull() }
-        repository.bulkUpdateTocEntryFlags(hasChildrenIds, lastChildIds)
+        repository.bulkUpdateTocEntryFlags(parentIds.toList(), lastChildByParent.values.toList())
 
         return BookContentStats(
-            lines = lines.size,
-            tocEntries = allTocEntries.size,
+            lines = totalLines,
+            tocEntries = tocEntryCount,
             tocEntriesWithChildren = parentIds.size,
         )
     }
@@ -1779,16 +1870,21 @@ class DatabaseGenerator(
         val currentBooks = collectCurrentBooks()
         plannedBookKeys = currentBooks.keys
         previousImportBookKeys = previousImportKeys()
+        val context = currentCoroutineContext()
         val currentLineHashes = { key: BookKey ->
-            // Same hash as stableLineId, so it compares with the previous line keys.
-            // Otzaria: on the lines as processBookContent stores them (BOM off, notes merged).
-            currentBooks[key]?.readText(Charsets.UTF_8)?.lines()
-                ?.let(Utf8Bom::stripFirstLine)
-                ?.let { lines ->
-                    hearotMergePlans[key.canonicalHeTitle]
-                        ?.let { HearotCompanionMerge.mergeLines(key.canonicalHeTitle, lines, it) } ?: lines
+            // Keep only the hashes the continuity API needs, never a whole book
+            // plus its BOM-stripped and companion-merged copies.
+            currentBooks[key]?.let { path ->
+                Files.newInputStream(path).reader(Charsets.UTF_8).use { reader ->
+                    reader.exactLineSequence { context.ensureActive() }.mapIndexed { index, raw ->
+                        val line = if (index == 0) Utf8Bom.strip(raw) else raw
+                        val notes = hearotMergePlans[key.canonicalHeTitle]?.get(index)
+                        val merged = if (notes == null) line else
+                            HearotCompanionMerge.mergeLine(key.canonicalHeTitle, line, index, notes)
+                        IdAllocatorBindings.normalisedContentHash(merged)
+                    }.toList()
                 }
-                ?.map(IdAllocatorBindings::normalisedContentHash)
+            }
         }
         val aliases = continuity.registerAliases(
             currentKeys = currentBooks.keys,
@@ -1957,27 +2053,16 @@ class DatabaseGenerator(
         val linksBefore = repository.countLinks()
         logger.d { "Links in database before processing: $linksBefore" }
 
-        logger.i { "Loading all link JSON files into RAM..." }
         droppedLinkTargets.clear()
         manualLinkRowsSeen = 0
-        // Preload all links JSON into memory to minimize IO
         val jsonFiles = Files.list(linksDir).use { s -> s.filter { it.extension == "json" }.toList() }
         val linkFiles = jsonFiles.filter(::isLinkJsonFile)
         noteSkippedHeadingFiles(jsonFiles.size - linkFiles.size)
-        val linksByBook = coroutineScope {
-            linkFiles.map { file ->
-                async {
-                    val bookTitle = file.nameWithoutExtension.removeSuffix("_links")
-                    val content = file.readText()
-                    val links = parseLinksFromJson(content, bookTitle)
-                    bookTitle to links
-                }
-            }.mapNotNull { deferred ->
-                runCatching { deferred.await() }
-                    .onFailure { e -> logger.w(e) { "Failed to preload links from file" } }
-                    .getOrNull()
-            }.toMap(mutableMapOf())
-        }
+        // The old toMap kept the last file for a duplicate title, in the first
+        // title's discovery slot. Preserve that exact order and winner so IDs
+        // and authored links do not change as a side effect of streaming.
+        val filesByTitle = linkedMapOf<String, Path>()
+        for (file in linkFiles) filesByTitle[file.nameWithoutExtension.removeSuffix("_links")] = file
 
         val legacyLinksByKey = repository.getNonBaseToBaseLinksByTypes(ORIENTED_DEPENDANT_TYPES)
             .groupBy(
@@ -1994,18 +2079,31 @@ class DatabaseGenerator(
             )
         val legacyLinkIdsToDelete = mutableSetOf<Long>()
 
-        logger.i { "Processing links from RAM..." }
+        logger.i { "Processing link inputs in order (input budget=$inputBufferBytes bytes; oversized inputs spill)" }
         var totalLinks = 0
-        for ((bookTitle, links) in linksByBook) {
-            manualLinkRowsSeen += links.size
-            val processedLinks = processLinksForBook(
-                bookTitle = bookTitle,
-                links = links,
-                legacyLinksByKey = legacyLinksByKey,
-                legacyLinkIdsToDelete = legacyLinkIdsToDelete,
-            )
-            totalLinks += processedLinks
-            logger.d { "Processed $processedLinks links for $bookTitle, total so far: $totalLinks" }
+        coroutineScope {
+            val pipeline = OrderedInputPipeline(this, filesByTitle.values.toList()) { file ->
+                prepareLinkInput(file, file.nameWithoutExtension.removeSuffix("_links"))
+            }
+            try {
+                for ((bookTitle, file) in filesByTitle) {
+                    pipeline.take(file).use { input ->
+                        manualLinkRowsSeen += input.size
+                        val processedLinks = input.useLines { records ->
+                            processLinksForBook(
+                                bookTitle = bookTitle,
+                                links = records.map { json.decodeFromString<LinkData>(it) },
+                                legacyLinksByKey = legacyLinksByKey,
+                                legacyLinkIdsToDelete = legacyLinkIdsToDelete,
+                            )
+                        }
+                        totalLinks += processedLinks
+                        logger.d { "Processed $processedLinks links for $bookTitle, total so far: $totalLinks" }
+                    }
+                }
+            } finally {
+                pipeline.close()
+            }
         }
         repository.deleteLinksAndDependants(legacyLinkIdsToDelete)
         if (legacyLinkIdsToDelete.isNotEmpty()) {
@@ -2074,11 +2172,11 @@ class DatabaseGenerator(
     }
 
     /**
-     * Processes links that were preloaded in memory for a given source book.
+     * Processes one validated input in order, with bounded ancillary-row batches.
      */
     private suspend fun processLinksForBook(
         bookTitle: String,
-        links: List<LinkData>,
+        links: Sequence<LinkData>,
         legacyLinksByKey: Map<LegacyAuthoredLinkKey, List<Long>>,
         legacyLinkIdsToDelete: MutableSet<Long>,
     ): Int {
@@ -2098,10 +2196,41 @@ class DatabaseGenerator(
         val anchorBatch = mutableListOf<LinkAnchor>()
         val rangeBatch = mutableListOf<LinkRange>()
         val coverageBatch = mutableListOf<LinkCoverage>()
-        val touchedLinkIds = mutableSetOf<Long>()
-        // `withIndex()` dropped with the per-link "Link i/N" log line it existed
-        // for: same list, same order, same iterations.
+        val pendingTouchedIds = mutableSetOf<Long>()
+        val syncedLinkIds = mutableSetOf<Long>()
+        val maxAuxiliaryRows = minOf(1000L, (inputPartBytes / 64L).coerceAtLeast(1L)).toInt()
+        var anchorCount = 0
+        var rangeCount = 0
+        var coverageCount = 0
+
+        suspend fun flushLinkBatch() {
+            try {
+                // Delete only once per link per file. A repeated link without an end
+                // must not erase the earlier row's range, including across batches.
+                pendingTouchedIds.chunked(500).forEach { chunk ->
+                    val ids = chunk.joinToString(",")
+                    repository.executeRawQuery("DELETE FROM link_range WHERE linkId IN ($ids)")
+                    repository.executeRawQuery("DELETE FROM link_coverage WHERE linkId IN ($ids)")
+                }
+                syncedLinkIds.addAll(pendingTouchedIds)
+                pendingTouchedIds.clear()
+                if (anchorBatch.isNotEmpty()) repository.insertLinkAnchorsBatch(anchorBatch)
+                if (rangeBatch.isNotEmpty()) repository.insertLinkRangesBatch(rangeBatch)
+                if (coverageBatch.isNotEmpty()) repository.insertLinkCoverageBatch(coverageBatch)
+                anchorCount += anchorBatch.size
+                rangeCount += rangeBatch.size
+                coverageCount += coverageBatch.size
+                anchorBatch.clear()
+                rangeBatch.clear()
+                coverageBatch.clear()
+            } catch (error: Exception) {
+                if (error is CancellationException) throw error
+                throw LinkBatchWriteFailure(error)
+            }
+        }
+
         for (linkData in links) {
+            currentCoroutineContext().ensureActive()
             try {
                 val path = linkData.path_2
                 val targetTitle = if (path.contains('\\')) {
@@ -2184,40 +2313,31 @@ class DatabaseGenerator(
                         legacyLinkIdsToDelete += legacyIds
                     }
                 }
-                touchedLinkIds += linkId
+                if (linkId !in syncedLinkIds) pendingTouchedIds += linkId
                 // Anchor is source-side; skip when flipped (that line is now the stored target).
                 if (!flip) {
                     buildLinkAnchor(linkData, linkId, sourceLineId, bookTitle)?.let { anchorBatch += it }
                 }
                 // Range side 0 = stored source, 1 = stored target; the flip swaps each file's end.
                 if (flip) {
-                    queueRangeSide(linkData.line_index_2_end, targetBook.id, targetLineIndex, linkId, 0, bookTitle, rangeBatch, coverageBatch)
-                    queueRangeSide(linkData.line_index_1_end, sourceBook.id, sourceLineIndex, linkId, 1, bookTitle, rangeBatch, coverageBatch)
+                    queueRangeSide(linkData.line_index_2_end, targetBook.id, targetLineIndex, linkId, 0, bookTitle, rangeBatch, coverageBatch, maxAuxiliaryRows, ::flushLinkBatch)
+                    queueRangeSide(linkData.line_index_1_end, sourceBook.id, sourceLineIndex, linkId, 1, bookTitle, rangeBatch, coverageBatch, maxAuxiliaryRows, ::flushLinkBatch)
                 } else {
-                    queueRangeSide(linkData.line_index_1_end, sourceBook.id, sourceLineIndex, linkId, 0, bookTitle, rangeBatch, coverageBatch)
-                    queueRangeSide(linkData.line_index_2_end, targetBook.id, targetLineIndex, linkId, 1, bookTitle, rangeBatch, coverageBatch)
+                    queueRangeSide(linkData.line_index_1_end, sourceBook.id, sourceLineIndex, linkId, 0, bookTitle, rangeBatch, coverageBatch, maxAuxiliaryRows, ::flushLinkBatch)
+                    queueRangeSide(linkData.line_index_2_end, targetBook.id, targetLineIndex, linkId, 1, bookTitle, rangeBatch, coverageBatch, maxAuxiliaryRows, ::flushLinkBatch)
                 }
                 processed++
-            } catch (_: Exception) {
-                // Skip malformed entries but continue
+            } catch (error: Exception) {
+                if (error is CancellationException || error is LinkBatchWriteFailure) throw error
+                // Skip malformed entries but continue, as before.
+            }
+            if (pendingTouchedIds.size + anchorBatch.size + rangeBatch.size + coverageBatch.size >= maxAuxiliaryRows) {
+                flushLinkBatch()
             }
         }
-        if (anchorBatch.isNotEmpty()) {
-            repository.insertLinkAnchorsBatch(anchorBatch)
-            logger.i { "Inserted ${anchorBatch.size} word-level anchors for $bookTitle" }
-        }
-        // Authoritative range sync: drop stale ranges of every link re-imported in
-        // this run, so a shortened or removed line_index_X_end takes effect on rerun.
-        touchedLinkIds.chunked(500).forEach { chunk ->
-            val ids = chunk.joinToString(",")
-            repository.executeRawQuery("DELETE FROM link_range WHERE linkId IN ($ids)")
-            repository.executeRawQuery("DELETE FROM link_coverage WHERE linkId IN ($ids)")
-        }
-        if (rangeBatch.isNotEmpty()) {
-            repository.insertLinkRangesBatch(rangeBatch)
-            repository.insertLinkCoverageBatch(coverageBatch)
-            logger.i { "Inserted ${rangeBatch.size} link ranges (${coverageBatch.size} coverage rows) for $bookTitle" }
-        }
+        flushLinkBatch()
+        if (anchorCount > 0) logger.i { "Inserted $anchorCount word-level anchors for $bookTitle" }
+        if (rangeCount > 0) logger.i { "Inserted $rangeCount link ranges ($coverageCount coverage rows) for $bookTitle" }
         return processed
     }
 
@@ -2236,6 +2356,8 @@ class DatabaseGenerator(
         bookTitle: String,
         ranges: MutableList<LinkRange>,
         coverage: MutableList<LinkCoverage>,
+        maxBufferedRows: Int,
+        flush: suspend () -> Unit,
     ) {
         val endLineIndex = (rawEnd ?: return).toInt() - 1
         // Degenerate range (end == start): a plain single-line link, nothing to record.
@@ -2250,6 +2372,7 @@ class DatabaseGenerator(
             val coveredId = getLineIdCached(bookId, idx) ?: continue
             if (coveredId in headingLineIds) continue
             coverage += LinkCoverage(lineId = coveredId, linkId = linkId, side = side)
+            if (coverage.size >= maxBufferedRows) flush()
         }
     }
 
@@ -2677,37 +2800,33 @@ class DatabaseGenerator(
 
 
     /**
-     * Parses links from JSON content, handling both Ben-YehudaToOtzaria and DictaToOtzaria formats
+     * Validate the entire file before allocating IDs or writing links. A corrupt
+     * final JSON record must discard the whole input, as decodeFromString<List>
+     * did; consuming a lazy decoder directly in the SQL loop would import a
+     * partial file. Large valid inputs spill their normalized records to disk.
      */
-    private fun parseLinksFromJson(rawContent: String, bookTitle: String): List<LinkData> {
-        // kotlinx.serialization rejects a leading BOM ("Unexpected JSON token at offset 0").
-        val content = Utf8Bom.strip(rawContent)
-        return try {
-            // First, try to parse as Ben-YehudaToOtzaria format (List<LinkData>)
-            json.decodeFromString<List<LinkData>>(content)
-        } catch (e: Exception) {
-            // If that fails, try to parse as DictaToOtzaria format (Map<String, List<DictaLinkData>>)
-            try {
-                val dictaLinksMap = json.decodeFromString<Map<String, List<DictaLinkData>>>(content)
-                logger.d { "Successfully parsed DictaToOtzaria format for $bookTitle with ${dictaLinksMap.size} line groups" }
-                
-                // Convert DictaToOtzaria format to LinkData format
-                // Note: DictaToOtzaria format doesn't map perfectly to LinkData structure
-                // We'll need to handle this conversion carefully or skip for now
-                logger.w { "DictaToOtzaria format conversion not yet implemented for $bookTitle" }
-                emptyList<LinkData>()
-            } catch (e2: Exception) {
-                // One line, no throwable: kermit renders the JsonDecodingException
-                // together with the whole offending document, which was 146 log
-                // lines of JSON body per build. The head of the content says just
-                // as much about what the file actually is.
-                logger.w {
-                    "Failed to parse links for '$bookTitle' in any known format " +
-                        "(${e2::class.simpleName}: ${e2.message?.take(120)?.oneLine()}); " +
-                        "content starts: ${content.take(80).oneLine()}"
+    @OptIn(ExperimentalSerializationApi::class)
+    private suspend fun prepareLinkInput(path: Path, bookTitle: String): PreparedStrings {
+        try {
+            return PreparedStrings.Builder(inputPartBytes, inputSpillDirectory).use { builder ->
+                Files.newInputStream(path).buffered().withoutUtf8Bom().use { stream ->
+                    val records = json.decodeToSequence<LinkData>(stream, DecodeSequenceMode.ARRAY_WRAPPED)
+                    for (record in records) {
+                        currentCoroutineContext().ensureActive()
+                        builder.add(json.encodeToString(record))
+                    }
                 }
-                emptyList<LinkData>()
+                builder.finish()
             }
+        } catch (error: SerializationException) {
+            // Dicta maps have never produced link rows (conversion is still
+            // unimplemented); malformed arrays also produce zero rows.
+            logger.w {
+                "Failed to parse links for '$bookTitle' as an authored link array " +
+                    "(${error::class.simpleName}: ${error.message?.take(120)?.oneLine()}); " +
+                    "DictaToOtzaria object conversion is not implemented"
+            }
+            return PreparedStrings.Builder(inputPartBytes, inputSpillDirectory).use { it.finish() }
         }
     }
 
@@ -2734,16 +2853,6 @@ class DatabaseGenerator(
         // side; the link row itself stays anchored at the start line.
         val line_index_1_end: Double? = null,
         val line_index_2_end: Double? = null
-    )
-
-    /**
-     * Data class for DictaToOtzaria link format
-     */
-    @Serializable
-    private data class DictaLinkData(
-        val start: Int,
-        val end: Int,
-        val refs: Map<String, String>
     )
 
     /** One alt-toc node: a heading anchored to a 1-based line, with nested children. */

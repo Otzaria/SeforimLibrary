@@ -322,3 +322,24 @@ tasks.register<JavaExec>("generateHavroutaLinks") {
         "-XX:+UseG1GC"
     )
 }
+
+// Deliberately opt-in: synthetic DB parity + phase/memory measurements, no timing assertions.
+tasks.register<JavaExec>("generatorPipelineProbe") {
+    group = "verification"
+    description = "Generate a deterministic synthetic DB and record generator phase time/heap/RSS."
+    dependsOn("jvmTestClasses")
+    classpath = tasks.named<Test>("jvmTest").get().classpath
+    mainClass.set("io.github.kdroidfilter.seforimlibrary.otzariasqlite.GeneratorPipelineProbe")
+    val books = providers.gradleProperty("probeBooks").orElse("12").get()
+    val lines = providers.gradleProperty("probeLines").orElse("100").get()
+    val probeRoot = rootProject.layout.buildDirectory.dir("generator-probe").get().asFile
+    args(
+        providers.gradleProperty("probeFixture").orElse("$probeRoot/fixture-$books-$lines").get(),
+        providers.gradleProperty("probeOutput").orElse("$probeRoot/output-$books-$lines").get(),
+        books, lines,
+    )
+    maxHeapSize = providers.gradleProperty("probeHeap").orElse("1g").get()
+    providers.gradleProperty("generatorInputBufferMiB").orNull?.let {
+        systemProperty("seforim.generator.inputBufferMiB", it)
+    }
+}
