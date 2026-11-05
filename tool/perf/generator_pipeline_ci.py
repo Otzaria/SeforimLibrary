@@ -24,7 +24,9 @@ import org.gradle.api.tasks.JavaExec
 import org.gradle.api.tasks.testing.Test
 
 gradle.projectsEvaluated {
-    def generator = gradle.rootProject.project(':otzariasqlite')
+    // Init scripts also run for included builds, which do not own this module.
+    def generator = gradle.rootProject.findProject(':otzariasqlite')
+    if (generator == null) return
     generator.tasks.register('generatorComparisonProbe', JavaExec) {
         dependsOn(generator.tasks.named('jvmTestClasses'))
         classpath = generator.tasks.named('jvmTest', Test).get().classpath
@@ -47,7 +49,11 @@ def run_logged(command, cwd, log):
     with log.open('w', encoding='utf-8') as output:
         completed = subprocess.run(command, cwd=cwd, stdout=output, stderr=subprocess.STDOUT)
     if completed.returncode:
-        print('\n'.join(log.read_text(encoding='utf-8', errors='replace').splitlines()[-100:]), file=sys.stderr)
+        lines = log.read_text(encoding='utf-8', errors='replace').splitlines()
+        excerpt = lines if len(lines) <= 150 else (
+            lines[:50] + [f'... {len(lines) - 150} lines omitted; full output: {log} ...'] + lines[-100:]
+        )
+        print('\n'.join(excerpt), file=sys.stderr)
         raise subprocess.CalledProcessError(completed.returncode, command)
 
 
