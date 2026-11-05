@@ -69,7 +69,12 @@ reader reuse, exact score/order parity with fresh readers, lexical and vector
 filters, committed refreshes, cursor stability, concurrent searching during
 refresh, close with in-flight work, initial and refresh failures, retry,
 coroutine cancellation and file replacement after cleanup. The index replacement
-test is portable and should also run on Windows to exercise OS-level file locks.
+test is portable. The `Search lifecycle and benchmarks` workflow runs
+`ManagedIndexSearchersTest` and `LuceneSearcherLifecycleTest` on Windows to
+exercise OS-level file locks. This is a focused Lucene check: the existing
+`MagicDictionaryIndex` tests retain separate thread-local SQLite connections,
+whose Windows file-deletion failures are outside this change. The regular Linux
+CI continues to run the full test suite.
 
 No index regeneration, dependency change or database migration is needed.
 
@@ -101,9 +106,16 @@ The idle current reader deliberately stays resident between requests; this is a
 tradeoff for avoiding repeated opens and mappings. All snapshots are released on
 the documented close path.
 
+The focused workflow also runs the benchmark on Linux for pull requests whose
+head branch starts with `perf/lucene-`, or through manual dispatch. It measures
+both modes with one and four workers, repeats each pair twice with the order
+reversed, and checks result checksums. Its `linux-lucene-searcher-benchmark`
+artifact contains individual and combined JSON, raw logs, the checked-out commit,
+Java version and dependency catalog. The job summary reports throughput and p95
+latency without enforcing a performance threshold.
+
 These are synthetic lifecycle measurements, not end-to-end application or
-production-corpus search timings. The task is opt-in and has no CI performance
-threshold.
+production-corpus search timings. Other pull requests do not run the benchmark.
 
 [manager]: https://lucene.apache.org/core/10_4_0/core/org/apache/lucene/search/SearcherManager.html
 [references]: https://lucene.apache.org/core/10_4_0/core/org/apache/lucene/search/ReferenceManager.html

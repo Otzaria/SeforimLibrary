@@ -3,7 +3,8 @@ plugins {
     alias(libs.plugins.kotlinx.serialization)
 }
 
-// Opt-in: no timing threshold and no extra workload in jvmTest or CI.
+// No timing threshold or extra workload in jvmTest. The focused CI workflow
+// runs this task only for perf/lucene-* pull requests or a manual dispatch.
 // Compare each mode in a fresh JVM, e.g. --args="legacy 10000 1000 1" and
 // --args="managed 10000 1000 1". The first argument selects reader lifecycle only.
 tasks.register<JavaExec>("benchmarkLuceneSearchers") {

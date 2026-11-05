@@ -70,6 +70,8 @@ internal object LuceneLifecycleFixture {
 
     fun title(bookId: Int) = Document().apply {
         add(StringField("type", "book_title", Field.Store.NO))
+        // Lucene 10 requires the same book_id point schema as line documents.
+        add(IntPoint("book_id", bookId))
         add(StoredField("book_id", bookId))
         add(TextField("title", "book title $bookId", Field.Store.NO))
     }

@@ -1,4 +1,4 @@
-name: Search lifecycle on Windows
+name: Search lifecycle and benchmarks
 
 on:
   pull_request:
@@ -7,6 +7,8 @@ on:
       - 'search/**'
       - 'gradle/**'
       - '.github/workflows/search-lifecycle-windows.yml'
+      - '.github/scripts/test_ci_workflows.py'
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -26,10 +28,15 @@ jobs:
       - uses: gradle/actions/setup-gradle@v5
         with:
           cache-read-only: true
+      # Scope this job to Lucene handles. Existing MagicDictionaryIndex tests
+      # retain separate thread-local SQLite connections and are not this gate.
       - name: Check native reader disposal and index replacement
         shell: pwsh
         run: >-
-          ./gradlew.bat :search:jvmTest --no-daemon --no-configuration-cache
+          ./gradlew.bat :search:jvmTest
+          --tests 'io.github.kdroidfilter.seforimlibrary.search.ManagedIndexSearchersTest'
+          --tests 'io.github.kdroidfilter.seforimlibrary.search.LuceneSearcherLifecycleTest'
+          --no-daemon --no-configuration-cache
           --max-workers=2 '-Dorg.gradle.jvmargs=-Xmx2g'
           '-Pkotlin.compiler.execution.strategy=in-process'
       - uses: actions/upload-artifact@v6
@@ -38,3 +45,113 @@ jobs:
           name: windows-search-test-results
           path: search/build/test-results/jvmTest/*.xml
           retention-days: 7
+
+  searcher-benchmark:
+    # Synthetic measurements are useful on this performance branch, but are
+    # neither a timing gate nor additional work for unrelated pull requests.
+    if: github.event_name == 'workflow_dispatch' || startsWith(github.head_ref, 'perf/lucene-')
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          submodules: true
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '25'
+      - uses: gradle/actions/setup-gradle@v5
+        with:
+          cache-read-only: true
+      - name: Measure identical queries with legacy and managed readers
+        shell: bash
+        run: |
+          set -euo pipefail
+          chmod +x gradlew
+          mkdir -p build/lucene-benchmark
+          git rev-parse HEAD > build/lucene-benchmark/checkout-sha.txt
+          java -version > build/lucene-benchmark/java-version.txt 2>&1
+          cp gradle/libs.versions.toml build/lucene-benchmark/libs.versions.toml
+          for workers in 1 4; do
+            for repetition in 1 2; do
+              # Each invocation forks a fresh benchmark JVM. Alternate mode
+              # order on the second pass to expose run-order/cache effects.
+              modes=(legacy managed)
+              if [ "$repetition" -eq 2 ]; then modes=(managed legacy); fi
+              for mode in "${modes[@]}"; do
+                ./gradlew :search:benchmarkLuceneSearchers \
+                  --args="$mode 10000 1000 $workers" \
+                  --no-daemon --no-configuration-cache --console=plain \
+                  --max-workers=2 '-Dorg.gradle.jvmargs=-Xmx2g' \
+                  '-Pkotlin.compiler.execution.strategy=in-process' \
+                  | tee "build/lucene-benchmark/$mode-w$workers-r$repetition.log"
+              done
+            done
+          done
+      - name: Collect measurements and check result parity
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          output = Path("build/lucene-benchmark")
+          records = []
+          summary = [
+              "## Lucene searcher lifecycle measurements",
+              "",
+              "Synthetic 10,000-line index; 1,000 measured requests per worker; "
+              "each mode uses a fresh JVM. No timing thresholds.",
+              "",
+              "| Workers | Run | Legacy req/s | Managed req/s | Ratio | Legacy p95 µs | Managed p95 µs |",
+              "| --- | --- | --- | --- | --- | --- | --- |",
+          ]
+          for workers in (1, 4):
+              for repetition in (1, 2):
+                  pair = {}
+                  for mode in ("legacy", "managed"):
+                      log = output / f"{mode}-w{workers}-r{repetition}.log"
+                      rows = []
+                      for line in log.read_text(encoding="utf-8").splitlines():
+                          try:
+                              row = json.loads(line)
+                          except json.JSONDecodeError:
+                              continue
+                          if isinstance(row, dict) and {"mode", "checksum", "requestsPerSecond"} <= row.keys():
+                              rows.append(row)
+                      if len(rows) != 1:
+                          raise SystemExit(f"{log}: expected one measurement, got {len(rows)}")
+                      row = rows[0]
+                      expected = {"mode": mode, "workers": workers, "documents": 10000, "requests": 1000 * workers}
+                      for key, value in expected.items():
+                          if row.get(key) != value:
+                              raise SystemExit(f"{log}: unexpected {key}: {row.get(key)!r}")
+                      row["repetition"] = repetition
+                      records.append(row)
+                      pair[mode] = row
+                      log.with_suffix(".json").write_text(json.dumps(row, indent=2) + "\n", encoding="utf-8")
+                  legacy, managed = pair["legacy"], pair["managed"]
+                  if legacy["checksum"] != managed["checksum"]:
+                      raise SystemExit(f"Result checksum mismatch: workers={workers}, repetition={repetition}")
+                  summary.append(
+                      f"| {workers} | {repetition} | {legacy['requestsPerSecond']:.1f} | "
+                      f"{managed['requestsPerSecond']:.1f} | "
+                      f"{managed['requestsPerSecond'] / legacy['requestsPerSecond']:.2f}× | "
+                      f"{legacy['p95Micros']:.1f} | {managed['p95Micros']:.1f} |"
+                  )
+          (output / "results.json").write_text(json.dumps(records, indent=2) + "\n", encoding="utf-8")
+          summary.extend(["", "Raw JSON includes allocations, sampled heap/RSS/mapped memory, GC, reader opens and checksums."])
+          text = "\n".join(summary) + "\n"
+          (output / "summary.md").write_text(text, encoding="utf-8")
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as report:
+              report.write(text)
+          print(text)
+          PY
+      - uses: actions/upload-artifact@v6
+        if: always()
+        with:
+          name: linux-lucene-searcher-benchmark
+          path: build/lucene-benchmark/
+          retention-days: 14

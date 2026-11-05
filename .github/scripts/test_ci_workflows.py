@@ -63,6 +63,10 @@ SELF_HOSTED_JOBS = {
     ("build-library-vectors.yml", "vectors"),
 }
 
+# Concrete GitHub-hosted images still run every action-major check below.
+# A new runner label/expression must be reviewed rather than silently exempted.
+HOSTED_RUNNERS = ("ubuntu-latest", "windows-latest")
+
 
 def parsed_workflows():
     for path in sorted(WORKFLOWS.glob("*.yml")):
@@ -545,7 +549,7 @@ class CiWorkflowTest(unittest.TestCase):
                 self_hosted = (name, job_name) in SELF_HOSTED_JOBS
                 self.assertEqual(
                     self_hosted,
-                    job.get("runs-on") != "ubuntu-latest",
+                    job.get("runs-on") not in HOSTED_RUNNERS,
                     f"{name}:{job_name} changed runner class",
                 )
                 if self_hosted:
