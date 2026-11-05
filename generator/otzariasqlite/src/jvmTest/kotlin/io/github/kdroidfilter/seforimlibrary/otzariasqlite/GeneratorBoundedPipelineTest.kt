@@ -1,18 +1,22 @@
 package io.github.kdroidfilter.seforimlibrary.otzariasqlite
 
 import app.cash.sqldelight.driver.jdbc.sqlite.JdbcSqliteDriver
+import io.github.kdroidfilter.seforimlibrary.common.ids.IdAllocator
 import io.github.kdroidfilter.seforimlibrary.common.ids.InMemoryIdAllocator
 import io.github.kdroidfilter.seforimlibrary.core.models.Book
 import io.github.kdroidfilter.seforimlibrary.core.models.Category
+import io.github.kdroidfilter.seforimlibrary.core.models.ConnectionType
 import io.github.kdroidfilter.seforimlibrary.core.models.Line
 import io.github.kdroidfilter.seforimlibrary.dao.repository.SeforimRepository
 import kotlinx.coroutines.runBlocking
 import java.nio.file.Files
 import java.nio.file.Path
 import java.sql.Connection
+import java.sql.SQLException
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFails
+import kotlin.test.assertFailsWith
 import kotlin.test.assertTrue
 
 class GeneratorBoundedPipelineTest {
@@ -90,6 +94,92 @@ class GeneratorBoundedPipelineTest {
                     generator.generateLinksOnly()
                     assertEquals(listOf(listOf("0")), query(driver.getConnection(), "SELECT count(*) FROM link"))
                 }
+                assertSpillsRemoved(root)
+            }
+        }
+    }
+
+    @Test
+    fun databaseFailureInPrimaryLinkWritePropagatesAndAllowsRetryAfterCleanup() = runBlocking {
+        withFixture { root ->
+            writeFixture(root, withNotes = false)
+            withRepo { driver, repo ->
+                val generator = DatabaseGenerator(
+                    root, repo, inputBufferBytes = 1024, inputSpillDirectory = root.resolve("spill"),
+                )
+                generator.generateLinesOnly()
+                driver.getConnection().createStatement().use { statement ->
+                    statement.execute(
+                        "CREATE TRIGGER reject_probe_link BEFORE INSERT ON link " +
+                            "BEGIN SELECT RAISE(ABORT, 'injected primary link failure'); END",
+                    )
+                }
+                val failure = assertFails { generator.generateLinksOnly() }
+                assertTrue(
+                    generateSequence(failure) { it.cause }.any {
+                        it is SQLException && it.message?.contains("injected primary link failure") == true
+                    },
+                    "Primary SQL errors must propagate, not become skipped links: $failure",
+                )
+                assertEquals(listOf(listOf("0")), query(driver.getConnection(), "SELECT count(*) FROM link"))
+                assertSpillsRemoved(root)
+                driver.getConnection().createStatement().use { it.execute("DROP TRIGGER reject_probe_link") }
+                generator.generateLinksOnly()
+                assertEquals(listOf(listOf("1")), query(driver.getConnection(), "SELECT count(*) FROM link"))
+                assertSpillsRemoved(root)
+            }
+        }
+    }
+
+    @Test
+    fun stableIdCollisionWhileReplacingLegacyLinkPropagatesAndRemovesSpills() = runBlocking {
+        withFixture { root ->
+            val links = Files.createDirectories(root.resolve("links"))
+            Files.createDirectories(root.resolve("spill"))
+            withRepo { _, repo ->
+                val source = repo.insertSource("Tashma")
+                val category = repo.insertCategory(Category(0, null, "בדיקה", level = 0, order = 1))
+                repo.insertBook(Book(1, category, source, "מקור", totalLines = 1))
+                repo.insertBook(Book(2, category, source, "יעד", totalLines = 1, isBaseBook = true))
+                repo.insertLinesBatch(listOf(Line(10, 1, 0, "מקור"), Line(20, 2, 0, "יעד")))
+                val delegate = InMemoryIdAllocator.load(null)
+                val allocator = object : IdAllocator by delegate {
+                    override fun linkId(srcLineId: Long, tgtLineId: Long, connectionTypeId: Long): Long = 900
+                }
+                val type = allocator.connectionTypeId(ConnectionType.COMMENTARY.name)
+                repo.insertConnectionTypeWithId(type, ConnectionType.COMMENTARY.name)
+                repo.insertLinkWithId(900, 1, 2, 10, 20, 0, type)
+                val row = """{"heRef_2":"יעד","line_index_1":1,"line_index_2":1,"path_2":"יעד.txt","Conection Type":"commentary"}"""
+                Files.writeString(
+                    links.resolve("מקור_links.json"),
+                    "[${List(4) { row }.joinToString()}]",
+                )
+                val generator = DatabaseGenerator(
+                    root, repo, allocator = allocator,
+                    inputBufferBytes = 1024, inputSpillDirectory = root.resolve("spill"),
+                )
+                val failure = assertFailsWith<IllegalStateException> { generator.generateLinksOnly() }
+                assertTrue(failure.message?.contains("Stable link id collision") == true)
+                assertSpillsRemoved(root)
+            }
+        }
+    }
+
+    @Test
+    fun malformedTargetPathsStillAllowLaterValidLinks() = runBlocking {
+        withFixture { root ->
+            writeFixture(root, withNotes = false)
+            withRepo { driver, repo ->
+                val generator = DatabaseGenerator(
+                    root, repo, inputBufferBytes = 1024, inputSpillDirectory = root.resolve("spill"),
+                )
+                generator.generateLinesOnly()
+                val valid = linkRecord(end = null)
+                val invalidPath = valid.replace("יעד.txt", "\\u0000")
+                val pathWithoutFilename = valid.replace("יעד.txt", "/")
+                Files.writeString(root.resolve("links/מקור_links.json"), "[$invalidPath,$pathWithoutFilename,$valid]")
+                generator.generateLinksOnly()
+                assertEquals(listOf(listOf("1")), query(driver.getConnection(), "SELECT count(*) FROM link"))
                 assertSpillsRemoved(root)
             }
         }

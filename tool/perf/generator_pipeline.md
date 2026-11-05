@@ -80,7 +80,9 @@ The producer and consumer are structured children of the phase scope. Cleanup
 cancels and joins the producer before returning. File streams close before
 deletion, so cleanup does not rely on Unix's ability to unlink open files.
 I/O errors and batched SQL write errors propagate; coroutine cancellation is
-not classified as malformed data.
+not classified as malformed data. The per-link malformed-entry tolerance also
+rethrows JDBC read/write errors and failed allocator/stable-ID invariants;
+invalid target paths still allow later valid links to be imported.
 
 Input validation is not a phase-wide SQL transaction. The repository's existing
 `runInTransaction` wrapper does not create a database transaction. A malformed
@@ -105,7 +107,9 @@ scheduling and cleanup on cancellation/preparation failure.
 between resident and forced-spill builds, including IDs, contents, links,
 ranges, anchors and foreign keys. It also checks malformed JSON tails, repeated
 ranges across tiny batches/reruns, sparse line-ID page boundaries/eviction and
-an injected SQL coverage-write failure.
+injected primary-link and coverage SQL failures. A primary-write failure checks
+cleanup and a successful retry, and a colliding legacy-link ID must abort the
+import instead of being silently skipped.
 
 The opt-in `generatorPipelineProbe` uses the same public API as production and
 produces a real SQLite database plus `metrics.json` with separate line/link

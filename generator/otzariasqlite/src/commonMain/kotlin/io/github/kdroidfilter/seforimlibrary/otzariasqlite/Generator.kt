@@ -36,6 +36,7 @@ import java.io.File
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.Paths
+import java.sql.SQLException
 import java.util.LinkedHashMap
 import kotlin.io.path.exists
 import kotlin.io.path.extension
@@ -2328,8 +2329,12 @@ class DatabaseGenerator(
                 }
                 processed++
             } catch (error: Exception) {
-                if (error is CancellationException || error is LinkBatchWriteFailure) throw error
-                // Skip malformed entries but continue, as before.
+                // JDBC reads/primary writes and allocator/collision invariants
+                // must escape the existing malformed-entry tolerance.
+                if (error is CancellationException || error is LinkBatchWriteFailure ||
+                    error is SQLException || error is IllegalStateException
+                ) throw error
+                // Skip malformed entries (for example invalid target paths), as before.
             }
             if (pendingTouchedIds.size + anchorBatch.size + rangeBatch.size + coverageBatch.size >= maxAuxiliaryRows) {
                 flushLinkBatch()
