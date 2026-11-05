@@ -28,15 +28,12 @@ jobs:
       - uses: gradle/actions/setup-gradle@v5
         with:
           cache-read-only: true
-      # Scope this job to Lucene handles. Existing MagicDictionaryIndex tests
-      # retain separate thread-local SQLite connections and are not this gate.
+      # The complete search suite covers Lucene readers and every worker's
+      # SQLite dictionary context, including native file replacement on Windows.
       - name: Check native reader disposal and index replacement
         shell: pwsh
         run: >-
-          ./gradlew.bat :search:jvmTest
-          --tests 'io.github.kdroidfilter.seforimlibrary.search.ManagedIndexSearchersTest'
-          --tests 'io.github.kdroidfilter.seforimlibrary.search.LuceneSearcherLifecycleTest'
-          --no-daemon --no-configuration-cache
+          ./gradlew.bat :search:jvmTest --no-daemon --no-configuration-cache
           --max-workers=2 '-Dorg.gradle.jvmargs=-Xmx2g'
           '-Pkotlin.compiler.execution.strategy=in-process'
       - uses: actions/upload-artifact@v6

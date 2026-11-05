@@ -1,22 +1,30 @@
 package io.github.kdroidfilter.seforimlibrary.search
 
 import co.touchlab.kermit.Logger
+import org.apache.lucene.store.AlreadyClosedException
+import java.io.Closeable
 import java.nio.file.Files
 import java.nio.file.Path
 import java.sql.Connection
 import java.sql.DriverManager
 import java.sql.PreparedStatement
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.locks.ReentrantReadWriteLock
+import kotlin.concurrent.read
+import kotlin.concurrent.write
 
 /**
  * Streaming dictionary index backed by SQLite (tables: surface, variant, base).
  * Previously we loaded the entire dictionary into memory; now we stream lookups
  * on-demand with a small LRU cache while preserving the exact expansion shape
- * used by the search ranking logic.
+ * used by the search ranking logic. Close the index when its owner is finished;
+ * closing waits for synchronous lookups and releases every worker's JDBC context.
  */
-class MagicDictionaryIndex private constructor(
+class MagicDictionaryIndex internal constructor(
     private val norm: (String) -> String,
-    private val dbFile: Path
-) {
+    private val dbFile: Path,
+    private val openConnection: (String) -> Connection = DriverManager::getConnection
+) : Closeable {
     data class Expansion(
         val surface: List<String>,
         val variants: List<String>,
@@ -24,20 +32,30 @@ class MagicDictionaryIndex private constructor(
     )
 
     private val url = "jdbc:sqlite:${dbFile.toAbsolutePath()}"
+    private val lifecycle = ReentrantReadWriteLock()
+    private var closed = false
+    private val contexts = ConcurrentHashMap.newKeySet<LookupContext>()
 
     /**
      * Prepared statement per thread to avoid re-opening connections on every token.
      */
     private val stmtProvider: ThreadLocal<LookupContext> = ThreadLocal.withInitial {
-        val conn = DriverManager.getConnection(url).apply {
-            autoCommit = false
-            // Enforce read-only queries without altering connection flags post-open
-            createStatement().use { stmt -> stmt.execute("PRAGMA query_only=ON") }
-        }
-        LookupContext(
-            conn = conn,
+        val conn = openConnection(url)
+        var stmt: PreparedStatement? = null
+        try {
+            conn.autoCommit = false
+            // Enforce read-only queries without altering connection flags post-open.
+            conn.createStatement().use { pragma -> pragma.execute("PRAGMA query_only=ON") }
             stmt = conn.prepareStatement(LOOKUP_SQL)
-        )
+            LookupContext(conn, stmt).also { contexts.add(it) }
+        } catch (failure: Throwable) {
+            try {
+                closeLookupResources(conn, stmt)
+            } catch (cleanupFailure: Throwable) {
+                if (cleanupFailure !== failure) failure.addSuppressed(cleanupFailure)
+            }
+            throw failure
+        }
     }
 
     /**
@@ -57,22 +75,53 @@ class MagicDictionaryIndex private constructor(
             size > BASE_CACHE_SIZE
     }
 
-    fun expansionsFor(tokens: List<String>): List<Expansion> =
+    fun expansionsFor(tokens: List<String>): List<Expansion> = whileOpen {
         tokens.flatMap { expansionsForToken(it) }.distinct()
+    }
 
-    fun expansionFor(token: String): Expansion? {
+    fun expansionFor(token: String): Expansion? = whileOpen {
         val expansions = expansionsForToken(token)
-        if (expansions.isEmpty()) return null
+        if (expansions.isEmpty()) return@whileOpen null
 
         val normalized = norm(token)
         // Strategy: prefer the expansion whose base matches the token
         val matchingBase = expansions.firstOrNull { exp ->
             exp.base.any { it == normalized }
         }
-        if (matchingBase != null) return matchingBase
+        if (matchingBase != null) return@whileOpen matchingBase
 
         // Otherwise, prefer the largest expansion (more terms = more complete paradigm)
-        return expansions.maxByOrNull { it.surface.size }
+        expansions.maxByOrNull { it.surface.size }
+    }
+
+    private inline fun <T> whileOpen(block: () -> T): T = lifecycle.read {
+        if (closed) throw AlreadyClosedException("MagicDictionaryIndex is closed")
+        block()
+    }
+
+    /**
+     * Reject new lookups and release statements and connections from all threads.
+     * Existing synchronous lookups finish first; repeated closes are harmless.
+     */
+    override fun close() {
+        lifecycle.write {
+            if (closed) return
+            closed = true
+            var failure: Throwable? = null
+            for (context in contexts) {
+                try {
+                    context.close()
+                } catch (cleanupFailure: Throwable) {
+                    if (failure == null) failure = cleanupFailure
+                    else if (cleanupFailure !== failure) failure.addSuppressed(cleanupFailure)
+                }
+            }
+            contexts.clear()
+            stmtProvider.remove()
+            tokenCache.clear()
+            baseCache.clear()
+            failure?.let { throw it }
+        }
     }
 
     private fun expansionsForToken(token: String): List<Expansion> {
@@ -119,19 +168,21 @@ class MagicDictionaryIndex private constructor(
         runCatching {
             synchronized(ctx) {
                 repeat(3) { idx -> ctx.stmt.setString(idx + 1, rawToken) }
-                val rs = ctx.stmt.executeQuery()
-                val accum = mutableMapOf<Long, BaseBucket>()
-                while (rs.next()) {
-                    val baseId = rs.getLong("base_id")
-                    val bucket = accum.getOrPut(baseId) {
-                        BaseBucket(
-                            baseRaw = rs.getString("base") ?: "",
-                            surfaces = linkedSetOf(),
-                            variants = linkedSetOf()
-                        )
+                val accum = ctx.stmt.executeQuery().use { rs ->
+                    val buckets = mutableMapOf<Long, BaseBucket>()
+                    while (rs.next()) {
+                        val baseId = rs.getLong("base_id")
+                        val bucket = buckets.getOrPut(baseId) {
+                            BaseBucket(
+                                baseRaw = rs.getString("base") ?: "",
+                                surfaces = linkedSetOf(),
+                                variants = linkedSetOf()
+                            )
+                        }
+                        rs.getString("surface")?.let { bucket.surfaces += it }
+                        rs.getString("variant")?.let { bucket.variants += it }
                     }
-                    rs.getString("surface")?.let { bucket.surfaces += it }
-                    rs.getString("variant")?.let { bucket.variants += it }
+                    buckets
                 }
 
                 for ((baseId, bucket) in accum) {
@@ -163,8 +214,17 @@ class MagicDictionaryIndex private constructor(
                     expansions += baseId to exp
                 }
             }
-        }.onFailure {
-            logger.d { "[MagicDictionary] Failed to fetch expansions for '$rawToken' : ${it.message}" }
+        }.onFailure { failure ->
+            // A failed statement must not leave a result/transaction pinned or
+            // poison this thread's next uncached lookup.
+            stmtProvider.remove()
+            contexts.remove(ctx)
+            try {
+                ctx.close()
+            } catch (cleanupFailure: Throwable) {
+                if (cleanupFailure !== failure) failure.addSuppressed(cleanupFailure)
+            }
+            logger.d { "[MagicDictionary] Failed to fetch expansions for '$rawToken' : ${failure.message}" }
         }
 
         return expansions
@@ -190,7 +250,7 @@ class MagicDictionaryIndex private constructor(
                 // Validate DB is reachable
                 DriverManager.getConnection("jdbc:sqlite:${file.toAbsolutePath()}").use { conn ->
                     conn.createStatement().use { stmt ->
-                        stmt.execute("SELECT 1")
+                        stmt.executeQuery("SELECT 1").use { it.next() }
                     }
                 }
                 logger.d { "[MagicDictionary] Streaming lexical db from $file (lazy on-demand)" }
@@ -225,13 +285,31 @@ class MagicDictionaryIndex private constructor(
                     WHERE type = 'table' AND name IN ('surface', 'variant', 'base', 'surface_variant')
                 """.trimIndent()
                 conn.createStatement().use { stmt ->
-                    val rs = stmt.executeQuery(sql)
-                    val names = mutableSetOf<String>()
-                    while (rs.next()) names += rs.getString("name") ?: ""
-                    names.containsAll(listOf("surface", "variant", "base", "surface_variant"))
+                    stmt.executeQuery(sql).use { rs ->
+                        val names = mutableSetOf<String>()
+                        while (rs.next()) names += rs.getString("name") ?: ""
+                        names.containsAll(listOf("surface", "variant", "base", "surface_variant"))
+                    }
                 }
             }
         }.getOrElse { false }
+
+        private fun closeLookupResources(conn: Connection, stmt: PreparedStatement?) {
+            var failure: Throwable? = null
+            fun attempt(block: () -> Unit) {
+                try {
+                    block()
+                } catch (cleanupFailure: Throwable) {
+                    val previous = failure
+                    if (previous == null) failure = cleanupFailure
+                    else if (cleanupFailure !== previous) previous.addSuppressed(cleanupFailure)
+                }
+            }
+            attempt { stmt?.close() }
+            attempt { if (!conn.autoCommit) conn.rollback() }
+            attempt { conn.close() }
+            failure?.let { throw it }
+        }
 
         private const val LOOKUP_SQL = """
             WITH matches AS (
@@ -256,10 +334,12 @@ class MagicDictionaryIndex private constructor(
         """
     }
 
-    private data class LookupContext(
+    private class LookupContext(
         val conn: Connection,
         val stmt: PreparedStatement
-    )
+    ) : Closeable {
+        override fun close() = closeLookupResources(conn, stmt)
+    }
 
     private data class BaseBucket(
         val baseRaw: String,
@@ -295,10 +375,10 @@ class MagicDictionaryIndex private constructor(
      * Load all surface forms whose base lemma directly from the underlying SQLite DB.
      * This is used for snippet highlighting of Hashem names, independent of token-level expansions.
      */
-    fun loadHashemSurfaces(): List<String> {
+    fun loadHashemSurfaces(): List<String> = whileOpen {
         val terms = linkedSetOf<String>()
         runCatching {
-            DriverManager.getConnection(url).use { conn ->
+            openConnection(url).use { conn ->
                 val sql = """
                     SELECT s.value AS surface
                     FROM surface s
@@ -306,12 +386,13 @@ class MagicDictionaryIndex private constructor(
                     WHERE b.value = 'יהוה'
                 """.trimIndent()
                 conn.createStatement().use { stmt ->
-                    val rs = stmt.executeQuery(sql)
-                    while (rs.next()) {
-                        val v = rs.getString("surface") ?: continue
-                        val trimmed = v.trim()
-                        if (trimmed.isNotEmpty()) {
-                            terms += trimmed
+                    stmt.executeQuery(sql).use { rs ->
+                        while (rs.next()) {
+                            val v = rs.getString("surface") ?: continue
+                            val trimmed = v.trim()
+                            if (trimmed.isNotEmpty()) {
+                                terms += trimmed
+                            }
                         }
                     }
                 }
@@ -319,6 +400,6 @@ class MagicDictionaryIndex private constructor(
         }.onFailure {
             logger.d { "[MagicDictionary] Failed to load Hashem surfaces: ${it.message}" }
         }
-        return terms.toList()
+        terms.toList()
     }
 }

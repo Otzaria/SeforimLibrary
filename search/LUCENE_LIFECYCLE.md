@@ -30,6 +30,16 @@ Normal completion, exceptions and coroutine cancellation release that lease.
 Failed initialization closes the directory and permits a later retry; failed
 refresh disposes the attempted reader without invalidating an acquired snapshot.
 
+`MagicDictionaryIndex` remains lazy and reuses one prepared statement and JDBC
+connection per lookup thread. It is now `Closeable`: the owner tracks every
+thread's context, scopes result sets, and attempts statement closure, transaction
+rollback and connection closure even when an earlier cleanup step fails. Failed
+context initialization releases its connection; a failed query discards its
+context so a later uncached lookup can retry. Token/base caches clear on close.
+A read/write lock protects entire synchronous dictionary calls, including cache
+hits and surface loading, so disposal waits for current lookups and rejects new
+ones. Query expansion and ranking rules are unchanged.
+
 ## Closing and replacing an index
 
 `close()` rejects new index operations and is idempotent. It does not interrupt a
@@ -37,6 +47,13 @@ request or a session that already holds a lease. When the final lease is returne
 the owner closes the manager, then the directory. This prevents a directory from
 closing during a refresh or active search. A session is still a single-consumer
 cursor, as documented by `SearchSession`; its `close()` is idempotent.
+
+The engine also closes its initialized dictionary. Lazy publication and the
+engine's closed state share a monitor, while JDBC disposal runs outside that
+monitor. Closing an unused engine does not load the dictionary, and a subsequent
+call cannot publish or reopen it. Cursor queries and highlight terms are already
+computed before acquiring their reader lease, so those cursors remain usable
+after the engine has released the dictionary.
 
 For **in-place Lucene updates**, commit the `IndexWriter`; new requests observe the
 commit automatically. `IndexWriter` with `OpenMode.CREATE` is also supported.
@@ -54,9 +71,9 @@ inputs when the final reader reference closes; closing a directory alone is not
 a substitute for closing readers. See [FSDirectory 10.4.0][directory] and
 [MMapDirectory 10.4.0][mmap].
 
-The replacement contract here is for the **Lucene index directory**. It does not
-claim to close an external snippet provider, a caller-supplied analyzer or the
-existing SQLite-backed `MagicDictionaryIndex` connections.
+This closes the engine's **Lucene index and lexical dictionary resources**. It
+does not close an external snippet provider, its database connections, or a
+caller-supplied analyzer; those remain their owners' responsibility.
 
 ## Verification
 
@@ -69,12 +86,12 @@ reader reuse, exact score/order parity with fresh readers, lexical and vector
 filters, committed refreshes, cursor stability, concurrent searching during
 refresh, close with in-flight work, initial and refresh failures, retry,
 coroutine cancellation and file replacement after cleanup. The index replacement
-test is portable. The `Search lifecycle and benchmarks` workflow runs
-`ManagedIndexSearchersTest` and `LuceneSearcherLifecycleTest` on Windows to
-exercise OS-level file locks. This is a focused Lucene check: the existing
-`MagicDictionaryIndex` tests retain separate thread-local SQLite connections,
-whose Windows file-deletion failures are outside this change. The regular Linux
-CI continues to run the full test suite.
+test is portable. The `Search lifecycle and benchmarks` workflow runs the full
+`:search:jvmTest` suite on Windows to exercise OS-level file locks. Dictionary
+tests also cover multiple live worker threads, blocked reads versus close,
+initialization/query/cleanup failures, late lazy initialization, and dictionary
+file replacement while an existing Lucene cursor retains its snapshot. The
+regular Linux CI continues to run the full repository test suite.
 
 No index regeneration, dependency change or database migration is needed.
 

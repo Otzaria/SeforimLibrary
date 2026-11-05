@@ -109,7 +109,9 @@ class LuceneSearchEngine(
     private val searchers = ManagedIndexSearchers(indexDir)
 
     private val stdAnalyzer: Analyzer by lazy { analyzer }
-    private val magicDict: MagicDictionaryIndex? by lazy {
+    private val dictionaryLifecycle = Any()
+    private var closed = false
+    private val lazyMagicDict = lazy {
         val candidates = listOfNotNull(
             dictionaryPath,
             System.getProperty("magicDict")?.let { Path.of(it) },
@@ -137,6 +139,15 @@ class LuceneSearchEngine(
         }
         loaded
     }
+
+    // Initialization and disposal share a monitor: close never forces a lazy
+    // load, and no lookup can publish a dictionary after close has completed.
+    // The dictionary itself protects each synchronous lookup against disposal.
+    private val magicDict: MagicDictionaryIndex?
+        get() = synchronized(dictionaryLifecycle) {
+            if (closed) throw AlreadyClosedException("LuceneSearchEngine is closed")
+            lazyMagicDict.value
+        }
 
     private inline fun <T> withSearcher(block: (IndexSearcher) -> T): T {
         searchers.acquire().use { lease ->
@@ -228,10 +239,21 @@ class LuceneSearchEngine(
 
     /**
      * Stop new index requests and release resources after active searches and
-     * sessions finish. Close all sessions as well before replacing index files,
-     * particularly on Windows, then construct a new engine for the new index.
+     * sessions finish. Dictionary lookups finish before their JDBC resources
+     * close; an unused dictionary is never loaded. Close all sessions as well
+     * before replacing index files, particularly on Windows, then construct a
+     * new engine for the new index.
      */
-    override fun close() = searchers.close()
+    override fun close() {
+        val dictionary = synchronized(dictionaryLifecycle) {
+            if (closed) return
+            closed = true
+            if (lazyMagicDict.isInitialized()) lazyMagicDict.value else null
+        }
+        // Always attempt both owners, retaining suppressed cleanup failures.
+        // Native cleanup and waiting for lookups happen outside the publication monitor.
+        dictionary.use { searchers.close() }
+    }
 
     override fun computeFacets(
         query: String,
