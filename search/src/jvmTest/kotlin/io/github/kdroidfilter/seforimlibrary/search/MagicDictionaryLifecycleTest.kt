@@ -276,12 +276,12 @@ class MagicDictionaryLifecycleTest {
         LuceneLifecycleFixture.create(indexPath)
         LuceneSearchEngine(indexPath, dictionaryPath = db).use { engine ->
             assertNotNull(engine.openSession("alpha")).use { cursor ->
-                engine.buildSnippet("השם", "ה׳")
+                engine.buildSnippet("השם", "ה׳", near = 0)
                 engine.close()
                 val moved = Files.move(db, db.resolveSibling("replaced.db"))
                 Files.delete(moved)
                 assertEquals(24, runBlocking { assertNotNull(cursor.nextPage(100)).hits.size })
-                assertFailsWith<AlreadyClosedException> { engine.buildSnippet("השם", "ה׳") }
+                assertFailsWith<AlreadyClosedException> { engine.buildSnippet("השם", "ה׳", near = 0) }
             }
         }
     }
@@ -294,7 +294,7 @@ class MagicDictionaryLifecycleTest {
             engine.close()
             assertEquals(0, probes.get())
             assertFailsWith<AlreadyClosedException> { engine.openSession("word1") }
-            assertFailsWith<AlreadyClosedException> { engine.buildSnippet("השם", "ה׳") }
+            assertFailsWith<AlreadyClosedException> { engine.buildSnippet("השם", "ה׳", near = 0) }
             assertEquals(0, probes.get(), "a closed engine must not perform a late lazy load")
         }
     }
@@ -317,7 +317,7 @@ class MagicDictionaryLifecycleTest {
             try {
                 val lookup = pool.submit {
                     try {
-                        engine.buildSnippet("השם", "ה׳")
+                        engine.buildSnippet("השם", "ה׳", near = 0)
                     } catch (_: AlreadyClosedException) {
                         // close may win before the first dictionary lookup.
                     }
@@ -333,7 +333,7 @@ class MagicDictionaryLifecycleTest {
                 finish.countDown()
                 lookup.get(10, TimeUnit.SECONDS)
                 closing.get(10, TimeUnit.SECONDS)
-                assertFailsWith<AlreadyClosedException> { engine.buildSnippet("השם", "ה׳") }
+                assertFailsWith<AlreadyClosedException> { engine.buildSnippet("השם", "ה׳", near = 0) }
                 val moved = Files.move(db, db.resolveSibling("replaced.db"))
                 Files.delete(moved)
             } finally {
