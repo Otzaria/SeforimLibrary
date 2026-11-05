@@ -153,8 +153,10 @@ class LazyDenseResourcesTest {
         val owner = LazyDenseResources<Resource, Resource>({ embedder }, { throw loadFailure })
         try {
             val thrown = assertFailsWith<IllegalStateException> { owner.ensureLoaded() }
-            assertSame(loadFailure, thrown)
-            assertEquals(listOf(cleanupFailure), thrown.suppressed.toList())
+            // Coroutine stacktrace recovery can copy the exception at withContext;
+            // the original failure and its suppressed cleanup must remain reachable.
+            assertTrue(generateSequence<Throwable>(thrown) { it.cause }.any { it === loadFailure })
+            assertEquals(listOf(cleanupFailure), loadFailure.suppressed.toList())
             assertEquals(1, embedder.closes.get())
             assertNull(owner.current)
         } finally {
