@@ -51,43 +51,53 @@ internal object HearotCompanionMerge {
     ): List<String> {
         if (notesByLine.isEmpty()) return baseLines
         val out = baseLines.toMutableList()
-        val havrouta = isHavroutaBase(bookTitle)
         for ((lineIdx, notes) in notesByLine.toSortedMap()) {
             check(lineIdx in out.indices) {
                 "hearot merge for '$bookTitle': base line $lineIdx out of range (${out.size} lines)"
             }
-            val original = out[lineIdx]
-            check(!original.contains("class=\"footnote")) {
-                "hearot merge for '$bookTitle': base line $lineIdx already carries inline footnotes"
-            }
-            val consumed = mutableListOf<IntRange>()
-            val placements = mutableListOf<Pair<IntRange, String>>()
-            val appendix = StringBuilder()
-            for (note in notes) {
-                check(note.isNotBlank()) { "hearot merge for '$bookTitle': blank note for line $lineIdx" }
-                check(!note.contains("<i>") && !note.contains("<i ") && !note.contains("</i>")) {
-                    "hearot merge for '$bookTitle': note carries <i> markup, which breaks the " +
-                        "app's footnote regex (first </i> ends the body): ${note.take(80)}"
-                }
-                val parsed = parseLeadingMarker(note, havrouta)
-                val anchor = parsed?.let { findAnchor(original, it.first, consumed, havrouta) }
-                if (parsed != null && anchor != null) {
-                    consumed += anchor
-                    placements += anchor to
-                        "<sup class=\"footnote-marker\">${parsed.first}</sup><i class=\"footnote\">${parsed.second}</i>"
-                    stats.inPlace++
-                } else {
-                    appendix.append("<i class=\"footnote\">").append(note.removePrefix("﻿")).append("</i>")
-                    stats.appended++
-                }
-            }
-            var line = original
-            for ((range, html) in placements.sortedByDescending { it.first.first }) {
-                line = line.substring(0, range.first) + html + line.substring(range.last + 1)
-            }
-            out[lineIdx] = line + appendix
+            out[lineIdx] = mergeLine(bookTitle, out[lineIdx], lineIdx, notes, stats)
         }
         return out
+    }
+
+    /** Applies the same merge to one streamed line, without copying its whole book. */
+    fun mergeLine(
+        bookTitle: String,
+        original: String,
+        lineIdx: Int,
+        notes: List<String>,
+        stats: MergeStats = MergeStats(),
+    ): String {
+        val havrouta = isHavroutaBase(bookTitle)
+        check(!original.contains("class=\"footnote")) {
+            "hearot merge for '$bookTitle': base line $lineIdx already carries inline footnotes"
+        }
+        val consumed = mutableListOf<IntRange>()
+        val placements = mutableListOf<Pair<IntRange, String>>()
+        val appendix = StringBuilder()
+        for (note in notes) {
+            check(note.isNotBlank()) { "hearot merge for '$bookTitle': blank note for line $lineIdx" }
+            check(!note.contains("<i>") && !note.contains("<i ") && !note.contains("</i>")) {
+                "hearot merge for '$bookTitle': note carries <i> markup, which breaks the " +
+                    "app's footnote regex (first </i> ends the body): ${note.take(80)}"
+            }
+            val parsed = parseLeadingMarker(note, havrouta)
+            val anchor = parsed?.let { findAnchor(original, it.first, consumed, havrouta) }
+            if (parsed != null && anchor != null) {
+                consumed += anchor
+                placements += anchor to
+                    "<sup class=\"footnote-marker\">${parsed.first}</sup><i class=\"footnote\">${parsed.second}</i>"
+                stats.inPlace++
+            } else {
+                appendix.append("<i class=\"footnote\">").append(note.removePrefix("﻿")).append("</i>")
+                stats.appended++
+            }
+        }
+        var line = original
+        for ((range, html) in placements.sortedByDescending { it.first.first }) {
+            line = line.substring(0, range.first) + html + line.substring(range.last + 1)
+        }
+        return line + appendix
     }
 
     /** (marker token, body) when the note opens with a recognized marker, else null. */
