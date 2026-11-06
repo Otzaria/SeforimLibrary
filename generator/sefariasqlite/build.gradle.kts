@@ -377,6 +377,30 @@ tasks.register<JavaExec>("seedBookNotices") {
     jvmArgs = listOf("-Xmx512m")
 }
 
+// Commentator entity of non-Sefaria books — book.collectiveTitleHe/En from the optional ForDB
+// commentator_collective_titles.csv, only where the value is NULL. Matches final titles.
+// Usage:
+//   ./gradlew :sefariasqlite:seedCollectiveTitles -PseforimDb=/path/to/seforim.db
+tasks.register<JavaExec>("seedCollectiveTitles") {
+    group = "application"
+    description = "Fill NULL book.collectiveTitleHe/En from ForDB commentator_collective_titles.csv."
+
+    dependsOn("jvmJar")
+    mainClass.set("io.github.kdroidfilter.seforimlibrary.sefariasqlite.SeedCollectiveTitlesPostProcessKt")
+    classpath = files(tasks.named("jvmJar")) + configurations.getByName("jvmRuntimeClasspath")
+
+    if (project.hasProperty("seforimDb")) {
+        systemProperty("seforimDb", project.property("seforimDb") as String)
+    } else if (System.getenv("SEFORIM_DB") != null) {
+        systemProperty("seforimDb", System.getenv("SEFORIM_DB"))
+    } else {
+        val defaultDbPath = rootProject.layout.buildDirectory.file("seforim.db").get().asFile.absolutePath
+        systemProperty("seforimDb", defaultDbPath)
+    }
+
+    jvmArgs = listOf("-Xmx512m")
+}
+
 // Verified sacred divine names — line_divine_name, with the curated verse list from
 // the required ForDB divine_name_overrides.csv (-PdivineNameOverridesCsv=<local file>
 // takes precedence). Reads the final line text, so it follows every content writer.
@@ -468,6 +492,7 @@ tasks.matching {
         "seedGenerations",
         "seedAllMetadata",
         "seedBookNotices",
+        "seedCollectiveTitles",
         "buildLineDivineNameIndex",
         "reportLineDivineNames",
         "validateForDbInputs",
