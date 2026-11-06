@@ -267,14 +267,22 @@ internal class SefariaBookPayloadReader(
             } + authors).distinct()
 
             val sameTractateHeTitle = sameTractateHeTitle(schemaJson, schemaObj, schemaDir, schemaLookup)
-            val (lines, refs, headings, cleanShifts, lineKeyHashOverrides, simanTopicLines, omittedLinesBefore) = SefariaSameTractateRefs.apply(
+            fun build(preservedTitleRefs: Set<String> = emptySet(), recordStats: Boolean = true) =
                 buildBookContent(
                     schemaObj = schemaObj,
                     textElement = textElement,
                     bookHeTitle = hebrewTitle,
                     bookEnTitle = englishTitle,
-                    authors = authorLines
-                ),
+                    authors = authorLines,
+                    preservedTitleRefs = preservedTitleRefs,
+                    recordStats = recordStats,
+                )
+            val initial = build()
+            // A heading cannot carry an edition's text overlay. Only fold a title
+            // when no Hebrew edition has different text at the same address.
+            val preservedTitleRefs = findTitleVariantRefs(initial, textPath.parent, schemaObj, hebrewTitle, englishTitle)
+            val (lines, refs, headings, cleanShifts, lineKeyHashOverrides, simanTopicLines, omittedLinesBefore, titleSegmentHeadingLines) = SefariaSameTractateRefs.apply(
+                if (preservedTitleRefs.isEmpty()) initial else build(preservedTitleRefs, recordStats = false),
                 sameTractateHeTitle,
             )
             // merged.json "versions" is a list of [title, url] pairs. A single
@@ -337,6 +345,7 @@ internal class SefariaBookPayloadReader(
                 cleanShiftByLineIndex = cleanShifts,
                 lineKeyHashOverrides = lineKeyHashOverrides,
                 omittedLinesBefore = omittedLinesBefore,
+                titleSegmentHeadingLines = titleSegmentHeadingLines,
                 simanTopicLines = simanTopicLines,
                 versionsMeta = versionsMeta,
                 sourceDirPath = textPath.parent?.toString(),
@@ -571,12 +580,15 @@ internal class SefariaBookPayloadReader(
         val lineKeyHashOverrides: Map<Int, ByteArray>,
         val simanTopicLines: Set<Int>,
         val omittedLinesBefore: Map<Int, List<OmittedSefariaLine>> = emptyMap(),
+        val titleSegmentHeadingLines: Set<Int> = emptySet(),
     )
 
     /**
      * Walks an alternative version's text with the BOOK's schema — the exact
      * walk merged.json went through, so identical addresses yield identical
      * refs and identical line formatting. Join version→merged lines by ref.
+     * Edition overlays use [foldTitleSegments] = false so their title text
+     * remains available even when the main text did not fold that address.
      */
     internal fun walkTextWithSchema(
         schemaObj: JsonObject,
@@ -584,6 +596,7 @@ internal class SefariaBookPayloadReader(
         bookHeTitle: String,
         bookEnTitle: String,
         collectLineKeyOverrides: Boolean = true,
+        foldTitleSegments: Boolean = true,
     ): BuiltBookContent = buildBookContent(
         schemaObj = schemaObj,
         textElement = textElement,
@@ -591,7 +604,50 @@ internal class SefariaBookPayloadReader(
         bookEnTitle = bookEnTitle,
         authors = emptyList(),
         collectLineKeyOverrides = collectLineKeyOverrides,
+        foldTitleSegments = foldTitleSegments,
     )
+
+    /** Inspect editions only for books with fold candidates; retain at most one edition walk at a time. */
+    private fun findTitleVariantRefs(
+        built: BuiltBookContent,
+        bookDir: Path,
+        schemaObj: JsonObject,
+        bookHeTitle: String,
+        bookEnTitle: String,
+    ): Set<String> {
+        if (built.titleSegmentHeadingLines.isEmpty()) return emptySet()
+        val titlesByLine = built.headings.associate { it.lineIndex to it.title }
+        val candidates = buildMap {
+            built.refs.forEach { ref ->
+                val index = ref.lineIndex - 1
+                if (index in built.titleSegmentHeadingLines) putIfAbsent(ref.ref, titlesByLine.getValue(index))
+            }
+        }
+        val preserved = HashSet<String>()
+        for (file in discoverSefariaVersionFiles(bookDir.toString())) {
+            val doc = runCatching { json.parseToJsonElement(file.readText()).jsonObject }.getOrNull() ?: continue
+            // Match the importer's language and required-field gates. Blacklisted
+            // Hebrew editions may conservatively prevent folding as well.
+            if (doc["actualLanguage"]?.stringOrNull()?.trim() != "he" ||
+                doc["versionTitle"]?.stringOrNull().isNullOrBlank()
+            ) continue
+            val text = doc["text"] ?: continue
+            val walk = buildBookContent(
+                schemaObj, text, bookHeTitle, bookEnTitle, authors = emptyList(),
+                collectLineKeyOverrides = false, foldTitleSegments = false, recordStats = false,
+            )
+            val seen = HashSet<String>()
+            for (ref in walk.refs) {
+                val title = candidates[ref.ref] ?: continue
+                if (ref.ref in preserved || !seen.add(ref.ref)) continue
+                val index = ref.lineIndex - 1
+                val segment = rawSegmentForKey(walk.lines[index], walk.cleanShifts[index])
+                if (!repeatsNodeTitle(segment, title)) preserved += ref.ref
+            }
+            if (preserved.size == candidates.size) break
+        }
+        return preserved
+    }
 
     private fun buildBookContent(
         schemaObj: JsonObject,
@@ -600,17 +656,22 @@ internal class SefariaBookPayloadReader(
         bookEnTitle: String,
         authors: List<String>,
         collectLineKeyOverrides: Boolean = true,
+        foldTitleSegments: Boolean = true,
+        preservedTitleRefs: Set<String> = emptySet(),
+        recordStats: Boolean = true,
     ): BuiltBookContent {
-        fun walk(labels: OwnLabelPass) =
-            walkBook(schemaObj, textElement, bookHeTitle, bookEnTitle, authors, collectLineKeyOverrides, labels)
-        val first = OwnLabelPass()
+        fun walk(labels: OwnLabelPass) = walkBook(
+            schemaObj, textElement, bookHeTitle, bookEnTitle, authors, collectLineKeyOverrides, labels,
+            foldTitleSegments, preservedTitleRefs,
+        )
+        val first = OwnLabelPass(recordStats = recordStats)
         val built = walk(first)
         // A section that labels most of its own items also writes some numbers its own way:
         // "טוב." for 17 and "חי." for 18 (קשר גודל), "<b>רן </b>" for 250 (the indexes of
         // תרומת הדשן). The book is walked again with those spellings accepted there, and
         // only there: anywhere else "אחד." at the thirteenth place is a dibbur, not a label.
         val variantSections = first.sectionsAdmittingVariants()
-        return if (variantSections.isEmpty()) built else walk(OwnLabelPass(variantSections))
+        return if (variantSections.isEmpty()) built else walk(OwnLabelPass(variantSections, recordStats = recordStats))
     }
 
     private fun walkBook(
@@ -621,6 +682,8 @@ internal class SefariaBookPayloadReader(
         authors: List<String>,
         collectLineKeyOverrides: Boolean,
         labels: OwnLabelPass,
+        foldTitleSegments: Boolean,
+        preservedTitleRefs: Set<String>,
     ): BuiltBookContent {
         // Pre-allocate with estimated capacity
         val output = ArrayList<String>(1000)
@@ -631,6 +694,8 @@ internal class SefariaBookPayloadReader(
         val lineKeyHashOverrides = if (collectLineKeyOverrides) HashMap<Int, ByteArray>() else null
         val simanTopicLines = HashSet<Int>()
         val omittedLineIndices = HashSet<Int>()
+        // Omitted segment line -> the heading line that takes over its ref.
+        val titleSegmentHeadings = HashMap<Int, Int>()
 
         fun headingTagForLevel(level: Int): Pair<String, String> = when (level) {
             0 -> "<h1>" to "</h1>"
@@ -719,7 +784,19 @@ internal class SefariaBookPayloadReader(
                     numbersIntegerLeaf = numbersIntegerLeaf(node, refPrefix),
                     labels = labels.section(refPrefix),
                 )
-                if (empty) omittedLineIndices.addAll(firstContentLine until output.size)
+                if (empty) {
+                    omittedLineIndices.addAll(firstContentLine until output.size)
+                } else if (foldTitleSegments && nodeTitle != null && level > 0 && firstContentLine < output.size &&
+                    repeatsNodeTitle(output[firstContentLine], nodeTitle)
+                ) {
+                    val firstRef = refs.asReversed().firstOrNull { it.lineIndex == firstContentLine + 1 }
+                    if (firstRef != null && firstRef.ref !in preservedTitleRefs) {
+                        // The heading takes over the ref only when no edition
+                        // needs a separate text overlay at this address.
+                        omittedLineIndices += firstContentLine
+                        titleSegmentHeadings[firstContentLine] = firstContentLine - 1
+                    }
+                }
             }
         }
 
@@ -802,9 +879,9 @@ internal class SefariaBookPayloadReader(
             }
         }
         output.subList(nextIndex, output.size).clear()
-        refs.removeAll { it.lineIndex - 1 in omittedLineIndices }
+        refs.removeAll { it.lineIndex - 1 in omittedLineIndices && it.lineIndex - 1 !in titleSegmentHeadings }
         refs.replaceAll { ref ->
-            val index = newIndex[ref.lineIndex - 1] + 1
+            val index = newIndex[titleSegmentHeadings[ref.lineIndex - 1] ?: (ref.lineIndex - 1)] + 1
             if (index == ref.lineIndex) ref else ref.copy(lineIndex = index)
         }
         headings.removeAll { it.lineIndex in omittedLineIndices }
@@ -814,10 +891,14 @@ internal class SefariaBookPayloadReader(
                 if (index !in omittedLineIndices) put(newIndex[index], value)
             }
         }
+        val titleSegmentHeadingLines = titleSegmentHeadings.values.mapTo(HashSet()) { newIndex[it] }
+        // Char offsets into the folded segment do not index the heading's text.
+        val shifts = remap(cleanShifts) + titleSegmentHeadingLines.associateWith { CLEAN_MODIFIED }
         return BuiltBookContent(
-            output, refs, headings, remap(cleanShifts), remap(lineKeyHashOverrides.orEmpty()),
+            output, refs, headings, shifts, remap(lineKeyHashOverrides.orEmpty()),
             simanTopicLines.filterNot { it in omittedLineIndices }.mapTo(HashSet()) { newIndex[it] },
             omittedLinesBefore,
+            titleSegmentHeadingLines,
         )
     }
 
@@ -1161,6 +1242,19 @@ private val NUMBERED_PARAGRAPH_SECTIONS = listOf(
     "Shulchan Arukh HaRav, Choshen Mishpat, ",
 )
 
+// Pure emphasis only: any other tag (an <i data-commentator> marker, <sup>, <br>…) keeps the segment.
+private val TITLE_EMPHASIS_TAG = Regex("</?(?:b|strong|big|small)>", RegexOption.IGNORE_CASE)
+private val TITLE_SPACES = Regex("\\s+")
+
+// Exact text only: with vowels ignored, "אָבִֽינוּ מַלְכֵּֽנוּ" would pass for the title of the prayer it opens.
+private fun titleText(content: String): String =
+    content.replace(TITLE_EMPHASIS_TAG, "").replace(TITLE_SPACES, " ").trim().trimEnd('.', ':').trimEnd()
+
+private fun repeatsNodeTitle(line: String, nodeTitle: String): Boolean {
+    val text = titleText(line)
+    return '<' !in text && text.isNotEmpty() && text == titleText(nodeTitle)
+}
+
 /** `match_templates[].scope` values that make an alt-struct node citable alone. */
 private val ALONE_MATCH_TEMPLATE_SCOPES = setOf("any", "alone")
 
@@ -1235,11 +1329,14 @@ private const val MIN_OWN_LABEL_PERCENT = 60
  * schema, keyed by its ref prefix). The first walk accepts only canonical labels; a
  * second one, if any, also accepts another spelling in [variantSections].
  */
-private class OwnLabelPass(private val variantSections: Set<String> = emptySet()) {
+private class OwnLabelPass(
+    private val variantSections: Set<String> = emptySet(),
+    private val recordStats: Boolean = true,
+) {
     private val sections = HashMap<String, SectionLabels>()
 
     fun section(key: String): SectionLabels = sections.getOrPut(key) {
-        SectionLabels(variants = key in variantSections, repeatedWalk = variantSections.isNotEmpty())
+        SectionLabels(variants = key in variantSections, repeatedWalk = !recordStats || variantSections.isNotEmpty())
     }
 
     fun sectionsAdmittingVariants(): Set<String> = sections.filterValues { it.admitsVariants() }.keys

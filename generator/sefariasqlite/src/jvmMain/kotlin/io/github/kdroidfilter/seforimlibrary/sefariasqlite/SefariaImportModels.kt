@@ -132,6 +132,9 @@ internal data class BookPayload(
     // Removed empty-node lines, grouped by the next retained line's index.
     // They still consume occurrence slots so later identical headings keep their ids.
     val omittedLinesBefore: Map<Int, List<OmittedSefariaLine>> = emptyMap(),
+    // Heading lines that took over the ref of a first segment repeating their title.
+    // They stay link endpoints, unlike every other heading.
+    val titleSegmentHeadingLines: Set<Int> = emptySet(),
     // Line indices of siman topic lines split off a first se'if (SefariaSimanTopicLines).
     val simanTopicLines: Set<Int> = emptySet(),
     // All [versionTitle, versionSource] pairs from merged.json's `versions` array
@@ -219,7 +222,8 @@ internal class LinePrecompute(
     var lineCharCounts: IntArray? = lineCharCounts
         private set
 
-    /// Per line, whether the content carries an `<h1>`…`<h4>` tag.
+    /// Per line, whether the content carries an `<h1>`…`<h4>` tag; such lines are no link endpoints.
+    /// [BookPayload.titleSegmentHeadingLines] are excluded, so links to their folded segment survive.
     var lineIsHeading: BooleanArray? = lineIsHeading
         private set
 
@@ -258,8 +262,10 @@ internal fun BookPayload.precomputeLineData(): BookPayload {
         hashes[idx] = lineKeyHashOverrides[idx] ?: IdAllocatorBindings.lineNaturalKeyHash(rawSegmentForKey(idx, content))
         legacyHashes[idx] = LegacyLineKey.hash(content, refsByLineIndex[idx]?.heRef)
         charCounts[idx] = countVisibleChars(content)
-        isHeading[idx] = content.contains("<h1>") || content.contains("<h2>") ||
-            content.contains("<h3>") || content.contains("<h4>")
+        isHeading[idx] = idx !in titleSegmentHeadingLines && (
+            content.contains("<h1>") || content.contains("<h2>") ||
+                content.contains("<h3>") || content.contains("<h4>")
+            )
     }
     val (teamim, nekudot) = detectTeamimAndNekudot(lines)
     @Suppress("UNCHECKED_CAST")

@@ -64,7 +64,7 @@ internal class SefariaVersionsImporter(
 
     suspend fun import(inputs: List<BookInput>, lineKeyToId: Map<Pair<String, Int>, Long>) {
         for (input in inputs) {
-            val versionFiles = discoverVersionFiles(input.payload.sourceDirPath)
+            val versionFiles = discoverSefariaVersionFiles(input.payload.sourceDirPath)
             if (versionFiles.isEmpty()) {
                 importMetadataOnly(input)
             } else {
@@ -121,6 +121,9 @@ internal class SefariaVersionsImporter(
             val lineId = lineKeyToId[input.bookPath to (entry.lineIndex - 1)] ?: return@forEach
             if (mergedLineIdByRef.putIfAbsent(entry.ref, lineId) != null) duplicateRefs++
         }
+        val titleSegmentRefs = payload.refEntries
+            .filter { it.lineIndex - 1 in payload.titleSegmentHeadingLines }
+            .mapTo(HashSet()) { it.ref }
 
         for (file in versionFiles) {
             val doc = runCatching { json.parseToJsonElement(file.readText()).jsonObject }.getOrNull()
@@ -158,11 +161,17 @@ internal class SefariaVersionsImporter(
                 bookHeTitle = payload.heTitle,
                 bookEnTitle = payload.enTitle,
                 collectLineKeyOverrides = false,
+                // Each edition retains its own text, including title segments
+                // whose corresponding main-text segment was not folded.
+                foldTitleSegments = false,
             )
             val versionId = allocator.bookVersionId(input.bookId, versionTitle)
             val rows = ArrayList<VersionLine>(walk.refs.size)
             val seenRefs = HashSet<String>(walk.refs.size)
             walk.refs.forEach { ref ->
+                // The reader checked all Hebrew editions before folding these
+                // main-text refs. Other refs always retain their edition text.
+                if (ref.ref in titleSegmentRefs) return@forEach
                 if (!seenRefs.add(ref.ref)) {
                     duplicateRefs++
                     return@forEach
@@ -225,18 +234,6 @@ internal class SefariaVersionsImporter(
         return true
     }
 
-    private fun discoverVersionFiles(sourceDirPath: String?): List<Path> {
-        val dir = sourceDirPath?.let(Path::of) ?: return emptyList()
-        if (!Files.isDirectory(dir)) return emptyList()
-        return Files.list(dir).use { stream ->
-            stream.filter { Files.isRegularFile(it) }
-                .filter { it.fileName.name.endsWith(".json", ignoreCase = true) }
-                .filter { !it.fileName.name.equals("merged.json", ignoreCase = true) }
-                .sorted()
-                .toList()
-        }
-    }
-
     private suspend fun flushIfNeeded() {
         // book_version rows always land before their version_line rows.
         if (versionBatch.size >= SefariaImportTuning.LINE_BATCH_SIZE ||
@@ -255,5 +252,18 @@ internal class SefariaVersionsImporter(
             repository.insertVersionLinesBatch(lineBatch)
             lineBatch.clear()
         }
+    }
+}
+
+/** The same deterministic edition file set for title validation and text import. */
+internal fun discoverSefariaVersionFiles(sourceDirPath: String?): List<Path> {
+    val dir = sourceDirPath?.let(Path::of) ?: return emptyList()
+    if (!Files.isDirectory(dir)) return emptyList()
+    return Files.list(dir).use { stream ->
+        stream.filter { Files.isRegularFile(it) }
+            .filter { it.fileName.name.endsWith(".json", ignoreCase = true) }
+            .filter { !it.fileName.name.equals("merged.json", ignoreCase = true) }
+            .sorted()
+            .toList()
     }
 }
