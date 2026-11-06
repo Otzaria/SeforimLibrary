@@ -1,0 +1,70 @@
+name: ONNX lifecycle probe
+
+on:
+  pull_request:
+    branches: [otzaria]
+    paths:
+      - 'search/**'
+      - '.github/workflows/onnx-lifecycle-probe.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  lifecycle:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          submodules: true
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '25'
+      - uses: gradle/actions/setup-gradle@v5
+        with:
+          cache-read-only: true
+      - name: Verify native lifetime and controlled close races
+        run: |
+          chmod +x gradlew
+          ./gradlew :search:jvmTest --tests '*OwnedOnnxSessionTest' \
+            --tests '*OnnxSessionFactoryTest' --tests '*LazyDenseResourcesTest' \
+            --no-daemon --no-configuration-cache --max-workers=2 \
+            '-Dorg.gradle.jvmargs=-Xmx2g' '-Pkotlin.compiler.execution.strategy=in-process'
+      - name: Measure the former and corrected success and failure paths
+        run: |
+          set -euo pipefail
+          mkdir -p build/onnx-lifecycle-probe
+          for mode in baseline managed baseline-failure managed-failure; do
+            ./gradlew :search:benchmarkOnnxLifecycle \
+              -PonnxBenchmarkMode="$mode" -PonnxBenchmarkIterations=500 \
+              --no-daemon --no-configuration-cache --console=plain --max-workers=2 \
+              '-Dorg.gradle.jvmargs=-Xmx2g' '-Pkotlin.compiler.execution.strategy=in-process' \
+              | tee "build/onnx-lifecycle-probe/$mode.log"
+          done
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          root = Path('build/onnx-lifecycle-probe')
+          reports = []
+          for mode in ['baseline', 'managed', 'baseline-failure', 'managed-failure']:
+              rows = [json.loads(line) for line in (root / (mode + '.log')).read_text().splitlines()
+                      if line.startswith('{"mode":')]
+              assert len(rows) == 1, (mode, 'expected exactly one benchmark result')
+              row = rows[0]
+              assert row['mode'] == mode and row['iterations'] == 500
+              assert row['optionsAllocated'] == 500
+              assert row['optionsUnclosed'] == (0 if mode.startswith('managed') else 500)
+              reports.append(row)
+          (root / 'results.json').write_text(json.dumps(reports, indent=2) + '\n')
+          print(json.dumps(reports, indent=2))
+          PY
+      - uses: actions/upload-artifact@v6
+        if: always()
+        with:
+          name: onnx-lifecycle-probe
+          path: |
+            build/onnx-lifecycle-probe/
+            search/build/test-results/jvmTest/*.xml
+          retention-days: 14

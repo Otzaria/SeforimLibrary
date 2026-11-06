@@ -1,3 +1,5 @@
+import org.jetbrains.kotlin.gradle.targets.jvm.KotlinJvmTarget
+
 plugins {
     alias(libs.plugins.multiplatform)
     alias(libs.plugins.kotlinx.serialization)
@@ -47,4 +49,21 @@ kotlin {
             implementation(libs.kotlinx.coroutines.test)
         }
     }
+}
+
+// Explicit opt-in only: the baseline modes intentionally reproduce the old native-options leak
+// in a disposable JVM. They are never part of jvmTest or the normal build.
+tasks.register<JavaExec>("benchmarkOnnxLifecycle") {
+    group = "verification"
+    description = "Measure ONNX session/options lifetime on a tiny, self-contained native model"
+    val testCompilation = (kotlin.targets.getByName("jvm") as KotlinJvmTarget).compilations.getByName("test")
+    dependsOn(testCompilation.compileTaskProvider)
+    classpath(testCompilation.output.allOutputs, testCompilation.runtimeDependencyFiles)
+    mainClass.set("io.github.kdroidfilter.seforimlibrary.search.OnnxLifecycleBenchmark")
+    args(
+        providers.gradleProperty("onnxBenchmarkMode").orElse("managed").get(),
+        providers.gradleProperty("onnxBenchmarkIterations").orElse("2000").get(),
+    )
+    maxHeapSize = "256m"
+    jvmArgs("-XX:ActiveProcessorCount=2")
 }

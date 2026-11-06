@@ -2,8 +2,6 @@ package io.github.kdroidfilter.seforimlibrary.search
 
 import co.touchlab.kermit.Logger
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import org.jsoup.Jsoup
 import org.jsoup.safety.Safelist
@@ -41,37 +39,28 @@ class HybridSearchEngine(
     // The embedder (heavy OrtSession) + vector searcher are loaded LAZILY on the first
     // dense search, off the main thread (see [ensureDense]) — so the first query just
     // shows the normal search spinner instead of freezing the UI while the model loads.
-    @Volatile private var embedder: SeforimEmbedder? = null
-    @Volatile private var vectorSearcher: VectorSearcher? = null
-    @Volatile private var denseTried = false
-    private val denseMutex = Mutex()
+    private val denseResources = LazyDenseResources(
+        loadEmbedder = { SeforimEmbedder.tryLoad(modelDir) },
+        loadSearcher = {
+            if (Files.isDirectory(indexDir)) runCatching { VectorSearcher(indexDir) }.getOrNull()
+            else null
+        },
+    )
 
     // Cheap, no-load check: are the model + vector index even present? Decides whether to
     // take the dense path (then load lazily); the actual OrtSession is built in fuse().
     private val denseConfigured: Boolean =
         Files.isDirectory(indexDir) && SeforimEmbedder.isAvailable(modelDir)
 
-    val denseEnabled: Boolean get() = embedder != null && vectorSearcher != null
+    val denseEnabled: Boolean get() = denseResources.current != null
 
     /** Load the embedder + vector searcher once, on a background thread. Idempotent. */
     private suspend fun ensureDense() {
-        if (denseTried) return
-        denseMutex.withLock {
-            if (denseTried) return
-            withContext(Dispatchers.IO) {
-                val emb = SeforimEmbedder.tryLoad(modelDir)
-                val vs = if (emb != null && Files.isDirectory(indexDir)) {
-                    runCatching { VectorSearcher(indexDir) }.getOrNull()
-                } else null
-                if (vs != null) {
-                    embedder = emb; vectorSearcher = vs
-                    logger.i { "dense ready (vector index $indexDir)" }
-                } else {
-                    runCatching { emb?.close() }
-                    logger.i { "dense unavailable -> lexical only" }
-                }
+        if (denseResources.ensureLoaded()) {
+            logger.i {
+                if (denseEnabled) "dense ready (vector index $indexDir)"
+                else "dense unavailable -> lexical only"
             }
-            denseTried = true
         }
     }
 
@@ -84,7 +73,7 @@ class HybridSearchEngine(
         lineIds: Collection<Long>?,
         baseBookOnly: Boolean,
     ): SearchSession? {
-        if (query.isBlank()) return null
+        if (denseResources.isClosed || query.isBlank()) return null
         // Dense index supports book / base-book filters only. For category/line filters
         // (or when dense isn't configured), use pure lexical to stay correct. The model
         // itself is loaded lazily in fuse() — denseConfigured is a cheap no-load check.
@@ -111,7 +100,7 @@ class HybridSearchEngine(
     override suspend fun semanticSpan(query: String, text: String): String? {
         if (query.isBlank() || text.isBlank()) return null
         ensureDense()
-        val emb = embedder ?: return null
+        val emb = denseResources.current?.embedder ?: return null
         val clauses = splitClauses(text)
         if (clauses.size < 2) return null
         return withContext(Dispatchers.Default) {
@@ -136,8 +125,9 @@ class HybridSearchEngine(
     override suspend fun semanticFind(query: String, bookId: Long, limit: Int): List<Long> {
         if (query.isBlank()) return emptyList()
         ensureDense()
-        val emb = embedder ?: return emptyList()
-        val vs = vectorSearcher ?: return emptyList()
+        val dense = denseResources.current ?: return emptyList()
+        val emb = dense.embedder
+        val vs = dense.searcher
         return withContext(Dispatchers.Default) {
             vs.search(emb.embed(query), limit, baseBookOnly = false, bookIds = listOf(bookId)).map { it.lineId }
         }
@@ -149,8 +139,9 @@ class HybridSearchEngine(
     ): SearchFacets? = lexical.computeFacets(query, near, bookFilter, categoryFilter, bookIds, lineIds, baseBookOnly)
 
     override fun close() {
-        runCatching { vectorSearcher?.close() }
-        runCatching { embedder?.close() }
+        runCatching { denseResources.close() }.onFailure {
+            logger.w(it) { "Dense resource cleanup failed; retained for a later close() retry" }
+        }
         runCatching { lexical.close() }
     }
 
@@ -165,9 +156,10 @@ class HybridSearchEngine(
             ?.use { it.nextPage(candidates)?.hits ?: emptyList() } ?: emptyList()
 
         // Dense failed to load -> lexical-only result (still correct, just no semantic recall).
-        val emb = embedder
-        val vs = vectorSearcher
-        if (emb == null || vs == null) return FusedResult(lexHits, lexHits.map { it.lineId }.toSet())
+        val dense = denseResources.current
+            ?: return FusedResult(lexHits, lexHits.map { it.lineId }.toSet())
+        val emb = dense.embedder
+        val vs = dense.searcher
 
         // Don't let a dense failure sink the whole search: degrade to lexical and log. This
         // also catches native-image gaps (e.g. a missing Lucene KNN vectors-format SPI entry).
