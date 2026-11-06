@@ -4,6 +4,8 @@ import app.cash.sqldelight.driver.jdbc.sqlite.JdbcSqliteDriver
 import co.touchlab.kermit.Logger
 import io.github.kdroidfilter.seforimlibrary.common.ids.IdAllocatorBindings
 import io.github.kdroidfilter.seforimlibrary.common.ids.InMemoryIdAllocator
+import io.github.kdroidfilter.seforimlibrary.common.ids.LegacyLineKey
+import io.github.kdroidfilter.seforimlibrary.common.ids.LineOccurrenceCounter
 import io.github.kdroidfilter.seforimlibrary.core.models.Book
 import io.github.kdroidfilter.seforimlibrary.core.models.Category
 import io.github.kdroidfilter.seforimlibrary.core.models.Line
@@ -185,6 +187,53 @@ class SefariaTitleSegmentHeadingTest {
         } finally {
             repo.close()
             Files.walk(root).use { paths -> paths.sorted(Comparator.reverseOrder()).forEach { Files.deleteIfExists(it) } }
+        }
+    }
+
+    @Test
+    fun survivingLineIdsRemainStableAcrossSeededBuildsIncludingRepeatedText() {
+        // The surviving second segment equals the omitted first one, so it
+        // must keep its occurrence slot rather than inherit the removed id.
+        val repeatedText = Json.parseToJsonElement(text.replace("גוף המעשה", "<b>מעשה אברהם</b>"))
+        val before = reader.walkTextWithSchema(schema, repeatedText, "ספר", "Book", foldTitleSegments = false)
+        val after = reader.walkTextWithSchema(schema, repeatedText, "ספר", "Book")
+        fun allocate(allocator: InMemoryIdAllocator, built: SefariaBookPayloadReader.BuiltBookContent): List<Long> {
+            val payload = BookPayload(
+                heTitle = "ספר", enTitle = "Book", categoriesHe = emptyList(), lines = built.lines,
+                refEntries = built.refs, headings = built.headings, authors = emptyList(),
+                description = null, heShortDesc = null, pubDates = emptyList(), altStructures = emptyList(),
+                cleanShiftByLineIndex = built.cleanShifts, lineKeyHashOverrides = built.lineKeyHashOverrides,
+                omittedLinesBefore = built.omittedLinesBefore, titleSegmentHeadingLines = built.titleSegmentHeadingLines,
+            ).precomputeLineData()
+            val precomputed = requireNotNull(payload.precomputed)
+            val occurrences = LineOccurrenceCounter()
+            val legacyOccurrences = LineOccurrenceCounter()
+            val bookId = allocator.bookId("Sefaria", "ספר")
+            return built.lines.indices.map { index ->
+                precomputed.reserveOmittedLineOccurrences(bookId, index, occurrences, legacyOccurrences)
+                val hash = requireNotNull(precomputed.lineKeyHashes)[index]
+                val legacyHash = requireNotNull(precomputed.legacyLineKeyHashes)[index]
+                allocator.lineId(bookId, hash, occurrences.next(bookId, hash),
+                    LegacyLineKey(legacyHash, legacyOccurrences.next(bookId, legacyHash)))
+            }
+        }
+        val root = Files.createTempDirectory("title-segment-ids")
+        try {
+            val state = root.resolve("build_state.db")
+            val original = InMemoryIdAllocator.load(null)
+            val originalIds = allocate(original, before)
+            original.snapshotTo(state)
+            val foldedIds = allocate(InMemoryIdAllocator.load(state), after)
+            assertEquals(after.lines.size, foldedIds.toSet().size)
+            after.headings.forEach { heading ->
+                assertEquals(originalIds[heading.keyLineIndex], foldedIds[heading.lineIndex], heading.title)
+            }
+            val originalRefs = before.refs.associateBy { it.ref }
+            after.refs.filterNot { it.lineIndex - 1 in after.titleSegmentHeadingLines }.forEach { ref ->
+                assertEquals(originalIds[originalRefs.getValue(ref.ref).lineIndex - 1], foldedIds[ref.lineIndex - 1], ref.ref)
+            }
+        } finally {
+            Files.walk(root).use { paths -> paths.sorted(Comparator.reverseOrder()).forEach(Files::deleteIfExists) }
         }
     }
 
