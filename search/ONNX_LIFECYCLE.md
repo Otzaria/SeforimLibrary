@@ -97,6 +97,12 @@ publication and shutdown mutually exclusive. Shutdown detaches the published pai
 before native disposal; it does not wait for a model constructor to finish. If shutdown
 wins, the initializer closes its unpublished candidates instead of making them live.
 Blocking model creation and both native close calls run outside the publication monitor.
+Resources whose close fails remain privately owned for a later `close()` retry, including
+unpublished candidates from failed, cancelled, or late initialization. Successfully closed
+resources are never retried, and failed resources cannot become available to queries again.
+Concurrent closes do not wait for an in-flight disposal or dispose its resources twice;
+retry after that disposal finishes. The hybrid engine logs cleanup failures and still
+closes the lexical engine.
 
 Cancellation is checked before, between, and after the factories. Unpublished resources
 are cleaned in `finally`, including when loading the vector searcher fails. Publication

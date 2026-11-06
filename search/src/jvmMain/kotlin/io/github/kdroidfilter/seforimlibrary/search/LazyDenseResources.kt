@@ -20,6 +20,9 @@ internal class LazyDenseResources<E : AutoCloseable, V : AutoCloseable>(
 
     private val initialization = Mutex()
     private val publication = Any()
+    // Only resources whose last close failed. In-flight disposal owns its detached list,
+    // so concurrent close calls never retry the same resource at the same time.
+    private val pendingDisposal = mutableListOf<AutoCloseable>()
     @Volatile private var tried = false
     @Volatile private var closed = false
     @Volatile private var resources: Resources<E, V>? = null
@@ -60,7 +63,7 @@ internal class LazyDenseResources<E : AutoCloseable, V : AutoCloseable>(
                 } finally {
                     // Publish inside the IO block: prompt cancellation when withContext
                     // returns must never strand a pair with neither an owner nor cleanup.
-                    if (!transferred) dispose(embedder, searcher, failure)
+                    if (!transferred) dispose(listOfNotNull(searcher, embedder), failure)
                 }
             }
         }
@@ -68,27 +71,32 @@ internal class LazyDenseResources<E : AutoCloseable, V : AutoCloseable>(
 
     override fun close() {
         val detached = synchronized(publication) {
-            if (closed) return
             closed = true
             tried = true
-            resources.also { resources = null }
+            buildList {
+                resources?.let { add(it.searcher); add(it.embedder) }
+                resources = null
+                addAll(pendingDisposal)
+                pendingDisposal.clear()
+            }
         }
-        dispose(detached?.embedder, detached?.searcher)
+        dispose(detached)
     }
 
-    private fun dispose(embedder: E?, searcher: V?, originalFailure: Throwable? = null) {
+    private fun dispose(detached: List<AutoCloseable>, originalFailure: Throwable? = null) {
         var failure = originalFailure
-        try {
-            searcher?.close()
-        } catch (cause: Throwable) {
-            if (failure == null) failure = cause
-            else if (cause !== failure) failure.addSuppressed(cause)
+        val failed = mutableListOf<AutoCloseable>()
+        for (resource in detached) {
+            try {
+                resource.close()
+            } catch (cause: Throwable) {
+                failed += resource
+                if (failure == null) failure = cause
+                else if (cause !== failure) failure.addSuppressed(cause)
+            }
         }
-        try {
-            embedder?.close()
-        } catch (cause: Throwable) {
-            if (failure == null) failure = cause
-            else if (cause !== failure) failure.addSuppressed(cause)
+        if (failed.isNotEmpty()) {
+            synchronized(publication) { pendingDisposal.addAll(failed) }
         }
         if (originalFailure == null && failure != null) throw failure
     }

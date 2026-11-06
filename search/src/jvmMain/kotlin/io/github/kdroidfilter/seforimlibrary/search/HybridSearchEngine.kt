@@ -139,7 +139,9 @@ class HybridSearchEngine(
     ): SearchFacets? = lexical.computeFacets(query, near, bookFilter, categoryFilter, bookIds, lineIds, baseBookOnly)
 
     override fun close() {
-        runCatching { denseResources.close() }
+        runCatching { denseResources.close() }.onFailure {
+            logger.w(it) { "Dense resource cleanup failed; retained for a later close() retry" }
+        }
         runCatching { lexical.close() }
     }
 
