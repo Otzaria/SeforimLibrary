@@ -581,6 +581,8 @@ internal class SefariaBookPayloadReader(
         val simanTopicLines: Set<Int>,
         val omittedLinesBefore: Map<Int, List<OmittedSefariaLine>> = emptyMap(),
         val titleSegmentHeadingLines: Set<Int> = emptySet(),
+        // Section numbers admit a terminal geresh; schema-node names do not.
+        val foldedSectionTitleRefs: Set<String> = emptySet(),
     )
 
     /**
@@ -620,7 +622,9 @@ internal class SefariaBookPayloadReader(
         val candidates = buildMap {
             built.refs.forEach { ref ->
                 val index = ref.lineIndex - 1
-                if (index in built.titleSegmentHeadingLines) putIfAbsent(ref.ref, titlesByLine.getValue(index))
+                if (index in built.titleSegmentHeadingLines) {
+                    putIfAbsent(ref.ref, titlesByLine.getValue(index) to (ref.ref in built.foldedSectionTitleRefs))
+                }
             }
         }
         val preserved = HashSet<String>()
@@ -638,11 +642,12 @@ internal class SefariaBookPayloadReader(
             )
             val seen = HashSet<String>()
             for (ref in walk.refs) {
-                val title = candidates[ref.ref] ?: continue
+                val (title, isSection) = candidates[ref.ref] ?: continue
                 if (ref.ref in preserved || !seen.add(ref.ref)) continue
                 val index = ref.lineIndex - 1
                 val segment = rawSegmentForKey(walk.lines[index], walk.cleanShifts[index])
-                if (!repeatsNodeTitle(segment, title)) preserved += ref.ref
+                val matches = if (isSection) repeatsSectionTitle(segment, title) else repeatsNodeTitle(segment, title)
+                if (!matches) preserved += ref.ref
             }
             if (preserved.size == candidates.size) break
         }
@@ -696,6 +701,7 @@ internal class SefariaBookPayloadReader(
         val omittedLineIndices = HashSet<Int>()
         // Omitted segment line -> the heading line that takes over its ref.
         val titleSegmentHeadings = HashMap<Int, Int>()
+        val foldedSectionTitleRefs = HashSet<String>()
 
         fun headingTagForLevel(level: Int): Pair<String, String> = when (level) {
             0 -> "<h1>" to "</h1>"
@@ -783,7 +789,9 @@ internal class SefariaBookPayloadReader(
                     simanTopicLines = simanTopicLines,
                     numbersIntegerLeaf = numbersIntegerLeaf(node, refPrefix),
                     labels = labels.section(refPrefix),
-                    titleSegmentHeadings = titleSegmentHeadings,
+                    titleSegmentHeadings = if (foldTitleSegments) titleSegmentHeadings else null,
+                    preservedTitleRefs = preservedTitleRefs,
+                    foldedSectionTitleRefs = foldedSectionTitleRefs,
                 )
                 if (empty) {
                     omittedLineIndices.addAll(firstContentLine until output.size)
@@ -850,7 +858,9 @@ internal class SefariaBookPayloadReader(
                 simanTopicLines = simanTopicLines,
                 numbersIntegerLeaf = numbersIntegerLeaf(schemaObj),
                 labels = labels.section(bookEnTitle),
-                titleSegmentHeadings = titleSegmentHeadings,
+                titleSegmentHeadings = if (foldTitleSegments) titleSegmentHeadings else null,
+                preservedTitleRefs = preservedTitleRefs,
+                foldedSectionTitleRefs = foldedSectionTitleRefs,
             )
         }
 
@@ -901,6 +911,7 @@ internal class SefariaBookPayloadReader(
             simanTopicLines.filterNot { it in omittedLineIndices }.mapTo(HashSet()) { newIndex[it] },
             omittedLinesBefore,
             titleSegmentHeadingLines,
+            foldedSectionTitleRefs,
         )
     }
 
@@ -935,6 +946,8 @@ internal class SefariaBookPayloadReader(
         labels: SectionLabels,
         // Omitted segment line -> the section heading it repeats (see walkBook).
         titleSegmentHeadings: MutableMap<Int, Int>? = null,
+        preservedTitleRefs: Set<String> = emptySet(),
+        foldedSectionTitleRefs: MutableSet<String>? = null,
     ) {
         // Leaf when depth reached zero, OR when the data is shallower than the
         // schema declares (e.g. Keter Malkhut: schema says depth=2 but most
@@ -1130,6 +1143,7 @@ internal class SefariaBookPayloadReader(
             }
             val nextRefIndexOffset = childRefOffsets?.get(idx) ?: 0
             val lineCountBefore = output.size
+            val refCountBefore = refEntries.size
 
             recursiveSections(
                 sectionNames = sectionNames,
@@ -1153,12 +1167,16 @@ internal class SefariaBookPayloadReader(
                 numbersIntegerLeaf = numbersIntegerLeaf,
                 labels = labels,
                 titleSegmentHeadings = titleSegmentHeadings,
+                preservedTitleRefs = preservedTitleRefs,
+                foldedSectionTitleRefs = foldedSectionTitleRefs,
             )
+            val firstRef = refEntries.getOrNull(refCountBefore)
             if (sectionTitle != null && titleSegmentHeadings != null && lineCountBefore < output.size &&
-                repeatsSectionTitle(output[lineCountBefore], sectionTitle) &&
-                refEntries.asReversed().any { it.lineIndex == lineCountBefore + 1 }
+                firstRef?.lineIndex == lineCountBefore + 1 && firstRef.ref !in preservedTitleRefs &&
+                repeatsSectionTitle(output[lineCountBefore], sectionTitle)
             ) {
                 titleSegmentHeadings[lineCountBefore] = lineCountBefore - 1
+                foldedSectionTitleRefs?.add(firstRef.ref)
             }
 
             // The paragraph's TOC entry points at the paragraph line itself, so the

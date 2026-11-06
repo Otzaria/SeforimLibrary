@@ -11,6 +11,7 @@ import io.github.kdroidfilter.seforimlibrary.db.SeforimDb
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.jsonObject
 import java.nio.file.Files
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -120,6 +121,76 @@ class SefariaTitleSegmentVersionsTest {
         assertEquals(setOf(1), result.payload.titleSegmentHeadingLines)
     }
 
+    @Test
+    fun sectionTitleWithSubstantiveEditionTextKeepsBothSegments() = runBlocking {
+        val variant = "דרוש א: תוכן ייחודי למהדורה אחרת"
+        val result = importVersions(section("דרוש א':"), listOf(Edition(section(variant))), sectionSchema)
+        assertTrue(result.payload.titleSegmentHeadingLines.isEmpty())
+        assertTrue("דרוש א':" in result.payload.lines)
+        assertEquals(listOf(variant, "גוף אחר"), result.contents())
+    }
+
+    @Test
+    fun sectionTitleInEditionIsRetainedWhenMainHasOtherText() = runBlocking {
+        val title = "<b>דרוש א׳:</b>"
+        val result = importVersions(section("תוכן ראשי"), listOf(Edition(section(title))), sectionSchema)
+        assertEquals(listOf(title, "גוף אחר"), result.contents())
+    }
+
+    @Test
+    fun equivalentSectionTitlesWithDifferentGereshStillFold() = runBlocking {
+        val result = importVersions(
+            section("דרוש א':"),
+            listOf(Edition(section("<strong>דרוש א׳:</strong>"), "A"), Edition(section("דרוש א."), "B")),
+            sectionSchema,
+        )
+        assertEquals(setOf(1), result.payload.titleSegmentHeadingLines)
+        assertEquals(listOf("A" to "גוף אחר", "B" to "גוף אחר"), result.rows)
+    }
+
+    @Test
+    fun sectionFoldingCanBeDisabledForEditionWalks() {
+        val reader = SefariaBookPayloadReader(Json, Logger.withTag("section-edition-walk"))
+        val built = reader.walkTextWithSchema(
+            Json.parseToJsonElement(sectionSchema).jsonObject, Json.parseToJsonElement(section("דרוש א':")),
+            "ספר", "Book", foldTitleSegments = false,
+        )
+        assertTrue(built.titleSegmentHeadingLines.isEmpty())
+        assertEquals(listOf("<h1>ספר</h1>", "<h2>דרוש א</h2>", "דרוש א':", "גוף אחר"), built.lines)
+    }
+
+    @Test
+    fun sectionEditionNotesVowelsAndExtraMarkupPreventFolding() = runBlocking {
+        for (variant in listOf(
+            """<b>דרוש א<i data-commentator="Endnotes" data-label="1" data-order="1"></i></b>""",
+            "דְּרוּשׁ א", "<em>דרוש א</em>", "דרוש א' ובו יבואר",
+        )) {
+            val result = importVersions(section("דרוש א':"), listOf(Edition(section(variant))), sectionSchema)
+            assertTrue(result.payload.titleSegmentHeadingLines.isEmpty(), variant)
+            assertEquals(listOf(variant, "גוף אחר"), result.contents())
+        }
+    }
+
+    @Test
+    fun sectionGereshRuleDoesNotBroadenNodeTitleMatching() = runBlocking {
+        val result = importVersions(intro("<b>הקדמה</b>"), listOf(Edition(intro("הקדמה׳"))))
+        assertTrue(result.payload.titleSegmentHeadingLines.isEmpty())
+        assertEquals(listOf("הקדמה׳", "גוף אחר"), result.contents())
+    }
+
+    @Test
+    fun onlySectionWithDifferentEditionTextKeepsItsSegment() = runBlocking {
+        val result = importVersions(
+            """[["דרוש א':","a"],["דרוש ב:","b"]]""",
+            listOf(Edition("""[["נוסח שונה","c"],["דרוש ב׳:","d"]]""")),
+            sectionSchema,
+        )
+        assertEquals(1, result.payload.titleSegmentHeadingLines.size)
+        assertEquals("<h2>דרוש ב</h2>", result.payload.lines[result.payload.titleSegmentHeadingLines.single()])
+        assertTrue("דרוש א':" in result.payload.lines)
+        assertEquals(listOf("נוסח שונה", "c", "d"), result.contents())
+    }
+
     private data class Edition(val text: String, val title: String = "Other", val language: String = "he")
 
     private data class Result(val payload: BookPayload, val rows: List<Pair<String, String>>) {
@@ -185,6 +256,14 @@ class SefariaTitleSegmentVersionsTest {
         """.trimIndent()
 
         val schema = """{"title":"Book","heTitle":"ספר","nodes":[${leaf("Intro", "הקדמה")}]}"""
+
+        val sectionSchema = """
+            {"title":"Book","heTitle":"ספר","depth":2,
+             "sectionNames":["Derush","Paragraph"],"heSectionNames":["דרוש","פסקה"],
+             "addressTypes":["Integer","Integer"]}
+        """.trimIndent()
+
+        fun section(first: String) = """[[${JsonPrimitive(first)},"גוף אחר"]]"""
 
         fun intro(first: String) = """{"Intro":[${JsonPrimitive(first)},"גוף אחר"]}"""
     }
