@@ -52,7 +52,7 @@ class MagicDictionaryIndexTest {
         val tempFile = createValidTestDatabase()
         try {
             val result = MagicDictionaryIndex.load(simpleNorm, tempFile)
-            assertNotNull(result)
+            assertNotNull(result).close()
         } finally {
             Files.deleteIfExists(tempFile)
         }
@@ -117,14 +117,13 @@ class MagicDictionaryIndexTest {
     fun `expansionFor returns null for empty token`() {
         val tempFile = createValidTestDatabase()
         try {
-            val index = MagicDictionaryIndex.load(simpleNorm, tempFile)
-            assertNotNull(index)
+            assertNotNull(MagicDictionaryIndex.load(simpleNorm, tempFile)).use { index ->
+                val result = index.expansionFor("")
+                assertNull(result)
 
-            val result = index.expansionFor("")
-            assertNull(result)
-
-            val resultBlank = index.expansionFor("   ")
-            assertNull(resultBlank)
+                val resultBlank = index.expansionFor("   ")
+                assertNull(resultBlank)
+            }
         } finally {
             Files.deleteIfExists(tempFile)
         }
@@ -134,11 +133,10 @@ class MagicDictionaryIndexTest {
     fun `expansionFor returns null for unknown token`() {
         val tempFile = createValidTestDatabase()
         try {
-            val index = MagicDictionaryIndex.load(simpleNorm, tempFile)
-            assertNotNull(index)
-
-            val result = index.expansionFor("unknownword12345")
-            assertNull(result)
+            assertNotNull(MagicDictionaryIndex.load(simpleNorm, tempFile)).use { index ->
+                val result = index.expansionFor("unknownword12345")
+                assertNull(result)
+            }
         } finally {
             Files.deleteIfExists(tempFile)
         }
@@ -148,12 +146,11 @@ class MagicDictionaryIndexTest {
     fun `expansionFor returns expansion for known token`() {
         val tempFile = createTestDatabaseWithData()
         try {
-            val index = MagicDictionaryIndex.load(simpleNorm, tempFile)
-            assertNotNull(index)
-
-            val result = index.expansionFor("word1")
-            assertNotNull(result)
-            assertTrue(result.surface.isNotEmpty())
+            assertNotNull(MagicDictionaryIndex.load(simpleNorm, tempFile)).use { index ->
+                val result = index.expansionFor("word1")
+                assertNotNull(result)
+                assertTrue(result.surface.isNotEmpty())
+            }
         } finally {
             Files.deleteIfExists(tempFile)
         }
@@ -165,11 +162,10 @@ class MagicDictionaryIndexTest {
     fun `expansionsFor returns empty list for empty token list`() {
         val tempFile = createValidTestDatabase()
         try {
-            val index = MagicDictionaryIndex.load(simpleNorm, tempFile)
-            assertNotNull(index)
-
-            val result = index.expansionsFor(emptyList())
-            assertTrue(result.isEmpty())
+            assertNotNull(MagicDictionaryIndex.load(simpleNorm, tempFile)).use { index ->
+                val result = index.expansionsFor(emptyList())
+                assertTrue(result.isEmpty())
+            }
         } finally {
             Files.deleteIfExists(tempFile)
         }
@@ -179,11 +175,10 @@ class MagicDictionaryIndexTest {
     fun `expansionsFor returns empty list for unknown tokens`() {
         val tempFile = createValidTestDatabase()
         try {
-            val index = MagicDictionaryIndex.load(simpleNorm, tempFile)
-            assertNotNull(index)
-
-            val result = index.expansionsFor(listOf("unknown1", "unknown2"))
-            assertTrue(result.isEmpty())
+            assertNotNull(MagicDictionaryIndex.load(simpleNorm, tempFile)).use { index ->
+                val result = index.expansionsFor(listOf("unknown1", "unknown2"))
+                assertTrue(result.isEmpty())
+            }
         } finally {
             Files.deleteIfExists(tempFile)
         }
@@ -193,13 +188,12 @@ class MagicDictionaryIndexTest {
     fun `expansionsFor returns distinct expansions`() {
         val tempFile = createTestDatabaseWithData()
         try {
-            val index = MagicDictionaryIndex.load(simpleNorm, tempFile)
-            assertNotNull(index)
-
-            // Query the same token twice - should return distinct results
-            val result = index.expansionsFor(listOf("word1", "word1"))
-            // Distinct should deduplicate
-            assertTrue(result.size <= 1 || result.distinct().size == result.size)
+            assertNotNull(MagicDictionaryIndex.load(simpleNorm, tempFile)).use { index ->
+                // Query the same token twice - should return distinct results
+                val result = index.expansionsFor(listOf("word1", "word1"))
+                // Distinct should deduplicate
+                assertTrue(result.size <= 1 || result.distinct().size == result.size)
+            }
         } finally {
             Files.deleteIfExists(tempFile)
         }
@@ -209,11 +203,10 @@ class MagicDictionaryIndexTest {
     fun `expansionsFor handles multiple tokens`() {
         val tempFile = createTestDatabaseWithData()
         try {
-            val index = MagicDictionaryIndex.load(simpleNorm, tempFile)
-            assertNotNull(index)
-
-            val result = index.expansionsFor(listOf("word1", "word2"))
-            assertNotNull(result)
+            assertNotNull(MagicDictionaryIndex.load(simpleNorm, tempFile)).use { index ->
+                val result = index.expansionsFor(listOf("word1", "word2"))
+                assertNotNull(result)
+            }
         } finally {
             Files.deleteIfExists(tempFile)
         }
@@ -225,11 +218,10 @@ class MagicDictionaryIndexTest {
     fun `loadHashemSurfaces returns empty list when no Hashem entries`() {
         val tempFile = createValidTestDatabase()
         try {
-            val index = MagicDictionaryIndex.load(simpleNorm, tempFile)
-            assertNotNull(index)
-
-            val result = index.loadHashemSurfaces()
-            assertTrue(result.isEmpty())
+            assertNotNull(MagicDictionaryIndex.load(simpleNorm, tempFile)).use { index ->
+                val result = index.loadHashemSurfaces()
+                assertTrue(result.isEmpty())
+            }
         } finally {
             Files.deleteIfExists(tempFile)
         }
@@ -239,12 +231,11 @@ class MagicDictionaryIndexTest {
     fun `loadHashemSurfaces returns surfaces for יהוה base`() {
         val tempFile = createTestDatabaseWithHashemData()
         try {
-            val index = MagicDictionaryIndex.load(hebrewNorm, tempFile)
-            assertNotNull(index)
-
-            val result = index.loadHashemSurfaces()
-            assertTrue(result.isNotEmpty())
-            assertTrue(result.contains("יהוה"))
+            assertNotNull(MagicDictionaryIndex.load(hebrewNorm, tempFile)).use { index ->
+                val result = index.loadHashemSurfaces()
+                assertTrue(result.isNotEmpty())
+                assertTrue(result.contains("יהוה"))
+            }
         } finally {
             Files.deleteIfExists(tempFile)
         }
@@ -256,12 +247,11 @@ class MagicDictionaryIndexTest {
     fun `expansionFor works with Hebrew normalization`() {
         val tempFile = createTestDatabaseWithHebrewData()
         try {
-            val index = MagicDictionaryIndex.load(hebrewNorm, tempFile)
-            assertNotNull(index)
-
-            // Search for a word with sofit letter
-            val result = index.expansionFor("מלך")
-            assertNotNull(result)
+            assertNotNull(MagicDictionaryIndex.load(hebrewNorm, tempFile)).use { index ->
+                // Search for a word with sofit letter
+                val result = index.expansionFor("מלך")
+                assertNotNull(result)
+            }
         } finally {
             Files.deleteIfExists(tempFile)
         }
@@ -271,13 +261,12 @@ class MagicDictionaryIndexTest {
     fun `expansion prefers base match over largest expansion`() {
         val tempFile = createTestDatabaseWithMultipleExpansions()
         try {
-            val index = MagicDictionaryIndex.load(simpleNorm, tempFile)
-            assertNotNull(index)
-
-            // When token matches a base, prefer that expansion
-            val result = index.expansionFor("root")
-            assertNotNull(result)
-            assertTrue(result.base.contains("root"))
+            assertNotNull(MagicDictionaryIndex.load(simpleNorm, tempFile)).use { index ->
+                // When token matches a base, prefer that expansion
+                val result = index.expansionFor("root")
+                assertNotNull(result)
+                assertTrue(result.base.contains("root"))
+            }
         } finally {
             Files.deleteIfExists(tempFile)
         }
@@ -289,15 +278,14 @@ class MagicDictionaryIndexTest {
     fun `repeated lookups use cache`() {
         val tempFile = createTestDatabaseWithData()
         try {
-            val index = MagicDictionaryIndex.load(simpleNorm, tempFile)
-            assertNotNull(index)
+            assertNotNull(MagicDictionaryIndex.load(simpleNorm, tempFile)).use { index ->
+                // First lookup
+                val result1 = index.expansionFor("word1")
+                // Second lookup (should use cache)
+                val result2 = index.expansionFor("word1")
 
-            // First lookup
-            val result1 = index.expansionFor("word1")
-            // Second lookup (should use cache)
-            val result2 = index.expansionFor("word1")
-
-            assertEquals(result1, result2)
+                assertEquals(result1, result2)
+            }
         } finally {
             Files.deleteIfExists(tempFile)
         }

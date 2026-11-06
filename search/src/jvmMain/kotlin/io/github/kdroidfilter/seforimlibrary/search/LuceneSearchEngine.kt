@@ -2,12 +2,13 @@ package io.github.kdroidfilter.seforimlibrary.search
 
 import co.touchlab.kermit.Logger
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import org.apache.lucene.analysis.Analyzer
 import org.apache.lucene.analysis.TokenStream
 import org.apache.lucene.analysis.standard.StandardAnalyzer
 import org.apache.lucene.analysis.tokenattributes.CharTermAttribute
-import org.apache.lucene.index.DirectoryReader
 import org.apache.lucene.index.StoredFields
 import org.apache.lucene.index.Term
 import org.apache.lucene.index.LeafReaderContext
@@ -26,12 +27,10 @@ import org.apache.lucene.search.ScoreDoc
 import org.apache.lucene.search.ScoreMode
 import org.apache.lucene.search.TermQuery
 import org.apache.lucene.util.QueryBuilder
-import org.apache.lucene.store.FSDirectory
-import org.apache.lucene.store.NIOFSDirectory
 import org.apache.lucene.document.IntPoint
+import org.apache.lucene.store.AlreadyClosedException
 import org.jsoup.Jsoup
 import org.jsoup.safety.Safelist
-import java.io.Closeable
 import java.nio.file.Path
 
 /**
@@ -106,18 +105,13 @@ class LuceneSearchEngine(
     private val dictionaryPath: Path? = null
 ) : SearchEngine {
 
-    // Open Lucene directory lazily to avoid any I/O at app startup.
-    // GraalVM native image does not support MMapDirectory (Panama foreign downcalls), use NIOFSDirectory instead.
-    private val dir by lazy {
-        if (System.getProperty("org.graalvm.nativeimage.imagecode") != null) {
-            NIOFSDirectory(indexDir)
-        } else {
-            FSDirectory.open(indexDir)
-        }
-    }
+    // The owner is cheap to construct: no directory/reader I/O until the first search.
+    private val searchers = ManagedIndexSearchers(indexDir)
 
     private val stdAnalyzer: Analyzer by lazy { analyzer }
-    private val magicDict: MagicDictionaryIndex? by lazy {
+    private val dictionaryLifecycle = Any()
+    private var closed = false
+    private val lazyMagicDict = lazy {
         val candidates = listOfNotNull(
             dictionaryPath,
             System.getProperty("magicDict")?.let { Path.of(it) },
@@ -146,10 +140,18 @@ class LuceneSearchEngine(
         loaded
     }
 
+    // Initialization and disposal share a monitor: close never forces a lazy
+    // load, and no lookup can publish a dictionary after close has completed.
+    // The dictionary itself protects each synchronous lookup against disposal.
+    private val magicDict: MagicDictionaryIndex?
+        get() = synchronized(dictionaryLifecycle) {
+            if (closed) throw AlreadyClosedException("LuceneSearchEngine is closed")
+            lazyMagicDict.value
+        }
+
     private inline fun <T> withSearcher(block: (IndexSearcher) -> T): T {
-        DirectoryReader.open(dir).use { reader ->
-            val searcher = IndexSearcher(reader)
-            return block(searcher)
+        searchers.acquire().use { lease ->
+            return block(lease.searcher)
         }
     }
 
@@ -165,8 +167,17 @@ class LuceneSearchEngine(
         baseBookOnly: Boolean
     ): SearchSession? {
         val context = buildSearchContext(query, near, bookFilter, categoryFilter, bookIds, lineIds, baseBookOnly) ?: return null
-        val reader = DirectoryReader.open(dir)
-        return LuceneSearchSession(context.query, context.anchorTerms, context.highlightTerms, reader)
+        val lease = searchers.acquire()
+        try {
+            return LuceneSearchSession(context.query, context.anchorTerms, context.highlightTerms, lease)
+        } catch (failure: Throwable) {
+            try {
+                lease.close()
+            } catch (cleanupFailure: Throwable) {
+                failure.addSuppressed(cleanupFailure)
+            }
+            throw failure
+        }
     }
 
     override fun searchBooksByTitlePrefix(query: String, limit: Int): List<Long> {
@@ -219,8 +230,29 @@ class LuceneSearchEngine(
         return buildSnippetInternal(rawClean, anchorTerms, highlightTerms)
     }
 
+    /**
+     * Refresh committed index changes ahead of the next query. Requests also
+     * check for changes automatically; existing sessions keep their snapshot.
+     * Call from an I/O thread after a writer commits, not for a directory swap.
+     */
+    fun refresh() = searchers.refresh()
+
+    /**
+     * Stop new index requests and release resources after active searches and
+     * sessions finish. Dictionary lookups finish before their JDBC resources
+     * close; an unused dictionary is never loaded. Close all sessions as well
+     * before replacing index files, particularly on Windows, then construct a
+     * new engine for the new index.
+     */
     override fun close() {
-        // Directory is closed automatically when readers are closed
+        val dictionary = synchronized(dictionaryLifecycle) {
+            if (closed) return
+            closed = true
+            if (lazyMagicDict.isInitialized()) lazyMagicDict.value else null
+        }
+        // Always attempt both owners, retaining suppressed cleanup failures.
+        // Native cleanup and waiting for lookups happen outside the publication monitor.
+        dictionary.use { searchers.close() }
     }
 
     override fun computeFacets(
@@ -298,35 +330,66 @@ class LuceneSearchEngine(
         private val query: Query,
         private val anchorTerms: List<String>,
         private val highlightTerms: List<String>,
-        private val reader: DirectoryReader
+        private val lease: ManagedIndexSearchers.Lease
     ) : SearchSession {
-        private val searcher = IndexSearcher(reader)
+        private val searcher = lease.searcher
         private var after: ScoreDoc? = null
         private var finished = false
         private var totalHitsValue: Long? = null
+        private val pageMutex = Mutex()
+        private val sessionLock = Any()
+        private var sessionClosed = false
+        private var pageActive = false
 
         override suspend fun nextPage(limit: Int): SearchPage? = withContext(Dispatchers.IO) {
-            if (finished) return@withContext null
-            val top = searcher.searchAfter(after, query, limit)
-            if (totalHitsValue == null) totalHitsValue = top.totalHits?.value
-            if (top.scoreDocs.isEmpty()) {
-                finished = true
-                return@withContext null
+            pageMutex.withLock {
+                synchronized(sessionLock) {
+                    if (sessionClosed) throw AlreadyClosedException("Search session is closed")
+                    pageActive = true
+                }
+                var failure: Throwable? = null
+                try {
+                    if (finished) return@withLock null
+                    val top = searcher.searchAfter(after, query, limit)
+                    if (totalHitsValue == null) totalHitsValue = top.totalHits?.value
+                    if (top.scoreDocs.isEmpty()) {
+                        finished = true
+                        return@withLock null
+                    }
+                    val stored = searcher.storedFields()
+                    val hits = mapScoreDocs(stored, top.scoreDocs.asList(), anchorTerms, highlightTerms)
+                    after = top.scoreDocs.last()
+                    val isLast = top.scoreDocs.size < limit
+                    if (isLast) finished = true
+                    SearchPage(hits, totalHitsValue ?: hits.size.toLong(), isLast)
+                } catch (problem: Throwable) {
+                    failure = problem
+                    throw problem
+                } finally {
+                    // Snippet lookup suspends, so a thread-owned lock cannot cover the page.
+                    // The tiny monitor only guards publication; native disposal runs outside it.
+                    val release = synchronized(sessionLock) {
+                        pageActive = false
+                        sessionClosed
+                    }
+                    if (release) {
+                        try {
+                            lease.close()
+                        } catch (cleanupFailure: Throwable) {
+                            if (failure != null) failure.addSuppressed(cleanupFailure) else throw cleanupFailure
+                        }
+                    }
+                }
             }
-            val stored = searcher.storedFields()
-            val hits = mapScoreDocs(stored, top.scoreDocs.asList(), anchorTerms, highlightTerms)
-            after = top.scoreDocs.last()
-            val isLast = top.scoreDocs.size < limit
-            if (isLast) finished = true
-            SearchPage(
-                hits = hits,
-                totalHits = totalHitsValue ?: hits.size.toLong(),
-                isLastPage = isLast
-            )
         }
 
         override fun close() {
-            reader.close()
+            val release = synchronized(sessionLock) {
+                if (sessionClosed) return
+                sessionClosed = true
+                !pageActive
+            }
+            if (release) lease.close()
         }
     }
 
