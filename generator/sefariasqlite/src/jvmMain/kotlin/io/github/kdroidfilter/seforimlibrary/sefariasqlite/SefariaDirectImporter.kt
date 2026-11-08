@@ -660,6 +660,11 @@ class SefariaDirectImporter(
                 refsByCanonical = refsByCanonical,
                 lineKeyToId = lineKeyToId,
             )
+            SefariaPrintedMarkerAnchors(repository, logger).generate(
+                books = anchorBookInputs,
+                bookMetaById = bookMetaById,
+                lineKeyToId = lineKeyToId,
+            )
 
             // Char-level anchors from the quotation finder's charLevelData —
             // exact-only (single-version + unmodified-line gates).
