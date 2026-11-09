@@ -2,6 +2,7 @@ package io.github.kdroidfilter.seforimlibrary.sefariasqlite
 
 import co.touchlab.kermit.Logger
 import io.github.kdroidfilter.seforimlibrary.common.countVisibleChars
+import io.github.kdroidfilter.seforimlibrary.common.dh.DhExtractor
 import io.github.kdroidfilter.seforimlibrary.core.models.LinkAnchor
 import io.github.kdroidfilter.seforimlibrary.dao.repository.SeforimRepository
 
@@ -48,7 +49,13 @@ internal class SefariaCharLevelAnchors(
         generateCore(
             pending = pending,
             books = books,
-            lineContent = { book, index -> repository.getLineByIndex(book.bookId, index)?.content },
+            // The persisted line may carry the generated dash-dibbur bold
+            // wrapper. Char-level offsets must use the original unbolded text,
+            // exactly as the legacy BookPayload-based anchor pass did.
+            lineContent = { book, index ->
+                repository.getLineByIndex(book.bookId, index)?.content
+                    ?.let(DhExtractor::sourceLineForIndex)
+            },
         )
     }
 
