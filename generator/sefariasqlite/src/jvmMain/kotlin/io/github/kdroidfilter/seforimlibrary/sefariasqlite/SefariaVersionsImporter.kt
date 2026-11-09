@@ -62,7 +62,7 @@ internal class SefariaVersionsImporter(
     private val versionBatch = mutableListOf<BookVersion>()
     private val lineBatch = mutableListOf<VersionLine>()
 
-    suspend fun import(inputs: List<BookInput>, lineKeyToId: Map<Pair<String, Int>, Long>) {
+    suspend fun import(inputs: Iterable<BookInput>, lineKeyToId: Map<Pair<String, Int>, Long>) {
         for (input in inputs) {
             val versionFiles = discoverSefariaVersionFiles(input.payload.sourceDirPath)
             if (versionFiles.isEmpty()) {

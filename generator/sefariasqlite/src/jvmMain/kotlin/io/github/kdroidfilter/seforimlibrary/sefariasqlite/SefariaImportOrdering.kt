@@ -185,25 +185,32 @@ internal fun loadPriorityList(classLoader: ClassLoader?, logger: Logger): List<S
 
 internal fun applyPriorityOrdering(
     payloads: List<BookPayload>,
-    priorityEntries: List<String>
-): Pair<List<BookPayload>, List<String>> {
-    if (priorityEntries.isEmpty()) return payloads to emptyList()
+    priorityEntries: List<String>,
+): Pair<List<BookPayload>, List<String>> =
+    applyPriorityOrderingByPath(payloads, priorityEntries) { normalizedBookPath(it.categoriesHe, it.heTitle) }
 
-    val lookup = payloads.associateBy { normalizedBookPath(it.categoriesHe, it.heTitle) }
+/** Same priority, duplicate and first-match rules for metadata-only descriptors. */
+internal fun <T> applyPriorityOrderingByPath(
+    items: List<T>,
+    priorityEntries: List<String>,
+    normalizedPath: (T) -> String,
+): Pair<List<T>, List<String>> {
+    if (priorityEntries.isEmpty()) return items to emptyList()
+    val lookup = items.associateBy(normalizedPath)
     val used = mutableSetOf<String>()
-    val ordered = mutableListOf<BookPayload>()
+    val ordered = mutableListOf<T>()
     val missing = mutableListOf<String>()
 
     priorityEntries.forEach { entry ->
         val normalized = normalizePriorityEntry(entry)
-        val payload = lookup[normalized]
-        if (payload != null && used.add(normalized)) {
-            ordered += payload
-        } else if (payload == null) {
+        val item = lookup[normalized]
+        if (item != null && used.add(normalized)) {
+            ordered += item
+        } else if (item == null) {
             missing += entry
         }
     }
 
-    val remaining = payloads.filter { normalizedBookPath(it.categoriesHe, it.heTitle) !in used }
+    val remaining = items.filter { normalizedPath(it) !in used }
     return (ordered + remaining) to missing
 }

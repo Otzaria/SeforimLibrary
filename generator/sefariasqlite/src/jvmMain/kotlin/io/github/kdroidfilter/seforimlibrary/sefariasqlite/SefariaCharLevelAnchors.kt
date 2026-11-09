@@ -28,6 +28,35 @@ internal class SefariaCharLevelAnchors(
         pending: Collection<PendingCharLevelAnchor>,
         books: List<SefariaInlineAnchors.BookInput>,
     ) {
+        val byPath = books.associateBy { it.bookPath }
+        generateCore(
+            pending = pending,
+            books = books.map {
+                SefariaInlineAnchors.BookRef(
+                    it.bookId, it.enTitle, it.bookPath, it.singleVersionTitle, it.cleanShiftByLineIndex,
+                )
+            },
+            lineContent = { book, index -> byPath[book.bookPath]?.lines?.getOrNull(index) },
+        )
+    }
+
+    /** Query only referenced line content; no need to retain every source book. */
+    suspend fun generateFromDatabase(
+        pending: Collection<PendingCharLevelAnchor>,
+        books: List<SefariaInlineAnchors.BookRef>,
+    ) {
+        generateCore(
+            pending = pending,
+            books = books,
+            lineContent = { book, index -> repository.getLineByIndex(book.bookId, index)?.content },
+        )
+    }
+
+    private suspend fun generateCore(
+        pending: Collection<PendingCharLevelAnchor>,
+        books: List<SefariaInlineAnchors.BookRef>,
+        lineContent: suspend (SefariaInlineAnchors.BookRef, Int) -> String?,
+    ) {
         if (pending.isEmpty()) return
         val booksByPath = books.associateBy { it.bookPath }
 
@@ -63,7 +92,7 @@ internal class SefariaCharLevelAnchors(
                 skip("line modified by cleaning")
                 continue
             }
-            val content = book.lines.getOrNull(entry.lineIndex0)
+            val content = lineContent(book, entry.lineIndex0)
             if (content == null) {
                 skip("line not found")
                 continue

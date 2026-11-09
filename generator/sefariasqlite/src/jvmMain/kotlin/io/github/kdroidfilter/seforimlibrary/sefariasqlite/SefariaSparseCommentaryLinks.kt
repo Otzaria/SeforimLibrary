@@ -18,6 +18,10 @@ private val sparselyLinkedCommentaries = listOf(
     SparseCommentaryTitles(commentary = "Darkhei Moshe", intermediate = "Beit Yosef", base = "Tur"),
 )
 
+/** Only these base books' text is needed for sparse-commentary marker matching. */
+internal fun sparseCommentaryBaseTitles(): Set<String> =
+    sparselyLinkedCommentaries.mapTo(LinkedHashSet()) { it.base }
+
 // Otzaria: commentary sections left out of the anchoring. In Choshen Mishpat, Sefaria's
 // Tur–Beit Yosef links disagree with the Tur's Beit Yosef markers in 2,568 of 3,554 seifim,
 // and of the 7 Darkhei Moshe seifim it links both ways, 6 reach another Tur paragraph through
