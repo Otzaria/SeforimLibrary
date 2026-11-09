@@ -110,7 +110,7 @@ class SefariaDirectImporter(
         // A stable, metadata-only discovery pass replaces awaitAll over every
         // merged.json. The full payloads are parsed only when consumed below.
         val mergedFiles = bookPayloadReader.mergedFiles(jsonDir)
-        logger.i { "Scanning ${mergedFiles.size} Sefaria merged.json files in deterministic path order" }
+        logger.i { "Scanning ${mergedFiles.size} Sefaria merged.json files in legacy discovery order" }
         bookPayloadReader.prepareBaseTexts(mergedFiles, schemaDir, schemaLookup)
 
         val classLoader = javaClass.classLoader
