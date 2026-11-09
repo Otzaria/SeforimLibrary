@@ -94,8 +94,8 @@ internal fun scanSefariaBooks(
 }
 
 /**
- * Exactly one I/O producer, one sequential SQLite consumer, and one queued
- * work item. A large on-disk JSON is not read ahead while the previous book
+ * Exactly one I/O producer, one sequential SQLite consumer, and at most one
+ * producer-held lookahead. Rendezvous handoff never buffers another payload while
  * is being inserted. This bounds retained BookPayload instances, NOT total
  * heap/RSS: reference indexes, source hashes, allocator state, images and a
  * single exceptionally large book still depend on corpus size.
@@ -137,7 +137,9 @@ internal object SefariaBoundedInput {
         consume: suspend (SefariaBookDescriptor, BookPayload) -> Unit,
     ): Stats = coroutineScope {
         require(budgetBytes > 0) { "Input budget must be positive" }
-        val work = Channel<Work>(capacity = 1)
+        // Rendezvous allows one producer-held lookahead, but no second retained
+        // payload in a buffered channel. Large books stay on the consumer.
+        val work = Channel<Work>(Channel.RENDEZVOUS)
         var deferred = 0
         val producer = launch(Dispatchers.IO) {
             try {
@@ -190,7 +192,7 @@ internal object SefariaBoundedInput {
         }
         logger.i {
             "Sefaria bounded input: $inserted books, $deferred consumer-side reads, " +
-                "one producer + one sequential writer + one waiting item; " +
+                "one producer + one sequential writer + rendezvous lookahead; " +
                 "source-file admission budget=${budgetBytes / (1024 * 1024)} MiB"
         }
         Stats(inserted, deferred, budgetBytes / (1024 * 1024))
