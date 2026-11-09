@@ -65,8 +65,8 @@ class SefariaBoundedInputTest {
                 while (seen.isEmpty()) delay(10)
                 delay(100)
             }
-            // One being consumed, one queued, at most one being prepared.
-            assertTrue(loadCount.get() <= 3, "read-ahead was not bounded: ${loadCount.get()}")
+            // One consumed and at most one producer-held pending send; no buffered third book.
+            assertTrue(loadCount.get() <= 2, "read-ahead was not bounded: ${loadCount.get()}")
             release.complete(Unit)
             withTimeout(5_000) { writer.join() }
             assertEquals((0 until 12).map { "ספר $it" }, seen)
@@ -92,6 +92,60 @@ class SefariaBoundedInputTest {
             assertEquals(3, loads.get())
             assertEquals(3, stats.readOnConsumer)
             assertEquals(3, stats.booksWritten)
+        } finally {
+            dir.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun decodedBookExceedingBudgetIsReparsedOnTheConsumer() = runBlocking {
+        val (dir, descriptors) = fixture(1)
+        try {
+            val calls = AtomicInteger()
+            val text = "אבג".repeat(1000)
+            val stats = SefariaBoundedInput.consumeInOrder(
+                descriptors = descriptors,
+                load = {
+                    calls.incrementAndGet()
+                    payload(0).copy(lines = listOf(text))
+                },
+                logger = Logger.withTag("SefariaBoundedInputTest"),
+                budgetBytes = 1024L,
+            ) { descriptor, book ->
+                descriptor.verify(book)
+                assertEquals(listOf(text), book.lines)
+            }
+            assertEquals(2, calls.get(), "large decoded content must not be retained in a queued item")
+            assertEquals(1, stats.readOnConsumer)
+            assertEquals(1, stats.booksWritten)
+        } finally {
+            dir.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun failedConsumerNeverContinuesToWriteFollowingBooks() {
+        val (dir, descriptors) = fixture(8)
+        try {
+            val written = mutableListOf<String>()
+            assertFailsWith<IllegalStateException> {
+                runBlocking {
+                    withTimeout(5_000) {
+                        SefariaBoundedInput.consumeInOrder(
+                            descriptors = descriptors,
+                            load = { path ->
+                                payload(path.fileName.toString().substringBefore('-').toInt())
+                            },
+                            logger = Logger.withTag("SefariaBoundedInputTest"),
+                            budgetBytes = 1024L,
+                        ) { _, book ->
+                            written += book.heTitle
+                            error("injected serial writer failure")
+                        }
+                    }
+                }
+            }
+            assertEquals(listOf("ספר 0"), written)
         } finally {
             dir.toFile().deleteRecursively()
         }
