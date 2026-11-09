@@ -198,5 +198,34 @@ class SefariaInlineAnchorsIntegrationTest {
 
         assertEquals(listOf(0 to "א"), repo.getLinkAnchors(302).map { it.charStart to it.label })
         assertEquals(listOf(7 to "ב"), repo.getLinkAnchors(303).map { it.charStart to it.label })
+
+        // Compare the streaming production route against the existing legacy
+        // in-memory implementation, including the printed-label +1 shift.
+        val baseline302 = repo.getLinkAnchors(302).map { it.charStart to it.label }
+        val baseline303 = repo.getLinkAnchors(303).map { it.charStart to it.label }
+        repo.executeRawQuery("DELETE FROM link_anchor")
+        var loaded = 0
+        SefariaInlineAnchors(repo, Logger.withTag("InlineAnchorsStreamingParityTest")).generateStreaming(
+            books = books.map { input ->
+                SefariaInlineAnchors.BookRef(
+                    bookId = input.bookId,
+                    enTitle = input.enTitle,
+                    bookPath = input.bookPath,
+                    singleVersionTitle = input.singleVersionTitle,
+                    cleanShiftByLineIndex = input.cleanShiftByLineIndex,
+                    hasInlineItags = input.bookId == 1L,
+                )
+            },
+            loadBook = { ref ->
+                loaded++
+                books.single { it.bookId == ref.bookId }
+            },
+            bookMetaById = bookMetaById,
+            refsByCanonical = refsByCanonical,
+            lineKeyToId = lineKeyToId,
+        )
+        assertEquals(1, loaded, "only the base book with itags must be reparsed")
+        assertEquals(baseline302, repo.getLinkAnchors(302).map { it.charStart to it.label })
+        assertEquals(baseline303, repo.getLinkAnchors(303).map { it.charStart to it.label })
     }
 }
