@@ -659,7 +659,7 @@ build_family() {  # <name> <release prefix> <codec, or ""> <alias threshold, or 
       EMBEDDED_BY="seforim-gpu-worker 1.1"
       skip=0; n=0
       while [ "$skip" -lt "$TO_EMBED" ]; do
-        "$PY" "$HERE/embed_worker.py" --plan "$PLAN" --out "$FW/shards/$(printf 's%03d' "$n")" \
+        "$PY" "$HERE/embed_worker.py" --model-kind "${MODEL_WORKER_KIND:-meivin}" --token-budget "${MODEL_TOKEN_BUDGET:-32768}" --max-batch "${MODEL_MAX_BATCH:-1024}" --plan "$PLAN" --out "$FW/shards/$(printf 's%03d' "$n")" \
           --skip "$skip" --take "$EMBED_WINDOW" --cache "$STATE/model-cache" \
           --repo "$MODEL_REPO" --revision "$MODEL_REVISION" --graph "$MODEL_GRAPH" --remote-graph "${MODEL_REMOTE_GRAPH:-}" --token-env OTZARIA_HF_TOKEN ${CACHE_POLICY[@]+"${CACHE_POLICY[@]}"}
         skip=$((skip + EMBED_WINDOW)); n=$((n + 1))

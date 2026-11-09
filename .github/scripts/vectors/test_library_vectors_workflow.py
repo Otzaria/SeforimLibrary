@@ -205,7 +205,11 @@ class Workflow(unittest.TestCase):
 
     def test_every_job_is_bounded(self):
         for name, job in self.doc["jobs"].items():
-            self.assertIsInstance(job.get("timeout-minutes"), int, name)
+            if name == "vectors":
+                self.assertEqual(job.get("timeout-minutes"),
+                                 "${{ inputs.family == 'pardes107-windows-onnx' && 1440 || 360 }}")
+            else:
+                self.assertIsInstance(job.get("timeout-minutes"), int, name)
 
     def test_the_workflow_is_thin_and_the_driver_does_the_work(self):
         runs = [s for s in self.job["steps"] if "run" in s]

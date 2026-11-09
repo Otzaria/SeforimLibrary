@@ -71,6 +71,7 @@ def parse_args(argv=None):
     ap.add_argument("--parity-samples", type=int, default=1000,
                     help=f"texts in the parity certificate, golden texts included (at least {vector_shard.PARITY_MIN_SAMPLES})")
     ap.add_argument("--parity-procs", type=int, default=0, help="ONNX Runtime reference processes (default: CPUs, at most 16)")
+    ap.add_argument("--model-kind", default="meivin", choices=("meivin", "pardes107"))
     a = ap.parse_args(argv)
     if a.skip < 0 or (a.take is not None and a.take < 0):
         ap.error("--skip and --take are counts")
@@ -117,16 +118,24 @@ def main(argv=None) -> int:
     import reference
     import torch_bert
     torch.backends.cuda.matmul.allow_tf32 = False
-    tok = reference.load_tokenizer(str(root / model_package.TOKENIZER_FILE), MAX_TOKENS)
-    model = torch_bert.MeivinTorch(torch_bert.load_weights(graph), mode=a.mode, device=a.device)
-    model_package.check_family(root, a.graph, plan["model"], package, model.dim, POOLING, MAX_TOKENS)
+    cap = MAX_TOKENS if a.model_kind == "meivin" else 512
+    tok = reference.load_tokenizer(str(root / model_package.TOKENIZER_FILE), cap)
+    if a.model_kind == "pardes107":
+        import torch_pardes
+        if plan["model"]["family_id"] != "otzaria/Pardes-QA491-TorahPairs107-fp32-384":
+            raise vector_shard.ContractError("Pardes worker requires its isolated family")
+        a.mode = "fp32"
+        model = torch_pardes.PardesTorch(torch_pardes.load_weights(graph), mode=a.mode, device=a.device)
+    else:
+        model = torch_bert.MeivinTorch(torch_bert.load_weights(graph), mode=a.mode, device=a.device)
+    model_package.check_family(root, a.graph, plan["model"], package, model.dim, POOLING, cap)
     log(f"package {package['checksum'][:12]} ({package['quantization']}) holds the family's tokenizer, "
-        f"width {model.dim}, pooling {POOLING}, cap {MAX_TOKENS}")
+        f"width {model.dim}, pooling {POOLING}, cap {cap}")
     on_gpu = a.device.startswith("cuda")
     worker = {"name": WORKER_NAME, "version": WORKER_VERSION,
               "device": (torch.cuda.get_device_name(0) if on_gpu else "cpu"),
               "ep": ("rocm" if getattr(torch.version, "hip", None) else "cuda") if on_gpu else "cpu",
-              "mode": f"torch-{a.mode}"}
+              "mode": f"torch-{a.mode}", "model_kind": a.model_kind}
 
     def embed(texts):
         ids = [e.ids for e in tok.encode_batch(texts, add_special_tokens=True)]

@@ -50,6 +50,7 @@ on:
           - meivin-round2-windows-onnx
           - meivin-qa491-onnx
           - meivin-qa491-windows-onnx
+          - pardes107-windows-onnx
 
 permissions:
   contents: write
@@ -148,7 +149,7 @@ jobs:
     # warehouse; a later release embeds only the texts the warehouse lacks, on the CPU when
     # they are few (CPU_EMBED_MAX in pins.env). The windows family's first build embeds ~3.2M
     # texts (about an hour more); if it ever outlasts this bound, a dry run of it alone fills the warehouse.
-    timeout-minutes: 360
+    timeout-minutes: ${{ inputs.family == 'pardes107-windows-onnx' && 1440 || 360 }}
     env:
       GH_TOKEN: ${{ secrets.PIPELINE_TOKEN }}
       OTZARIA_HF_TOKEN: ${{ secrets.OTZARIA_HF_TOKEN }}
