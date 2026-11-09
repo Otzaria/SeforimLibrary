@@ -391,6 +391,7 @@ class SefariaDirectImporter(
                 bookPath = bookPath,
                 singleVersionTitle = payload.singleVersionTitle,
                 cleanShiftByLineIndex = payload.cleanShiftByLineIndex,
+                hasInlineItags = payload.lines.any { it.contains("<i data-commentator=") },
             )
             versionBookRefs += Triple(descriptor, bookId, bookPath)
 
