@@ -148,6 +148,8 @@ internal class SefariaInlineAnchors(
         val bookPath: String,
         val singleVersionTitle: String? = null,
         val cleanShiftByLineIndex: Map<Int, Int> = emptyMap(),
+        /** Seen while the serial writer already had the raw text in memory. */
+        val hasInlineItags: Boolean = true,
     )
 
     private val skipCounts = linkedMapOf<String, Int>()
@@ -193,7 +195,9 @@ internal class SefariaInlineAnchors(
                 size > 512
         }
         generateCore(
-            books = books.asSequence().map(loadBook).asIterable(),
+            // Header metadata is still complete, but only source books which
+            // actually contain an itag must be parsed a second time.
+            books = books.asSequence().filter { it.hasInlineItags }.map(loadBook).asIterable(),
             headers = books,
             printedLabelValue = { entry ->
                 val key = entry.path to entry.lineIndex
