@@ -260,6 +260,10 @@ class SefariaDirectImporter(
         }
         val issuedBookIds = HashMap<Long, String>()
 
+        // Discovery and ID-rename matching parsed candidate books but did
+        // not insert them. Reset diagnostics so they describe the actual
+        // serial insertion pass, not those preparatory re-reads.
+        SefariaDashlessDibburim.resetSummary()
         logger.i { "Inserting books and lines..." }
         var processedBooks = 0
 
