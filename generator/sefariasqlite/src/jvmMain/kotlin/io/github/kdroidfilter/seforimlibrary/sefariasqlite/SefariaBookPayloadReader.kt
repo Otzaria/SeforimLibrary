@@ -67,10 +67,15 @@ internal class SefariaBookPayloadReader(
         return lookup
     }
 
-    /** Stable discovery order, independent of directory-enumeration order. */
+    /**
+     * Preserve the legacy Files.walk discovery order: new book/line IDs are
+     * allocated sequentially, so sorting by path would renumber books without
+     * any content change. The bounded writer consumes precisely this order.
+     * Full cross-filesystem reproducibility still needs a pinned source tree
+     * and matching enumeration order.
+     */
     internal fun mergedFiles(jsonDir: Path): List<Path> = Files.walk(jsonDir).use { stream ->
         stream.filter { Files.isRegularFile(it) && it.fileName.name.equals("merged.json", ignoreCase = true) }
-            .sorted()
             .toList()
     }
 
