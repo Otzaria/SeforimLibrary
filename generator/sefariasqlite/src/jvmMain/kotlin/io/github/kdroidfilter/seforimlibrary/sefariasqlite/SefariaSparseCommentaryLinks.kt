@@ -55,6 +55,15 @@ internal data class SparseCommentary(
 /** A missing link from a base line to a commentary line. */
 internal data class CommentaryAnchor(val baseLineId: Long, val commentaryLine: SectionLine)
 
+internal fun CommentaryAnchor.toDerivedLink(commentary: SparseCommentary) = DerivedCommentaryLink(
+    stage = DerivedLinkStage.INTERMEDIATE_MARKER,
+    baseBookId = commentary.baseBookId,
+    commentaryBookId = commentary.commentaryBookId,
+    baseLineId = baseLineId,
+    commentaryLineId = commentaryLine.lineId,
+    commentaryLineIndex = commentaryLine.lineIndex,
+)
+
 /**
  * Collects the books of every [sparselyLinkedCommentaries] entry present in the export.
  * [linesByPath] holds each book's line contents by its path.

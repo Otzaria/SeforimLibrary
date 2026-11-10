@@ -52,6 +52,7 @@ internal class SefariaLinksImporter(
     private val rowsDroppedByType = ConcurrentHashMap<ConnectionType, LongAdder>()
     private val resolvedPairsByType = ConcurrentHashMap<ConnectionType, LongAdder>()
     private val linksWrittenByType = ConcurrentHashMap<ConnectionType, LongAdder>()
+    private val derivedLinksWrittenByStage = ConcurrentHashMap<DerivedLinkStage, LongAdder>()
 
     private fun ConcurrentHashMap<ConnectionType, LongAdder>.bump(type: ConnectionType) {
         computeIfAbsent(type) { LongAdder() }.increment()
@@ -79,6 +80,8 @@ internal class SefariaLinksImporter(
         // may leave this false to exercise the legacy whole-unit fallback.
         requireExportedVisibility: Boolean = false,
         onLinkStored: (Link) -> Unit = {},
+        // Every line a stored range covers (link_coverage), either side.
+        onLineCovered: (Long) -> Unit = {},
     ) = coroutineScope {
         // Pre-register all connection types we'll use so their ids are stable
         // (so `link.connectionTypeId` is reproducible across builds).
@@ -181,7 +184,7 @@ internal class SefariaLinksImporter(
 
             // Ranges/coverage/suppression reference link ids, so they are
             // inserted only after every link row exists.
-            insertPendingRangesAndCoverage()
+            insertPendingRangesAndCoverage(onLineCovered)
             insertSuppressedSides(suppressionAccumulator)
         } finally {
             linkChannel.close()
@@ -286,9 +289,10 @@ internal class SefariaLinksImporter(
         }
     }
 
-    private suspend fun insertPendingRangesAndCoverage() {
+    private suspend fun insertPendingRangesAndCoverage(onLineCovered: (Long) -> Unit) {
         val ranges = generateSequence { pendingRanges.poll() }.toList()
         val coverage = generateSequence { pendingCoverage.poll() }.toList()
+        coverage.forEach { onLineCovered(it.lineId) }
         ranges.chunked(SefariaImportTuning.LINK_BATCH_SIZE).forEach {
             repository.insertLinkRangesBatch(it)
         }
@@ -343,7 +347,10 @@ internal class SefariaLinksImporter(
                     resolvedPairs = resolvedPairsByType[t]?.sum() ?: 0,
                     written = linksWrittenByType[t]?.sum() ?: 0,
                 )
-            }
+            },
+            derivedCommentaryByStage = derivedLinksWrittenByStage.entries
+                .associate { (stage, count) -> stage.metricKey to count.sum() }
+                .toSortedMap(),
         )
     }
 
@@ -730,36 +737,46 @@ internal class SefariaLinksImporter(
     }
 
     /**
-     * Stores the [anchors] of a sparsely linked commentary as COMMENTARY links from its base
-     * text. See [anchorUnlinkedCommentaryLines].
+     * Stores [derived] as COMMENTARY links from the base line, with a link_range and
+     * link_coverage on the base side for a ranged one. A link already stored keeps its own
+     * range rows. Returns the links actually inserted.
      */
-    suspend fun insertCommentaryAnchors(
-        commentary: SparseCommentary,
-        anchors: List<CommentaryAnchor>,
+    suspend fun insertDerivedCommentaryLinks(
+        derived: List<DerivedCommentaryLink>,
         bookMetaById: Map<Long, BookMeta>,
-    ) {
+    ): List<Link> {
         val typeId = bindings.upsertConnectionType(ConnectionType.COMMENTARY.name)
-        val baseProvenance = computeBaseProvenance(commentary.baseBookId, bookMetaById[commentary.commentaryBookId])
-        anchors
-            .map { anchor ->
+        val stored = mutableListOf<Link>()
+        derived.chunked(SefariaImportTuning.LINK_BATCH_SIZE).forEach { chunk ->
+            val batch = chunk.map { d ->
                 Link(
-                    id = bindings.allocator.linkId(anchor.baseLineId, anchor.commentaryLine.lineId, typeId),
-                    sourceBookId = commentary.baseBookId,
-                    targetBookId = commentary.commentaryBookId,
-                    sourceLineId = anchor.baseLineId,
-                    targetLineId = anchor.commentaryLine.lineId,
-                    targetLineIndex = anchor.commentaryLine.lineIndex,
+                    id = bindings.allocator.linkId(d.baseLineId, d.commentaryLineId, typeId),
+                    sourceBookId = d.baseBookId,
+                    targetBookId = d.commentaryBookId,
+                    sourceLineId = d.baseLineId,
+                    targetLineId = d.commentaryLineId,
+                    targetLineIndex = d.commentaryLineIndex,
                     connectionType = ConnectionType.COMMENTARY,
-                    baseProvenance = baseProvenance,
+                    baseProvenance = computeBaseProvenance(d.baseBookId, bookMetaById[d.commentaryBookId]),
                 )
             }
-            .chunked(SefariaImportTuning.LINK_BATCH_SIZE)
-            .forEach { batch ->
-                val inserted = repository.insertLinksBatchReportingInserted(batch)
-                batch.forEachIndexed { i, link ->
-                    if (inserted[i]) linksWrittenByType.bump(link.connectionType)
+            val inserted = repository.insertLinksBatchReportingInserted(batch)
+            val ranges = mutableListOf<LinkRange>()
+            val coverage = mutableListOf<LinkCoverage>()
+            batch.forEachIndexed { i, link ->
+                if (!inserted[i]) return@forEachIndexed
+                linksWrittenByType.bump(link.connectionType)
+                derivedLinksWrittenByStage.computeIfAbsent(chunk[i].stage) { LongAdder() }.increment()
+                stored += link
+                chunk[i].range?.let { range ->
+                    ranges += LinkRange(link.id, side = 0, endLineId = range.endLineId, endLineIndex = range.endLineIndex)
+                    range.coveredLineIds.forEach { coverage += LinkCoverage(lineId = it, linkId = link.id, side = 0) }
                 }
             }
+            if (ranges.isNotEmpty()) repository.insertLinkRangesBatch(ranges)
+            coverage.chunked(SefariaImportTuning.LINK_BATCH_SIZE).forEach { repository.insertLinkCoverageBatch(it) }
+        }
+        return stored
     }
 
     private data class StoredLink(
@@ -1041,7 +1058,11 @@ internal data class LinkImportTypeMetrics(
  * surfaced alongside this in [LinkImportMetricsReport].
  */
 @kotlinx.serialization.Serializable
-internal data class LinkImportMetrics(val insertedByType: Map<String, LinkImportTypeMetrics>)
+internal data class LinkImportMetrics(
+    val insertedByType: Map<String, LinkImportTypeMetrics>,
+    // COMMENTARY links written by the generator's own rules, by [DerivedLinkStage.metricKey].
+    val derivedCommentaryByStage: Map<String, Long> = emptyMap(),
+)
 
 /**
  * Machine-checkable link-import metrics JSON, written next to seforim.db for QA
@@ -1062,6 +1083,7 @@ internal data class LinkImportMetricsReport(
     @kotlinx.serialization.SerialName("db_size_bytes") val dbSizeBytes: Long,
     val insertedByType: Map<String, LinkImportTypeMetrics>,
     val persistedByType: Map<String, Long>,
+    val derivedCommentaryByStage: Map<String, Long> = emptyMap(),
 )
 
 private val metricsReportJson = Json { prettyPrint = true }

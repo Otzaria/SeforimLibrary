@@ -72,6 +72,7 @@ class SefariaBookPayloadReaderTest {
         // base_text_titles → declared set; the title-pattern set stays empty.
         assertTrue(payload.declaredBaseTextTitleKeys.isNotEmpty())
         assertTrue(payload.inferredBaseTextTitleKeys.isEmpty())
+        assertEquals("many_to_one", payload.baseTextMapping)
     }
 
     @Test
@@ -82,6 +83,7 @@ class SefariaBookPayloadReaderTest {
         // from the "X on Y" title pattern.
         assertTrue(payload.declaredBaseTextTitleKeys.isEmpty())
         assertTrue(payload.inferredBaseTextTitleKeys.isNotEmpty())
+        assertEquals(null, payload.baseTextMapping)
     }
 
     companion object {
@@ -107,6 +109,7 @@ class SefariaBookPayloadReaderTest {
               "dependence": "Commentary",
               "collective_title": { "en": "Rashi", "he": "רש\"י" },
               "base_text_titles": ["Genesis"],
+              "base_text_mapping": "many_to_one",
               "schema": {
                 "title": "Rashi on Genesis",
                 "heTitle": "רש\"י על בראשית",

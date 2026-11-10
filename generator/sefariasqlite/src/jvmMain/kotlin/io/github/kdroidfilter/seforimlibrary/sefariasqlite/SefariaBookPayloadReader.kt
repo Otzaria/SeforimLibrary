@@ -338,6 +338,7 @@ internal class SefariaBookPayloadReader(
                 dependence = dependence,
                 rawDependence = rawDependence,
                 declaredBaseTextTitleKeys = declaredBaseTextTitleKeys,
+                baseTextMapping = extractBaseTextMapping(schemaJson, schemaObj),
                 inferredBaseTextTitleKeys = inferredBaseTextTitleKeys,
                 collectiveTitleHe = collectiveTitleHe,
                 collectiveTitleEn = collectiveTitleEn,
@@ -443,6 +444,10 @@ internal class SefariaBookPayloadReader(
     private fun extractRawDependence(schemaJson: JsonObject, schemaObj: JsonObject): String? =
         (schemaJson["dependence"]?.stringOrNull() ?: schemaObj["dependence"]?.stringOrNull())
             ?.trim()?.lowercase()?.takeIf { it.isNotEmpty() }
+
+    private fun extractBaseTextMapping(schemaJson: JsonObject, schemaObj: JsonObject): String? =
+        (schemaJson["base_text_mapping"]?.stringOrNull() ?: schemaObj["base_text_mapping"]?.stringOrNull())
+            ?.trim()?.takeIf { it.isNotEmpty() }
 
     private fun mapDependence(raw: String): Dependence = when (raw) {
         "commentary", "sub-commentary", "supercommentary", "super-commentary",

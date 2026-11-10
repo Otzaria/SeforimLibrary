@@ -60,6 +60,10 @@ internal data class BookMeta(
     // texts without being their base or their commentary, so a link between a
     // reference work and a non-reference book is never oriented.
     val isReferenceWork: Boolean = false,
+    // English title, the prefix of every ref of the book's main node (see SefariaDerivedCommentaryLinks).
+    val enTitle: String? = null,
+    // Schema `base_text_mapping` ("many_to_one", "one_to_one", …); null when absent.
+    val baseTextMapping: String? = null,
 )
 
 /// Base encoded value in [BookPayload.cleanShiftByLineIndex] for a line whose
@@ -107,6 +111,8 @@ internal data class BookPayload(
     val rawDependence: String? = null,
     // From schema `base_text_titles` — provenance SEFARIA_DECLARED.
     val declaredBaseTextTitleKeys: List<String> = emptyList(),
+    // Schema `base_text_mapping`: how a segment address maps onto its base text.
+    val baseTextMapping: String? = null,
     // Recovered from the "X on Y" title pattern — provenance INFERRED_TITLE.
     val inferredBaseTextTitleKeys: List<String> = emptyList(),
     val collectiveTitleHe: String? = null,
