@@ -114,7 +114,7 @@ class Workflow(unittest.TestCase):
         self.assertEqual(on["workflow_run"]["workflows"], [self.index["name"]])
         self.assertEqual(on["workflow_run"]["types"], ["completed"])
         inputs = on["workflow_dispatch"]["inputs"]
-        self.assertEqual(set(inputs), {"release_tag", "mode", "family"})
+        self.assertEqual(set(inputs), {"release_tag", "mode", "family", "resume"})
         self.assertTrue(inputs["release_tag"]["required"])
         self.assertEqual(inputs["mode"]["options"], ["dry-run", "auto", "base"])
         self.assertEqual(inputs["mode"]["default"], "dry-run")
@@ -552,6 +552,7 @@ esac
 STUB_PY = r"""#!/usr/bin/env bash
 echo "py $*" >> "$CALLS"
 script=$1; shift
+case "$script" in */resume_compact.py) exec "${REAL_PYTHON:-python3}" "$script" "$@";; esac
 out=""; cache=""; checksum=""; graph=""
 while [ $# -gt 0 ]; do case "$1" in --out) out=$2; shift 2;; --cache) cache=$2; shift 2;;
   --checksum) checksum=$2; shift 2;; --graph) graph=$2; shift 2;; *) shift;; esac; done
@@ -781,6 +782,40 @@ class Driver(unittest.TestCase):
         self.assertIn("refusing to erase it", p.stdout)
         self.assertEqual(shard.read_bytes(), b"completed expensive shard")
         self.assertFalse(any("release download" in c for c in calls))
+
+    def test_compact_resume_skips_complete_windows_and_retains_them_after_publish(self):
+        from test_resume_compact import fixture
+        work = self.state / "work" / TAG
+        model = self.model("pardesqa491-windows-onnx")
+        package = "edb0b74909ef0ae63ddaa1f47e909c18dc1584908a926471636f759e2de43365"
+        add = fixture(work, model, tag=TAG, package=package)
+        completed = [add(0), add(2)]
+        # Stub assembly reads this additional diagnostic model file.
+        shutil.copy(model, work / "pardesqa491-windows-onnx/plan/model.json")
+        partial = work / "pardesqa491-windows-onnx/shards/s001"
+        partial.mkdir(); (partial / "vectors.f32.partial").write_bytes(b"preserve partial")
+        before = {str(f): (f.read_bytes(), f.stat().st_mtime_ns) for d in completed for f in d.iterdir()}
+        driver = self.unpinned_driver()
+        pins = driver.parent / "pins.env"
+        pins.write_text(re.sub(r"^CPU_EMBED_MAX=.*$", "CPU_EMBED_MAX=0", pins.read_text(), flags=re.M))
+        profile = driver.parent / "model-pins/pardesqa491.env"
+        profile.write_text(profile.read_text().replace("MODEL_EMBED_WINDOW=65536", "MODEL_EMBED_WINDOW=2"))
+        p, calls = self.run_driver(mode="base", driver=driver, REAL_PYTHON=sys.executable,
+                                   args=("--family", "pardesqa491-windows-onnx", "--resume"))
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        workers = [c for c in calls if "embed_worker.py" in c]
+        self.assertEqual(len(workers), 1)
+        self.assertIn("--skip 2 --take 2", workers[0])
+        self.assertFalse(any(c.startswith("export ") or "release download" in c for c in calls))
+        self.assertEqual({str(f): (f.read_bytes(), f.stat().st_mtime_ns) for d in completed for f in d.iterdir()}, before)
+        self.assertEqual(next((work / "recovery-partials").rglob("vectors.f32.partial")).read_bytes(), b"preserve partial")
+        self.assertTrue(any("gh release edit vectors-pardesqa491-windows-" in c for c in calls))
+
+    def test_resume_rejects_other_families_before_preflight(self):
+        p, calls = self.run_driver(mode="base", args=("--family", LEGACY, "--resume"))
+        self.assertEqual(p.returncode, 64)
+        self.assertIn("--resume supports only compact Pardes", p.stdout)
+        self.assertFalse(calls)
 
     def test_qa491_uses_a_fresh_package_warehouse_and_cache_only(self):
         shutil.rmtree(self.state / "warehouse/fp32-5f80c47d")

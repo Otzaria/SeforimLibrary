@@ -66,6 +66,9 @@
 # keeps what it embedded, as in a base). The state directory (default
 # /home/runner/otzaria-vectors; see bootstrap_runner.sh) holds the binaries, the venv, the
 # model cache, the warehouse and the published ledgers, and is locked for the whole build.
+# --resume --mode base --family pardesqa491-windows-onnx reuses an interrupted
+# embedding phase: verifies retained plan/shards, archives uncommitted output intact,
+# and skips completed windows. Compact work remains on disk after publication.
 # Runs by hand on the build machine as it runs in the workflow. Tests replace the tools with
 # OTZARIA_SEMANTIC_CLI, EXPORT_SEMANTIC_PLAN, VALIDATE_SEMANTIC_VECTORS, VECTOR_PYTHON, GH and ZSTD.
 set -euo pipefail
@@ -78,7 +81,7 @@ HERE=$(cd "$(dirname "$0")" && pwd)
 . "$HERE/../db_asset_names.sh"   # FULL_DB_ASSET_JQ: the release's full DB, which the index is built from
 
 TAG=""; MODE=dry-run; STATE=/home/runner/otzaria-vectors; WORK=""; REPO=${GITHUB_REPOSITORY:-Otzaria/SeforimLibrary}
-WANTED=(); ALL=""
+WANTED=(); ALL=""; RESUME=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --tag) TAG=$2; shift 2 ;;
@@ -88,7 +91,8 @@ while [ $# -gt 0 ]; do
     --state) STATE=$2; shift 2 ;;
     --work) WORK=$2; shift 2 ;;
     --repo) REPO=$2; shift 2 ;;
-    *) echo "usage: build_library_vectors.sh --tag vN-YYYYMMDDHHMMSS [--mode auto|base|dry-run] [--family all|NAME]... [--state DIR] [--work DIR] [--repo R]" >&2; exit 64 ;;
+    --resume) RESUME=1; shift ;;
+    *) echo "usage: build_library_vectors.sh --tag vN-YYYYMMDDHHMMSS [--mode auto|base|dry-run] [--family all|NAME]... [--state DIR] [--work DIR] [--repo R] [--resume]" >&2; exit 64 ;;
   esac
 done
 echo "$TAG" | grep -Eq '^v[0-9]+-[0-9]{14}$' || { echo "::error::'$TAG' is not a database release tag (v<dbVersion>-<utcTimestamp>)"; exit 64; }
@@ -118,6 +122,10 @@ for name in ${WANTED[@]+"${WANTED[@]}"}; do
   [[ " ${NAMES[*]} " == *" $name "* ]] || { echo "::error::--family '$name' is not a family of FAMILY_CONFIGS ($FAMILY_CONFIGS)"; exit 64; }
 done
 [ "${#NAMES[@]}" -gt 0 ] || { echo "::error::pins.env names no family in FAMILY_CONFIGS"; exit 64; }
+if [ -n "$RESUME" ]; then
+  [ "$MODE" = base ] && [ "${#NAMES[@]}" -eq 1 ] && [ "${NAMES[0]}" = pardesqa491-windows-onnx ] \
+    || { echo "::error::--resume supports only compact Pardes in mode base"; exit 64; }
+fi
 VERSION=${TAG#v}; VERSION=${VERSION%%-*}
 WORK=${WORK:-$STATE/work/$TAG}
 CLI=${OTZARIA_SEMANTIC_CLI:-$STATE/bin/otzaria-semantic-search}
@@ -248,9 +256,18 @@ if [ "$MODE" != dry-run ]; then
 fi
 if [[ " ${NAMES[*]} " == *" pardesqa491-windows-onnx "* ]] \
   && [ -d "$WORK" ] && [ -n "$(find "$WORK" -mindepth 1 -maxdepth 1 -print -quit)" ]; then
-  die "retained compact Pardes work exists at $WORK; reconcile its atomic shards before retrying (refusing to erase it)"
+  [ -n "$RESUME" ] || die "retained compact Pardes work exists at $WORK; use --resume to verify and retain its atomic shards (refusing to erase it)"
 fi
-rm -rf "$WORK"; mkdir -p "$WORK/dl" "$WORK/index"
+if [ -n "$RESUME" ]; then
+  select_model_profile "${NAMES[0]}"
+  "$PY" "$HERE/resume_compact.py" --work "$WORK" --tag "$TAG" \
+    --model "$STATE/bin/families/${NAMES[0]}/model.json" --package "$PASSAGE_PACKAGE_CHECKSUM" \
+    --window "$MODEL_EMBED_WINDOW" --warehouse "$STATE/warehouse/$PASSAGE_QUANTIZATION-${PASSAGE_PACKAGE_CHECKSUM:0:8}"
+  select_model_profile ""
+else
+  rm -rf "$WORK"; mkdir -p "$WORK/dl" "$WORK/index"
+fi
+if [ -z "$RESUME" ]; then
 fetch() {  # <asset name>: into $WORK/dl, through gh, or anonymously from the public release URL
   if [ -n "$GH_OK" ]; then
     "$GH" release download "$TAG" --repo "$REPO" --dir "$WORK/dl" --pattern "$1"
@@ -365,6 +382,14 @@ rm -f "${db_parts[@]}"
 [ -s "$DB" ] || die "$db_name expanded to nothing"
 echo "database: $db_name, $(du -sh "$DB" | cut -f1)"
 endgroup
+
+else
+  RELEASE_JSON=$WORK/library-release.json
+  CREATED=$(jq -r .published_at "$RELEASE_JSON")
+  INDEX=$WORK/index/index; DB=$WORK/seforim.db
+  echo "resume: retained database, index and verified plan; no download or replanning"
+  endgroup
+fi
 
 no_delta() { echo "::warning::$RELEASE_TAG is published as a base alone, with no delta: $*"; }
 
@@ -510,10 +535,12 @@ make_plan() {  # $FW/plan, split against the warehouse and, with one, against $P
   local split=(--warehouse "$WAREHOUSE")
   if [ -n "$FRESH" ]; then split=(); echo "no warehouse yet at $WAREHOUSE: every text is planned"; fi
   [ -z "$PREV" ] || split+=(--previous-ledger "$PREV")
-  rm -rf "$FW/plan"
-  "$EXPORT" --index "$INDEX" --seforim-db "$DB" --library-version "$VERSION" --release-tag "$TAG" \
-    --model "$FAMILY" --passage-quantization "$PASSAGE_QUANTIZATION" \
-    ${split[@]+"${split[@]}"} --created-at "$CREATED" --out "$FW/plan" | tee "$FW/plan.log"
+  if [ -z "$RESUME" ]; then
+    rm -rf "$FW/plan"
+    "$EXPORT" --index "$INDEX" --seforim-db "$DB" --library-version "$VERSION" --release-tag "$TAG" \
+      --model "$FAMILY" --passage-quantization "$PASSAGE_QUANTIZATION" \
+      ${split[@]+"${split[@]}"} --created-at "$CREATED" --out "$FW/plan" | tee "$FW/plan.log"
+  fi
   PLAN=$FW/plan
   jq -e '.format == "otzaria-vector-plan" and .version == 1' "$PLAN/plan-manifest.json" >/dev/null || die "the plan is not an otzaria-vector-plan version 1"
   [ "$(jq -r .library_release_tag "$PLAN/plan-manifest.json")" = "$TAG" ] || die "the plan was made for another release"
@@ -668,6 +695,11 @@ build_family() {  # <name> <release prefix> <codec, or ""> <alias threshold, or 
       active_embed_window=${MODEL_EMBED_WINDOW:-$EMBED_WINDOW}
       skip=0; n=0
       while [ "$skip" -lt "$TO_EMBED" ]; do
+        shard="$FW/shards/$(printf 's%03d' "$n")"
+        if [ -n "$RESUME" ] && [ -f "$shard/shard-manifest.json" ]; then
+          echo "resume: keeping verified shard $(basename "$shard") ($skip onward), no inference"
+          skip=$((skip + active_embed_window)); n=$((n + 1)); continue
+        fi
         "$PY" "$HERE/embed_worker.py" --device "${MODEL_DEVICE:-cuda}" --cpu-procs "$CPU_PROCESSES" --cpu-threads "$CPU_THREADS" --chunk "${MODEL_WRITE_CHUNK:-65536}" --model-kind "${MODEL_WORKER_KIND:-meivin}" --token-budget "${MODEL_TOKEN_BUDGET:-32768}" --max-batch "${MODEL_MAX_BATCH:-1024}" --plan "$PLAN" --out "$FW/shards/$(printf 's%03d' "$n")" \
           --skip "$skip" --take "$active_embed_window" --cache "$STATE/model-cache" \
           --repo "$MODEL_REPO" --revision "$MODEL_REVISION" --graph "$MODEL_GRAPH" --remote-graph "${MODEL_REMOTE_GRAPH:-}" --token-env OTZARIA_HF_TOKEN ${CACHE_POLICY[@]+"${CACHE_POLICY[@]}"}
@@ -679,7 +711,8 @@ build_family() {  # <name> <release prefix> <codec, or ""> <alias threshold, or 
     CREATE=()
     [ -z "$FRESH" ] || CREATE=(--create --model "$FAMILY" --passage-quantization "$PASSAGE_QUANTIZATION")
     "$CLI" warehouse-add --warehouse "$WAREHOUSE" ${CREATE[@]+"${CREATE[@]}"} --plan "$PLAN" --shards "$FW/shards"
-    rm -rf "$FW/shards"   # the warehouse holds their vectors now
+    # Keep compact shards even after import; a recovery must never destroy completed work.
+    [ "$name" = pardesqa491-windows-onnx ] || rm -rf "$FW/shards"
     endgroup
   fi
 
@@ -753,7 +786,7 @@ build_family() {  # <name> <release prefix> <codec, or ""> <alias threshold, or 
 
   if [ "$MODE" = dry-run ]; then
     # Kept for inspection: the plan, the release, the files and the logs; the rest (the validator's set) goes.
-    find "$FW" -mindepth 1 -maxdepth 1 ! -name plan ! -name release ! -name files ! -name '*.log' ! -name rotation.bin -exec rm -rf {} +
+    [ "$name" = pardesqa491-windows-onnx ] || find "$FW" -mindepth 1 -maxdepth 1 ! -name plan ! -name release ! -name files ! -name '*.log' ! -name rotation.bin -exec rm -rf {} +
     echo "dry run: built and verified $STEM ($name); nothing published, the ledger is not persisted; $(du -sh "$FW" | cut -f1) kept in $FW"
     return 0
   fi
@@ -896,7 +929,7 @@ build_family() {  # <name> <release prefix> <codec, or ""> <alias threshold, or 
     fi
     endgroup
   fi
-  rm -rf "$FW"
+  [ "$name" = pardesqa491-windows-onnx ] || rm -rf "$FW"
 }
 
 PUBLISHED=()
@@ -911,7 +944,7 @@ for i in "${!NAMES[@]}"; do
   fi
   [ "$MODE" = dry-run ] || PUBLISHED+=("${PREFIXES[$i]}-$TAG")
 done
-if [ "$MODE" = dry-run ]; then
+if [ "$MODE" = dry-run ] || [[ " ${NAMES[*]} " == *" pardesqa491-windows-onnx "* ]]; then
   echo "work directory kept: $WORK"
 else
   rm -rf "$WORK"
