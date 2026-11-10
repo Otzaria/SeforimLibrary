@@ -668,7 +668,7 @@ build_family() {  # <name> <release prefix> <codec, or ""> <alias threshold, or 
       active_embed_window=${MODEL_EMBED_WINDOW:-$EMBED_WINDOW}
       skip=0; n=0
       while [ "$skip" -lt "$TO_EMBED" ]; do
-        "$PY" "$HERE/embed_worker.py" --device "${MODEL_DEVICE:-cuda}" --cpu-procs "$CPU_PROCESSES" --cpu-threads "$CPU_THREADS" --model-kind "${MODEL_WORKER_KIND:-meivin}" --token-budget "${MODEL_TOKEN_BUDGET:-32768}" --max-batch "${MODEL_MAX_BATCH:-1024}" --plan "$PLAN" --out "$FW/shards/$(printf 's%03d' "$n")" \
+        "$PY" "$HERE/embed_worker.py" --device "${MODEL_DEVICE:-cuda}" --cpu-procs "$CPU_PROCESSES" --cpu-threads "$CPU_THREADS" --chunk "${MODEL_WRITE_CHUNK:-65536}" --model-kind "${MODEL_WORKER_KIND:-meivin}" --token-budget "${MODEL_TOKEN_BUDGET:-32768}" --max-batch "${MODEL_MAX_BATCH:-1024}" --plan "$PLAN" --out "$FW/shards/$(printf 's%03d' "$n")" \
           --skip "$skip" --take "$active_embed_window" --cache "$STATE/model-cache" \
           --repo "$MODEL_REPO" --revision "$MODEL_REVISION" --graph "$MODEL_GRAPH" --remote-graph "${MODEL_REMOTE_GRAPH:-}" --token-env OTZARIA_HF_TOKEN ${CACHE_POLICY[@]+"${CACHE_POLICY[@]}"}
         skip=$((skip + active_embed_window)); n=$((n + 1))

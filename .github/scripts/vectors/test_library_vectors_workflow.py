@@ -764,7 +764,7 @@ class Driver(unittest.TestCase):
         self.assertEqual(len(workers), 2)
         for call in workers:
             for arg in ("--device cpu", "--model-kind pardesqa491", "--cpu-procs 8",
-                        "--cpu-threads 2", "--take 65536", "--graph model.onnx"):
+                        "--cpu-threads 2", "--chunk 4096", "--take 65536", "--graph model.onnx"):
                 self.assertIn(arg, call)
         self.assertIn("--skip 0 ", workers[0])
         self.assertIn("--skip 65536 ", workers[1])
