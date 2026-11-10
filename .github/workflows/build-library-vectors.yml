@@ -51,6 +51,11 @@ on:
           - meivin-qa491-onnx
           - meivin-qa491-windows-onnx
           - pardesqa491-windows-onnx
+      resume:
+        description: 'Resume retained compact Pardes work; verify completed shards and never recompute them (base mode only)'
+        type: boolean
+        required: false
+        default: false
 
 permissions:
   contents: write
@@ -156,6 +161,7 @@ jobs:
       RELEASE_TAG: ${{ needs.gate.outputs.release_tag }}
       MODE: ${{ needs.gate.outputs.mode }}
       FAMILY: ${{ inputs.family }}
+      RESUME: ${{ inputs.resume }}
       LIBRARY_VECTORS_PRERELEASE: ${{ vars.LIBRARY_VECTORS_PRERELEASE || 'true' }}
     steps:
       # The build machine's other self-hosted jobs pin checkout@v4: its runner's Node 24
@@ -177,4 +183,5 @@ jobs:
             # A new model gets its own scratch tree; preserve the cancelled P107 shards.
             WORK_ARGS=(--work "$HOME/otzaria-vectors/work/$RELEASE_TAG-pardesqa491-int8-v1")
           fi
+          if [ "${RESUME:-false}" = true ]; then WORK_ARGS+=(--resume); fi
           bash .github/scripts/vectors/build_library_vectors.sh --tag "$RELEASE_TAG" --mode "$MODE" --family "${FAMILY:-all}" --repo "$GITHUB_REPOSITORY" "${WORK_ARGS[@]}"
