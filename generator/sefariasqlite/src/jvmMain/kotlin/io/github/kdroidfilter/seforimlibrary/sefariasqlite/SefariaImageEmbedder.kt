@@ -68,6 +68,11 @@ object SefariaImageEmbedder {
 
     private const val HEX = "0123456789abcdef"
 
+    /** SHA-256 of the 666x367 PNG NetFree serves instead of an image ("לבדיקת התמונה פנו לנטפרי"). */
+    internal val FILTER_PLACEHOLDER_SHA256: Set<String> = setOf(
+        "1a00712621da6964deac5b491a5532e15c8854c00de7fba692818e0e042db311",
+    )
+
     /**
      * Pause before download attempt 2 and 3. A transient timeout on
      * textimages.sefaria.org (10 of 420 images timed out at 30 s in build
@@ -130,10 +135,12 @@ object SefariaImageEmbedder {
         mergedJsonPaths: Collection<Path>,
         cacheDir: Path = defaultCacheDir(),
         reportPath: Path = defaultReportPath(),
+        bundledDir: Path? = null,
         logger: Logger = Logger.withTag("SefariaImageEmbedder")
     ) = coroutineScope {
         Files.createDirectories(cacheDir)
         logger.i { "Embedder: image cache at ${cacheDir.toAbsolutePath()}" }
+        if (bundledDir != null) logger.i { "Embedder: images bundled with the export at ${bundledDir.toAbsolutePath()}" }
 
         val urls = collectUrls(mergedJsonPaths)
         logger.i { "Embedder: ${urls.size} unique Sefaria image URLs to process" }
@@ -149,7 +156,7 @@ object SefariaImageEmbedder {
         urls.map { url ->
             async(Dispatchers.IO) {
                 semaphore.withPermit {
-                    when (val fetched = ensureCachedBytes(url, cacheDir, logger)) {
+                    when (val fetched = ensureCachedBytes(url, cacheDir, bundledDir, logger)) {
                         is Fetched.Bytes -> {
                             if (fetched.fromNetwork) newlyDownloaded.incrementAndGet()
                             else fromDiskCache.incrementAndGet()
@@ -314,6 +321,7 @@ object SefariaImageEmbedder {
     private fun ensureCachedBytes(
         url: String,
         cacheDir: Path,
+        bundledDir: Path?,
         logger: Logger,
     ): Fetched {
         val cachePath = cacheDir.resolve(cacheFileName(url))
@@ -323,6 +331,17 @@ object SefariaImageEmbedder {
             return Fetched.Bytes(it, fromNetwork = false)
         }
 
+        // Fetched with the export on an unfiltered host; read-only, so a bad entry is skipped, never deleted.
+        if (bundledDir != null) {
+            val bundledPath = bundledDir.resolve(cacheFileName(url))
+            readVerifiedEntry(url, bundledPath, sidecarOf(bundledPath), logger, evictInvalid = false)?.let {
+                // The bytes are good; a full disk must not cost the image.
+                runCatching { writeEntry(cacheDir, url, cachePath, sidecarPath, it) }
+                    .onFailure { e -> logger.w(e) { "Could not copy bundled image into the cache: $url" } }
+                return Fetched.Bytes(it, fromNetwork = false)
+            }
+        }
+
         val bytes = runCatching { downloadWithRetry(url, logger) }.getOrElse {
             // Reported once, by the caller, with the URL — see [failureReason].
             return Fetched.Failure(failureReason(it))
@@ -330,6 +349,7 @@ object SefariaImageEmbedder {
         if (bytes.size > MAX_IMAGE_BYTES) {
             return Fetched.Failure("oversized (${bytes.size} bytes)")
         }
+        rejectionReason(bytes)?.let { return Fetched.Failure(it) }
         writeEntry(cacheDir, url, cachePath, sidecarPath, bytes)
         return Fetched.Bytes(bytes, fromNetwork = true)
     }
@@ -353,29 +373,62 @@ object SefariaImageEmbedder {
      * write) a miss instead of the wrong image reported as a success. It is also
      * the ONLY way in: no name-shaped heuristic ever adopts bytes.
      */
-    private fun readVerifiedEntry(url: String, cachePath: Path, sidecarPath: Path, logger: Logger): ByteArray? {
+    private fun readVerifiedEntry(
+        url: String,
+        cachePath: Path,
+        sidecarPath: Path,
+        logger: Logger,
+        evictInvalid: Boolean = true,
+    ): ByteArray? {
         if (!cachePath.isRegularFile()) return null
+        fun drop() { if (evictInvalid) evict(cachePath, sidecarPath) }
         val owner = readSidecar(sidecarPath)
         if (owner != url) {
             logger.w {
                 if (owner == null) "Cached image at $cachePath has no $SIDECAR_SUFFIX sidecar; redownloading: $url"
                 else "Cached image at $cachePath was written for another URL; redownloading: $url"
             }
-            evict(cachePath, sidecarPath)
+            drop()
             return null
         }
         val bytes = runCatching { cachePath.readBytes() }.getOrElse {
             logger.w(it) { "Corrupted cached image at $cachePath; redownloading" }
-            evict(cachePath, sidecarPath)
+            drop()
             return null
         }
         if (bytes.isEmpty()) {
             logger.w { "Empty cached image at $cachePath; redownloading" }
-            evict(cachePath, sidecarPath)
+            drop()
+            return null
+        }
+        rejectionReason(bytes)?.let { reason ->
+            logger.w { "Cached image at $cachePath is not usable ($reason); redownloading: $url" }
+            drop()
             return null
         }
         return bytes
     }
+
+    /**
+     * Why [bytes] must not be inlined, or null. A content filter may answer 200
+     * with its own picture or an HTML page instead of the image; inlined, that
+     * ships in every book line that references the URL. Add a hash to
+     * [FILTER_PLACEHOLDER_SHA256] when another filter placeholder shows up.
+     */
+    internal fun rejectionReason(bytes: ByteArray): String? {
+        if (bytes.isEmpty()) return "empty"
+        if (looksLikeHtml(bytes)) return "html-instead-of-image"
+        if (sha256Hex(bytes) in FILTER_PLACEHOLDER_SHA256) return "content-filter-placeholder (NetFree image)"
+        return null
+    }
+
+    private fun looksLikeHtml(b: ByteArray): Boolean {
+        val head = String(b, 0, minOf(b.size, 512), Charsets.UTF_8).trimStart().lowercase()
+        return head.startsWith("<!doctype html") || head.startsWith("<html")
+    }
+
+    private fun sha256Hex(bytes: ByteArray): String =
+        MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }
 
     /**
      * Sidecar first, bytes second: a crash in between leaves an orphan `.url`

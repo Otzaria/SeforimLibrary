@@ -105,7 +105,11 @@ class SefariaDirectImporter(
                     it.fileName.toString().endsWith(".json", ignoreCase = true)
             }.toList()
         }
-        SefariaImageEmbedder.prefetch(bookJsonFiles, logger = logger)
+        SefariaImageEmbedder.prefetch(
+            bookJsonFiles,
+            bundledDir = dbRoot.resolve("textimages").takeIf { it.isDirectory() },
+            logger = logger,
+        )
 
         // Read and parse files in parallel
         logger.i { "Starting parallel file processing..." }

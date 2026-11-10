@@ -128,6 +128,110 @@ class SefariaImageEmbedderTest {
         assertEquals(0, report.downloaded)
     }
 
+    // --- content-filter answers that are not the image ----------------------
+
+    private fun netfreePlaceholder(): ByteArray =
+        javaClass.getResourceAsStream("/netfree-image-placeholder.png")!!.use { it.readBytes() }
+
+    @Test
+    fun filterPlaceholderIsNotEmbeddedNorCached() = runBlocking {
+        val url = "https://textimages.sefaria.org/filtered/p.png"
+        val (dir, json) = mergedJsonWith(url)
+        SefariaImageEmbedder.downloader = { netfreePlaceholder() }
+
+        SefariaImageEmbedder.prefetch(listOf(json), cacheDir = dir, reportPath = reportPath(dir))
+
+        assertFalse(Files.exists(cacheFile(dir, url)), "a placeholder must not enter the durable cache")
+        assertEquals("content-filter-placeholder (NetFree image)", reportIn(dir).failures.single().reason)
+        assertTrue(cleanSefariaLine("""<img src="$url">""").contains(url), "the line keeps the remote URL")
+    }
+
+    @Test
+    fun htmlInsteadOfAnImageIsNotEmbedded() = runBlocking {
+        val url = "https://textimages.sefaria.org/filtered/h.png"
+        val (dir, json) = mergedJsonWith(url)
+        SefariaImageEmbedder.downloader = { "<!DOCTYPE html><html>blocked</html>".toByteArray() }
+
+        SefariaImageEmbedder.prefetch(listOf(json), cacheDir = dir, reportPath = reportPath(dir))
+
+        assertFalse(Files.exists(cacheFile(dir, url)))
+        assertEquals("html-instead-of-image", reportIn(dir).failures.single().reason)
+    }
+
+    @Test
+    fun placeholderAlreadyInTheCacheIsEvictedAndRefetched() = runBlocking {
+        val url = "https://textimages.sefaria.org/filtered/c.png"
+        val (dir, json) = mergedJsonWith(url)
+        writeCacheEntry(dir, url, netfreePlaceholder())
+        var calls = 0
+        SefariaImageEmbedder.downloader = { calls++; byteArrayOf(1, 2, 3) }
+
+        SefariaImageEmbedder.prefetch(listOf(json), cacheDir = dir, reportPath = reportPath(dir))
+
+        assertEquals(1, calls)
+        assertEquals(byteArrayOf(1, 2, 3).toList(), Files.readAllBytes(cacheFile(dir, url)).toList())
+        assertTrue(cleanSefariaLine("""<img src="$url">""").contains("data:image/png;base64,AQID"))
+    }
+
+    @Test
+    fun emptyBodyFromTheNetworkIsNotEmbedded() = runBlocking {
+        val url = "https://textimages.sefaria.org/filtered/e.png"
+        val (dir, json) = mergedJsonWith(url)
+        SefariaImageEmbedder.downloader = { ByteArray(0) }
+
+        SefariaImageEmbedder.prefetch(listOf(json), cacheDir = dir, reportPath = reportPath(dir))
+
+        assertFalse(Files.exists(cacheFile(dir, url)))
+        assertEquals("empty", reportIn(dir).failures.single().reason)
+    }
+
+    @Test
+    fun missingBundledDirFallsBackToTheNetwork() = runBlocking {
+        val url = "https://textimages.sefaria.org/bundled/m.png"
+        val (dir, json) = mergedJsonWith(url)
+        SefariaImageEmbedder.downloader = { byteArrayOf(1, 2, 3) }
+
+        SefariaImageEmbedder.prefetch(
+            listOf(json), cacheDir = dir, reportPath = reportPath(dir),
+            bundledDir = dir.resolve("no-such-dir"),
+        )
+
+        assertTrue(cleanSefariaLine("""<img src="$url">""").contains("data:image/png;base64,AQID"))
+    }
+
+    // --- images bundled with the export ---------------------------------------
+
+    @Test
+    fun bundledImageIsUsedWithoutNetworkAndCopiedToTheCache() = runBlocking {
+        val url = "https://textimages.sefaria.org/bundled/b.png"
+        val (dir, json) = mergedJsonWith(url)
+        val bundled = Files.createTempDirectory("bundled-images")
+        writeCacheEntry(bundled, url, byteArrayOf(1, 2, 3))
+        SefariaImageEmbedder.downloader = { error("a bundled image must not be downloaded") }
+        val cache = Files.createTempDirectory("image-cache")
+
+        SefariaImageEmbedder.prefetch(listOf(json), cacheDir = cache, reportPath = reportPath(dir), bundledDir = bundled)
+
+        assertTrue(cleanSefariaLine("""<img src="$url">""").contains("data:image/png;base64,AQID"))
+        assertTrue(Files.isRegularFile(cacheFile(cache, url)), "copied into the durable cache")
+        assertEquals(0, reportIn(dir).downloaded)
+    }
+
+    @Test
+    fun bundledPlaceholderIsSkippedAndLeftInPlace() = runBlocking {
+        val url = "https://textimages.sefaria.org/bundled/x.png"
+        val (dir, json) = mergedJsonWith(url)
+        val bundled = Files.createTempDirectory("bundled-images")
+        writeCacheEntry(bundled, url, netfreePlaceholder())
+        SefariaImageEmbedder.downloader = { byteArrayOf(7, 8, 9) }
+        val cache = Files.createTempDirectory("image-cache")
+
+        SefariaImageEmbedder.prefetch(listOf(json), cacheDir = cache, reportPath = reportPath(dir), bundledDir = bundled)
+
+        assertEquals(byteArrayOf(7, 8, 9).toList(), Files.readAllBytes(cacheFile(cache, url)).toList())
+        assertTrue(Files.exists(cacheFile(bundled, url)), "the bundled dir is read-only for the build")
+    }
+
     // --- cache key: two URLs, two files (audit claim 5) -------------------
 
     /** `a/b.png` and `a_b.png` — one file under the pre-sha256 key. */
