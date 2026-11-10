@@ -182,6 +182,14 @@ class Workflow(unittest.TestCase):
             self.assertIn("proceed=true", output)
             self.assertIn("mode=auto", output)
 
+    def test_only_manual_recovery_can_run_the_gate_on_the_local_runner(self):
+        self.assertEqual(self.gate["runs-on"],
+                         "${{ github.event_name == 'workflow_dispatch' && inputs.resume && "
+                         "fromJSON('[\"self-hosted\",\"otzaria-db\",\"amd-gpu\"]') || 'ubuntu-latest' }}")
+        self.assertFalse(any("uses" in step for step in self.gate["steps"]))
+        self.assertEqual(self.gate["timeout-minutes"], 5)
+        self.assertIn("set -euo pipefail", run_text(self.gate))
+
     def test_a_manual_run_builds_every_family_or_one_alone(self):
         family = self.doc[True]["workflow_dispatch"]["inputs"]["family"]
         self.assertEqual(family["options"], ["all"] + [name for name, _ in CONFIGURED_FAMILIES + OPT_IN_FAMILIES])

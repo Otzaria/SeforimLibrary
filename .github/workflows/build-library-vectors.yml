@@ -70,7 +70,10 @@ concurrency:
 jobs:
   gate:
     name: Accept only a stored index of a database release
-    runs-on: ubuntu-latest
+    # Recovery already has its verified inputs on the local build machine. Do not
+    # make it wait for a GitHub-hosted slot before it can reach that idle machine.
+    # This step uses shell/gh only; it does not check out or run repository code.
+    runs-on: ${{ github.event_name == 'workflow_dispatch' && inputs.resume && fromJSON('["self-hosted","otzaria-db","amd-gpu"]') || 'ubuntu-latest' }}
     timeout-minutes: 5
     outputs:
       proceed: ${{ steps.classify.outputs.proceed }}
