@@ -13,7 +13,7 @@ _SESSION = None
 
 def initialize(graph, threads):
     global _SESSION
-    _SESSION = reference.session(graph, threads)
+    _SESSION = reference.session(graph, threads, disable_kleidiai=True)
     if _SESSION.get_providers() != ['CPUExecutionProvider']:
         raise RuntimeError('Exact worker must use CPUExecutionProvider only')
 

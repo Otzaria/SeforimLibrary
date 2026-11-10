@@ -30,7 +30,7 @@ def main():
     got=np.fromfile(shard/'vectors.f32',dtype='<f4').reshape(len(texts),384)
     tok=reference.load_tokenizer(str(args.model_dir/'tokenizer.json'),512)
     ids=[e.ids for e in tok.encode_batch(texts)]
-    expected=reference.embed_reference(str(args.model_dir/'model.onnx'),ids,procs=1)
+    expected=reference.embed_reference(str(args.model_dir/'model.onnx'),ids,procs=1,disable_kleidiai=True)
     assert manifest['worker']['mode']=='onnxruntime' and manifest['worker']['ep']=='cpu'
     assert manifest['passage_package']==package and 'parity' not in manifest
     assert (shard/'keys.bin').read_bytes()==b''.join(hashlib.sha256(t.encode()).digest() for t in texts)

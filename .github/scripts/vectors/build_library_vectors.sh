@@ -246,6 +246,10 @@ if [ "$MODE" != dry-run ]; then
   echo "$TARGET" | grep -Eq '^[0-9a-f]{40}$' || die "$TAG resolves to '$TARGET', not a commit"
   echo "publish: ${PREFIXES[*]/%/-$TAG} at $TARGET, prerelease $PRERELEASE"
 fi
+if [[ " ${NAMES[*]} " == *" pardesqa491-windows-onnx "* ]] \
+  && [ -d "$WORK" ] && [ -n "$(find "$WORK" -mindepth 1 -maxdepth 1 -print -quit)" ]; then
+  die "retained compact Pardes work exists at $WORK; reconcile its atomic shards before retrying (refusing to erase it)"
+fi
 rm -rf "$WORK"; mkdir -p "$WORK/dl" "$WORK/index"
 fetch() {  # <asset name>: into $WORK/dl, through gh, or anonymously from the public release URL
   if [ -n "$GH_OK" ]; then
@@ -656,13 +660,18 @@ build_family() {  # <name> <release prefix> <codec, or ""> <alias threshold, or 
       OTZARIA_ONNX_RUNTIME=$ORT "$CLI" embed-shard --plan "$PLAN" --model-file "$PKG/$MODEL_GRAPH" \
         --processes "$CPU_PROCESSES" --threads "$CPU_THREADS" --out "$FW/shards/cpu"
     else
-      EMBEDDED_BY="seforim-gpu-worker 1.1"
+      if [ "${MODEL_DEVICE:-cuda}" = cpu ]; then
+        EMBEDDED_BY="seforim exact ONNX Runtime CPU worker"
+      else
+        EMBEDDED_BY="seforim-gpu-worker 1.1"
+      fi
+      active_embed_window=${MODEL_EMBED_WINDOW:-$EMBED_WINDOW}
       skip=0; n=0
       while [ "$skip" -lt "$TO_EMBED" ]; do
-        "$PY" "$HERE/embed_worker.py" --model-kind "${MODEL_WORKER_KIND:-meivin}" --token-budget "${MODEL_TOKEN_BUDGET:-32768}" --max-batch "${MODEL_MAX_BATCH:-1024}" --plan "$PLAN" --out "$FW/shards/$(printf 's%03d' "$n")" \
-          --skip "$skip" --take "$EMBED_WINDOW" --cache "$STATE/model-cache" \
+        "$PY" "$HERE/embed_worker.py" --device "${MODEL_DEVICE:-cuda}" --cpu-procs "$CPU_PROCESSES" --cpu-threads "$CPU_THREADS" --model-kind "${MODEL_WORKER_KIND:-meivin}" --token-budget "${MODEL_TOKEN_BUDGET:-32768}" --max-batch "${MODEL_MAX_BATCH:-1024}" --plan "$PLAN" --out "$FW/shards/$(printf 's%03d' "$n")" \
+          --skip "$skip" --take "$active_embed_window" --cache "$STATE/model-cache" \
           --repo "$MODEL_REPO" --revision "$MODEL_REVISION" --graph "$MODEL_GRAPH" --remote-graph "${MODEL_REMOTE_GRAPH:-}" --token-env OTZARIA_HF_TOKEN ${CACHE_POLICY[@]+"${CACHE_POLICY[@]}"}
-        skip=$((skip + EMBED_WINDOW)); n=$((n + 1))
+        skip=$((skip + active_embed_window)); n=$((n + 1))
       done
     fi
     endgroup

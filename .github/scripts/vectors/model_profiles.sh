@@ -8,7 +8,7 @@ select_model_profile() {
   local family=$1 entry profile="" i
   # Reset every model pin before switching families, including a switch back to a default.
   for i in "${!MODEL_PIN_KEYS[@]}"; do printf -v "${MODEL_PIN_KEYS[$i]}" '%s' "${MODEL_PIN_DEFAULTS[$i]}"; done
-  MODEL_REMOTE_GRAPH=""; QUERY_REMOTE_GRAPH=""; MODEL_WORKER_KIND=meivin; MODEL_TOKEN_BUDGET=32768; MODEL_MAX_BATCH=1024
+  MODEL_REMOTE_GRAPH=""; QUERY_REMOTE_GRAPH=""; MODEL_WORKER_KIND=meivin; MODEL_TOKEN_BUDGET=32768; MODEL_MAX_BATCH=1024; MODEL_DEVICE=cuda; MODEL_EMBED_WINDOW=""
   MODEL_REQUIRE_CACHE=false
   MODEL_REQUIRE_PRERELEASE=false
   for entry in ${FAMILY_MODEL_PROFILES:-}; do
