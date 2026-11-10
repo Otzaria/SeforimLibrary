@@ -1,0 +1,76 @@
+name: Measure Unicode directional isolates in released library
+
+on:
+  push:
+    branches:
+      - qa/measure-bidi-isolates-v37-20261110
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  census:
+    runs-on: ubuntu-latest
+    timeout-minutes: 100
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test census script independently on synthetic SQLite DB
+        run: python3 tool/bidi/scan_unicode_isolates.py --self-test
+      - name: Disk space and system zstd support
+        run: |
+          df -h .
+          python3 - <<'PY'
+          import ctypes.util
+          print("system libzstd:", ctypes.util.find_library("zstd"))
+          PY
+          if ! command -v zstd; then
+            sudo apt-get update -qq
+            sudo apt-get install -y zstd
+          fi
+      - name: Fetch verified SeforimLibrary v37 full SQLite archive
+        run: |
+          curl --fail --location --retry 5 --retry-all-errors --retry-delay 10 \
+            --silent --show-error \
+            --output "$RUNNER_TEMP/seforim.db.zst" \
+            "https://github.com/Otzaria/SeforimLibrary/releases/download/v37-20261105163520/seforim-schema7.db.zst"
+          echo "373ef184244565757569371ad0df99c22c911902c3676c16f5280aa537f244f7  $RUNNER_TEMP/seforim.db.zst" \
+            | sha256sum --check
+          ls -lh "$RUNNER_TEMP/seforim.db.zst"
+          df -h "$RUNNER_TEMP"
+      - name: Decompress released SQLite snapshot
+        run: |
+          zstd --quiet --decompress --rm \
+            --output "$RUNNER_TEMP/seforim.db" "$RUNNER_TEMP/seforim.db.zst"
+          ls -lh "$RUNNER_TEMP/seforim.db"
+          df -h "$RUNNER_TEMP"
+      - name: Count every isolate in main text, editions and metadata
+        run: |
+          python3 -u tool/bidi/scan_unicode_isolates.py \
+            "$RUNNER_TEMP/seforim.db" --out "$RUNNER_TEMP/bidi-isolate-counts.json"
+          python3 - "$RUNNER_TEMP/bidi-isolate-counts.json" <<'PY'
+          import json, os, sys
+          j = json.load(open(sys.argv[1]))
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as out:
+              print('## Unicode isolate census: release v37 (2026-11-05)', file=out)
+              print(f"Books: **{j['books_in_db']:,}**, books containing isolates in "
+                    f"stored main text or editions: **{j['books_with_any_isolate_in_text']:,}**", file=out)
+              print('', file=out)
+              print('| Population | Rows read | Rows with isolates | LRI | RLI | FSI | PDI |', file=out)
+              print('|---|---:|---:|---:|---:|---:|---:|', file=out)
+              for key in ('main_text','edition_overlays','metadata'):
+                  x = j.get(key) or {}
+                  ct = x.get('character_occurrences') or {}
+                  print(f"| {key} | {x.get('rows_examined',0):,} | "
+                        f"{x.get('rows_with_any_isolate',0):,} | "
+                        + ' | '.join(f"{ct.get(k,0):,}" for k in ('LRI','RLI','FSI','PDI'))
+                        + ' |', file=out)
+              print(f"\nDecoded zstd frames: {j['zstd_frames_decoded']:,}. "
+                    f"Time: {j['duration_seconds']} seconds.", file=out)
+              print('\nScope excludes local imported files, PDFs outside SQLite and user notes.', file=out)
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bidi-isolates-v37-census
+          path: ${{ runner.temp }}/bidi-isolate-counts.json
+          retention-days: 30
