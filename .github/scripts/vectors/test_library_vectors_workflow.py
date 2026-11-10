@@ -653,6 +653,10 @@ cp "$in" "$out"
 
 # df -Pk answering DF_FREE_KB's values in turn (DF_COUNT counts the calls)
 STUB_DF = r"""#!/usr/bin/env bash
+if [ -n "${VECTORS_HOST_FREE_PATH:-}" ] && [ "${!#}" = "$VECTORS_HOST_FREE_PATH" ]; then
+  echo "Filesystem 1024-blocks Used Available Capacity Mounted on"
+  echo "host 999999999 1 ${HOST_FREE_KB:-999999999} 1% $VECTORS_HOST_FREE_PATH"; exit 0
+fi
 n=$(cat "$DF_COUNT" 2>/dev/null || echo 0); n=$((n + 1)); echo "$n" > "$DF_COUNT"
 set -- $DF_FREE_KB; shift $((n - 1)) 2>/dev/null || set --
 echo "Filesystem 1024-blocks Used Available Capacity Mounted on"
@@ -765,6 +769,30 @@ class Driver(unittest.TestCase):
 
     def model(self, name):
         return self.state / "bin" / "families" / name / "model.json"
+
+    def install_host_df_stub(self):
+        df = self.root / "net/df"
+        df.write_text(STUB_DF); df.chmod(0o755)
+        return {"DF_COUNT": str(self.root / "df-count"), "DF_FREE_KB": " ".join(["999999999"] * 20)}
+
+    def test_low_windows_host_space_preserves_retained_work_before_any_download(self):
+        df_env = self.install_host_df_stub()
+        work = self.state / "work" / TAG
+        kept = work / "pardesqa491-windows-onnx/shards/s000/vectors.f32"
+        kept.parent.mkdir(parents=True); kept.write_bytes(b"retained completed work")
+        p, calls = self.run_driver(mode="base", args=("--family", "pardesqa491-windows-onnx", "--resume"),
+                                   VECTORS_HOST_FREE_PATH=str(self.root), VECTORS_MIN_FREE_GB=1, HOST_FREE_KB=0, **df_env)
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn("Windows host", p.stdout)
+        self.assertEqual(kept.read_bytes(), b"retained completed work")
+        self.assertFalse(any("release download" in c or "embed_worker.py" in c or "resume_compact.py" in c for c in calls))
+
+    def test_compact_build_accepts_sufficient_physical_host_space(self):
+        df_env = self.install_host_df_stub()
+        p, calls = self.run_driver(TO_EMBED=65537, args=("--family", "pardesqa491-windows-onnx"),
+                                   VECTORS_HOST_FREE_PATH=str(self.root), VECTORS_MIN_FREE_GB=1, HOST_FREE_KB=999999999, **df_env)
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertEqual(len([c for c in calls if "embed_worker.py" in c]), 2)
 
     def test_compact_pardes_uses_exact_cpu_and_small_atomic_windows(self):
         p, calls = self.run_driver(TO_EMBED=65537, args=("--family", "pardesqa491-windows-onnx"))

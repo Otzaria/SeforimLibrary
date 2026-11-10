@@ -146,6 +146,16 @@ need_free_space() {
   local free_kb
   free_kb=$(df -Pk "$STATE" | awk 'NR==2 {print $4}')
   [ "$free_kb" -ge $((MIN_FREE_GB * 1024 * 1024)) ] || die "only $((free_kb / 1024 / 1024)) GiB free on $STATE, fewer than $MIN_FREE_GB"
+  # ext4's virtual capacity does not include the Windows volume that hosts its
+  # growing VHDX. Check that physical volume too before allocating more output.
+  local host_path=${VECTORS_HOST_FREE_PATH:-}
+  if [ -z "$host_path" ] && grep -qi microsoft /proc/sys/kernel/osrelease 2>/dev/null; then host_path=/mnt/c; fi
+  if [ -n "$host_path" ]; then
+    [ -d "$host_path" ] || die "Windows host storage path is unavailable: $host_path"
+    free_kb=$(df -Pk "$host_path" | awk 'NR==2 {print $4}')
+    [ "$free_kb" -ge $((MIN_FREE_GB * 1024 * 1024)) ] \
+      || die "only $((free_kb / 1024 / 1024)) GiB free on Windows host $host_path, fewer than $MIN_FREE_GB; retained work is preserved"
+  fi
 }
 onnx_runtime() {  # the venv's ONNX Runtime library, which embed-shard and the validator load
   local lib
@@ -695,6 +705,7 @@ build_family() {  # <name> <release prefix> <codec, or ""> <alias threshold, or 
       active_embed_window=${MODEL_EMBED_WINDOW:-$EMBED_WINDOW}
       skip=0; n=0
       while [ "$skip" -lt "$TO_EMBED" ]; do
+        if [ "$name" = pardesqa491-windows-onnx ]; then need_free_space; fi
         shard="$FW/shards/$(printf 's%03d' "$n")"
         if [ -n "$RESUME" ] && [ -f "$shard/shard-manifest.json" ]; then
           echo "resume: keeping verified shard $(basename "$shard") ($skip onward), no inference"
@@ -708,6 +719,7 @@ build_family() {  # <name> <release prefix> <codec, or ""> <alias threshold, or 
     fi
     endgroup
     group "4 warehouse ($name): add the shards, held to the plan"
+    if [ "$name" = pardesqa491-windows-onnx ]; then need_free_space; fi
     CREATE=()
     [ -z "$FRESH" ] || CREATE=(--create --model "$FAMILY" --passage-quantization "$PASSAGE_QUANTIZATION")
     "$CLI" warehouse-add --warehouse "$WAREHOUSE" ${CREATE[@]+"${CREATE[@]}"} --plan "$PLAN" --shards "$FW/shards"
