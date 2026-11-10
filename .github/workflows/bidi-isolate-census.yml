@@ -41,7 +41,7 @@ jobs:
       - name: Decompress released SQLite snapshot
         run: |
           zstd --quiet --decompress --rm \
-            --output "$RUNNER_TEMP/seforim.db" "$RUNNER_TEMP/seforim.db.zst"
+            -o "$RUNNER_TEMP/seforim.db" "$RUNNER_TEMP/seforim.db.zst"
           ls -lh "$RUNNER_TEMP/seforim.db"
           df -h "$RUNNER_TEMP"
       - name: Count every isolate in main text, editions and metadata
