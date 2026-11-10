@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
-"""seforim-gpu-worker: embed a window of a vector plan into a v2 shard, on a GPU.
+"""Embed a window of a vector plan into an atomic v2 shard, using a qualified backend.
 
     embed_worker.py --plan <dir> --out <dir> [--skip N] [--take N]
                     [--model-dir <package dir> | --cache <dir> [--repo R] [--revision REV]]
 
 The plan is the sidecar's external embedding interface v2 (embed.jsonl + embed-manifest.json),
-the output a v2 shard (vectors.f32, keys.bin, shard-manifest.json; see vector_shard.py). The
-model is the plan's passage package, which must be the family's fp32 package: this worker is
-a re-implementation of the fp32 graph (torch_bert.py, mode "mixed"), so every shard carries a
+the output a v2 shard (vectors.f32, keys.bin, shard-manifest.json; see vector_shard.py).
+Compact Pardes QA491 uses the exact INT8 ONNX graph on CPU, one text per call,
+with persistent sessions. It reports CPU/onnxruntime and requires no approximation certificate.
+Meivin uses the family's fp32 package and a GPU re-implementation of the fp32 graph
+(torch_bert.py, mode "mixed"), so every Meivin GPU shard carries a
 parity certificate against ONNX Runtime on a CPU — the 41 golden texts plus plan texts sampled
 across the whole plan, at least 1,000 in all, lowest cosine at least 0.999. A plan of fewer than
 959 texts cannot reach 1,000 and is refused at once: it is embedded on the CPU with the sidecar's
@@ -71,13 +73,59 @@ def parse_args(argv=None):
     ap.add_argument("--parity-samples", type=int, default=1000,
                     help=f"texts in the parity certificate, golden texts included (at least {vector_shard.PARITY_MIN_SAMPLES})")
     ap.add_argument("--parity-procs", type=int, default=0, help="ONNX Runtime reference processes (default: CPUs, at most 16)")
-    ap.add_argument("--model-kind", default="meivin", choices=("meivin", "pardes107"))
+    ap.add_argument("--model-kind", default="meivin", choices=("meivin", "pardesqa491"))
+    ap.add_argument("--cpu-procs", type=int, default=8, help="persistent exact ONNX CPU processes for compact Pardes")
+    ap.add_argument("--cpu-threads", type=int, default=2, help="intra-op threads per exact ONNX CPU process")
     a = ap.parse_args(argv)
     if a.skip < 0 or (a.take is not None and a.take < 0):
         ap.error("--skip and --take are counts")
     if a.parity_samples < vector_shard.PARITY_MIN_SAMPLES:
         ap.error(f"--parity-samples must be at least {vector_shard.PARITY_MIN_SAMPLES}")
+    if a.cpu_procs < 1 or a.cpu_threads < 1:
+        ap.error("--cpu-procs and --cpu-threads must be positive")
     return a
+
+
+def compact_onnx_cpu(a, plan, take, started):
+    """The shipped INT8 graph itself; no GPU/native approximation or certificate claim.
+
+    CPUExecutionProvider's fused integer kernels are the production reference.
+    Dequantizing weights or emulating the decomposed graph changes its function.
+    Each run remains [1,tokens], preserving per-text activation quantization.
+    """
+    if a.device != "cpu":
+        raise vector_shard.ContractError("Compact Pardes uses the qualified exact ONNX CPU path; GPU emulation is not qualified")
+    if plan["model"]["family_id"] != "otzaria/Pardes-QA491-int8-384" or plan["passage_package"]["quantization"] != "int8":
+        raise vector_shard.ContractError("Compact Pardes requires its isolated INT8 family and package")
+    import hashlib
+    import reference
+    from onnx_cpu_worker import ExactOnnxPool
+    root = resolve_package(a, plan)
+    graph = root / a.graph
+    with graph.open("rb") as stream:
+        if hashlib.file_digest(stream, "sha256").hexdigest() != "c0a9ca9d764ae40ebba313150305702fd82832312ae9e11a7eb449e5a388f090":
+            raise vector_shard.ContractError("Wrong compact Pardes graph")
+    model_package.check_family(root, a.graph, plan["model"], plan["passage_package"], 384, POOLING, 512)
+    tok = reference.load_tokenizer(str(root / model_package.TOKENIZER_FILE), 512)
+    worker = {"name": "seforim-onnx-cpu-worker", "version": WORKER_VERSION,
+              "device": "cpu", "ep": "cpu", "mode": "onnxruntime", "model_kind": a.model_kind,
+              "runtime": reference.version(), "processes": a.cpu_procs, "threads_per_process": a.cpu_threads,
+              "one_text_per_call": True, "graph_sha256": "c0a9ca9d764ae40ebba313150305702fd82832312ae9e11a7eb449e5a388f090"}
+    log(f"exact ONNX CPU: {a.cpu_procs} processes x {a.cpu_threads} threads; INT8 graph,384D, cap512; no GPU")
+    loaded = time.time()
+    with ExactOnnxPool(str(graph), a.cpu_procs, a.cpu_threads) as pool:
+        def embed(texts):
+            ids = [entry.ids for entry in tok.encode_batch(texts, add_special_tokens=True)]
+            return pool.embed(ids)
+        manifest = vector_shard.write_shard(a.plan, a.out, a.skip, take, embed, worker,
+                                            chunk=a.chunk, log=log)
+    finished = time.time()
+    print(json.dumps({"out": str(a.out), "skip": a.skip, "take": take, "records": manifest["records"],
+                      "vectors_sha256": manifest["vectors_sha256"], "keys_sha256": manifest["keys_sha256"],
+                      "parity": manifest.get("parity"), "worker": worker, "load_s": round(loaded-started,1),
+                      "embed_s": round(finished-loaded,1),
+                      "vec_per_s": round(manifest["records"] / max(finished-loaded,1e-9),1)}), flush=True)
+    return 0
 
 
 def resolve_package(a, plan) -> Path:
@@ -94,6 +142,10 @@ def main(argv=None) -> int:
     t0 = time.time()
     plan = vector_shard.read_embed_manifest(a.plan)
     package = plan["passage_package"]
+    if a.model_kind == "pardesqa491":
+        take = plan["records"] - a.skip if a.take is None else a.take
+        vector_shard.ensure_output_dir(a.out)
+        return compact_onnx_cpu(a, plan, max(0,take), t0)
     if package["quantization"] != "fp32":
         raise vector_shard.ContractError(f"the plan's passage package is {package['quantization']}; this worker "
                                          f"re-implements the fp32 graph only")
@@ -118,16 +170,9 @@ def main(argv=None) -> int:
     import reference
     import torch_bert
     torch.backends.cuda.matmul.allow_tf32 = False
-    cap = MAX_TOKENS if a.model_kind == "meivin" else 512
+    cap = MAX_TOKENS
     tok = reference.load_tokenizer(str(root / model_package.TOKENIZER_FILE), cap)
-    if a.model_kind == "pardes107":
-        import torch_pardes
-        if plan["model"]["family_id"] != "otzaria/Pardes-QA491-TorahPairs107-fp32-384":
-            raise vector_shard.ContractError("Pardes worker requires its isolated family")
-        a.mode = "fp32"
-        model = torch_pardes.PardesTorch(torch_pardes.load_weights(graph), mode=a.mode, device=a.device)
-    else:
-        model = torch_bert.MeivinTorch(torch_bert.load_weights(graph), mode=a.mode, device=a.device)
+    model = torch_bert.MeivinTorch(torch_bert.load_weights(graph), mode=a.mode, device=a.device)
     model_package.check_family(root, a.graph, plan["model"], package, model.dim, POOLING, cap)
     log(f"package {package['checksum'][:12]} ({package['quantization']}) holds the family's tokenizer, "
         f"width {model.dim}, pooling {POOLING}, cap {cap}")
