@@ -68,6 +68,9 @@ class Decoder:
             self.ctx = None
 
     def decode(self, value) -> bytes:
+        # An absent edition override is stored as SQL NULL; it is not text.
+        if value is None:
+            return b""
         if isinstance(value, str):
             return value.encode("utf-8")
         data = bytes(value)
@@ -267,6 +270,8 @@ def self_test():
             CREATE TABLE source(id INTEGER PRIMARY KEY, name TEXT);
             CREATE TABLE line(id INTEGER PRIMARY KEY, bookId INTEGER, heRef TEXT);
             CREATE TABLE line_content(id INTEGER PRIMARY KEY, content BLOB);
+            CREATE TABLE version_line(lineId INTEGER, content BLOB);
+            INSERT INTO version_line VALUES (10, NULL);
             INSERT INTO source VALUES (1, 'sample');
             INSERT INTO book VALUES (1,'שלום',1);
             INSERT INTO line VALUES (10,1,'ref');
@@ -280,6 +285,8 @@ def self_test():
         r = scan_db(path, progress=0)
         assert r["main_text"]["character_occurrences"] == {"LRI": 1, "FSI": 1, "PDI": 2}
         assert r["main_text"]["rows_examined"] == 2
+        assert r["edition_overlays"]["rows_examined"] == 1
+        assert r["edition_overlays"]["character_occurrences"] == {}
         assert r["books_in_db"] == r["books_with_any_isolate_in_text"] == 1
 
 
