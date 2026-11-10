@@ -50,6 +50,7 @@ on:
           - meivin-round2-windows-onnx
           - meivin-qa491-onnx
           - meivin-qa491-windows-onnx
+          - pardesqa491-windows-onnx
 
 permissions:
   contents: write
@@ -148,7 +149,7 @@ jobs:
     # warehouse; a later release embeds only the texts the warehouse lacks, on the CPU when
     # they are few (CPU_EMBED_MAX in pins.env). The windows family's first build embeds ~3.2M
     # texts (about an hour more); if it ever outlasts this bound, a dry run of it alone fills the warehouse.
-    timeout-minutes: 360
+    timeout-minutes: ${{ inputs.family == 'pardesqa491-windows-onnx' && 4320 || 360 }}
     env:
       GH_TOKEN: ${{ secrets.PIPELINE_TOKEN }}
       OTZARIA_HF_TOKEN: ${{ secrets.OTZARIA_HF_TOKEN }}
@@ -170,4 +171,10 @@ jobs:
           bash .github/scripts/vectors/bootstrap_runner.sh
 
       - name: Build the vectors
-        run: bash .github/scripts/vectors/build_library_vectors.sh --tag "$RELEASE_TAG" --mode "$MODE" --family "${FAMILY:-all}" --repo "$GITHUB_REPOSITORY"
+        run: |
+          WORK_ARGS=()
+          if [ "${FAMILY:-all}" = pardesqa491-windows-onnx ]; then
+            # A new model gets its own scratch tree; preserve the cancelled P107 shards.
+            WORK_ARGS=(--work "$HOME/otzaria-vectors/work/$RELEASE_TAG-pardesqa491-int8-v1")
+          fi
+          bash .github/scripts/vectors/build_library_vectors.sh --tag "$RELEASE_TAG" --mode "$MODE" --family "${FAMILY:-all}" --repo "$GITHUB_REPOSITORY" "${WORK_ARGS[@]}"

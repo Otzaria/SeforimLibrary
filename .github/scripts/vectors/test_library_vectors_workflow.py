@@ -86,6 +86,7 @@ G6_FLOORS = dict((e.split("=")[0], tuple(e.split("=")[1].split(","))) for e in P
 ROTATION_KEY = f"{FAMILIES[1][0]}.fp32-4a4a2ae8"   # the windows family's rotation, fitted on the stub warehouse
 CHUNKING_IDENTITY = {"meivin-round2-onnx": 2685558872390372738, "meivin-round2-windows-onnx": 320260894818558297}
 CHUNKING_IDENTITY.update({"meivin-qa491-onnx": 2685558872390372738, "meivin-qa491-windows-onnx": 320260894818558297})
+CHUNKING_IDENTITY["pardesqa491-windows-onnx"] = 13334152532150206612
 
 
 def run_text(job):
@@ -205,7 +206,11 @@ class Workflow(unittest.TestCase):
 
     def test_every_job_is_bounded(self):
         for name, job in self.doc["jobs"].items():
-            self.assertIsInstance(job.get("timeout-minutes"), int, name)
+            if name == "vectors":
+                self.assertEqual(job.get("timeout-minutes"),
+                                 "${{ inputs.family == 'pardesqa491-windows-onnx' && 4320 || 360 }}")
+            else:
+                self.assertIsInstance(job.get("timeout-minutes"), int, name)
 
     def test_the_workflow_is_thin_and_the_driver_does_the_work(self):
         runs = [s for s in self.job["steps"] if "run" in s]
@@ -421,7 +426,8 @@ mkdir -p "$out"
 : > "$out/embed.jsonl"
 [ -z "$model" ] || cp "$model" "$out/model.json"   # what the stub assemble derives the identity digest from
 package=$(jq -r '.passage_package_checksum // "4a4a2ae88a86f15ffe6069bfcefc3abd13c207cec5d7aaef52c0c59d752ade46"' "$model")
-jq -n --arg checksum "$package" --argjson n "${TO_EMBED:-0}" '{format:"otzaria-embed-plan",version:2,records:$n,plan_sha256:("a"*64),passage_package:{checksum:$checksum,quantization:"fp32"}}' > "$out/embed-manifest.json"
+quantization=$(jq -r '.passage_quantization // "fp32"' "$model")
+jq -n --arg checksum "$package" --arg quantization "$quantization" --argjson n "${TO_EMBED:-0}" '{format:"otzaria-embed-plan",version:2,records:$n,plan_sha256:("a"*64),passage_package:{checksum:$checksum,quantization:$quantization}}' > "$out/embed-manifest.json"
 family=""; [ -z "$model" ] || family=$(sha256sum < "$model" | cut -c1-16)
 jq -n --arg tag "${PLAN_TAG:-v30-20260930165019}" --arg family "$family" --arg text "${PLAN_IDENTITY:-stub}" --argjson prev "$prev_version" \
   '{format:"otzaria-vector-plan",version:1,identity:{family:$family,text:$text},library_release_tag:$tag,
@@ -689,8 +695,11 @@ class Driver(unittest.TestCase):
             family = self.state / "bin" / "families" / name
             family.mkdir(parents=True)
             model = {"family_id": "stub", "chunking_identity": CHUNKING_IDENTITY[name]}
-            if "qa491" in name:
+            if name.startswith("meivin-qa491"):
                 model["passage_package_checksum"] = "5f80c47d3310a21fcc0c2f541fbb5732ba254555ef45afc2712cab63c8a33059"
+            if name == "pardesqa491-windows-onnx":
+                model["passage_package_checksum"] = "edb0b74909ef0ae63ddaa1f47e909c18dc1584908a926471636f759e2de43365"
+                model["passage_quantization"] = "int8"
             (family / "model.json").write_text(json.dumps(model))
             (family / "chunking.json").write_text(json.dumps({"chunking_version": 2 if "windows" in name else 1}))
         # a runner that has built before: its warehouse (the driver's path for the fp32 package)
@@ -747,6 +756,31 @@ class Driver(unittest.TestCase):
 
     def model(self, name):
         return self.state / "bin" / "families" / name / "model.json"
+
+    def test_compact_pardes_uses_exact_cpu_and_small_atomic_windows(self):
+        p, calls = self.run_driver(TO_EMBED=65537, args=("--family", "pardesqa491-windows-onnx"))
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        workers = [c for c in calls if "embed_worker.py" in c]
+        self.assertEqual(len(workers), 2)
+        for call in workers:
+            for arg in ("--device cpu", "--model-kind pardesqa491", "--cpu-procs 8",
+                        "--cpu-threads 2", "--chunk 4096", "--take 65536", "--graph model.onnx"):
+                self.assertIn(arg, call)
+        self.assertIn("--skip 0 ", workers[0])
+        self.assertIn("--skip 65536 ", workers[1])
+        self.assertTrue((self.state / "warehouse/int8-edb0b749/warehouse.json").exists())
+        self.assertTrue((self.warehouse / "warehouse.json").exists())
+        self.assertFalse(any("pardes107" in c for c in calls))
+
+    def test_compact_retry_preserves_unimported_atomic_shards(self):
+        shard = self.state / "work" / TAG / "pardesqa491-windows-onnx/shards/s000/vectors.f32"
+        shard.parent.mkdir(parents=True)
+        shard.write_bytes(b"completed expensive shard")
+        p, calls = self.run_driver(TO_EMBED=65537, args=("--family", "pardesqa491-windows-onnx"))
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn("refusing to erase it", p.stdout)
+        self.assertEqual(shard.read_bytes(), b"completed expensive shard")
+        self.assertFalse(any("release download" in c for c in calls))
 
     def test_qa491_uses_a_fresh_package_warehouse_and_cache_only(self):
         shutil.rmtree(self.state / "warehouse/fp32-5f80c47d")
@@ -2145,7 +2179,7 @@ if [ "$1" = clone ]; then           # git clone -q --filter=blob:none <url> <des
   url=${@: -2:1}; dest=${@: -1}
   mkdir -p "$dest"
   case "$url" in *otzaria-semantic-search*)
-    for family in meivin-round2-onnx meivin-round2-windows-onnx meivin-qa491-onnx meivin-qa491-windows-onnx; do
+    for family in meivin-round2-onnx meivin-round2-windows-onnx meivin-qa491-onnx meivin-qa491-windows-onnx pardesqa491-windows-onnx; do
       mkdir -p "$dest/config/models/$family"
       echo "{\"family_id\":\"$family\"}" > "$dest/config/models/$family/model.json"
       echo '{"chunking_version":1}' > "$dest/config/models/$family/chunking.json"

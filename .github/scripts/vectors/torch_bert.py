@@ -180,7 +180,7 @@ def embed_id_lists(model: MeivinTorch, id_lists, token_budget=32768, max_batch=1
     out = np.empty((len(id_lists), model.dim), dtype=np.float32)
     for b in make_batches(lengths, token_budget, max_batch):
         Lp = -(-int(lengths[b].max()) // PAD_L) * PAD_L
-        arr = np.zeros((len(b), Lp), dtype=np.int64)
+        arr = np.full((len(b), Lp), getattr(model, "pad_id", 0), dtype=np.int64)
         for j, i in enumerate(b):
             arr[j, : lengths[i]] = id_lists[i]
         ids = torch.from_numpy(arr).to(model.dev)

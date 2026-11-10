@@ -23,7 +23,7 @@ def load_tokenizer(path: str, max_tokens: int):
     return tok
 
 
-def session(graph: str, threads: int = 1):
+def session(graph: str, threads: int = 1, disable_kleidiai: bool = False):
     import onnxruntime as ort
     so = ort.SessionOptions()
     so.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
@@ -31,6 +31,10 @@ def session(graph: str, threads: int = 1):
     so.inter_op_num_threads = 1
     so.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
     so.add_session_config_entry("session.intra_op.allow_spinning", "0")
+    if disable_kleidiai:
+        # Compact Pardes uses global per-text dynamic quantization on every CPU.
+        # ARM KleidiAI's fused per-row activation ranges change this INT8 graph.
+        so.add_session_config_entry("mlas.disable_kleidiai", "1")
     return ort.InferenceSession(graph, sess_options=so, providers=["CPUExecutionProvider"])
 
 
@@ -42,22 +46,23 @@ def run_ids(sess, ids: Sequence[int]) -> np.ndarray:
 _STATE = {}
 
 
-def _init(graph):
-    _STATE["sess"] = session(graph, 1)
+def _init(graph, disable_kleidiai=False):
+    _STATE["sess"] = session(graph, 1, disable_kleidiai)
 
 
 def _one(ids):
     return run_ids(_STATE["sess"], ids)
 
 
-def embed_reference(graph: str, id_lists: List[List[int]], procs: int = 0) -> np.ndarray:
+def embed_reference(graph: str, id_lists: List[List[int]], procs: int = 0,
+                    disable_kleidiai: bool = False) -> np.ndarray:
     """ONNX Runtime CPU vectors for already-tokenized texts, `procs` single-thread sessions."""
     procs = procs or min(16, os.cpu_count() or 1)
     if procs <= 1 or len(id_lists) < 64:
-        s = session(graph, 1)
+        s = session(graph, 1, disable_kleidiai)
         return np.stack([run_ids(s, ids) for ids in id_lists]).astype(np.float32)
     ctx = mp.get_context("fork")
-    with ctx.Pool(procs, initializer=_init, initargs=(graph,)) as pool:
+    with ctx.Pool(procs, initializer=_init, initargs=(graph,disable_kleidiai)) as pool:
         return np.stack(pool.map(_one, id_lists, chunksize=8)).astype(np.float32)
 
 
