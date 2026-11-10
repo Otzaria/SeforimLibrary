@@ -465,6 +465,72 @@ class SefariaLinksImporterTest {
         assertEquals(ConnectionType.COMMENTARY, result)
     }
 
+    private val tanakhBase = BookMeta(
+        isBaseBook = true, categoryLevel = 0, priorityRank = 0, topCategoryEn = "Tanakh",
+    )
+    private val tanakhCommentary = BookMeta(
+        isBaseBook = false, categoryLevel = 2, priorityRank = null,
+        dependence = Dependence.COMMENTARY, baseTextBookIds = setOf(10L),
+    )
+
+    private fun blankTanakhLink(baseRef: String, commentaryRef: String) = inferBlankConnectionType(
+        srcBookId = 10L, tgtBookId = 20L,
+        srcMeta = tanakhBase, tgtMeta = tanakhCommentary,
+        srcRef = baseRef, tgtRef = commentaryRef,
+    )
+
+    // Real-world bug (Otzaria#4752): Rashi on Genesis 26:29 quotes "לך מעמנו" from 26:16;
+    // the blank-typed citation made it surface under verse 16.
+    @Test
+    fun blankTanakhCitationAcrossVersesIsDemotedToReference() {
+        assertEquals(
+            ConnectionType.REFERENCE,
+            blankTanakhLink("Genesis 26:16", "Rashi on Genesis 26:29:1"),
+        )
+    }
+
+    @Test
+    fun blankTanakhSameVerseCommentaryIsKept() {
+        assertEquals(
+            ConnectionType.COMMENTARY,
+            blankTanakhLink("Genesis 26:29", "Rashi on Genesis 26:29:1"),
+        )
+    }
+
+    @Test
+    fun blankTanakhVerseRangeIsNotJudged() {
+        assertEquals(
+            ConnectionType.COMMENTARY,
+            blankTanakhLink("Genesis 26:16-18", "Rashi on Genesis 26:17:1"),
+        )
+        assertEquals(
+            ConnectionType.COMMENTARY,
+            blankTanakhLink("Genesis 26:17", "Rashi on Genesis 26:16-18:1"),
+        )
+    }
+
+    @Test
+    fun blankWholeChapterCitationIsNotJudgedByVerse() {
+        assertEquals(
+            ConnectionType.COMMENTARY,
+            blankTanakhLink("Genesis 26", "Rashi on Genesis 26:29:1"),
+        )
+    }
+
+    @Test
+    fun blankVerseGateAppliesOnlyToTanakhBases() {
+        val saMeta = BookMeta(isBaseBook = true, categoryLevel = 0, priorityRank = 0, topCategoryEn = "Halakhah")
+        assertEquals(
+            ConnectionType.COMMENTARY,
+            inferBlankConnectionType(
+                srcBookId = 10L, tgtBookId = 20L,
+                srcMeta = saMeta, tgtMeta = tanakhCommentary,
+                srcRef = "Shulchan Arukh, Orach Chayim 323:6",
+                tgtRef = "Magen Avraham 323:8",
+            ),
+        )
+    }
+
     // Daf-style refs compare only when the pair proved daf-aligned in the typed-row
     // pre-scan; without that proof the gate never fires (protects Rif-paginated books).
     @Test

@@ -1275,6 +1275,8 @@ internal fun inferConnectionTypeFromSchema(
  * dependant segment's top-level structural address (siman / perek) matches the base
  * segment it points at; otherwise the link is a [ConnectionType.REFERENCE].
  *
+ * For a Tanakh base the verse must match too (`Rashi on Genesis 26:29` ↛ `Genesis 26:16`).
+ *
  * Daf-style tokens (`4b` vs `11a`) are compared only when [dafAlignedPairs] contains the
  * (dependant, base) book pair — i.e. the pair's explicitly-typed commentary rows proved
  * same-daf addressing. Books with their own pagination (Rif, Baal HaMaor, Milchamot —
@@ -1308,7 +1310,13 @@ internal fun inferBlankConnectionType(
     val dependantNum = dependantTok.toIntOrNull()
     val baseNum = baseTok.toIntOrNull()
     if (dependantNum != null && baseNum != null) {
-        return if (dependantNum != baseNum) ConnectionType.REFERENCE else inferred
+        if (dependantNum != baseNum) return ConnectionType.REFERENCE
+        val baseMeta = if (targetDependsOnSource) srcMeta else tgtMeta
+        return if (baseMeta?.topCategoryEn == "Tanakh" && differentVerse(dependantRef, baseRef)) {
+            ConnectionType.REFERENCE
+        } else {
+            inferred
+        }
     }
 
     // Daf-vs-daf: comparable only for pairs whose typed rows proved daf alignment.
@@ -1329,6 +1337,19 @@ internal fun topLevelAddressToken(ref: String): String =
     ref.trim()
         .substringAfterLast(' ') // address portion, e.g. "302:6" / "2a:5"
         .substringBefore(':') // top-level component, e.g. "302" / "2a"
+
+/**
+ * True when both refs name different single verses of one chapter. Tanakh commentary is
+ * addressed by verse, so a blank-typed link across verses is a citation. Ranges are not judged.
+ */
+internal fun differentVerse(dependantRef: String, baseRef: String): Boolean {
+    val dependantVerse = secondLevelVerse(dependantRef) ?: return false
+    val baseVerse = secondLevelVerse(baseRef) ?: return false
+    return dependantVerse != baseVerse
+}
+
+private fun secondLevelVerse(ref: String): Int? =
+    ref.trim().substringAfterLast(' ').split(':').getOrNull(1)?.toIntOrNull()
 
 /** Numeric form of [topLevelAddressToken]; null for whole-book / daf-style refs. */
 internal fun topLevelStructuralIndex(ref: String): Int? =
