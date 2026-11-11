@@ -6,6 +6,15 @@ import io.github.kdroidfilter.seforimlibrary.core.models.ConnectionType
 import io.github.kdroidfilter.seforimlibrary.core.models.LinkAnchor
 import io.github.kdroidfilter.seforimlibrary.dao.repository.SeforimRepository
 
+// Expand only with corpus evidence for the printed-marker convention.
+private val PRINTED_MARKER_SUPPORTED_PAIRS = mapOf(
+    "Be'er Mayim Chaim" to "Chafetz Chaim",
+    "Brit Moshe" to "Sefer Mitzvot Gadol",
+)
+
+internal fun printedMarkerEligibleTitles(): Set<String> =
+    PRINTED_MARKER_SUPPORTED_PAIRS.keys + PRINTED_MARKER_SUPPORTED_PAIRS.values
+
 /**
  * A printed commentary marker "(X)" in a base line, in visible-char offsets.
  * [value] is the gematria of X; the range covers the parentheses.
@@ -121,11 +130,7 @@ internal class SefariaPrintedMarkerAnchors(
         lineKeyToId: Map<Pair<String, Int>, Long>,
     ) {
         val booksById = books.associateBy { it.bookId }
-        // Expand this list only with corpus evidence for the printed-marker convention.
-        val supportedPairs = mapOf(
-            "Be'er Mayim Chaim" to "Chafetz Chaim",
-            "Brit Moshe" to "Sefer Mitzvot Gadol",
-        )
+        val supportedPairs = PRINTED_MARKER_SUPPORTED_PAIRS
         val commentariesByBase = HashMap<Long, MutableList<SefariaInlineAnchors.BookInput>>()
         for (book in books) {
             val baseTitle = supportedPairs[book.enTitle] ?: continue

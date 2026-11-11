@@ -42,10 +42,30 @@ internal class SefariaVersionsImporter(
     hebrewTitles: VersionHebrewTitles = VersionHebrewTitles.Empty,
 ) {
     internal data class BookInput(
-        val payload: BookPayload,
         val bookId: Long,
         val bookPath: String,
-    )
+        val heTitle: String,
+        val enTitle: String,
+        val sourceDirPath: String?,
+        val schemaFilePath: String?,
+        val versionsMeta: List<VersionMeta>,
+        val refEntries: List<RefEntry>,
+        val titleSegmentHeadingLines: Set<Int>,
+        val preferredVersionFileName: String?,
+        val sameTractateHeTitle: String?,
+        val boldDashDibburim: Boolean,
+    ) {
+        constructor(
+            payload: BookPayload,
+            bookId: Long,
+            bookPath: String,
+            refEntries: List<RefEntry> = payload.refEntries,
+        ) : this(
+            bookId, bookPath, payload.heTitle, payload.enTitle, payload.sourceDirPath,
+            payload.schemaFilePath, payload.versionsMeta, refEntries, payload.titleSegmentHeadingLines,
+            payload.preferredVersionFileName, payload.sameTractateHeTitle, payload.boldDashDibburim,
+        )
+    }
 
     private var versionsWithContent = 0
     private var metadataOnlyVersions = 0
@@ -62,9 +82,9 @@ internal class SefariaVersionsImporter(
     private val versionBatch = mutableListOf<BookVersion>()
     private val lineBatch = mutableListOf<VersionLine>()
 
-    suspend fun import(inputs: List<BookInput>, lineKeyToId: Map<Pair<String, Int>, Long>) {
+    suspend fun import(inputs: Iterable<BookInput>, lineKeyToId: Map<Pair<String, Int>, Long>) {
         for (input in inputs) {
-            val versionFiles = discoverSefariaVersionFiles(input.payload.sourceDirPath)
+            val versionFiles = discoverSefariaVersionFiles(input.sourceDirPath)
             if (versionFiles.isEmpty()) {
                 importMetadataOnly(input)
             } else {
@@ -85,13 +105,13 @@ internal class SefariaVersionsImporter(
     // merged.json's `versions` pairs carry no language field at all, so these rows
     // are not language-gated; they are metadata-only (hasContent=0, no foreign text).
     private fun importMetadataOnly(input: BookInput) {
-        input.payload.versionsMeta.distinctBy { it.title }.forEach { meta ->
-            if (isBlacklisted(input.payload, meta.title, heVersionTitle = null)) return@forEach
+        input.versionsMeta.distinctBy { it.title }.forEach { meta ->
+            if (isBlacklisted(input, meta.title, heVersionTitle = null)) return@forEach
             versionBatch += BookVersion(
                 id = allocator.bookVersionId(input.bookId, meta.title),
                 bookId = input.bookId,
                 versionTitle = meta.title,
-                heVersionTitle = titlesUsage.resolve(input.payload.heTitle, input.payload.enTitle, meta.title, null),
+                heVersionTitle = titlesUsage.resolve(input.heTitle, input.enTitle, meta.title, null),
                 versionSource = meta.source,
                 hasContent = false,
             )
@@ -104,25 +124,24 @@ internal class SefariaVersionsImporter(
         versionFiles: List<Path>,
         lineKeyToId: Map<Pair<String, Int>, Long>,
     ) {
-        val payload = input.payload
-        val schemaFile = payload.schemaFilePath?.let(Path::of)
+        val schemaFile = input.schemaFilePath?.let(Path::of)
         val schemaObj = schemaFile
             ?.let { runCatching { json.parseToJsonElement(it.readText()).jsonObject["schema"]?.jsonObject }.getOrNull() }
         if (schemaObj == null) {
-            logger.w { "Versions of ${payload.enTitle} skipped: schema unreadable at ${payload.schemaFilePath}" }
+            logger.w { "Versions of ${input.enTitle} skipped: schema unreadable at ${input.schemaFilePath}" }
             filesSkipped += versionFiles.size
             return
         }
 
         // ref -> lineId of the book's (merged) lines; first occurrence wins,
         // mirrored by the first-wins on the version-walk side below.
-        val mergedLineIdByRef = HashMap<String, Long>(payload.refEntries.size)
-        payload.refEntries.forEach { entry ->
+        val mergedLineIdByRef = HashMap<String, Long>(input.refEntries.size)
+        input.refEntries.forEach { entry ->
             val lineId = lineKeyToId[input.bookPath to (entry.lineIndex - 1)] ?: return@forEach
             if (mergedLineIdByRef.putIfAbsent(entry.ref, lineId) != null) duplicateRefs++
         }
-        val titleSegmentRefs = payload.refEntries
-            .filter { it.lineIndex - 1 in payload.titleSegmentHeadingLines }
+        val titleSegmentRefs = input.refEntries
+            .filter { it.lineIndex - 1 in input.titleSegmentHeadingLines }
             .mapTo(HashSet()) { it.ref }
 
         for (file in versionFiles) {
@@ -148,18 +167,18 @@ internal class SefariaVersionsImporter(
             // עברית בלבד נכנסת ל-DB; כל שפה אחרת נחסמת, יידיש בכלל זה.
             if (actualLanguage != "he") {
                 versionsForeignLanguage++
-                logger.i { "Version skipped, actualLanguage=$actualLanguage: ${payload.heTitle} / $versionTitle" }
+                logger.i { "Version skipped, actualLanguage=$actualLanguage: ${input.heTitle} / $versionTitle" }
                 continue
             }
             val heVersionTitle =
                 doc["versionTitleInHebrew"]?.stringOrNull()?.trim()?.takeIf { it.isNotEmpty() }
-            if (isBlacklisted(payload, versionTitle, heVersionTitle)) continue
+            if (isBlacklisted(input, versionTitle, heVersionTitle)) continue
 
             val walk = payloadReader.walkTextWithSchema(
                 schemaObj = schemaObj,
                 textElement = textElement,
-                bookHeTitle = payload.heTitle,
-                bookEnTitle = payload.enTitle,
+                bookHeTitle = input.heTitle,
+                bookEnTitle = input.enTitle,
                 collectLineKeyOverrides = false,
                 // Each edition retains its own text, including title segments
                 // whose corresponding main-text segment was not folded.
@@ -180,9 +199,9 @@ internal class SefariaVersionsImporter(
                 if (lineId == null) {
                     // טקסט ראשי ממהדורה מוצהרת אינו איחוד המהדורות — כתובת שאין לה
                     // שורה נופלת בקול, כי אין לאן לשמור אותה.
-                    val preferredFile = payload.preferredVersionFileName
+                    val preferredFile = input.preferredVersionFileName
                     if (preferredFile != null) throw PreferredVersionRefGapException(
-                        "preferred_versions.txt: ${payload.heTitle} נקרא מ-$preferredFile, " +
+                        "preferred_versions.txt: ${input.heTitle} נקרא מ-$preferredFile, " +
                             "ולמהדורה \"$versionTitle\" יש כתובת ללא שורה מקבילה: ${ref.ref}. " +
                             "לחסום את המהדורה ב-black_versions.txt או לתקן את המיפוי."
                     )
@@ -191,23 +210,23 @@ internal class SefariaVersionsImporter(
                     segmentsUnmatched++
                     return@forEach
                 }
-                val content = SefariaSameTractateRefs.strip(walk.lines[ref.lineIndex - 1], payload.sameTractateHeTitle)
+                val content = SefariaSameTractateRefs.strip(walk.lines[ref.lineIndex - 1], input.sameTractateHeTitle)
                 rows += VersionLine(
                     versionId = versionId,
                     lineId = lineId,
-                    content = if (payload.boldDashDibburim) SefariaTalmudDibburBold.bold(content) else content,
+                    content = if (input.boldDashDibburim) SefariaTalmudDibburBold.bold(content) else content,
                     charCount = countVisibleChars(content),
                 )
             }
             if (rows.isEmpty()) {
                 emptyWalks++
-                logger.w { "Version walk yielded no lines: ${payload.enTitle} / $versionTitle" }
+                logger.w { "Version walk yielded no lines: ${input.enTitle} / $versionTitle" }
             }
             versionBatch += BookVersion(
                 id = versionId,
                 bookId = input.bookId,
                 versionTitle = versionTitle,
-                heVersionTitle = titlesUsage.resolve(payload.heTitle, payload.enTitle, versionTitle, heVersionTitle),
+                heVersionTitle = titlesUsage.resolve(input.heTitle, input.enTitle, versionTitle, heVersionTitle),
                 versionSource = doc["versionSource"]?.stringOrNull(),
                 priority = doc["priority"]?.stringOrNull()?.toDoubleOrNull(),
                 license = doc["license"]?.stringOrNull(),
@@ -224,13 +243,13 @@ internal class SefariaVersionsImporter(
         }
     }
 
-    private fun isBlacklisted(payload: BookPayload, versionTitle: String, heVersionTitle: String?): Boolean {
+    private fun isBlacklisted(input: BookInput, versionTitle: String, heVersionTitle: String?): Boolean {
         if (blacklist.isEmpty()) return false
-        val bookKeys = setOfNotNull(normalizeTitleKey(payload.heTitle), normalizeTitleKey(payload.enTitle))
+        val bookKeys = setOfNotNull(normalizeTitleKey(input.heTitle), normalizeTitleKey(input.enTitle))
         val versionKeys = setOfNotNull(normalizeTitleKey(versionTitle), normalizeTitleKey(heVersionTitle))
         if (!blacklist.isBlocked(bookKeys, versionKeys)) return false
         versionsBlacklisted++
-        logger.i { "Version blacklisted: ${payload.heTitle} / $versionTitle" }
+        logger.i { "Version blacklisted: ${input.heTitle} / $versionTitle" }
         return true
     }
 
