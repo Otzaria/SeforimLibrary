@@ -15,8 +15,6 @@ jobs:
     timeout-minutes: 100
     steps:
       - uses: actions/checkout@v5
-      - name: Test census script independently on synthetic SQLite DB
-        run: python3 tool/bidi/scan_unicode_isolates.py --self-test
       - name: Disk space and system zstd support
         run: |
           df -h .
@@ -28,6 +26,8 @@ jobs:
             sudo apt-get update -qq
             sudo apt-get install -y zstd
           fi
+      - name: Test the census on a dictionary-compressed SQLite fixture
+        run: python3 tool/bidi/scan_unicode_isolates.py --self-test
       - name: Fetch verified SeforimLibrary v37 full SQLite archive
         run: |
           curl --fail --location --retry 5 --retry-all-errors --retry-delay 10 \
@@ -44,7 +44,7 @@ jobs:
             -o "$RUNNER_TEMP/seforim.db" "$RUNNER_TEMP/seforim.db.zst"
           ls -lh "$RUNNER_TEMP/seforim.db"
           df -h "$RUNNER_TEMP"
-      - name: Count every isolate in main text, editions and metadata
+      - name: Count isolates in main text, edition overlays, bundled notes and selected metadata
         run: |
           python3 -u tool/bidi/scan_unicode_isolates.py \
             "$RUNNER_TEMP/seforim.db" --out "$RUNNER_TEMP/bidi-isolate-counts.json"
@@ -54,20 +54,23 @@ jobs:
           with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as out:
               print('## Unicode isolate census: release v37 (2026-11-05)', file=out)
               print(f"Books: **{j['books_in_db']:,}**, books containing isolates in "
-                    f"stored main text or editions: **{j['books_with_any_isolate_in_text']:,}**", file=out)
+                    f"stored main text, edition overlays or bundled notes: **{j['books_with_any_isolate_in_text']:,}**", file=out)
               print('', file=out)
-              print('| Population | Rows read | Rows with isolates | LRI | RLI | FSI | PDI |', file=out)
-              print('|---|---:|---:|---:|---:|---:|---:|', file=out)
-              for key in ('main_text','edition_overlays','metadata'):
-                  x = j.get(key) or {}
-                  ct = x.get('character_occurrences') or {}
-                  print(f"| {key} | {x.get('rows_examined',0):,} | "
-                        f"{x.get('rows_with_any_isolate',0):,} | "
+              print('| Population | Rows read | Text values read | Rows with isolates | LRI | RLI | FSI | PDI |', file=out)
+              print('|---|---:|---:|---:|---:|---:|---:|---:|', file=out)
+              for key in ('main_text', 'edition_overlays', 'bundled_notes', 'metadata'):
+                  x = j[key]
+                  if x is None:
+                      print(f'| {key} | Absent | — | — | — | — | — | — |', file=out)
+                      continue
+                  ct = x['character_occurrences']
+                  print(f"| {key} | {x['rows_examined']:,} | "
+                        f"{x['text_values_examined']:,} | {x['rows_with_any_isolate']:,} | "
                         + ' | '.join(f"{ct.get(k,0):,}" for k in ('LRI','RLI','FSI','PDI'))
                         + ' |', file=out)
               print(f"\nDecoded zstd frames: {j['zstd_frames_decoded']:,}. "
                     f"Time: {j['duration_seconds']} seconds.", file=out)
-              print('\nScope excludes local imported files, PDFs outside SQLite and user notes.', file=out)
+              print(f"\n{j['interpretation']}", file=out)
           PY
       - uses: actions/upload-artifact@v6
         with:
