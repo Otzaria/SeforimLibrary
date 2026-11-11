@@ -235,6 +235,16 @@ class SefariaDerivedCommentaryLinksTest {
         assertTrue(derive(f).isEmpty())
     }
 
+    /** 29 linked segments: two that quote another line of their amud leave 93% (kept), three 89.7% (dropped). */
+    @Test
+    fun gateNeedsAtLeast92PercentOfTheBooksOwnLinks() {
+        val f = meiri()
+        listOf("97a:1", "97b:1").forEach { f.say(it, it.substringBefore(':') + ":9") }
+        assertEquals(1, derive(f).size)
+        f.say("98a:1", "98a:9")
+        assertTrue(derive(f).isEmpty())
+    }
+
     @Test
     fun bookWithTooFewLinkedSegmentsDerivesNothing() {
         val f = Fixture(daf("96a", 10) + daf("96b", 10), daf("96a", 5) + daf("96b", 4), null)

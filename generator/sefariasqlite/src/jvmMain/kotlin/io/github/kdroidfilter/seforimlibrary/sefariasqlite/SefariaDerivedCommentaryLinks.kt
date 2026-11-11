@@ -189,7 +189,7 @@ internal fun interface LineTextSource {
 
 // Text gate of stage 2: a segment keeps its neighbours' base line only when its own words
 // single that line out of the amud, and only in a book where this holds for Sefaria's own links.
-private const val TEXT_GATE_MIN_ACCURACY = 0.9
+private const val TEXT_GATE_MIN_ACCURACY = 0.92
 private const val TEXT_GATE_MIN_DECISIVE = 20
 private const val TEXT_GATE_MAX_SAMPLES = 400
 private const val TEXT_WORDS = 80
