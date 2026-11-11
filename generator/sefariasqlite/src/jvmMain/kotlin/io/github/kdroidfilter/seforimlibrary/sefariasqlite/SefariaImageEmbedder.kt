@@ -5,16 +5,18 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.runInterruptible
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.serialization.json.Json
+import java.io.IOException
 import java.net.URI
 import java.net.URISyntaxException
 import java.net.http.HttpClient
 import java.net.http.HttpRequest
 import java.net.http.HttpResponse
 import java.net.http.HttpTimeoutException
-import java.io.IOException
+import java.nio.ByteBuffer
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.Paths
@@ -22,10 +24,12 @@ import java.nio.file.StandardCopyOption
 import java.security.MessageDigest
 import java.time.Duration
 import java.util.Base64
-import java.util.concurrent.ConcurrentHashMap
-import java.util.concurrent.atomic.AtomicInteger
+import java.util.HexFormat
+import java.util.concurrent.ExecutionException
+import java.util.concurrent.Flow
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.TimeoutException
 import kotlin.io.path.isRegularFile
-import kotlin.io.path.readBytes
 
 /**
  * Downloads `textimages.sefaria.org` images referenced from book content and
@@ -48,7 +52,8 @@ object SefariaImageEmbedder {
     private const val URL_MARKER = "textimages.sefaria.org/"
     private const val USER_AGENT = "SeforimLibrary-SefariaImageEmbedder/1.0"
     private const val DOWNLOAD_PARALLELISM = 16
-    private const val MAX_IMAGE_BYTES = 5 * 1024 * 1024 // 5 MiB ceiling per image
+    internal const val MAX_IMAGE_BYTES = 5 * 1024 * 1024
+    private val DOWNLOAD_TIMEOUT = Duration.ofSeconds(30)
     private const val DOWNLOAD_ATTEMPTS = 3
 
     /** `-PimageCacheDir=` / `-DimageCacheDir=`: where downloaded images persist. */
@@ -66,7 +71,8 @@ object SefariaImageEmbedder {
      */
     internal const val SIDECAR_SUFFIX = ".url"
 
-    private const val HEX = "0123456789abcdef"
+    /** SHA-256 of the 666×367 PNG that NetFree serves in place of the requested image. */
+    internal const val FILTER_PLACEHOLDER_SHA256 = "1a00712621da6964deac5b491a5532e15c8854c00de7fba692818e0e042db311"
 
     /**
      * Pause before download attempt 2 and 3. A transient timeout on
@@ -109,75 +115,70 @@ object SefariaImageEmbedder {
         RegexOption.IGNORE_CASE
     )
 
-    private val dataUriByUrl = ConcurrentHashMap<String, String>()
-
-    /**
-     * Set by the importer at startup. When null, [substituteImages] is a no-op
-     * and the original URLs are kept (so tests/debug runs don't require network).
-     */
     @Volatile
-    var enabled: Boolean = false
-        private set
+    private var dataUriByUrl: Map<String, String>? = null
+
+    /** Whether an image prefetch has completed in this process. */
+    val enabled: Boolean get() = dataUriByUrl != null
 
     /**
-     * Scan [mergedJsonPaths], extract unique Sefaria image URLs, download any
-     * that aren't already in [cacheDir], and populate the in-memory data-URI map.
-     * Safe to call multiple times — already-cached entries are reused.
-     * Writes [reportPath] on every run: whatever did not download ships as a
-     * live network URL, so the build has to be able to see it.
+     * Collect referenced images for this import and publish the resulting data URIs together.
+     * Prefer the export, then the persistent cache, then the network for older or partial exports.
+     * Images that fail all three paths stay as remote URLs and are recorded in [reportPath].
      */
     suspend fun prefetch(
         mergedJsonPaths: Collection<Path>,
         cacheDir: Path = defaultCacheDir(),
         reportPath: Path = defaultReportPath(),
+        bundledDir: Path? = null,
         logger: Logger = Logger.withTag("SefariaImageEmbedder")
     ) = coroutineScope {
-        Files.createDirectories(cacheDir)
+        val fallbackCache = cacheDir.takeUnless {
+            bundledDir != null && runCatching { Files.isSameFile(bundledDir, cacheDir) }.getOrDefault(false)
+        }
         logger.i { "Embedder: image cache at ${cacheDir.toAbsolutePath()}" }
+        if (bundledDir != null) logger.i { "Embedder: images bundled with the export at ${bundledDir.toAbsolutePath()}" }
 
         val urls = collectUrls(mergedJsonPaths)
         logger.i { "Embedder: ${urls.size} unique Sefaria image URLs to process" }
 
         val semaphore = Semaphore(DOWNLOAD_PARALLELISM)
-        // Counted from DOWNLOAD_PARALLELISM coroutines: plain `Int++` loses
-        // increments (34024655297 printed cached=410 with downloaded=409 on a
-        // cold cache), and these numbers now gate the build.
-        val newlyDownloaded = AtomicInteger()
-        val fromDiskCache = AtomicInteger()
-        val failures = ConcurrentHashMap<String, String>()
-
-        urls.map { url ->
+        val results = urls.map { url ->
             async(Dispatchers.IO) {
                 semaphore.withPermit {
-                    when (val fetched = ensureCachedBytes(url, cacheDir, logger)) {
-                        is Fetched.Bytes -> {
-                            if (fetched.fromNetwork) newlyDownloaded.incrementAndGet()
-                            else fromDiskCache.incrementAndGet()
-                            dataUriByUrl[url] = toDataUri(url, fetched.bytes)
-                        }
-                        is Fetched.Failure -> failures[url] = fetched.reason
-                    }
+                    runInterruptible { url to fetchImage(url, fallbackCache, bundledDir, logger) }
                 }
             }
         }.awaitAll()
 
-        enabled = true
+        val dataUris = HashMap<String, String>()
+        val failures = ArrayList<ImageEmbedFailure>()
+        val sourceCounts = IntArray(Source.entries.size)
+        for ((url, result) in results) {
+            when (result) {
+                is Fetched.Image -> {
+                    dataUris[url] = result.dataUri
+                    sourceCounts[result.source.ordinal]++
+                }
+                is Fetched.Failure -> failures += ImageEmbedFailure(url, result.reason)
+            }
+        }
+        dataUriByUrl = dataUris
         val report = ImageEmbedReport(
             attempted = urls.size,
-            cached = dataUriByUrl.size,
-            downloaded = newlyDownloaded.get(),
-            fromDiskCache = fromDiskCache.get(),
+            cached = dataUris.size,
+            downloaded = sourceCounts[Source.NETWORK.ordinal],
+            fromDiskCache = sourceCounts[Source.CACHE.ordinal],
             failed = failures.size,
-            // Sorted so two runs over the same export produce identical bytes.
-            failures = failures.entries.sortedBy { it.key }.map { ImageEmbedFailure(it.key, it.value) },
+            failures = failures.sortedBy { it.url },
+            fromBundle = sourceCounts[Source.BUNDLE.ordinal],
         )
         writeReport(report, reportPath, logger)
         logger.i {
-            "Embedder: cached=${report.cached} (downloaded=${report.downloaded}, " +
-                "fromDiskCache=${report.fromDiskCache}, failed=${report.failed}) of ${report.attempted}"
+            "Embedder: cached=${report.cached} (fromBundle=${report.fromBundle}, " +
+                "fromDiskCache=${report.fromDiskCache}, downloaded=${report.downloaded}, " +
+                "failed=${report.failed}) of ${report.attempted}"
         }
-        // One line per failure, no stack trace: the frames are always the same
-        // HttpClient chain, and every one of these ships as a remote <img src>.
         report.failures.forEach { logger.w { "Embedder: not embedded (${it.reason}): ${it.url}" } }
     }
 
@@ -187,10 +188,11 @@ object SefariaImageEmbedder {
      * Preserves any other attributes on the tag.
      */
     fun substituteImages(content: String): String {
-        if (!enabled || !content.contains(URL_MARKER)) return content
+        val dataUris = dataUriByUrl ?: return content
+        if (dataUris.isEmpty() || !content.contains(URL_MARKER)) return content
         return IMG_TAG_REGEX.replace(content) { match ->
             val url = match.groupValues[1]
-            val dataUri = dataUriByUrl[url] ?: return@replace match.value
+            val dataUri = dataUris[url] ?: return@replace match.value
             match.value.replace(url, dataUri)
         }
     }
@@ -242,8 +244,7 @@ object SefariaImageEmbedder {
      * Drop all in-memory cache state (does not touch disk cache). Mostly for tests.
      */
     internal fun resetForTest() {
-        dataUriByUrl.clear()
-        enabled = false
+        dataUriByUrl = null
         downloader = ::downloadBytes
         retryBackoffMillis = longArrayOf(2_000, 6_000)
     }
@@ -252,8 +253,7 @@ object SefariaImageEmbedder {
      * Seed the in-memory cache directly (tests only — lets us skip the network).
      */
     internal fun seedForTest(url: String, dataUri: String) {
-        dataUriByUrl[url] = dataUri
-        enabled = true
+        dataUriByUrl = dataUriByUrl.orEmpty() + (url to dataUri)
     }
 
     private fun collectUrls(mergedJsonPaths: Collection<Path>): Set<String> {
@@ -290,101 +290,90 @@ object SefariaImageEmbedder {
         return -1
     }
 
-    /** What one URL produced: bytes to inline, or why it stays a remote URL. */
+    private enum class Source { BUNDLE, CACHE, NETWORK }
+
     private sealed interface Fetched {
-        data class Bytes(
-            val bytes: ByteArray,
-            val fromNetwork: Boolean,
-        ) : Fetched
+        data class Image(val dataUri: String, val source: Source) : Fetched
         data class Failure(val reason: String) : Fetched
     }
 
-    /**
-     * A hit requires an entry at `sha256(url)` whose `.url` sidecar holds this
-     * exact URL — there is no other way into the cache. In particular a file
-     * left over from the pre-sha256 naming scheme (path with `/ : ?` folded to
-     * `_`) is NOT adopted: that scheme was not injective (`…/Tikkunei_Zohar/40.png`
-     * and `…/Tikkunei_Zohar_40.png` both wrote `Tikkunei_Zohar_40.png`) and the
-     * file records no URL, so adopting it would inline one URL's image under
-     * another URL's key, durably and reported as a success. Such a file is
-     * simply ignored and left where it is — nothing reads it, and deleting
-     * files this build did not write in a cache dir that may be shared with a
-     * second checkout is the more dangerous option.
-     */
-    private fun ensureCachedBytes(
+    private fun fetchImage(
         url: String,
-        cacheDir: Path,
+        cacheDir: Path?,
+        bundledDir: Path?,
         logger: Logger,
     ): Fetched {
-        val cachePath = cacheDir.resolve(cacheFileName(url))
-        val sidecarPath = sidecarOf(cachePath)
-
-        readVerifiedEntry(url, cachePath, sidecarPath, logger)?.let {
-            return Fetched.Bytes(it, fromNetwork = false)
+        val key = cacheFileName(url)
+        bundledDir?.resolve(key)?.let {
+            readVerifiedEntry(url, it, Source.BUNDLE, logger)?.let { image -> return image }
+        }
+        val cachePath = cacheDir?.resolve(key)
+        cachePath?.let {
+            readVerifiedEntry(url, it, Source.CACHE, logger)?.let { image -> return image }
         }
 
-        val bytes = runCatching { downloadWithRetry(url, logger) }.getOrElse {
-            // Reported once, by the caller, with the URL — see [failureReason].
-            return Fetched.Failure(failureReason(it))
+        val bytes = try {
+            downloadWithRetry(url, logger)
+        } catch (error: InterruptedException) {
+            throw error
+        } catch (error: Exception) {
+            return Fetched.Failure(failureReason(error))
         }
-        if (bytes.size > MAX_IMAGE_BYTES) {
-            return Fetched.Failure("oversized (${bytes.size} bytes)")
+        return when (val validation = SefariaImageValidation.validate(bytes)) {
+            is SefariaImageValidation.Invalid -> Fetched.Failure(validation.reason)
+            is SefariaImageValidation.Valid -> {
+                if (cacheDir != null && cachePath != null) {
+                    runCatching { writeEntry(cacheDir, url, cachePath, bytes) }
+                        .onFailure { logger.w(it) { "Could not cache downloaded image: $url" } }
+                }
+                Fetched.Image(toDataUri(validation.mime, bytes), Source.NETWORK)
+            }
         }
-        writeEntry(cacheDir, url, cachePath, sidecarPath, bytes)
-        return Fetched.Bytes(bytes, fromNetwork = true)
     }
 
-    /** `<key>.url` for `<key>` — see [SIDECAR_SUFFIX]. */
     private fun sidecarOf(path: Path): Path =
         path.resolveSibling(path.fileName.toString() + SIDECAR_SUFFIX)
-
-    private fun readSidecar(sidecarPath: Path): String? =
-        runCatching { Files.readString(sidecarPath) }.getOrNull()
 
     private fun evict(vararg paths: Path) {
         for (path in paths) runCatching { Files.deleteIfExists(path) }
     }
 
     /**
-     * A usable hit at the current name, or null (with the unusable entry
-     * evicted). The name is already sha256(url), so the sidecar is not what
-     * separates two URLs — it is what makes an entry that did NOT come from this
-     * URL (a hand-copied cache dir, a blob dropped in by another tool, a torn
-     * write) a miss instead of the wrong image reported as a success. It is also
-     * the ONLY way in: no name-shaped heuristic ever adopts bytes.
+     * Match the exact UTF-8 URL sidecar before reading the payload. Legacy names
+     * and orphaned blobs have no verified URL and cannot be hits.
      */
-    private fun readVerifiedEntry(url: String, cachePath: Path, sidecarPath: Path, logger: Logger): ByteArray? {
-        if (!cachePath.isRegularFile()) return null
-        val owner = readSidecar(sidecarPath)
-        if (owner != url) {
-            logger.w {
-                if (owner == null) "Cached image at $cachePath has no $SIDECAR_SUFFIX sidecar; redownloading: $url"
-                else "Cached image at $cachePath was written for another URL; redownloading: $url"
-            }
-            evict(cachePath, sidecarPath)
+    private fun readVerifiedEntry(url: String, path: Path, source: Source, logger: Logger): Fetched.Image? {
+        if (!path.isRegularFile()) return null
+        val sidecar = sidecarOf(path)
+        fun reject(reason: String): Fetched.Image? {
+            logger.w { "Ignoring ${source.name.lowercase()} image at $path ($reason): $url" }
+            if (source == Source.CACHE) evict(path, sidecar)
             return null
         }
-        val bytes = runCatching { cachePath.readBytes() }.getOrElse {
-            logger.w(it) { "Corrupted cached image at $cachePath; redownloading" }
-            evict(cachePath, sidecarPath)
-            return null
+        if (!sidecar.isRegularFile()) return reject("missing $SIDECAR_SUFFIX sidecar")
+        val expected = url.toByteArray(Charsets.UTF_8)
+        val owner = try {
+            Files.newInputStream(sidecar).use { it.readNBytes(expected.size + 1) }
+        } catch (_: IOException) {
+            return reject("unreadable $SIDECAR_SUFFIX sidecar")
         }
-        if (bytes.isEmpty()) {
-            logger.w { "Empty cached image at $cachePath; redownloading" }
-            evict(cachePath, sidecarPath)
-            return null
+        if (!owner.contentEquals(expected)) return reject("URL sidecar mismatch")
+        val bytes = try {
+            Files.newInputStream(path).use { it.readNBytes(MAX_IMAGE_BYTES + 1) }
+        } catch (_: IOException) {
+            return reject("unreadable payload")
         }
-        return bytes
+        return when (val validation = SefariaImageValidation.validate(bytes)) {
+            is SefariaImageValidation.Invalid -> reject(validation.reason)
+            is SefariaImageValidation.Valid -> Fetched.Image(toDataUri(validation.mime, bytes), source)
+        }
     }
 
-    /**
-     * Sidecar first, bytes second: a crash in between leaves an orphan `.url`
-     * (harmless — the next run finds no bytes and downloads) instead of bytes no
-     * reader is allowed to trust. Both land through [atomicWrite].
-     */
-    private fun writeEntry(cacheDir: Path, url: String, cachePath: Path, sidecarPath: Path, bytes: ByteArray) {
-        atomicWrite(cacheDir, sidecarPath, url.toByteArray(Charsets.UTF_8))
+    private fun writeEntry(cacheDir: Path, url: String, cachePath: Path, bytes: ByteArray) {
+        // Publish validated bytes before the sidecar so replacing an entry
+        // cannot give the previous payload a new URL.
         atomicWrite(cacheDir, cachePath, bytes)
+        atomicWrite(cacheDir, sidecarOf(cachePath), url.toByteArray(Charsets.UTF_8))
     }
 
     /**
@@ -418,9 +407,6 @@ object SefariaImageEmbedder {
         if (status == 408 || status == 429 || status >= 500) RetriableHttpStatus(status, url)
         else FinalHttpStatus(status, url)
 
-    /** Timeouts (HttpTimeoutException is an IOException), resets, and [RetriableHttpStatus]. */
-    internal fun isRetriable(error: Throwable): Boolean = error is IOException
-
     /**
      * The short reason string [ImageEmbedReport] carries and the workflow turns
      * into one `::warning::` per URL. Kept stable and greppable — a 418 is the
@@ -433,6 +419,7 @@ object SefariaImageEmbedder {
         error is FinalHttpStatus -> "http ${error.status}"
         error is RetriableHttpStatus -> "http ${error.status}"
         error is HttpTimeoutException -> "timeout"
+        error is OversizedImage -> "oversized (> $MAX_IMAGE_BYTES bytes)"
         error is IllegalArgumentException || error is URISyntaxException -> "malformed-url"
         else -> "${error.javaClass.simpleName}: ${error.message}"
     }
@@ -441,9 +428,8 @@ object SefariaImageEmbedder {
         for (attempt in 1..DOWNLOAD_ATTEMPTS) {
             try {
                 return downloader(url)
-            } catch (error: Throwable) {
-                if (error is InterruptedException) throw error
-                if (!isRetriable(error) || attempt == DOWNLOAD_ATTEMPTS) throw error
+            } catch (error: IOException) {
+                if (attempt == DOWNLOAD_ATTEMPTS) throw error
                 val backoff = retryBackoffMillis.getOrElse(attempt - 1) { retryBackoffMillis.last() }
                 logger.w {
                     "Image download attempt $attempt/$DOWNLOAD_ATTEMPTS failed " +
@@ -479,17 +465,70 @@ object SefariaImageEmbedder {
         return out.toString()
     }
 
-    private fun downloadBytes(url: String): ByteArray {
+    private fun downloadBytes(url: String): ByteArray = downloadBytes(url, DOWNLOAD_TIMEOUT)
+
+    internal fun downloadBytes(url: String, timeout: Duration): ByteArray {
         val request = HttpRequest.newBuilder(URI.create(encodeForRequest(url)))
-            .timeout(Duration.ofSeconds(30))
+            .timeout(timeout)
             .header("User-Agent", USER_AGENT)
             .header("Accept", "image/*")
             .build()
-        val response = client.send(request, HttpResponse.BodyHandlers.ofByteArray())
-        if (response.statusCode() !in 200..299) {
-            throw httpFailure(response.statusCode(), url)
+        val pending = client.sendAsync(request) { response ->
+            val status = response.statusCode()
+            if (status !in 200..299 || status == 206) throw httpFailure(status, url)
+            if (response.headers().firstValueAsLong("Content-Length").orElse(0) > MAX_IMAGE_BYTES) {
+                throw OversizedImage()
+            }
+            ImageBodySubscriber()
         }
-        return response.body()
+        // HttpRequest.timeout on JDK 25 covers the headers. Bound the full
+        // response as well so a stalled body can be retried.
+        return try {
+            pending.get(timeout.toNanos(), TimeUnit.NANOSECONDS).body()
+        } catch (_: TimeoutException) {
+            pending.cancel(true)
+            throw HttpTimeoutException("Image response timed out: $url")
+        } catch (error: InterruptedException) {
+            pending.cancel(true)
+            throw error
+        } catch (error: ExecutionException) {
+            throw error.cause ?: error
+        }
+    }
+
+    private class OversizedImage : IllegalStateException()
+
+    private class ImageBodySubscriber(
+        private val downstream: HttpResponse.BodySubscriber<ByteArray> = HttpResponse.BodySubscribers.ofByteArray(),
+    ) : HttpResponse.BodySubscriber<ByteArray> by downstream {
+        private lateinit var subscription: Flow.Subscription
+        private var bytesReceived = 0L
+        private var rejected = false
+
+        override fun onSubscribe(subscription: Flow.Subscription) {
+            this.subscription = subscription
+            downstream.onSubscribe(subscription)
+        }
+
+        override fun onNext(items: List<ByteBuffer>) {
+            if (rejected) return
+            bytesReceived += items.sumOf { it.remaining().toLong() }
+            if (bytesReceived <= MAX_IMAGE_BYTES) downstream.onNext(items) else reject(OversizedImage())
+        }
+
+        override fun onError(error: Throwable) {
+            if (!rejected) downstream.onError(error)
+        }
+
+        override fun onComplete() {
+            if (!rejected) downstream.onComplete()
+        }
+
+        private fun reject(error: Throwable) {
+            rejected = true
+            downstream.onError(error)
+            subscription.cancel()
+        }
     }
 
     /**
@@ -501,31 +540,16 @@ object SefariaImageEmbedder {
      * no provenance) and counted as a success.
      * The fixed 64 chars also retire the >255-byte name a deep path threw on and
      * the `* " < > |` a Windows run choked on. No extension: the data-URI MIME
-     * comes from the requested URL ([toDataUri]), never from the cache file, and
+     * comes from the validated payload, and
      * [SIDECAR_SUFFIX] is what keeps the directory greppable.
      */
     internal fun cacheFileName(url: String): String {
         val digest = MessageDigest.getInstance("SHA-256").digest(url.toByteArray(Charsets.UTF_8))
-        val out = StringBuilder(digest.size * 2)
-        for (byte in digest) {
-            val code = byte.toInt() and 0xFF
-            out.append(HEX[code ushr 4]).append(HEX[code and 0x0F])
-        }
-        return out.toString()
+        return HexFormat.of().formatHex(digest)
     }
 
-    private fun toDataUri(url: String, bytes: ByteArray): String {
-        val mime = when {
-            url.endsWith(".png", ignoreCase = true) -> "image/png"
-            url.endsWith(".jpg", ignoreCase = true) || url.endsWith(".jpeg", ignoreCase = true) -> "image/jpeg"
-            url.endsWith(".gif", ignoreCase = true) -> "image/gif"
-            url.endsWith(".svg", ignoreCase = true) -> "image/svg+xml"
-            url.endsWith(".webp", ignoreCase = true) -> "image/webp"
-            else -> "image/png"
-        }
-        val b64 = Base64.getEncoder().encodeToString(bytes)
-        return "data:$mime;base64,$b64"
-    }
+    private fun toDataUri(mime: String, bytes: ByteArray): String =
+        "data:$mime;base64,${Base64.getEncoder().encodeToString(bytes)}"
 }
 
 /** One URL that could not be inlined, and why — see [SefariaImageEmbedder.failureReason]. */
@@ -542,7 +566,7 @@ internal data class ImageEmbedFailure(val url: String, val reason: String)
  *
  * - [attempted]: unique URLs found in the export.
  * - [cached]: URLs with a data URI in hand, i.e. actually embeddable.
- * - [downloaded]/[fromDiskCache]: how those were obtained.
+ * - [fromBundle]/[fromDiskCache]/[downloaded]: how those were obtained.
  *
  * Shape is deterministic (declared key order; [failures] sorted by URL).
  */
@@ -554,9 +578,13 @@ internal data class ImageEmbedReport(
     val fromDiskCache: Int,
     val failed: Int,
     val failures: List<ImageEmbedFailure>,
+    val fromBundle: Int = 0,
 )
 
-private val imageEmbedReportJson = Json { prettyPrint = true }
+private val imageEmbedReportJson = Json {
+    prettyPrint = true
+    encodeDefaults = true
+}
 
 /** JSON form written beside seforim.db for the workflow gate. */
 internal fun ImageEmbedReport.toJsonReport(): String =

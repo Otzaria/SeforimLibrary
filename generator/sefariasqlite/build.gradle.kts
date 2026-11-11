@@ -43,6 +43,7 @@ kotlin {
             implementation(libs.zstd)
             implementation(libs.jackson.core)
             implementation(libs.jackson.databind)
+            runtimeOnly(libs.twelvemonkeys.webp)
         }
     }
 }

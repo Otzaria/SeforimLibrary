@@ -61,6 +61,9 @@ SELF_HOSTED_JOBS = {
     ("delta-real-diff-test.yml", "real-diff"),
     ("build-library-index.yml", "index"),
     ("build-library-vectors.yml", "vectors"),
+    # Manual recovery's shell-only gate may use the local build runner. Its
+    # alternate hosted route has no actions whose Node major could be exempted.
+    ("build-library-vectors.yml", "gate"),
 }
 
 # Concrete GitHub-hosted images still run every action-major check below.
@@ -552,6 +555,8 @@ class CiWorkflowTest(unittest.TestCase):
                     job.get("runs-on") not in HOSTED_RUNNERS,
                     f"{name}:{job_name} changed runner class",
                 )
+                if (name, job_name) == ("build-library-vectors.yml", "gate"):
+                    self.assertNotIn("uses", step, "mixed-runner gate must stay shell-only")
                 if self_hosted:
                     continue
                 action, major = action_major(step.get("uses"))
