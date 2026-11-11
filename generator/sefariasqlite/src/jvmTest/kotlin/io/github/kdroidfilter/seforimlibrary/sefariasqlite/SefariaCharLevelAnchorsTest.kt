@@ -158,5 +158,28 @@ class SefariaCharLevelAnchorsTest {
         // An upstream edit at the same offsets makes the exception inapplicable.
         importer.generate(listOf(knownIncorrect.copy(incorrectSpan = "ישן")), books)
         assertEquals(setOf(4, 10), repo.getLinkAnchors(9).map { it.charStart }.toSet())
+
+        // A second export path can share the same book ID and line index.
+        // The anchor must read the row at the actual target endpoint.
+        repo.insertLinesBatch(listOf(Line(id = 199, bookId = 2, lineIndex = 0, content = "אחר", heRef = null)))
+        val baselineOffsets = anchors.map { Triple(it.side, it.charStart, it.charEnd) }
+        repo.executeRawQuery("DELETE FROM link_anchor")
+        SefariaCharLevelAnchors(repo, Logger.withTag("CharLevelDatabaseParityTest"))
+            .generateFromDatabase(
+                pending = pending + knownIncorrect,
+                books = books.map { book ->
+                    SefariaInlineAnchors.BookRef(
+                        bookId = book.bookId,
+                        enTitle = book.enTitle,
+                        bookPath = book.bookPath,
+                        singleVersionTitle = book.singleVersionTitle,
+                        cleanShiftByLineIndex = book.cleanShiftByLineIndex,
+                    )
+                },
+            )
+        assertEquals(
+            baselineOffsets,
+            repo.getLinkAnchors(9).map { Triple(it.side, it.charStart, it.charEnd) },
+        )
     }
 }

@@ -18,6 +18,7 @@ import java.nio.file.Files
 import java.nio.file.Path
 import java.security.MessageDigest
 import java.sql.DriverManager
+import java.util.BitSet
 import java.util.concurrent.TimeUnit
 import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
@@ -130,8 +131,7 @@ class SefariaTalmudDibburImportTest {
 
             val target = query(db, "SELECT l.id FROM line l JOIN book b ON b.id=l.bookId WHERE b.title='$commentaryTitle' AND l.lineIndex=${targetRef.lineIndex - 1}").single().single()!!.toLong()
             val source = query(db, "SELECT l.id FROM line l JOIN book b ON b.id=l.bookId WHERE b.title='$baseTitle' AND l.lineIndex=${sourceRef.lineIndex - 1}").single().single()!!.toLong()
-            // The real anchoring stage consumes the original payload, exactly
-            // as SefariaDirectImporter does, against the newly formatted DB.
+            // The production anchor reader restores the exact raw offsets from the stored line.
             val driver = JdbcSqliteDriver("jdbc:sqlite:$db")
             val repo = SeforimRepository(db.toString(), driver)
             try {
@@ -143,10 +143,13 @@ class SefariaTalmudDibburImportTest {
                     connectionType = io.github.kdroidfilter.seforimlibrary.core.models.ConnectionType.QUOTATION,
                 )))
                 val bookPath = buildBookPath(commentary.categoriesHe, commentary.heTitle)
-                SefariaCharLevelAnchors(repo, Logger.withTag("DibburImportAnchor")).generate(
+                SefariaCharLevelAnchors(repo, Logger.withTag("DibburImportAnchor")).generateFromDatabase(
                     listOf(PendingCharLevelAnchor(bookPath, targetRef.lineIndex - 1, source, target, 1, start, end, "Fixture Edition", "he", false)),
-                    listOf(SefariaInlineAnchors.BookInput(targetId, commentary.enTitle, bookPath, commentary.lines,
-                        commentary.refEntries.associateBy { it.lineIndex - 1 }, commentary.singleVersionTitle, commentary.cleanShiftByLineIndex)),
+                    listOf(SefariaInlineAnchors.BookRef(
+                        targetId, commentary.enTitle, bookPath, commentary.singleVersionTitle,
+                        commentary.cleanShiftByLineIndex,
+                        boldedLineIndexes = BitSet().apply { set(targetRef.lineIndex - 1) },
+                    )),
                 )
                 val anchor = repo.getLinkAnchors(999).single()
                 val shift = generatedPrefixLength(commentary.cleanShiftByLineIndex[targetRef.lineIndex - 1] ?: 0)

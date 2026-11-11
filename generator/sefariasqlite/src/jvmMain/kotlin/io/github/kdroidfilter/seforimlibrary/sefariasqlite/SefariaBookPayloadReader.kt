@@ -5,12 +5,6 @@ import io.github.kdroidfilter.seforimlibrary.common.ids.IdAllocatorBindings
 import com.fasterxml.jackson.core.JsonFactory
 import com.fasterxml.jackson.core.JsonToken
 import io.github.kdroidfilter.seforimlibrary.core.models.PubDate
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.async
-import kotlinx.coroutines.awaitAll
-import kotlinx.coroutines.coroutineScope
-import kotlinx.coroutines.sync.Semaphore
-import kotlinx.coroutines.sync.withPermit
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
@@ -74,34 +68,41 @@ internal class SefariaBookPayloadReader(
     }
 
     /**
-     * Read and parse book files in parallel using coroutines.
+     * Preserve the legacy Files.walk discovery order: new book/line IDs are
+     * allocated sequentially, so sorting by path would renumber books without
+     * any content change. The bounded writer consumes precisely this order.
+     * Full cross-filesystem reproducibility still needs a pinned source tree
+     * and matching enumeration order.
+     */
+    internal fun mergedFiles(jsonDir: Path): List<Path> = Files.walk(jsonDir).use { stream ->
+        stream.filter { Files.isRegularFile(it) && it.fileName.name.equals("merged.json", ignoreCase = true) }
+            .toList()
+    }
+
+    /** One-time preparation of the handful of base texts needed for letter matching. */
+    internal fun prepareBaseTexts(
+        mergedFiles: List<Path>,
+        schemaDir: Path,
+        schemaLookup: Map<String, Path>,
+    ) {
+        readBaseTexts(mergedFiles, schemaDir, schemaLookup)
+    }
+
+    /**
+     * Compatibility helper for small fixtures/tests. Production uses the
+     * metadata scan and SefariaBoundedInput, never a list of all BookPayloads.
      */
     suspend fun readBooksInParallel(
         jsonDir: Path,
         schemaDir: Path,
         schemaLookup: Map<String, Path>
-    ): List<BookPayload> = coroutineScope {
-        val mergedFiles = Files.walk(jsonDir).use { stream ->
-            stream.filter { Files.isRegularFile(it) && it.fileName.name.equals("merged.json", ignoreCase = true) }
-                .toList()
+    ): List<BookPayload> {
+        val files = mergedFiles(jsonDir)
+        logger.i { "Found ${files.size} merged.json files to process" }
+        val baseTexts = readBaseTexts(files, schemaDir, schemaLookup)
+        return files.mapNotNull { path ->
+            (baseTexts[path] ?: parseBookFile(path, schemaDir, schemaLookup))?.precomputeLineData()
         }
-
-        logger.i { "Found ${mergedFiles.size} merged.json files to process" }
-        val baseTexts = readBaseTexts(mergedFiles, schemaDir, schemaLookup)
-
-        // Process files in parallel with limited concurrency
-        val semaphore = Semaphore(SefariaImportTuning.FILE_PARALLELISM)
-
-        mergedFiles.map { textPath ->
-            async(Dispatchers.IO) {
-                semaphore.withPermit {
-                    // Derive the text-only per-line values here, on the worker that
-                    // already holds the book's text, so the single-threaded insert
-                    // loop is left with nothing but id allocation and inserts.
-                    (baseTexts[textPath] ?: parseBookFile(textPath, schemaDir, schemaLookup))?.precomputeLineData()
-                }
-            }
-        }.awaitAll().filterNotNull()
     }
 
     /**

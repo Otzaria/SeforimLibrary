@@ -86,6 +86,7 @@ G6_FLOORS = dict((e.split("=")[0], tuple(e.split("=")[1].split(","))) for e in P
 ROTATION_KEY = f"{FAMILIES[1][0]}.fp32-4a4a2ae8"   # the windows family's rotation, fitted on the stub warehouse
 CHUNKING_IDENTITY = {"meivin-round2-onnx": 2685558872390372738, "meivin-round2-windows-onnx": 320260894818558297}
 CHUNKING_IDENTITY.update({"meivin-qa491-onnx": 2685558872390372738, "meivin-qa491-windows-onnx": 320260894818558297})
+CHUNKING_IDENTITY["pardesqa491-windows-onnx"] = 13334152532150206612
 
 
 def run_text(job):
@@ -113,7 +114,7 @@ class Workflow(unittest.TestCase):
         self.assertEqual(on["workflow_run"]["workflows"], [self.index["name"]])
         self.assertEqual(on["workflow_run"]["types"], ["completed"])
         inputs = on["workflow_dispatch"]["inputs"]
-        self.assertEqual(set(inputs), {"release_tag", "mode", "family"})
+        self.assertEqual(set(inputs), {"release_tag", "mode", "family", "resume"})
         self.assertTrue(inputs["release_tag"]["required"])
         self.assertEqual(inputs["mode"]["options"], ["dry-run", "auto", "base"])
         self.assertEqual(inputs["mode"]["default"], "dry-run")
@@ -181,6 +182,14 @@ class Workflow(unittest.TestCase):
             self.assertIn("proceed=true", output)
             self.assertIn("mode=auto", output)
 
+    def test_only_manual_recovery_can_run_the_gate_on_the_local_runner(self):
+        self.assertEqual(self.gate["runs-on"],
+                         "${{ github.event_name == 'workflow_dispatch' && inputs.resume && "
+                         "fromJSON('[\"self-hosted\",\"otzaria-db\",\"amd-gpu\"]') || 'ubuntu-latest' }}")
+        self.assertFalse(any("uses" in step for step in self.gate["steps"]))
+        self.assertEqual(self.gate["timeout-minutes"], 5)
+        self.assertIn("set -euo pipefail", run_text(self.gate))
+
     def test_a_manual_run_builds_every_family_or_one_alone(self):
         family = self.doc[True]["workflow_dispatch"]["inputs"]["family"]
         self.assertEqual(family["options"], ["all"] + [name for name, _ in CONFIGURED_FAMILIES + OPT_IN_FAMILIES])
@@ -205,7 +214,11 @@ class Workflow(unittest.TestCase):
 
     def test_every_job_is_bounded(self):
         for name, job in self.doc["jobs"].items():
-            self.assertIsInstance(job.get("timeout-minutes"), int, name)
+            if name == "vectors":
+                self.assertEqual(job.get("timeout-minutes"),
+                                 "${{ inputs.family == 'pardesqa491-windows-onnx' && 4320 || 360 }}")
+            else:
+                self.assertIsInstance(job.get("timeout-minutes"), int, name)
 
     def test_the_workflow_is_thin_and_the_driver_does_the_work(self):
         runs = [s for s in self.job["steps"] if "run" in s]
@@ -421,7 +434,8 @@ mkdir -p "$out"
 : > "$out/embed.jsonl"
 [ -z "$model" ] || cp "$model" "$out/model.json"   # what the stub assemble derives the identity digest from
 package=$(jq -r '.passage_package_checksum // "4a4a2ae88a86f15ffe6069bfcefc3abd13c207cec5d7aaef52c0c59d752ade46"' "$model")
-jq -n --arg checksum "$package" --argjson n "${TO_EMBED:-0}" '{format:"otzaria-embed-plan",version:2,records:$n,plan_sha256:("a"*64),passage_package:{checksum:$checksum,quantization:"fp32"}}' > "$out/embed-manifest.json"
+quantization=$(jq -r '.passage_quantization // "fp32"' "$model")
+jq -n --arg checksum "$package" --arg quantization "$quantization" --argjson n "${TO_EMBED:-0}" '{format:"otzaria-embed-plan",version:2,records:$n,plan_sha256:("a"*64),passage_package:{checksum:$checksum,quantization:$quantization}}' > "$out/embed-manifest.json"
 family=""; [ -z "$model" ] || family=$(sha256sum < "$model" | cut -c1-16)
 jq -n --arg tag "${PLAN_TAG:-v30-20260930165019}" --arg family "$family" --arg text "${PLAN_IDENTITY:-stub}" --argjson prev "$prev_version" \
   '{format:"otzaria-vector-plan",version:1,identity:{family:$family,text:$text},library_release_tag:$tag,
@@ -546,6 +560,7 @@ esac
 STUB_PY = r"""#!/usr/bin/env bash
 echo "py $*" >> "$CALLS"
 script=$1; shift
+case "$script" in */resume_compact.py) exec "${REAL_PYTHON:-python3}" "$script" "$@";; esac
 out=""; cache=""; checksum=""; graph=""
 while [ $# -gt 0 ]; do case "$1" in --out) out=$2; shift 2;; --cache) cache=$2; shift 2;;
   --checksum) checksum=$2; shift 2;; --graph) graph=$2; shift 2;; *) shift;; esac; done
@@ -638,6 +653,10 @@ cp "$in" "$out"
 
 # df -Pk answering DF_FREE_KB's values in turn (DF_COUNT counts the calls)
 STUB_DF = r"""#!/usr/bin/env bash
+if [ -n "${VECTORS_HOST_FREE_PATH:-}" ] && [ "${!#}" = "$VECTORS_HOST_FREE_PATH" ]; then
+  echo "Filesystem 1024-blocks Used Available Capacity Mounted on"
+  echo "host 999999999 1 ${HOST_FREE_KB:-999999999} 1% $VECTORS_HOST_FREE_PATH"; exit 0
+fi
 n=$(cat "$DF_COUNT" 2>/dev/null || echo 0); n=$((n + 1)); echo "$n" > "$DF_COUNT"
 set -- $DF_FREE_KB; shift $((n - 1)) 2>/dev/null || set --
 echo "Filesystem 1024-blocks Used Available Capacity Mounted on"
@@ -689,8 +708,11 @@ class Driver(unittest.TestCase):
             family = self.state / "bin" / "families" / name
             family.mkdir(parents=True)
             model = {"family_id": "stub", "chunking_identity": CHUNKING_IDENTITY[name]}
-            if "qa491" in name:
+            if name.startswith("meivin-qa491"):
                 model["passage_package_checksum"] = "5f80c47d3310a21fcc0c2f541fbb5732ba254555ef45afc2712cab63c8a33059"
+            if name == "pardesqa491-windows-onnx":
+                model["passage_package_checksum"] = "edb0b74909ef0ae63ddaa1f47e909c18dc1584908a926471636f759e2de43365"
+                model["passage_quantization"] = "int8"
             (family / "model.json").write_text(json.dumps(model))
             (family / "chunking.json").write_text(json.dumps({"chunking_version": 2 if "windows" in name else 1}))
         # a runner that has built before: its warehouse (the driver's path for the fp32 package)
@@ -747,6 +769,89 @@ class Driver(unittest.TestCase):
 
     def model(self, name):
         return self.state / "bin" / "families" / name / "model.json"
+
+    def install_host_df_stub(self):
+        df = self.root / "net/df"
+        df.write_text(STUB_DF); df.chmod(0o755)
+        return {"DF_COUNT": str(self.root / "df-count"), "DF_FREE_KB": " ".join(["999999999"] * 20)}
+
+    def test_low_windows_host_space_preserves_retained_work_before_any_download(self):
+        df_env = self.install_host_df_stub()
+        work = self.state / "work" / TAG
+        kept = work / "pardesqa491-windows-onnx/shards/s000/vectors.f32"
+        kept.parent.mkdir(parents=True); kept.write_bytes(b"retained completed work")
+        p, calls = self.run_driver(mode="base", args=("--family", "pardesqa491-windows-onnx", "--resume"),
+                                   VECTORS_HOST_FREE_PATH=str(self.root), VECTORS_MIN_FREE_GB=1, HOST_FREE_KB=0, **df_env)
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn("Windows host", p.stdout)
+        self.assertEqual(kept.read_bytes(), b"retained completed work")
+        self.assertFalse(any("release download" in c or "embed_worker.py" in c or "resume_compact.py" in c for c in calls))
+
+    def test_compact_build_accepts_sufficient_physical_host_space(self):
+        df_env = self.install_host_df_stub()
+        p, calls = self.run_driver(TO_EMBED=65537, args=("--family", "pardesqa491-windows-onnx"),
+                                   VECTORS_HOST_FREE_PATH=str(self.root), VECTORS_MIN_FREE_GB=1, HOST_FREE_KB=999999999, **df_env)
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertEqual(len([c for c in calls if "embed_worker.py" in c]), 2)
+
+    def test_compact_pardes_uses_exact_cpu_and_small_atomic_windows(self):
+        p, calls = self.run_driver(TO_EMBED=65537, args=("--family", "pardesqa491-windows-onnx"))
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        workers = [c for c in calls if "embed_worker.py" in c]
+        self.assertEqual(len(workers), 2)
+        for call in workers:
+            for arg in ("--device cpu", "--model-kind pardesqa491", "--cpu-procs 8",
+                        "--cpu-threads 2", "--chunk 4096", "--take 65536", "--graph model.onnx"):
+                self.assertIn(arg, call)
+        self.assertIn("--skip 0 ", workers[0])
+        self.assertIn("--skip 65536 ", workers[1])
+        self.assertTrue((self.state / "warehouse/int8-edb0b749/warehouse.json").exists())
+        self.assertTrue((self.warehouse / "warehouse.json").exists())
+        self.assertFalse(any("pardes107" in c for c in calls))
+
+    def test_compact_retry_preserves_unimported_atomic_shards(self):
+        shard = self.state / "work" / TAG / "pardesqa491-windows-onnx/shards/s000/vectors.f32"
+        shard.parent.mkdir(parents=True)
+        shard.write_bytes(b"completed expensive shard")
+        p, calls = self.run_driver(TO_EMBED=65537, args=("--family", "pardesqa491-windows-onnx"))
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn("refusing to erase it", p.stdout)
+        self.assertEqual(shard.read_bytes(), b"completed expensive shard")
+        self.assertFalse(any("release download" in c for c in calls))
+
+    def test_compact_resume_skips_complete_windows_and_retains_them_after_publish(self):
+        from test_resume_compact import fixture
+        work = self.state / "work" / TAG
+        model = self.model("pardesqa491-windows-onnx")
+        package = "edb0b74909ef0ae63ddaa1f47e909c18dc1584908a926471636f759e2de43365"
+        add = fixture(work, model, tag=TAG, package=package)
+        completed = [add(0), add(2)]
+        # Stub assembly reads this additional diagnostic model file.
+        shutil.copy(model, work / "pardesqa491-windows-onnx/plan/model.json")
+        partial = work / "pardesqa491-windows-onnx/shards/s001"
+        partial.mkdir(); (partial / "vectors.f32.partial").write_bytes(b"preserve partial")
+        before = {str(f): (f.read_bytes(), f.stat().st_mtime_ns) for d in completed for f in d.iterdir()}
+        driver = self.unpinned_driver()
+        pins = driver.parent / "pins.env"
+        pins.write_text(re.sub(r"^CPU_EMBED_MAX=.*$", "CPU_EMBED_MAX=0", pins.read_text(), flags=re.M))
+        profile = driver.parent / "model-pins/pardesqa491.env"
+        profile.write_text(profile.read_text().replace("MODEL_EMBED_WINDOW=65536", "MODEL_EMBED_WINDOW=2"))
+        p, calls = self.run_driver(mode="base", driver=driver, REAL_PYTHON=sys.executable,
+                                   args=("--family", "pardesqa491-windows-onnx", "--resume"))
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        workers = [c for c in calls if "embed_worker.py" in c]
+        self.assertEqual(len(workers), 1)
+        self.assertIn("--skip 2 --take 2", workers[0])
+        self.assertFalse(any(c.startswith("export ") or "release download" in c for c in calls))
+        self.assertEqual({str(f): (f.read_bytes(), f.stat().st_mtime_ns) for d in completed for f in d.iterdir()}, before)
+        self.assertEqual(next((work / "recovery-partials").rglob("vectors.f32.partial")).read_bytes(), b"preserve partial")
+        self.assertTrue(any("gh release edit vectors-pardesqa491-windows-" in c for c in calls))
+
+    def test_resume_rejects_other_families_before_preflight(self):
+        p, calls = self.run_driver(mode="base", args=("--family", LEGACY, "--resume"))
+        self.assertEqual(p.returncode, 64)
+        self.assertIn("--resume supports only compact Pardes", p.stdout)
+        self.assertFalse(calls)
 
     def test_qa491_uses_a_fresh_package_warehouse_and_cache_only(self):
         shutil.rmtree(self.state / "warehouse/fp32-5f80c47d")
@@ -2145,7 +2250,7 @@ if [ "$1" = clone ]; then           # git clone -q --filter=blob:none <url> <des
   url=${@: -2:1}; dest=${@: -1}
   mkdir -p "$dest"
   case "$url" in *otzaria-semantic-search*)
-    for family in meivin-round2-onnx meivin-round2-windows-onnx meivin-qa491-onnx meivin-qa491-windows-onnx; do
+    for family in meivin-round2-onnx meivin-round2-windows-onnx meivin-qa491-onnx meivin-qa491-windows-onnx pardesqa491-windows-onnx; do
       mkdir -p "$dest/config/models/$family"
       echo "{\"family_id\":\"$family\"}" > "$dest/config/models/$family/model.json"
       echo '{"chunking_version":1}' > "$dest/config/models/$family/chunking.json"

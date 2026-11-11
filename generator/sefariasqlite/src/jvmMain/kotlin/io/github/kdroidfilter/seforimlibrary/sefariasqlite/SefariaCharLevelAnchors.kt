@@ -2,6 +2,7 @@ package io.github.kdroidfilter.seforimlibrary.sefariasqlite
 
 import co.touchlab.kermit.Logger
 import io.github.kdroidfilter.seforimlibrary.common.countVisibleChars
+import io.github.kdroidfilter.seforimlibrary.common.dh.DhExtractor
 import io.github.kdroidfilter.seforimlibrary.core.models.LinkAnchor
 import io.github.kdroidfilter.seforimlibrary.dao.repository.SeforimRepository
 
@@ -27,6 +28,43 @@ internal class SefariaCharLevelAnchors(
     suspend fun generate(
         pending: Collection<PendingCharLevelAnchor>,
         books: List<SefariaInlineAnchors.BookInput>,
+    ) {
+        val byPath = books.associateBy { it.bookPath }
+        generateCore(
+            pending = pending,
+            books = books.map {
+                SefariaInlineAnchors.BookRef(
+                    it.bookId, it.enTitle, it.bookPath, it.singleVersionTitle, it.cleanShiftByLineIndex,
+                )
+            },
+            lineContent = { book, entry -> byPath[book.bookPath]?.lines?.getOrNull(entry.lineIndex0) },
+        )
+    }
+
+    /** Query only referenced line content; no need to retain every source book. */
+    suspend fun generateFromDatabase(
+        pending: Collection<PendingCharLevelAnchor>,
+        books: List<SefariaInlineAnchors.BookRef>,
+    ) {
+        generateCore(
+            pending = pending,
+            books = books,
+            lineContent = { book, entry ->
+                val lineId = if (entry.side == 0) entry.srcLineId else entry.tgtLineId
+                val content = repository.getLine(lineId)?.content
+                if (content != null && book.boldedLineIndexes[entry.lineIndex0]) {
+                    DhExtractor.sourceLineForIndex(content)
+                } else {
+                    content
+                }
+            },
+        )
+    }
+
+    private suspend fun generateCore(
+        pending: Collection<PendingCharLevelAnchor>,
+        books: List<SefariaInlineAnchors.BookRef>,
+        lineContent: suspend (SefariaInlineAnchors.BookRef, PendingCharLevelAnchor) -> String?,
     ) {
         if (pending.isEmpty()) return
         val booksByPath = books.associateBy { it.bookPath }
@@ -63,7 +101,7 @@ internal class SefariaCharLevelAnchors(
                 skip("line modified by cleaning")
                 continue
             }
-            val content = book.lines.getOrNull(entry.lineIndex0)
+            val content = lineContent(book, entry)
             if (content == null) {
                 skip("line not found")
                 continue

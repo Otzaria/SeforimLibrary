@@ -198,5 +198,28 @@ class SefariaInlineAnchorsIntegrationTest {
 
         assertEquals(listOf(0 to "א"), repo.getLinkAnchors(302).map { it.charStart to it.label })
         assertEquals(listOf(7 to "ב"), repo.getLinkAnchors(303).map { it.charStart to it.label })
+
+        // A coordinate shared by two paths must still resolve the printed label of the linked row.
+        repo.insertLinesBatch(listOf(Line(id = 299, bookId = 3, lineIndex = 1, content = "(ג) אחר", heRef = null)))
+        val baseline302 = repo.getLinkAnchors(302).map { it.charStart to it.label }
+        val baseline303 = repo.getLinkAnchors(303).map { it.charStart to it.label }
+        repo.executeRawQuery("DELETE FROM link_anchor")
+        SefariaInlineAnchors(repo, Logger.withTag("InlineAnchorsStreamingParityTest")).generateFromImportedLines(
+            books = books.map { input ->
+                SefariaInlineAnchors.BookRef(
+                    bookId = input.bookId,
+                    enTitle = input.enTitle,
+                    bookPath = input.bookPath,
+                    singleVersionTitle = input.singleVersionTitle,
+                    cleanShiftByLineIndex = input.cleanShiftByLineIndex,
+                    inlineLines = SefariaInlineAnchors.collectInlineLines(input.lines, input.refsByLineIndex),
+                )
+            },
+            bookMetaById = bookMetaById,
+            refsByCanonical = refsByCanonical,
+            lineKeyToId = lineKeyToId,
+        )
+        assertEquals(baseline302, repo.getLinkAnchors(302).map { it.charStart to it.label })
+        assertEquals(baseline303, repo.getLinkAnchors(303).map { it.charStart to it.label })
     }
 }

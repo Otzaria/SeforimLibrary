@@ -50,6 +50,12 @@ on:
           - meivin-round2-windows-onnx
           - meivin-qa491-onnx
           - meivin-qa491-windows-onnx
+          - pardesqa491-windows-onnx
+      resume:
+        description: 'Resume retained compact Pardes work; verify completed shards and never recompute them (base mode only)'
+        type: boolean
+        required: false
+        default: false
 
 permissions:
   contents: write
@@ -64,7 +70,10 @@ concurrency:
 jobs:
   gate:
     name: Accept only a stored index of a database release
-    runs-on: ubuntu-latest
+    # Recovery already has its verified inputs on the local build machine. Do not
+    # make it wait for a GitHub-hosted slot before it can reach that idle machine.
+    # This step uses shell/gh only; it does not check out or run repository code.
+    runs-on: ${{ github.event_name == 'workflow_dispatch' && inputs.resume && fromJSON('["self-hosted","otzaria-db","amd-gpu"]') || 'ubuntu-latest' }}
     timeout-minutes: 5
     outputs:
       proceed: ${{ steps.classify.outputs.proceed }}
@@ -148,13 +157,14 @@ jobs:
     # warehouse; a later release embeds only the texts the warehouse lacks, on the CPU when
     # they are few (CPU_EMBED_MAX in pins.env). The windows family's first build embeds ~3.2M
     # texts (about an hour more); if it ever outlasts this bound, a dry run of it alone fills the warehouse.
-    timeout-minutes: 360
+    timeout-minutes: ${{ inputs.family == 'pardesqa491-windows-onnx' && 4320 || 360 }}
     env:
       GH_TOKEN: ${{ secrets.PIPELINE_TOKEN }}
       OTZARIA_HF_TOKEN: ${{ secrets.OTZARIA_HF_TOKEN }}
       RELEASE_TAG: ${{ needs.gate.outputs.release_tag }}
       MODE: ${{ needs.gate.outputs.mode }}
       FAMILY: ${{ inputs.family }}
+      RESUME: ${{ inputs.resume }}
       LIBRARY_VECTORS_PRERELEASE: ${{ vars.LIBRARY_VECTORS_PRERELEASE || 'true' }}
     steps:
       # The build machine's other self-hosted jobs pin checkout@v4: its runner's Node 24
@@ -170,4 +180,11 @@ jobs:
           bash .github/scripts/vectors/bootstrap_runner.sh
 
       - name: Build the vectors
-        run: bash .github/scripts/vectors/build_library_vectors.sh --tag "$RELEASE_TAG" --mode "$MODE" --family "${FAMILY:-all}" --repo "$GITHUB_REPOSITORY"
+        run: |
+          WORK_ARGS=()
+          if [ "${FAMILY:-all}" = pardesqa491-windows-onnx ]; then
+            # A new model gets its own scratch tree; preserve the cancelled P107 shards.
+            WORK_ARGS=(--work "$HOME/otzaria-vectors/work/$RELEASE_TAG-pardesqa491-int8-v1")
+          fi
+          if [ "${RESUME:-false}" = true ]; then WORK_ARGS+=(--resume); fi
+          bash .github/scripts/vectors/build_library_vectors.sh --tag "$RELEASE_TAG" --mode "$MODE" --family "${FAMILY:-all}" --repo "$GITHUB_REPOSITORY" "${WORK_ARGS[@]}"

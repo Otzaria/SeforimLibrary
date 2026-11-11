@@ -141,6 +141,28 @@ internal class SefariaInlineAnchors(
         val cleanShiftByLineIndex: Map<Int, Int> = emptyMap(),
     )
 
+    /** Lightweight per-book metadata retained across import phases. */
+    internal data class BookRef(
+        val bookId: Long,
+        val enTitle: String,
+        val bookPath: String,
+        val singleVersionTitle: String? = null,
+        val cleanShiftByLineIndex: Map<Int, Int> = emptyMap(),
+        val inlineLines: List<InlineLine> = emptyList(),
+        /** Indices whose stored text has a dash-dibbur wrapper added by this import. */
+        val boldedLineIndexes: java.util.BitSet = java.util.BitSet(),
+    )
+
+    internal data class InlineLine(val index: Int, val ref: String?, val itags: List<InlineItag>)
+
+    companion object {
+        fun collectInlineLines(lines: List<String>, refsByLineIndex: Map<Int, RefEntry>): List<InlineLine> =
+            lines.mapIndexedNotNull { index, content ->
+                val itags = parseInlineItags(content)
+                if (itags.isEmpty()) null else InlineLine(index, refsByLineIndex[index]?.ref, itags)
+            }
+    }
+
     private val skipCounts = linkedMapOf<String, Int>()
     private val skipSamples = linkedMapOf<String, String>()
 
@@ -151,6 +173,54 @@ internal class SefariaInlineAnchors(
 
     suspend fun generate(
         books: List<BookInput>,
+        bookMetaById: Map<Long, BookMeta>,
+        refsByCanonical: Map<String, List<RefEntry>>,
+        lineKeyToId: Map<Pair<String, Int>, Long>,
+    ) {
+        val linesByPath = books.associate { it.bookPath to it.lines }
+        generateCore(
+            books = books.map {
+                BookRef(it.bookId, it.enTitle, it.bookPath, inlineLines = collectInlineLines(it.lines, it.refsByLineIndex))
+            },
+            printedLabelValue = { entry ->
+                linesByPath[entry.path]?.getOrNull(entry.lineIndex - 1)?.let(::leadingPrintedLabel)
+            },
+            bookMetaById = bookMetaById,
+            refsByCanonical = refsByCanonical,
+            lineKeyToId = lineKeyToId,
+        )
+    }
+
+    /** Resolves the collected itags against stored links and commentary text. */
+    suspend fun generateFromImportedLines(
+        books: List<BookRef>,
+        bookMetaById: Map<Long, BookMeta>,
+        refsByCanonical: Map<String, List<RefEntry>>,
+        lineKeyToId: Map<Pair<String, Int>, Long>,
+    ) {
+        val labels = object : java.util.LinkedHashMap<Long, Int?>(512, 0.75f, true) {
+            override fun removeEldestEntry(eldest: MutableMap.MutableEntry<Long, Int?>?): Boolean =
+                size > 512
+        }
+        generateCore(
+            books = books,
+            printedLabelValue = label@{ entry ->
+                val lineId = lineKeyToId[entry.path to (entry.lineIndex - 1)] ?: return@label null
+                if (labels.containsKey(lineId)) {
+                    labels[lineId]
+                } else {
+                    repository.getLine(lineId)?.content?.let(::leadingPrintedLabel).also { labels[lineId] = it }
+                }
+            },
+            bookMetaById = bookMetaById,
+            refsByCanonical = refsByCanonical,
+            lineKeyToId = lineKeyToId,
+        )
+    }
+
+    private suspend fun generateCore(
+        books: List<BookRef>,
+        printedLabelValue: suspend (RefEntry) -> Int?,
         bookMetaById: Map<Long, BookMeta>,
         refsByCanonical: Map<String, List<RefEntry>>,
         lineKeyToId: Map<Pair<String, Int>, Long>,
@@ -167,9 +237,6 @@ internal class SefariaInlineAnchors(
             }
         }
         val enTitleByBookId = books.associate { it.bookId to it.enTitle }
-        val linesByPath = books.associate { it.bookPath to it.lines }
-        fun printedLabelValue(entry: RefEntry): Int? =
-            linesByPath[entry.path]?.getOrNull(entry.lineIndex - 1)?.let(::leadingPrintedLabel)
 
         var anchorsInserted = 0L
         var labelShiftsApplied = 0
@@ -177,11 +244,8 @@ internal class SefariaInlineAnchors(
         val batch = mutableListOf<LinkAnchor>()
 
         for (book in books) {
-            for ((idx, content) in book.lines.withIndex()) {
-                val itags = parseInlineItags(content)
-                if (itags.isEmpty()) continue
+            for ((idx, baseRef, itags) in book.inlineLines) {
                 linesWithItags++
-                val baseRef = book.refsByLineIndex[idx]?.ref
                 val srcLineId = lineKeyToId[book.bookPath to idx]
                 if (baseRef == null || srcLineId == null) {
                     skip("base line without ref") { "${book.enTitle} line $idx" }
@@ -232,10 +296,14 @@ internal class SefariaInlineAnchors(
                     if (itag.order == null) {
                         val printed = printedLabelValue(entries.first())
                         if (printed != order) {
-                            val shifted = PRINTED_LABEL_SHIFTS.firstNotNullOfOrNull { shift ->
-                                commentRef(order + shift)
+                            var shifted: List<RefEntry>? = null
+                            for (shift in PRINTED_LABEL_SHIFTS) {
+                                val candidate = commentRef(order + shift)
                                     ?.let { refsByCanonical[canonicalCitation(it)] }
-                                    ?.takeIf { it.isNotEmpty() && printedLabelValue(it.first()) == order }
+                                if (!candidate.isNullOrEmpty() && printedLabelValue(candidate.first()) == order) {
+                                    shifted = candidate
+                                    break
+                                }
                             }
                             when {
                                 shifted != null -> {
