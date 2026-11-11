@@ -299,7 +299,7 @@ class SefariaDirectImporter(
             val hasTeamim = precomputed.hasTeamim
             val hasNekudot = precomputed.hasNekudot
 
-            // Pre-resolve author + pubDate IDs through the IdAllocator so they
+            // Pre-resolve author + pubPlace + pubDate IDs through the IdAllocator so they
             // stay stable across builds (without this, INSERT OR IGNORE INTO author
             // would assign a fresh auto-increment id on every build and break the
             // delta producer's secondary-UNIQUE collision pre-check).
@@ -307,10 +307,17 @@ class SefariaDirectImporter(
             // before constructing either the body or the blacklist keys.
             val resolvedAuthors = payload.authors
                 .map { name -> Author(id = bindings.upsertAuthor(name), name = name) }
+            val resolvedPubPlaces = payload.pubPlaces.map { name ->
+                io.github.kdroidfilter.seforimlibrary.core.models.PubPlace(
+                    id = bindings.upsertPubPlace(name),
+                    name = name,
+                )
+            }
             val resolvedPubDates = payload.pubDates.map { pd ->
+                val date = hebrewPubDate(payload.heTitle, pd.date)
                 io.github.kdroidfilter.seforimlibrary.core.models.PubDate(
-                    id = bindings.upsertPubDate(pd.date),
-                    date = pd.date,
+                    id = bindings.upsertPubDate(date),
+                    date = date,
                 )
             }
             val book = Book(
@@ -320,7 +327,7 @@ class SefariaDirectImporter(
                 title = sefariaDisplayTitle(payload.heTitle, payload.collectiveTitleEn),
                 heRef = payload.heTitle,
                 authors = resolvedAuthors,
-                pubPlaces = emptyList(),
+                pubPlaces = resolvedPubPlaces,
                 pubDates = resolvedPubDates,
                 heShortDesc = payload.heShortDesc,
                 heDesc = payload.description,

@@ -301,6 +301,7 @@ internal class SefariaBookPayloadReader(
             val description = extractDescription(schemaJson, schemaObj)
             val heShortDesc = extractShortDescription(schemaJson, schemaObj)
             val pubDates = extractPubDates(schemaJson, schemaObj)
+            val pubPlaces = extractPubPlaces(schemaJson, schemaObj)
             val altStructures = SefariaAltNodeNameFixes.apply(englishTitle, parseAltStructures(schemaJson), logger)
             val rawDependence = extractRawDependence(schemaJson, schemaObj)
             val dependence = rawDependence?.let(::mapDependence)
@@ -333,6 +334,7 @@ internal class SefariaBookPayloadReader(
                 description = description,
                 heShortDesc = heShortDesc,
                 pubDates = pubDates,
+                pubPlaces = pubPlaces,
                 altStructures = altStructures,
                 dependence = dependence,
                 rawDependence = rawDependence,
@@ -519,6 +521,13 @@ internal class SefariaBookPayloadReader(
         collect("pubDate", schemaJson)
         collect("pubDate", schemaObj)
         return dates.distinct().map { PubDate(date = it) }
+    }
+
+    // Only the Hebrew string: `pubPlace` is English and would show as-is in the app.
+    private fun extractPubPlaces(schemaJson: JsonObject, schemaObj: JsonObject): List<String> {
+        val place = (schemaJson["pubPlaceString"] as? JsonObject)?.get("he")?.stringOrNull()
+            ?: (schemaObj["pubPlaceString"] as? JsonObject)?.get("he")?.stringOrNull()
+        return listOfNotNull(place?.trim()?.takeIf { it.isNotEmpty() })
     }
 
     private fun parseAltStructures(schemaJson: JsonObject): List<AltStructurePayload> {

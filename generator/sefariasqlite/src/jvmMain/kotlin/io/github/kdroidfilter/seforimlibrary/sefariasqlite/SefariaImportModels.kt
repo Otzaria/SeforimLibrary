@@ -98,6 +98,7 @@ internal data class BookPayload(
     // Short one-line summary (Sefaria heShortDesc) → book.heShortDesc
     val heShortDesc: String?,
     val pubDates: List<PubDate>,
+    val pubPlaces: List<String> = emptyList(),
     val altStructures: List<AltStructurePayload>,
     // Schema metadata used for link orientation. The *Keys lists hold the
     // *normalized* titles (en+he) of base texts; resolution to bookIds happens
