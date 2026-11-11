@@ -369,10 +369,8 @@ class SefariaDirectImporter(
                 pendingInferredKeysByBookId[bookId] = payload.inferredBaseTextTitleKeys
             }
 
-            val refsForBook = payload.refEntries.map { it.copy(path = bookPath) }
-            synchronized(allRefsWithPath) {
-                allRefsWithPath += refsForBook
-            }
+            // The serial insert loop owns this list until link processing starts.
+            payload.refEntries.mapTo(allRefsWithPath) { it.copy(path = bookPath) }
 
             // Mapping from lineIndex to RefEntry, built on the parse worker.
             val refsByLineIndex = precomputed.refsByLineIndex
