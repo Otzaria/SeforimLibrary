@@ -305,7 +305,9 @@ internal class SefariaBookPayloadReader(
             val altStructures = SefariaAltNodeNameFixes.apply(englishTitle, parseAltStructures(schemaJson), logger)
             val rawDependence = extractRawDependence(schemaJson, schemaObj)
             val dependence = rawDependence?.let(::mapDependence)
-            val declaredBaseTextTitleKeys = extractBaseTextTitleKeys(schemaJson, schemaObj)
+            val declaredBaseTextTitles = schemaJson["base_text_titles"]?.jsonArray
+                ?: schemaObj["base_text_titles"]?.jsonArray
+            val declaredBaseTextTitleKeys = extractBaseTextTitleKeys(declaredBaseTextTitles)
             // When Sefaria didn't ship `base_text_titles` (≈ 74 books, e.g.
             // Nachalat Avot on Avot, Bartenura on Torah, Ralbag on Torah),
             // try to recover the base from the title's "X on Y" / "X על Y"
@@ -338,7 +340,7 @@ internal class SefariaBookPayloadReader(
                 dependence = dependence,
                 rawDependence = rawDependence,
                 declaredBaseTextTitleKeys = declaredBaseTextTitleKeys,
-                baseTextMapping = extractBaseTextMapping(schemaJson, schemaObj),
+                baseTextMapping = if (declaredBaseTextTitles?.size == 1) extractBaseTextMapping(schemaJson, schemaObj) else null,
                 inferredBaseTextTitleKeys = inferredBaseTextTitleKeys,
                 collectiveTitleHe = collectiveTitleHe,
                 collectiveTitleEn = collectiveTitleEn,
@@ -478,10 +480,8 @@ internal class SefariaBookPayloadReader(
             ?.takeIf { it.isNotBlank() }
     }
 
-    private fun extractBaseTextTitleKeys(schemaJson: JsonObject, schemaObj: JsonObject): List<String> {
-        val arr = schemaJson["base_text_titles"]?.jsonArray
-            ?: schemaObj["base_text_titles"]?.jsonArray
-            ?: return emptyList()
+    private fun extractBaseTextTitleKeys(arr: JsonArray?): List<String> {
+        if (arr == null) return emptyList()
         val keys = mutableListOf<String>()
         arr.forEach { el ->
             when (el) {

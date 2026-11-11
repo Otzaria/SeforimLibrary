@@ -80,8 +80,12 @@ internal class SefariaLinksImporter(
         // may leave this false to exercise the legacy whole-unit fallback.
         requireExportedVisibility: Boolean = false,
         onLinkStored: (Link) -> Unit = {},
-        // Every line a stored range covers (link_coverage), either side.
-        onLineCovered: (Long) -> Unit = {},
+        // Called from CSV workers for commentary links whose original citations
+        // are not visible point refs on both sides. Must be thread-safe.
+        onNonExactCommentary: ((Link) -> Unit)? = null,
+        // Called from CSV workers with a book ID and inclusive, zero-based range
+        // bounds, including ranges whose per-line coverage is suppressed.
+        onRangeResolved: ((Long, Int, Int) -> Unit)? = null,
     ) = coroutineScope {
         // Pre-register all connection types we'll use so their ids are stable
         // (so `link.connectionTypeId` is reproducible across builds).
@@ -140,6 +144,8 @@ internal class SefariaLinksImporter(
                     wholeUnitCitations = wholeUnitCitations,
                     suppressionChannel = suppressionChannel,
                     observedVisibility = observedVisibility,
+                    onNonExactCommentary = onNonExactCommentary,
+                    onRangeResolved = onRangeResolved,
                 )
             }
         }
@@ -184,7 +190,7 @@ internal class SefariaLinksImporter(
 
             // Ranges/coverage/suppression reference link ids, so they are
             // inserted only after every link row exists.
-            insertPendingRangesAndCoverage(onLineCovered)
+            insertPendingRangesAndCoverage()
             insertSuppressedSides(suppressionAccumulator)
         } finally {
             linkChannel.close()
@@ -289,10 +295,9 @@ internal class SefariaLinksImporter(
         }
     }
 
-    private suspend fun insertPendingRangesAndCoverage(onLineCovered: (Long) -> Unit) {
+    private suspend fun insertPendingRangesAndCoverage() {
         val ranges = generateSequence { pendingRanges.poll() }.toList()
         val coverage = generateSequence { pendingCoverage.poll() }.toList()
-        coverage.forEach { onLineCovered(it.lineId) }
         ranges.chunked(SefariaImportTuning.LINK_BATCH_SIZE).forEach {
             repository.insertLinkRangesBatch(it)
         }
@@ -380,6 +385,8 @@ internal class SefariaLinksImporter(
         wholeUnitCitations: Set<String> = emptySet(),
         suppressionChannel: Channel<List<SuppressionContribution>>,
         observedVisibility: LinkVisibilityObservedCounts?,
+        onNonExactCommentary: ((Link) -> Unit)?,
+        onRangeResolved: ((Long, Int, Int) -> Unit)?,
     ) {
         Files.newBufferedReader(file).use { reader ->
             val iter = reader.lineSequence().iterator()
@@ -596,18 +603,24 @@ internal class SefariaLinksImporter(
                         val baseProvenance =
                             computeBaseProvenance(storedSrcBook, bookMetaById[storedTgtBook])
 
-                        linkChannel.send(
-                            Link(
-                                id = linkId,
-                                sourceBookId = storedSrcBook,
-                                targetBookId = storedTgtBook,
-                                sourceLineId = storedSrcLine,
-                                targetLineId = storedTgtLine,
-                                targetLineIndex = storedTgtLineIndex,
-                                connectionType = storedType,
-                                baseProvenance = baseProvenance,
-                            )
+                        val link = Link(
+                            id = linkId,
+                            sourceBookId = storedSrcBook,
+                            targetBookId = storedTgtBook,
+                            sourceLineId = storedSrcLine,
+                            targetLineId = storedTgtLine,
+                            targetLineIndex = storedTgtLineIndex,
+                            connectionType = storedType,
+                            baseProvenance = baseProvenance,
                         )
+                        if (onNonExactCommentary != null && storedType == ConnectionType.COMMENTARY &&
+                            (range1 != null || range2 != null || exportedMask1 != 0 || exportedMask2 != 0 ||
+                                fromRefs.size != 1 || toRefs.size != 1 ||
+                                refsByCanonical[canonical1].isNullOrEmpty() || refsByCanonical[canonical2].isNullOrEmpty())
+                        ) {
+                            onNonExactCommentary(link)
+                        }
+                        linkChannel.send(link)
                         rowWroteLink = true
 
                         // Per-side visibility, mapped from CSV order onto the
@@ -625,18 +638,20 @@ internal class SefariaLinksImporter(
                         // The side is relative to the STORED direction (0 = source).
                         if (range1 != null) {
                             queueRangeSide(
-                                range = range1, entry = from,
+                                range = range1, entry = from, bookId = srcBookId,
                                 side = if (wasSwapped) 1 else 0, linkId = linkId,
                                 lineKeyToId = lineKeyToId, headingLineIds = headingLineIds,
                                 refsByPath = refsByPath, emitCoverage = coverage1,
+                                onRangeResolved = onRangeResolved,
                             )
                         }
                         if (range2 != null) {
                             queueRangeSide(
-                                range = range2, entry = to,
+                                range = range2, entry = to, bookId = tgtBookId,
                                 side = if (wasSwapped) 0 else 1, linkId = linkId,
                                 lineKeyToId = lineKeyToId, headingLineIds = headingLineIds,
                                 refsByPath = refsByPath, emitCoverage = coverage2,
+                                onRangeResolved = onRangeResolved,
                             )
                         }
 
@@ -692,12 +707,14 @@ internal class SefariaLinksImporter(
     private fun queueRangeSide(
         range: CitationRange,
         entry: RefEntry,
+        bookId: Long,
         side: Int,
         linkId: Long,
         lineKeyToId: Map<Pair<String, Int>, Long>,
         headingLineIds: Set<Long>,
         refsByPath: Map<String, List<RefEntry>>,
         emitCoverage: Boolean = true,
+        onRangeResolved: ((Long, Int, Int) -> Unit)?,
     ) {
         val pathIndex = pathIndexCache.computeIfAbsent(entry.path) {
             PathRefPrefixIndex.build(refsByPath[it].orEmpty())
@@ -724,6 +741,7 @@ internal class SefariaLinksImporter(
             endLineId = endLineId,
             endLineIndex = endEntry.lineIndex - 1,
         )
+        onRangeResolved?.invoke(bookId, entry.lineIndex - 1, endEntry.lineIndex - 1)
         if (emitCoverage) {
             for (lineIndex1 in (entry.lineIndex + 1)..endEntry.lineIndex) {
                 val coveredId = lineKeyToId[entry.path to (lineIndex1 - 1)] ?: continue
@@ -737,14 +755,15 @@ internal class SefariaLinksImporter(
     }
 
     /**
-     * Stores [derived] as COMMENTARY links from the base line. Returns the links actually inserted.
+     * Stores [derived] as COMMENTARY links from the base line. Returns the number inserted.
      */
     suspend fun insertDerivedCommentaryLinks(
         derived: List<DerivedCommentaryLink>,
         bookMetaById: Map<Long, BookMeta>,
-    ): List<Link> {
+    ): Int {
+        if (derived.isEmpty()) return 0
         val typeId = bindings.upsertConnectionType(ConnectionType.COMMENTARY.name)
-        val stored = mutableListOf<Link>()
+        var written = 0
         derived.chunked(SefariaImportTuning.LINK_BATCH_SIZE).forEach { chunk ->
             val batch = chunk.map { d ->
                 Link(
@@ -763,10 +782,10 @@ internal class SefariaLinksImporter(
                 if (!inserted[i]) return@forEachIndexed
                 linksWrittenByType.bump(link.connectionType)
                 derivedLinksWrittenByStage.computeIfAbsent(chunk[i].stage) { LongAdder() }.increment()
-                stored += link
+                written++
             }
         }
-        return stored
+        return written
     }
 
     private data class StoredLink(

@@ -86,6 +86,18 @@ class SefariaBookPayloadReaderTest {
         assertEquals(null, payload.baseTextMapping)
     }
 
+    @Test
+    fun addressMappingRequiresExactlyOneDeclaredBase() = runBlocking {
+        val schema = rashiSchemaJson.replace(
+            "\"base_text_titles\": [\"Genesis\"]",
+            "\"base_text_titles\": [\"Genesis\", \"Unavailable base\"]",
+        )
+        val payload = readSingle("Rashi_on_Genesis", "Rashi on Genesis", schema, rashiMergedJson)
+
+        assertEquals(2, payload.declaredBaseTextTitleKeys.size)
+        assertEquals(null, payload.baseTextMapping)
+    }
+
     companion object {
         private fun readSingle(folder: String, title: String, schema: String, merged: String) = runBlocking {
             val tempDir = Files.createTempDirectory("seforim-test")

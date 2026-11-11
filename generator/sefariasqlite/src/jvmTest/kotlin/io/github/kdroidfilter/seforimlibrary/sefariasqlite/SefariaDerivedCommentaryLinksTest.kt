@@ -6,48 +6,28 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 
-/** Commentary links derived where Sefaria has none (Otzaria/otzaria#3854, #3264, #3806). */
+/** Commentary links derived from Sefaria segment addresses (Otzaria/otzaria#3854). */
 class SefariaDerivedCommentaryLinksTest {
-    private val base = 1L
-    private val commentary = 2L
-
-    /** Texts of the fixture: a base line has three words of its own, a segment says what [Fixture.say] told. */
-    private class FixtureTexts : LineTextSource {
-        val segmentText = HashMap<Int, String>()
-
-        private fun word(n: Int): String {
-            val letters = ('א'..'ת').toList()
-            return "ק" + letters[n % 22] + letters[(n / 22) % 22] + "ת"
-        }
-
-        fun baseText(lineIndex: Int) = (0..2).joinToString(" ") { word(lineIndex * 3 + it) }
-
-        override fun text(path: String, lineIndex: Int) = if (path == "b") baseText(lineIndex) else segmentText[lineIndex]
-    }
-
     /** Builds a commentary and its base from addresses; line ids are 1000+i (base) and 2000+i. */
     private class Fixture(baseAddresses: List<String>, segmentAddresses: List<String>, mapping: String?) {
         val baseLines = baseAddresses.mapIndexed { i, a -> AddressedLine(1000L + i, i, a) }
         val segments = segmentAddresses.mapIndexed { i, a -> AddressedLine(2000L + i, i, a) }
-        val book = AddressedCommentary(2L, 1L, mapping, segments, baseLines, commentaryPath = "c", basePath = "b")
-        val texts = FixtureTexts()
-        val links = CommentaryBaseLinks(
-            listOf(book),
-            (baseLines.associate { it.lineId to 1L } + segments.associate { it.lineId to 2L }),
-        )
+        val book = AddressedCommentary(2L, 1L, mapping, segments, baseLines)
+        val links = CommentaryBaseLinks(listOf(book))
 
         fun baseLine(address: String) = baseLines.single { it.address == address }
         fun segment(address: String) = segments.single { it.address == address }
 
-        /** The segment's text quotes the words of [baseAddress]. */
-        fun say(segmentAddress: String, baseAddress: String) {
-            texts.segmentText[segment(segmentAddress).lineIndex] = texts.baseText(baseLine(baseAddress).lineIndex)
-        }
-
-        fun link(segmentAddress: String, baseAddress: String, type: ConnectionType = ConnectionType.COMMENTARY) {
+        fun link(
+            segmentAddress: String,
+            baseAddress: String,
+            type: ConnectionType = ConnectionType.COMMENTARY,
+            nonExact: Boolean = false,
+        ) {
             val s = segment(segmentAddress)
-            links.record(Link(0, 1L, 2L, baseLine(baseAddress).lineId, s.lineId, s.lineIndex, type))
-            say(segmentAddress, baseAddress)
+            val link = Link(0, 1L, 2L, baseLine(baseAddress).lineId, s.lineId, s.lineIndex, type)
+            links.record(link)
+            if (nonExact) links.recordNonExactCommentary(link)
         }
     }
 
@@ -91,7 +71,8 @@ class SefariaDerivedCommentaryLinksTest {
     @Test
     fun segmentInsideAStoredRangeIsLeftAlone() {
         val f = maggidMishneh()
-        f.links.recordCoveredLine(f.segment("17:16:2").lineId)
+        val first = f.segment("17:16:1").lineIndex
+        f.links.recordRange(f.book.commentaryBookId, first, first + 2)
         assertTrue(deriveSegmentAddressLinks(f.book, f.links).isEmpty())
     }
 
@@ -122,170 +103,20 @@ class SefariaDerivedCommentaryLinksTest {
 
     @Test
     fun siblingLinkedAwayFromTheAddressBlocksIt() {
-        val f = maggidMishneh()
-        val other = f.segment("17:16:1")
-        // Relink 17:16:1 to 17:15 only: its own address is then contradicted.
-        f.links.anchors[other.lineId] = mutableSetOf(f.baseLine("17:15").lineId)
-        assertTrue(deriveSegmentAddressLinks(f.book, f.links).none { it.addresses(f).first == "17:16" })
-    }
-
-    // --- Stage 2: daf-only Talmud commentaries ------------------------------------------
-
-    private fun daf(amud: String, lines: Int) = (1..lines).map { "$amud:$it" }
-
-    private val amudim = listOf("96a", "96b", "97a", "97b", "98a", "98b")
-
-    /**
-     * Meiri on Chullin: six amudim of 10 base lines and 5 segments. Every segment is linked and
-     * its text is its base line's, except 96a:3, which sits between two segments linked to 96a:6.
-     */
-    private fun meiri(): Fixture {
-        val f = Fixture(amudim.flatMap { daf(it, 10) }, amudim.flatMap { daf(it, 5) }, null)
-        amudim.forEach { a ->
-            listOf(1 to 5, 2 to 6, 4 to 6, 5 to 9).forEach { (s, b) -> f.link("$a:$s", "$a:$b") }
-            if (a != "96a") f.link("$a:3", "$a:6")
-        }
-        f.say("96a:3", "96a:6")
-        return f
-    }
-
-    private fun derive(f: Fixture) = deriveTalmudNeighbourLinks(f.book, f.links, f.texts)
-
-    @Test
-    fun issue3264SegmentBetweenTwoLinksToTheSameLine() {
-        val f = meiri()
-        val derived = derive(f)
-        assertEquals(listOf("96a:6" to "96a:3"), derived.map { it.addresses(f) })
-        assertEquals(DerivedLinkStage.TALMUD_NEIGHBOURS, derived.single().stage)
+        val halakhot = (12..20).map { "17:$it" }
+        val f = Fixture(halakhot, halakhot.map { "$it:1" } + "17:16:2", "many_to_one")
+        (halakhot - "17:16").forEach { f.link("$it:1", it) }
+        f.link("17:16:1", "17:15")
+        assertTrue(deriveSegmentAddressLinks(f.book, f.links).isEmpty())
     }
 
     @Test
-    fun runOfTwoBetweenTheSameLineGetsItWhenBothTextsAgree() {
-        val f = meiri()
-        f.links.anchors[f.segment("96a:5").lineId] = mutableSetOf(f.baseLine("96a:6").lineId)
-        f.links.linked.remove(f.segment("96a:4").lineId)
-        f.links.anchors.remove(f.segment("96a:4").lineId)
-        f.say("96a:4", "96a:6")
-        assertEquals(setOf("96a:3", "96a:4"), derive(f).map { it.addresses(f).second }.toSet())
-    }
-
-    /** Chidushei Halachot on Eruvin 31b:2: the last segment of the amud, one linked neighbour only. */
-    @Test
-    fun issue3806SegmentAtTheEdgeOfTheAmudDerivesNothing() {
-        val f = meiri()
-        f.links.linked.remove(f.segment("98b:5").lineId)
-        f.links.anchors.remove(f.segment("98b:5").lineId)
-        f.say("98b:5", "98b:9")
-        assertTrue(derive(f).none { it.addresses(f).second == "98b:5" })
-    }
-
-    @Test
-    fun segmentBeforeTheFirstLinkedOneDerivesNothing() {
-        val f = meiri()
-        f.links.linked.remove(f.segment("97a:1").lineId)
-        f.links.anchors.remove(f.segment("97a:1").lineId)
-        f.say("97a:1", "97a:5")
-        assertTrue(derive(f).none { it.addresses(f).second == "97a:1" })
-    }
-
-    @Test
-    fun neighboursOnDifferentLinesDeriveNothing() {
-        val f = meiri()
-        f.links.anchors[f.segment("96a:4").lineId] = mutableSetOf(f.baseLine("96a:8").lineId)
-        assertTrue(derive(f).none { it.addresses(f).second == "96a:3" })
-    }
-
-    @Test
-    fun neighbourLinkedToSeveralLinesDerivesNothing() {
-        val f = meiri()
-        f.links.anchors.getValue(f.segment("96a:4").lineId) += f.baseLine("96a:7").lineId
-        assertTrue(derive(f).none { it.addresses(f).second == "96a:3" })
-    }
-
-    @Test
-    fun neighbourLinkedOnlyOutsideTheAmudDerivesNothing() {
-        val f = meiri()
-        f.links.anchors[f.segment("96a:4").lineId] = mutableSetOf(f.baseLine("96b:6").lineId)
-        f.links.anchors[f.segment("96a:2").lineId] = mutableSetOf(f.baseLine("96b:6").lineId)
-        assertTrue(derive(f).none { it.addresses(f).second == "96a:3" })
-    }
-
-    @Test
-    fun segmentWhoseTextPointsElsewhereDerivesNothing() {
-        val f = meiri()
-        f.say("96a:3", "96a:9")
-        assertTrue(derive(f).isEmpty())
-    }
-
-    @Test
-    fun segmentWithoutAClearBestLineDerivesNothing() {
-        val f = meiri()
-        f.say("96a:3", "96a:6")
-        f.texts.segmentText[f.segment("96a:3").lineIndex] = f.texts.baseText(f.baseLine("96a:6").lineIndex).split(' ').first()
-        assertTrue(derive(f).isEmpty())
-    }
-
-    @Test
-    fun bookWhoseTextsDoNotMatchItsOwnLinksDerivesNothing() {
-        val f = meiri()
-        // Every other linked segment now says something else: the gate sees 50% of Sefaria's links agree.
-        f.segments.filter { it.address != "96a:3" }.filterIndexed { i, _ -> i % 2 == 0 }.forEach {
-            f.texts.segmentText[it.lineIndex] = f.texts.baseText(f.baseLines.first { b -> b.address.startsWith("98b") }.lineIndex)
-        }
-        assertTrue(derive(f).isEmpty())
-    }
-
-    /** 29 linked segments: two that quote another line of their amud leave 93% (kept), three 89.7% (dropped). */
-    @Test
-    fun gateNeedsAtLeast92PercentOfTheBooksOwnLinks() {
-        val f = meiri()
-        listOf("97a:1", "97b:1").forEach { f.say(it, it.substringBefore(':') + ":9") }
-        assertEquals(1, derive(f).size)
-        f.say("98a:1", "98a:9")
-        assertTrue(derive(f).isEmpty())
-    }
-
-    @Test
-    fun bookWithTooFewLinkedSegmentsDerivesNothing() {
-        val f = Fixture(daf("96a", 10) + daf("96b", 10), daf("96a", 5) + daf("96b", 4), null)
-        listOf(1 to 5, 2 to 6, 4 to 6, 5 to 9).forEach { (s, b) -> f.link("96a:$s", "96a:$b") }
-        listOf(1 to 2, 2 to 4, 3 to 6, 4 to 9).forEach { (s, b) -> f.link("96b:$s", "96b:$b") }
-        f.say("96a:3", "96a:6")
-        assertTrue(derive(f).isEmpty())
-    }
-
-    @Test
-    fun bookOutOfBaseOrderDerivesNothing() {
-        val f = meiri()
-        amudim.forEach { a ->
-            f.links.anchors[f.segment("$a:2").lineId] = mutableSetOf(f.baseLine("$a:1").lineId)
-            f.links.anchors[f.segment("$a:5").lineId] = mutableSetOf(f.baseLine("$a:2").lineId)
-        }
-        assertTrue(derive(f).isEmpty())
-    }
-
-    @Test
-    fun segmentAddressedBelowTheDafIsNotStage2() {
-        val f = Fixture(daf("96a", 10), (1..6).map { "96a:$it:1" }, null)
-        assertTrue(derive(f).isEmpty())
-    }
-
-    @Test
-    fun cachedTextSourceLoadsABookOnceAndKeepsOnlyTheLastFew() {
-        val loads = mutableListOf<String>()
-        val source = CachedLineTextSource(capacity = 2) { path -> loads += path; listOf("$path-0", "$path-1") }
-        assertEquals("a-1", source.text("a", 1))
-        assertEquals("a-0", source.text("a", 0))
-        assertEquals(null, source.text("a", 2))
-        source.text("b", 0)
-        source.text("c", 0)
-        source.text("a", 0)
-        assertEquals(listOf("a", "b", "c", "a"), loads)
-    }
-
-    @Test
-    fun cachedTextSourceWithoutABookGivesNothing() {
-        assertEquals(null, CachedLineTextSource { null }.text("missing", 0))
+    fun rangeStartsDoNotCountAsCalibrationSamples() {
+        val halakhot = (12..16).map { "17:$it" }
+        val f = Fixture(halakhot, halakhot.map { "$it:1" } + "17:16:2", "many_to_one")
+        (halakhot - "17:12").forEach { f.link("$it:1", it) }
+        f.link("17:12:1", "17:12", nonExact = true)
+        assertTrue(deriveSegmentAddressLinks(f.book, f.links).isEmpty())
     }
 
     // --- Collecting -----------------------------------------------------------------------
@@ -311,6 +142,7 @@ class SefariaDerivedCommentaryLinksTest {
             2L to BookMeta(
                 isBaseBook = false, categoryLevel = 1, priorityRank = null, dependence = Dependence.COMMENTARY,
                 baseTextBookIds = setOf(1L), sefariaDeclaredBaseTextBookIds = setOf(1L), enTitle = "Meiri on Chullin",
+                baseTextMapping = "one_to_one",
             ),
             3L to BookMeta(
                 isBaseBook = false, categoryLevel = 1, priorityRank = null, dependence = Dependence.COMMENTARY,
@@ -321,9 +153,9 @@ class SefariaDerivedCommentaryLinksTest {
         val collected = collectAddressedCommentaries(refs.groupBy { it.path }, lineKeyToId, lineIdToBookId, setOf(22L), meta)
 
         assertEquals(
-            listOf(AddressedCommentary(2L, 1L, null, listOf(AddressedLine(21L, 1, "96a:1")), listOf(
+            listOf(AddressedCommentary(2L, 1L, "one_to_one", listOf(AddressedLine(21L, 1, "96a:1")), listOf(
                 AddressedLine(10L, 0, "96a:1"), AddressedLine(11L, 1, "96a:2"),
-            ), commentaryPath = "meiri", basePath = "chullin")),
+            ))),
             collected,
         )
     }

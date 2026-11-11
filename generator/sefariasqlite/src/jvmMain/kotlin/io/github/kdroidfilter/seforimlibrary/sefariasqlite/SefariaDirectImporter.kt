@@ -225,7 +225,6 @@ class SefariaDirectImporter(
         val lineIdToBookId = ConcurrentHashMap<Long, Long>()
         val allRefsWithPath = mutableListOf<RefEntry>()
         val canonicalTitleByBookPath = ConcurrentHashMap<String, String>()
-        val sourceDirByBookPath = ConcurrentHashMap<String, String>()
         val bookMetaById = ConcurrentHashMap<Long, BookMeta>()
         val normalizedTitleToBookId = ConcurrentHashMap<String, Long>()
         // Collected in priority order during the book loop; the title→bookId
@@ -297,7 +296,6 @@ class SefariaDirectImporter(
             }
             val bookPath = buildBookPath(payload.categoriesHe, payload.heTitle)
             val canonicalTitle = canonicalHeTitle(payload)
-            payload.sourceDirPath?.let { sourceDirByBookPath[bookPath] = it }
             val previousCanonicalTitle = canonicalTitleByBookPath.putIfAbsent(bookPath, canonicalTitle)
             check(previousCanonicalTitle == null || previousCanonicalTitle == canonicalTitle) {
                 "Conflicting Sefaria book identities for linker sidecar path $bookPath: " +
@@ -650,7 +648,7 @@ class SefariaDirectImporter(
                 bookMetaById,
                 excludedBookIds = sparseCommentaries.mapTo(HashSet()) { it.commentaryBookId },
             )
-            val commentaryBaseLinks = CommentaryBaseLinks(addressedCommentaries, lineIdToBookId)
+            val commentaryBaseLinks = CommentaryBaseLinks(addressedCommentaries)
             linksImporter.processLinksInParallel(
                 linksDir = linksDir,
                 refsByCanonical = refsByCanonical,
@@ -668,24 +666,17 @@ class SefariaDirectImporter(
                     }
                     commentaryBaseLinks.record(link)
                 },
-                onLineCovered = commentaryBaseLinks::recordCoveredLine,
+                onRangeResolved = commentaryBaseLinks::recordRange,
+                onNonExactCommentary = commentaryBaseLinks::recordNonExactCommentary,
             )
             sparseLinks.forEach { (commentary, links) ->
                 val anchors = anchorUnlinkedCommentaryLines(commentary, links)
                 linksImporter.insertDerivedCommentaryLinks(anchors.map { it.toDerivedLink(commentary) }, bookMetaById)
                 logger.i { "Anchored ${anchors.size} lines of book ${commentary.commentaryBookId} to its base text" }
             }
-            // Stage 1 first: its links bound the daf-only runs of stage 2.
-            storeDerived(addressedCommentaries.flatMap { deriveSegmentAddressLinks(it, commentaryBaseLinks) }, linksImporter, commentaryBaseLinks, bookMetaById)
-            // Re-read one book at a time: no book list is kept for the text gate.
-            val lineTexts = CachedLineTextSource { path ->
-                sourceDirByBookPath[path]?.let { dir ->
-                    java.nio.file.Files.list(java.nio.file.Paths.get(dir)).use { files ->
-                        files.filter { it.fileName.toString().equals("merged.json", ignoreCase = true) }.findFirst().orElse(null)
-                    }?.let { bookPayloadReader.parseBookFile(it, schemaDir, schemaLookup)?.lines }
-                }
-            }
-            storeDerived(addressedCommentaries.flatMap { deriveTalmudNeighbourLinks(it, commentaryBaseLinks, lineTexts) }, linksImporter, commentaryBaseLinks, bookMetaById)
+            val addressLinks = addressedCommentaries.flatMap { deriveSegmentAddressLinks(it, commentaryBaseLinks) }
+            val inserted = linksImporter.insertDerivedCommentaryLinks(addressLinks, bookMetaById)
+            logger.i { "Derived $inserted commentary links from Sefaria segment addresses" }
             // After the anchors: they are counted as written links too.
             linkImportMetrics = linksImporter.metricsSnapshot()
             logger.i { "Links processed" }
@@ -786,19 +777,6 @@ class SefariaDirectImporter(
      * space) and of books another source held that Sefaria now provides: the
      * Otzaria importer skips any title Sefaria has, so the id moves here.
      */
-    private suspend fun storeDerived(
-        derived: List<DerivedCommentaryLink>,
-        linksImporter: SefariaLinksImporter,
-        commentaryBaseLinks: CommentaryBaseLinks,
-        bookMetaById: Map<Long, BookMeta>,
-    ) {
-        linksImporter.insertDerivedCommentaryLinks(derived, bookMetaById).forEach(commentaryBaseLinks::record)
-        logger.i {
-            "Derived ${derived.size} commentary links: " +
-                derived.groupingBy { it.stage.metricKey }.eachCount().toSortedMap()
-        }
-    }
-
     internal fun registerBookAliases(payloads: List<BookPayload>) {
         val currentBooks = payloads.associateBy { BookKey(sourceName, canonicalHeTitle(it)) }
         registerBookAliasesWithHashes(currentBooks.keys) { key ->

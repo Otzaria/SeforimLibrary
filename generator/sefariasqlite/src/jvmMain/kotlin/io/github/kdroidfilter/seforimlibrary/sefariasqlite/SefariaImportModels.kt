@@ -62,7 +62,7 @@ internal data class BookMeta(
     val isReferenceWork: Boolean = false,
     // English title, the prefix of every ref of the book's main node (see SefariaDerivedCommentaryLinks).
     val enTitle: String? = null,
-    // Schema `base_text_mapping` ("many_to_one", "one_to_one", …); null when absent.
+    // Schema `base_text_mapping` for a commentary with a single declared base.
     val baseTextMapping: String? = null,
 )
 
@@ -111,7 +111,7 @@ internal data class BookPayload(
     val rawDependence: String? = null,
     // From schema `base_text_titles` — provenance SEFARIA_DECLARED.
     val declaredBaseTextTitleKeys: List<String> = emptyList(),
-    // Schema `base_text_mapping`: how a segment address maps onto its base text.
+    // Schema `base_text_mapping` when exactly one base text is declared.
     val baseTextMapping: String? = null,
     // Recovered from the "X on Y" title pattern — provenance INFERRED_TITLE.
     val inferredBaseTextTitleKeys: List<String> = emptyList(),
