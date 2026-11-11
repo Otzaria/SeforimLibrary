@@ -373,6 +373,8 @@ class SefariaDirectImporter(
                 topCategoryEn = payload.categoriesEn.firstOrNull(),
                 authorKeys = resolvedAuthors.mapTo(HashSet()) { it.name },
                 isReferenceWork = payload.isReferenceWork,
+                enTitle = payload.enTitle,
+                baseTextMapping = payload.baseTextMapping,
             )
             if (payload.declaredBaseTextTitleKeys.isNotEmpty()) {
                 pendingDeclaredKeysByBookId[bookId] = payload.declaredBaseTextTitleKeys
@@ -636,6 +638,17 @@ class SefariaDirectImporter(
             )
             sparseBaseLines.clear()
             val sparseLinks = sparseCommentaries.associateWith { SparseCommentaryLinks() }
+            // Commentaries whose unlinked segments get a link derived from their address
+            // (see SefariaDerivedCommentaryLinks.kt). The sparse ones keep their own rule.
+            val addressedCommentaries = collectAddressedCommentaries(
+                refsByPath,
+                lineKeyToId,
+                lineIdToBookId,
+                headingLineIds,
+                bookMetaById,
+                excludedBookIds = sparseCommentaries.mapTo(HashSet()) { it.commentaryBookId },
+            )
+            val commentaryBaseLinks = CommentaryBaseLinks(addressedCommentaries)
             linksImporter.processLinksInParallel(
                 linksDir = linksDir,
                 refsByCanonical = refsByCanonical,
@@ -651,13 +664,19 @@ class SefariaDirectImporter(
                     if (link.connectionType == ConnectionType.COMMENTARY) {
                         sparseLinks.forEach { (commentary, links) -> links.record(commentary, link) }
                     }
+                    commentaryBaseLinks.record(link)
                 },
+                onRangeResolved = commentaryBaseLinks::recordRange,
+                onNonExactCommentary = commentaryBaseLinks::recordNonExactCommentary,
             )
             sparseLinks.forEach { (commentary, links) ->
                 val anchors = anchorUnlinkedCommentaryLines(commentary, links)
-                linksImporter.insertCommentaryAnchors(commentary, anchors, bookMetaById)
+                linksImporter.insertDerivedCommentaryLinks(anchors.map { it.toDerivedLink(commentary) }, bookMetaById)
                 logger.i { "Anchored ${anchors.size} lines of book ${commentary.commentaryBookId} to its base text" }
             }
+            val addressLinks = addressedCommentaries.flatMap { deriveSegmentAddressLinks(it, commentaryBaseLinks) }
+            val inserted = linksImporter.insertDerivedCommentaryLinks(addressLinks, bookMetaById)
+            logger.i { "Derived $inserted commentary links from Sefaria segment addresses" }
             // After the anchors: they are counted as written links too.
             linkImportMetrics = linksImporter.metricsSnapshot()
             logger.i { "Links processed" }

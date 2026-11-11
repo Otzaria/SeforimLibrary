@@ -143,6 +143,7 @@ fun main(args: Array<String>) = runBlocking {
                 dbSizeBytes = File(persistedDbPath).length(),
                 insertedByType = metrics.insertedByType,
                 persistedByType = importer.persistedLinkCountsByType ?: emptyMap(),
+                derivedCommentaryByStage = metrics.derivedCommentaryByStage,
             )
             val reportPath = Paths.get("$persistDbPath.link-import-metrics.json")
             val dir = reportPath.toAbsolutePath().parent
