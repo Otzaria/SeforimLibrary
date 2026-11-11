@@ -133,6 +133,45 @@ class SefariaCleanSefariaLineTest {
     }
 
     @Test
+    fun dropsMarkerRepeatedAtStartOfNoteBody() {
+        // Shape of Issur VeHeter HaArokh 35:11 (Otzaria/otzaria#4892)
+        val line = "לעיל<sup class=\"footnote-marker\">ב)</sup><i class=\"footnote\">ב) אמנם מהרי\"ש הורה</i>. והטעם"
+        val fixed = "לעיל<sup class=\"footnote-marker\">ב)</sup><i class=\"footnote\">אמנם מהרי\"ש הורה</i>. והטעם"
+        assertEquals(fixed, cleanSefariaLine(line))
+        // Once Sefaria drops the repeat, the same text comes out.
+        assertEquals(fixed, cleanSefariaLine(fixed))
+    }
+
+    @Test
+    fun dropsOnlyTheRepeatedMarkerAmongSeveralNotes() {
+        val line = "א<sup class=\"footnote-marker\">*</sup><i class=\"footnote\"> * הערה</i> " +
+            "ב<sup class=\"footnote-marker\">2</sup><i class=\"footnote\">שנייה</i>"
+        assertEquals(
+            "א<sup class=\"footnote-marker\">*</sup><i class=\"footnote\"> הערה</i> " +
+                "ב<sup class=\"footnote-marker\">2</sup><i class=\"footnote\">שנייה</i>",
+            cleanSefariaLine(line),
+        )
+    }
+
+    @Test
+    fun keepsBodyWhoseFirstWordStartsWithTheMarker() {
+        val line = "א<sup class=\"footnote-marker\">ב</sup><i class=\"footnote\">בדברי הרמב\"ם</i>"
+        assertEquals(line, cleanSefariaLine(line))
+    }
+
+    @Test
+    fun keepsBodyThatIsOnlyTheMarker() {
+        val line = "א<sup class=\"footnote-marker\">ח)</sup><i class=\"footnote\">ח) </i>"
+        assertEquals(line, cleanSefariaLine(line))
+    }
+
+    @Test
+    fun keepsNoteWithoutMarker() {
+        val line = "א <i class=\"footnote\">ב) אמנם</i>"
+        assertEquals(line, cleanSefariaLine(line))
+    }
+
+    @Test
     fun translatorFootnotesAreScopedToNodaBiYehudahOrachChaim() {
         assertTrue(hasTranslatorFootnotes("Noda BiYehudah I, Orach Chaim,  1 20 "))
         assertFalse(hasTranslatorFootnotes("Noda BiYehudah I, Author's Introduction,  1 "))

@@ -81,6 +81,36 @@ internal fun normalizeSegmentMarker(line: String): String = BRACED_SEGMENT_MARKE
 /** Drops footnote markers and bodies; bodies may nest `<i>` tags, so closing tags are matched by depth. */
 internal fun stripSefariaFootnotes(line: String): String = InlineNotes.stripMarkersAndBodies(line)
 
+private val HTML_TAG_REGEX = Regex("<[^>]*>")
+
+private fun Char.isSpaceOrNbsp(): Boolean = isWhitespace() || this == ' '
+
+/**
+ * Note bodies that open with their own marker and a space ("ב) ב) אמנם", every note of
+ * Issur VeHeter HaArokh): the reader shows the marker already. A body that is only the marker stays.
+ */
+internal fun dropRepeatedFootnoteMarkers(line: String): String {
+    val notes = (InlineNotes.parse(line) as? InlineNotes.Parsed.Notes)?.notes ?: return line
+    var out: StringBuilder? = null
+    var cursor = 0
+    for (note in notes) {
+        val marker = note.marker?.let { HTML_TAG_REGEX.replace(it, "").trim() }
+        if (marker.isNullOrEmpty()) continue
+        val body = note.body
+        val lead = body.indexOfFirst { !it.isSpaceOrNbsp() }
+        if (lead < 0 || !body.startsWith(marker, lead)) continue
+        var end = lead + marker.length
+        if (end >= body.length || !body[end].isSpaceOrNbsp()) continue
+        while (end < body.length && body[end].isSpaceOrNbsp()) end++
+        if (end == body.length) continue
+        val bodyStart = line.indexOf('>', note.start) + 1
+        val sb = out ?: StringBuilder(line.length).also { out = it }
+        sb.append(line, cursor, bodyStart + lead)
+        cursor = bodyStart + end
+    }
+    return out?.append(line, cursor, line.length)?.toString() ?: line
+}
+
 internal fun cleanSefariaLine(
     raw: String,
     collapseInlineBreaks: Boolean = false,
@@ -89,6 +119,8 @@ internal fun cleanSefariaLine(
     var s = if (raw.contains('\n')) raw.replace("\n", "") else raw
     if (stripFootnotes) {
         s = stripSefariaFootnotes(s)
+    } else if (s.contains("footnote")) {
+        s = dropRepeatedFootnoteMarkers(s)
     }
     if (OTZAR_MARKUP_REGEX.containsMatchIn(s)) {
         s = OTZAR_MARKUP_REGEX.replace(s, "$1")
