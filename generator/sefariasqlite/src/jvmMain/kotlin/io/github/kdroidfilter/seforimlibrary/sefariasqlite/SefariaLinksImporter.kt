@@ -1259,6 +1259,19 @@ internal fun inferConnectionTypeFromSchema(
     }
 }
 
+// Verified against the export's link rows and the texts' opening lemmas. A
+// different verse number alone cannot distinguish a citation from commentary.
+private val KNOWN_TANAKH_CROSS_REFERENCES = mapOf(
+    // Otzaria/otzaria#3626
+    "Genesis 7:1" to setOf("Rashi on Genesis 7:11:1"),
+    "Genesis 7:5" to setOf("Rashi on Genesis 7:7:2"),
+    "Genesis 9:1" to setOf("Rashi on Genesis 9:7:1", "Rashi on Genesis 9:9:1"),
+    // Otzaria/otzaria#4752
+    "Genesis 26:16" to setOf("Rashi on Genesis 26:29:1"),
+    // Otzaria/otzaria#1509
+    "Deuteronomy 31:23" to setOf("Ramban on Deuteronomy 31:14:1"),
+)
+
 /**
  * Blank `Conection Type` recovery, gated by a structural-home check.
  *
@@ -1270,12 +1283,9 @@ internal fun inferConnectionTypeFromSchema(
  * only because it cites siman 323, even though it lives in siman 302. Promoting those
  * to COMMENTARY makes the commentator panel surface comments from unrelated simanim.
  *
- * Genuine commentary links are explicitly typed `commentary` in Sefaria and never reach
- * this path — only blank-typed links do. So we keep the oriented promotion only when the
- * dependant segment's top-level structural address (siman / perek) matches the base
- * segment it points at; otherwise the link is a [ConnectionType.REFERENCE].
- *
- * For a Tanakh base the verse must match too (`Rashi on Genesis 26:29` ↛ `Genesis 26:16`).
+ * Blank rows can contain genuine commentary spanning multiple verses. Keep the
+ * top-level structural check (siman / perek), and correct only the verified
+ * verse-level cross-references in [KNOWN_TANAKH_CROSS_REFERENCES].
  *
  * Daf-style tokens (`4b` vs `11a`) are compared only when [dafAlignedPairs] contains the
  * (dependant, base) book pair — i.e. the pair's explicitly-typed commentary rows proved
@@ -1301,6 +1311,11 @@ internal fun inferBlankConnectionType(
     val targetDependsOnSource = tgtMeta != null && srcBookId in tgtMeta.baseTextBookIds
     val dependantRef = if (targetDependsOnSource) tgtRef else srcRef
     val baseRef = if (targetDependsOnSource) srcRef else tgtRef
+    if (inferred == ConnectionType.COMMENTARY &&
+        KNOWN_TANAKH_CROSS_REFERENCES[baseRef]?.contains(dependantRef) == true
+    ) {
+        return ConnectionType.REFERENCE
+    }
     val dependantBookId = if (targetDependsOnSource) tgtBookId else srcBookId
     val baseBookId = if (targetDependsOnSource) srcBookId else tgtBookId
 
@@ -1310,13 +1325,7 @@ internal fun inferBlankConnectionType(
     val dependantNum = dependantTok.toIntOrNull()
     val baseNum = baseTok.toIntOrNull()
     if (dependantNum != null && baseNum != null) {
-        if (dependantNum != baseNum) return ConnectionType.REFERENCE
-        val baseMeta = if (targetDependsOnSource) srcMeta else tgtMeta
-        return if (baseMeta?.topCategoryEn == "Tanakh" && differentVerse(dependantRef, baseRef)) {
-            ConnectionType.REFERENCE
-        } else {
-            inferred
-        }
+        return if (dependantNum != baseNum) ConnectionType.REFERENCE else inferred
     }
 
     // Daf-vs-daf: comparable only for pairs whose typed rows proved daf alignment.
@@ -1337,19 +1346,6 @@ internal fun topLevelAddressToken(ref: String): String =
     ref.trim()
         .substringAfterLast(' ') // address portion, e.g. "302:6" / "2a:5"
         .substringBefore(':') // top-level component, e.g. "302" / "2a"
-
-/**
- * True when both refs name different single verses of one chapter. Tanakh commentary is
- * addressed by verse, so a blank-typed link across verses is a citation. Ranges are not judged.
- */
-internal fun differentVerse(dependantRef: String, baseRef: String): Boolean {
-    val dependantVerse = secondLevelVerse(dependantRef) ?: return false
-    val baseVerse = secondLevelVerse(baseRef) ?: return false
-    return dependantVerse != baseVerse
-}
-
-private fun secondLevelVerse(ref: String): Int? =
-    ref.trim().substringAfterLast(' ').split(':').getOrNull(1)?.toIntOrNull()
 
 /** Numeric form of [topLevelAddressToken]; null for whole-book / daf-style refs. */
 internal fun topLevelStructuralIndex(ref: String): Int? =
