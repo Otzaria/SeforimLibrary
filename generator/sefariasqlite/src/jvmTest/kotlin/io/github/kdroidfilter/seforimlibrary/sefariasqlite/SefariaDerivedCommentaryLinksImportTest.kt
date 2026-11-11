@@ -17,17 +17,36 @@ import kotlin.test.assertEquals
 /**
  * The three reported segments, imported from Sefaria-shaped links: Maggid Mishneh on Shabbat
  * 17:16:2 (only a self-link, Otzaria/otzaria#3854), Meiri on Chullin 96a:3 (#3264) and
- * Chidushei Halachot on Eruvin 31b:2 (#3806), neither linked at all.
+ * Chidushei Halachot on Eruvin 31b:2 (#3806, stays unlinked: one linked neighbour only).
  */
 class SefariaDerivedCommentaryLinksImportTest {
-    private class BookSpec(val id: Long, val enTitle: String, val addresses: List<String>, val base: BookSpec? = null, val mapping: String? = null)
+    private class BookSpec(
+        val id: Long, val enTitle: String, val addresses: List<String>, val base: BookSpec? = null, val mapping: String? = null,
+        val content: List<String> = addresses,
+    )
 
     @Test
     fun reportedSegmentsGetTheirBaseLines() = runBlocking {
         val shabbat = BookSpec(1, "Mishneh Torah, Sabbath", (12..20).map { "17:$it" })
         val maggid = BookSpec(2, "Maggid Mishneh on Mishneh Torah, Sabbath", (12..20).map { "17:$it:1" } + "17:16:2", shabbat, "many_to_one")
-        val chullin = BookSpec(3, "Chullin", (1..10).map { "96a:$it" } + (1..10).map { "96b:$it" })
-        val meiri = BookSpec(4, "Meiri on Chullin", (1..5).map { "96a:$it" } + (1..4).map { "96b:$it" }, chullin)
+        val amudim = listOf("96a", "96b", "97a", "97b", "98a", "98b")
+        // Meiri segment k of an amud quotes the base line it is linked to (96a:3 is not linked, and quotes 96a:6).
+        val meiriBaseLine = mapOf(1 to 5, 2 to 6, 3 to 6, 4 to 6, 5 to 9)
+        fun word(n: Int): String {
+            val letters = ('א'..'ת').toList()
+            return "ק" + letters[n % 22] + letters[(n / 22) % 22] + "ת"
+        }
+        fun words(n: Int) = (0..2).joinToString(" ") { word(n * 3 + it) }
+        val chullinAddresses = amudim.flatMap { a -> (1..10).map { "$a:$it" } }
+        val chullin = BookSpec(3, "Chullin", chullinAddresses, content = chullinAddresses.indices.map(::words))
+        val meiriAddresses = amudim.flatMap { a -> (1..5).map { "$a:$it" } }
+        val meiri = BookSpec(
+            4, "Meiri on Chullin", meiriAddresses, chullin,
+            content = meiriAddresses.map { address ->
+                val (amud, k) = address.split(':')
+                words(chullinAddresses.indexOf("$amud:${meiriBaseLine.getValue(k.toInt())}"))
+            },
+        )
         val eruvin = BookSpec(5, "Eruvin", (1..20).map { "31b:$it" } + (1..20).map { "32a:$it" })
         val chidushei = BookSpec(6, "Chidushei Halachot on Eruvin", listOf("31b:1", "31b:2") + (1..6).map { "32a:$it" }, eruvin)
         val books = listOf(shabbat, maggid, chullin, meiri, eruvin, chidushei)
@@ -35,10 +54,9 @@ class SefariaDerivedCommentaryLinksImportTest {
         val rows = buildList {
             (12..20).forEach { add("Mishneh Torah, Sabbath 17:$it" to "Maggid Mishneh on Mishneh Torah, Sabbath 17:$it:1") }
             add("Maggid Mishneh on Mishneh Torah, Sabbath 17:16:2" to "Maggid Mishneh on Mishneh Torah, Sabbath 17:16:2")
-            listOf("96a:5" to "96a:1", "96a:6" to "96a:2", "96a:6" to "96a:4", "96a:9" to "96a:5").forEach { (b, s) ->
-                add("Chullin $b" to "Meiri on Chullin $s")
+            amudim.forEach { a ->
+                meiriBaseLine.filterKeys { it != 3 || a != "96a" }.forEach { (s, b) -> add("Chullin $a:$b" to "Meiri on Chullin $a:$s") }
             }
-            listOf(2 to 1, 4 to 2, 6 to 3, 9 to 4).forEach { (b, s) -> add("Chullin 96b:$b" to "Meiri on Chullin 96b:$s") }
             add("Chidushei Halachot on Eruvin 31b:1" to "Eruvin 31b:15")
             listOf(1 to 1, 3 to 2, 5 to 3, 8 to 4, 10 to 5, 15 to 6).forEach { (b, s) ->
                 add("Chidushei Halachot on Eruvin 32a:$s" to "Eruvin 32a:$b")
@@ -74,7 +92,7 @@ class SefariaDerivedCommentaryLinksImportTest {
                     lineKeyToId[spec.enTitle to i] = lineId
                     lineIdToBookId[lineId] = spec.id
                     refs += RefEntry("${spec.enTitle} $address", "", spec.enTitle, i + 1)
-                    Line(id = lineId, bookId = spec.id, lineIndex = i, content = address, heRef = address)
+                    Line(id = lineId, bookId = spec.id, lineIndex = i, content = spec.content[i], heRef = address)
                 }
             )
         }
@@ -109,7 +127,9 @@ class SefariaDerivedCommentaryLinksImportTest {
         val storedBySefaria = importer.metricsSnapshot().insertedByType.getValue("COMMENTARY").written
         importer.insertDerivedCommentaryLinks(commentaries.flatMap { deriveSegmentAddressLinks(it, baseLinks) }, bookMeta)
             .forEach(baseLinks::record)
-        importer.insertDerivedCommentaryLinks(commentaries.flatMap { deriveTalmudNeighbourLinks(it, baseLinks) }, bookMeta)
+        val contentByPath = books.associate { it.enTitle to it.content }
+        val texts = LineTextSource { path, lineIndex -> contentByPath[path]?.getOrNull(lineIndex) }
+        importer.insertDerivedCommentaryLinks(commentaries.flatMap { deriveTalmudNeighbourLinks(it, baseLinks, texts) }, bookMeta)
 
         fun line(spec: BookSpec, address: String) = spec.id * 1000 + spec.addresses.indexOf(address)
         fun query(sql: String): List<List<Long>> = driver.getConnection().createStatement().use { st ->
@@ -123,23 +143,15 @@ class SefariaDerivedCommentaryLinksImportTest {
 
         assertEquals(listOf(listOf(line(shabbat, "17:16"), 2L)), derivedFor(maggid, "17:16:2"))
         assertEquals(listOf(listOf(line(chullin, "96a:6"), 2L)), derivedFor(meiri, "96a:3"))
-        assertEquals(listOf(listOf(line(eruvin, "31b:15"), 2L)), derivedFor(chidushei, "31b:2"))
-        val rangeLink = query("SELECT id FROM link WHERE targetLineId = ${line(chidushei, "31b:2")}").single().single()
-        assertEquals(
-            listOf(listOf(0L, line(eruvin, "31b:20"), 19L)),
-            query("SELECT side, endLineId, endLineIndex FROM link_range WHERE linkId = $rangeLink"),
-        )
-        assertEquals(
-            (16..20).map { listOf(line(eruvin, "31b:$it"), 0L) },
-            query("SELECT lineId, side FROM link_coverage WHERE linkId = $rangeLink ORDER BY lineId"),
-        )
+        // 31b:2 sits at the edge of its amud beside one linked segment: not derived.
+        assertEquals(emptyList(), derivedFor(chidushei, "31b:2"))
         val metrics = importer.metricsSnapshot()
         assertEquals(
-            mapOf("segment_address" to 1L, "talmud_neighbours" to 1L, "talmud_neighbours_range" to 1L),
+            mapOf("segment_address" to 1L, "talmud_neighbours" to 1L),
             metrics.derivedCommentaryByStage,
         )
-        assertEquals(storedBySefaria + 3, metrics.insertedByType.getValue("COMMENTARY").written)
-        assertEquals(storedBySefaria + 3, query("SELECT COUNT(*) FROM link").single().single())
+        assertEquals(storedBySefaria + 2, metrics.insertedByType.getValue("COMMENTARY").written)
+        assertEquals(storedBySefaria + 2, query("SELECT COUNT(*) FROM link").single().single())
         repo.close()
     }
 }

@@ -16,13 +16,7 @@ internal enum class DerivedLinkStage(val metricKey: String) {
 
     /** Both neighbours of a daf-only segment comment on the same base line ([deriveTalmudNeighbourLinks]). */
     TALMUD_NEIGHBOURS("talmud_neighbours"),
-
-    /** Only the base lines between a daf-only segment's neighbours are known: a range link. */
-    TALMUD_NEIGHBOURS_RANGE("talmud_neighbours_range"),
 }
-
-/** The base lines after the first that a derived range link covers. */
-internal data class DerivedBaseRange(val endLineId: Long, val endLineIndex: Int, val coveredLineIds: List<Long>)
 
 /** A COMMENTARY link from a base line to a commentary line that Sefaria does not link. */
 internal data class DerivedCommentaryLink(
@@ -32,7 +26,6 @@ internal data class DerivedCommentaryLink(
     val baseLineId: Long,
     val commentaryLineId: Long,
     val commentaryLineIndex: Int,
-    val range: DerivedBaseRange? = null,
 )
 
 /** A content line with a plain address after its book title: "17:16:2", "96a:3". */
@@ -48,6 +41,9 @@ internal data class AddressedCommentary(
     val mapping: String?,
     val segments: List<AddressedLine>,
     val baseLines: List<AddressedLine>,
+    // Book paths, the key of [LineTextSource].
+    val commentaryPath: String = "",
+    val basePath: String = "",
 )
 
 private val PLAIN_ADDRESS = Regex("""^[0-9]+[ab]?(?::[0-9]+)*$""")
@@ -57,9 +53,6 @@ private val DAF_SEGMENT_ADDRESS = Regex("""^([0-9]+[ab]):([0-9]+)$""")
 // disagree with the rule more often than this gets none derived.
 private const val MIN_RULE_AGREEMENT = 0.9
 private const val MIN_RULE_SAMPLES = 5
-
-/** Talmud neighbour ranges longer than this many base lines are not derived. */
-internal const val MAX_DERIVED_RANGE_LINES = 12
 
 /**
  * Collects every commentary that declares exactly one base text, other than [excludedBookIds].
@@ -107,7 +100,10 @@ internal fun collectAddressedCommentaries(
             val segments = addressedLines(bookId).ifEmpty { return@mapNotNull null }
             val baseLines = baseLinesCache.getOrPut(baseBookId) { addressedLines(baseBookId) }
                 .ifEmpty { return@mapNotNull null }
-            AddressedCommentary(bookId, baseBookId, meta.baseTextMapping, segments, baseLines)
+            AddressedCommentary(
+                bookId, baseBookId, meta.baseTextMapping, segments, baseLines,
+                commentaryPath = pathByBookId.getValue(bookId), basePath = pathByBookId.getValue(baseBookId),
+            )
         }
 }
 
@@ -186,19 +182,82 @@ internal fun deriveSegmentAddressLinks(
     }
 }
 
+/** The stored text of a book line, by book path and 0-based line index. */
+internal fun interface LineTextSource {
+    fun text(path: String, lineIndex: Int): String?
+}
+
+// Text gate of stage 2: a segment keeps its neighbours' base line only when its own words
+// single that line out of the amud, and only in a book where this holds for Sefaria's own links.
+private const val TEXT_GATE_MIN_ACCURACY = 0.9
+private const val TEXT_GATE_MIN_DECISIVE = 20
+private const val TEXT_GATE_MAX_SAMPLES = 400
+private const val TEXT_WORDS = 80
+private const val TEXT_MIN_MATCHED_FEATURES = 3
+private const val TEXT_MIN_MARGIN = 1.5
+
+private val HTML_TAG = Regex("<[^>]*>")
+private val NIKUD_AND_TAAMIM = Regex("[֑-ׇ]")
+private val QUOTE_MARKS = Regex("[\"'׳״“”‘’]")
+private val NOT_HEBREW_LETTER = Regex("[^א-ת]+")
+private const val PREFIX_LETTERS = "והבלכמש"
+
+/** The words of [text] without markup, nikud and punctuation, minus one leading prefix letter. */
+internal fun textStems(text: String, limit: Int = Int.MAX_VALUE): List<String> =
+    text.replace(HTML_TAG, " ").replace('־', ' ').replace(NIKUD_AND_TAAMIM, "")
+        .replace(QUOTE_MARKS, "").split(NOT_HEBREW_LETTER)
+        .filter { it.length >= 3 }
+        .map { if (it.length > 3 && it[0] in PREFIX_LETTERS) it.substring(1) else it }
+        .take(limit)
+
+/** The words of [text] and each pair of neighbouring words, the features lines are matched by. */
+internal fun textFeatures(text: String, limit: Int = Int.MAX_VALUE): Set<String> {
+    val stems = textStems(text, limit)
+    return LinkedHashSet(stems).also { features -> stems.zipWithNext { a, b -> features += "$a $b" } }
+}
+
 /**
- * Stage 2 (Otzaria/otzaria#3264, #3806). A Talmud commentary addressed by daf only ("Meiri on
- * Chullin 96a:3") names no base line. A run of unlinked segments takes its base from the nearest
- * linked segments of the same amud: the same line when both are linked there, otherwise a range
- * between them, or to the amud's edge where the run reaches it. A neighbour linked only outside
- * the amud, a range against the base order or longer than [MAX_DERIVED_RANGE_LINES], and an
- * amud without linked segments derive nothing.
+ * The amud base line whose features [segmentText] matches clearly best, or null. Rare features
+ * of the amud weigh more (IDF); the best line needs [TEXT_MIN_MATCHED_FEATURES] matched features,
+ * one of them a pair of neighbouring words, and [TEXT_MIN_MARGIN] times the weight of the runner-up.
+ */
+internal fun clearBestLine(segmentText: String, lineFeatures: List<Set<String>>): Int? {
+    val words = textFeatures(segmentText, TEXT_WORDS)
+    if (words.isEmpty() || lineFeatures.isEmpty()) return null
+    val df = HashMap<String, Int>()
+    lineFeatures.forEach { features -> features.forEach { df.merge(it, 1, Int::plus) } }
+    val weights = DoubleArray(lineFeatures.size)
+    val matched = IntArray(lineFeatures.size)
+    val matchedPairs = IntArray(lineFeatures.size)
+    lineFeatures.forEachIndexed { i, features ->
+        words.forEach { w ->
+            if (w in features) {
+                weights[i] += Math.log(1.0 + lineFeatures.size.toDouble() / df.getValue(w))
+                matched[i]++
+                if (' ' in w) matchedPairs[i]++
+            }
+        }
+    }
+    val best = weights.indices.maxByOrNull { weights[it] } ?: return null
+    if (matched[best] < TEXT_MIN_MATCHED_FEATURES || matchedPairs[best] == 0) return null
+    val runnerUp = weights.indices.filter { it != best }.maxOfOrNull { weights[it] } ?: 0.0
+    return best.takeIf { weights[best] >= TEXT_MIN_MARGIN * runnerUp }
+}
+
+/**
+ * Stage 2 (Otzaria/otzaria#3264). A Talmud commentary addressed by daf only ("Meiri on Chullin
+ * 96a:3") names no base line. An unlinked segment whose nearest linked segments of the same
+ * amud, before and after it, are each linked to the same single line of that amud takes that
+ * line, when its text agrees: the line is the segment's clear best match in the amud, and the
+ * same test, wherever it gives a clear answer, finds the line of at least
+ * [TEXT_GATE_MIN_ACCURACY] of the book's own singly linked segments. A segment at the edge of an amud or next to one linked neighbour only, a neighbour
+ * linked to several lines or outside the amud, and a book whose links leave the base order or
+ * their amud derive nothing.
  */
 internal fun deriveTalmudNeighbourLinks(
     commentary: AddressedCommentary,
     links: CommentaryBaseLinks,
-    maxRangeLines: Int = MAX_DERIVED_RANGE_LINES,
-    minOrderedShare: Double = MIN_RULE_AGREEMENT,
+    texts: LineTextSource,
 ): List<DerivedCommentaryLink> {
     fun dafOf(address: String) = DAF_SEGMENT_ADDRESS.matchEntire(address)?.groupValues
 
@@ -216,11 +275,13 @@ internal fun deriveTalmudNeighbourLinks(
         .mapValues { (_, segments) -> segments.sortedBy { it.first }.map { it.second } }
         .filterKeys { it in baseLinesByDaf }
 
-    // In-amud anchor positions of a linked segment; empty = linked, but not within its amud.
+    // In-amud positions of a linked segment's anchors.
     fun inAmud(daf: String, segment: AddressedLine): List<Int> =
         links.anchors[segment.lineId].orEmpty()
             .mapNotNull { positionByBaseLineId[it]?.takeIf { (d, _) -> d == daf }?.second }
-            .sorted()
+    // The one in-amud base line a segment is linked to; null with several anchors, one outside the amud, or none.
+    fun singleAnchor(daf: String, segment: AddressedLine): Int? =
+        if (links.anchors[segment.lineId]?.size == 1) inAmud(daf, segment).singleOrNull() else null
 
     // Book guard: its linked segments must follow their amud and the base order.
     var anchoredSegments = 0
@@ -228,66 +289,59 @@ internal fun deriveTalmudNeighbourLinks(
     var orderedPairs = 0
     var pairs = 0
     segmentsByDaf.forEach { (daf, segments) ->
-        var previous: List<Int>? = null
-        segments.filter { it.lineId in links.linked }.forEach { segment ->
-            if (links.anchors[segment.lineId].isNullOrEmpty()) return@forEach
+        var previous: Int? = null
+        segments.filter { !links.anchors[it.lineId].isNullOrEmpty() }.forEach { segment ->
             anchoredSegments++
-            val positions = inAmud(daf, segment)
-            if (positions.isEmpty()) return@forEach
+            val position = inAmud(daf, segment).minOrNull() ?: return@forEach
             inAmudSegments++
             previous?.let { prev ->
                 pairs++
-                if (positions.first() >= prev.first()) orderedPairs++
+                if (position >= prev) orderedPairs++
             }
-            previous = positions
+            previous = position
         }
     }
     if (anchoredSegments < MIN_RULE_SAMPLES || inAmudSegments < MIN_RULE_AGREEMENT * anchoredSegments) return emptyList()
-    if (pairs < MIN_RULE_SAMPLES || orderedPairs < minOrderedShare * pairs) return emptyList()
+    if (pairs < MIN_RULE_SAMPLES || orderedPairs < MIN_RULE_AGREEMENT * pairs) return emptyList()
 
-    val derived = mutableListOf<DerivedCommentaryLink>()
+    // Neighbours' agreement first: a book with nothing to derive never pays for the text gate.
+    val candidates = mutableListOf<Triple<String, AddressedLine, Int>>()
     segmentsByDaf.forEach { (daf, segments) ->
-        val baseLines = baseLinesByDaf.getValue(daf)
-        var i = 0
-        while (i < segments.size) {
-            if (segments[i].lineId in links.linked) {
-                i++
-                continue
-            }
-            val runStart = i
-            while (i < segments.size && segments[i].lineId !in links.linked) i++
-            val run = segments.subList(runStart, i)
-            val before = segments.getOrNull(runStart - 1)?.let { inAmud(daf, it).ifEmpty { return@let null } }
-            val after = segments.getOrNull(i)?.let { inAmud(daf, it).ifEmpty { return@let null } }
-            // A neighbour linked only outside the amud leaves its side unknown.
-            if (before == null && runStart > 0) continue
-            if (after == null && i < segments.size) continue
-            if (before == null && after == null) continue
-            val from = before?.last() ?: 0
-            val to = after?.first() ?: baseLines.lastIndex
-            if (from > to || to - from + 1 > maxRangeLines) continue
-            val exact = from == to && before != null && after != null
-            val range = if (from == to) {
-                null
-            } else {
-                DerivedBaseRange(
-                    endLineId = baseLines[to].lineId,
-                    endLineIndex = baseLines[to].lineIndex,
-                    coveredLineIds = baseLines.subList(from + 1, to + 1).map { it.lineId },
-                )
-            }
-            run.forEach { segment ->
-                derived += DerivedCommentaryLink(
-                    stage = if (exact) DerivedLinkStage.TALMUD_NEIGHBOURS else DerivedLinkStage.TALMUD_NEIGHBOURS_RANGE,
-                    baseBookId = commentary.baseBookId,
-                    commentaryBookId = commentary.commentaryBookId,
-                    baseLineId = baseLines[from].lineId,
-                    commentaryLineId = segment.lineId,
-                    commentaryLineIndex = segment.lineIndex,
-                    range = range,
-                )
-            }
+        segments.forEachIndexed { i, segment ->
+            if (segment.lineId in links.linked) return@forEachIndexed
+            val before = segments.subList(0, i).lastOrNull { it.lineId in links.linked } ?: return@forEachIndexed
+            val after = segments.subList(i + 1, segments.size).firstOrNull { it.lineId in links.linked } ?: return@forEachIndexed
+            val position = singleAnchor(daf, before)
+            if (position != null && position == singleAnchor(daf, after)) candidates += Triple(daf, segment, position)
         }
     }
-    return derived
+    if (candidates.isEmpty()) return emptyList()
+
+    val lineStemsByDaf = HashMap<String, List<Set<String>>>()
+    fun bestLine(daf: String, segment: AddressedLine): Int? {
+        val stems = lineStemsByDaf.getOrPut(daf) {
+            baseLinesByDaf.getValue(daf).map { textFeatures(texts.text(commentary.basePath, it.lineIndex).orEmpty()) }
+        }
+        return texts.text(commentary.commentaryPath, segment.lineIndex)?.let { clearBestLine(it, stems) }
+    }
+
+    val calibration = segmentsByDaf.flatMap { (daf, segments) ->
+        segments.mapNotNull { segment -> singleAnchor(daf, segment)?.let { Triple(daf, segment, it) } }
+    }
+    val step = (calibration.size + TEXT_GATE_MAX_SAMPLES - 1) / TEXT_GATE_MAX_SAMPLES
+    val sampled = calibration.filterIndexed { i, _ -> i % step == 0 }
+    val answers = sampled.mapNotNull { (daf, segment, position) -> bestLine(daf, segment)?.let { it == position } }
+    if (answers.size < TEXT_GATE_MIN_DECISIVE || answers.count { it } < TEXT_GATE_MIN_ACCURACY * answers.size) return emptyList()
+
+    return candidates.mapNotNull { (daf, segment, position) ->
+        if (bestLine(daf, segment) != position) return@mapNotNull null
+        DerivedCommentaryLink(
+            stage = DerivedLinkStage.TALMUD_NEIGHBOURS,
+            baseBookId = commentary.baseBookId,
+            commentaryBookId = commentary.commentaryBookId,
+            baseLineId = baseLinesByDaf.getValue(daf)[position].lineId,
+            commentaryLineId = segment.lineId,
+            commentaryLineIndex = segment.lineIndex,
+        )
+    }
 }

@@ -682,7 +682,9 @@ class SefariaDirectImporter(
             }
             // Stage 1 first: its links bound the daf-only runs of stage 2.
             storeDerived(addressedCommentaries.flatMap { deriveSegmentAddressLinks(it, commentaryBaseLinks) })
-            storeDerived(addressedCommentaries.flatMap { deriveTalmudNeighbourLinks(it, commentaryBaseLinks) })
+            val linesByPath = anchorBookInputs.associate { it.bookPath to it.lines }
+            val lineTexts = LineTextSource { path, lineIndex -> linesByPath[path]?.getOrNull(lineIndex) }
+            storeDerived(addressedCommentaries.flatMap { deriveTalmudNeighbourLinks(it, commentaryBaseLinks, lineTexts) })
             // After the anchors: they are counted as written links too.
             linkImportMetrics = linksImporter.metricsSnapshot()
             logger.i { "Links processed" }

@@ -737,9 +737,7 @@ internal class SefariaLinksImporter(
     }
 
     /**
-     * Stores [derived] as COMMENTARY links from the base line, with a link_range and
-     * link_coverage on the base side for a ranged one. A link already stored keeps its own
-     * range rows. Returns the links actually inserted.
+     * Stores [derived] as COMMENTARY links from the base line. Returns the links actually inserted.
      */
     suspend fun insertDerivedCommentaryLinks(
         derived: List<DerivedCommentaryLink>,
@@ -761,20 +759,12 @@ internal class SefariaLinksImporter(
                 )
             }
             val inserted = repository.insertLinksBatchReportingInserted(batch)
-            val ranges = mutableListOf<LinkRange>()
-            val coverage = mutableListOf<LinkCoverage>()
             batch.forEachIndexed { i, link ->
                 if (!inserted[i]) return@forEachIndexed
                 linksWrittenByType.bump(link.connectionType)
                 derivedLinksWrittenByStage.computeIfAbsent(chunk[i].stage) { LongAdder() }.increment()
                 stored += link
-                chunk[i].range?.let { range ->
-                    ranges += LinkRange(link.id, side = 0, endLineId = range.endLineId, endLineIndex = range.endLineIndex)
-                    range.coveredLineIds.forEach { coverage += LinkCoverage(lineId = it, linkId = link.id, side = 0) }
-                }
             }
-            if (ranges.isNotEmpty()) repository.insertLinkRangesBatch(ranges)
-            coverage.chunked(SefariaImportTuning.LINK_BATCH_SIZE).forEach { repository.insertLinkCoverageBatch(it) }
         }
         return stored
     }
