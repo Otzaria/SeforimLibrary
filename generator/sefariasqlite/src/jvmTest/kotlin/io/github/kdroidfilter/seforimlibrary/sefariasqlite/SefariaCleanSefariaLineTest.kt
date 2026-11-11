@@ -1,6 +1,13 @@
 package io.github.kdroidfilter.seforimlibrary.sefariasqlite
 
+import co.touchlab.kermit.Logger
+import io.github.kdroidfilter.seforimlibrary.common.ids.IdAllocatorBindings
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.jsonObject
 import kotlin.test.Test
+import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
@@ -130,6 +137,71 @@ class SefariaCleanSefariaLineTest {
             "<b>There are eight requirements in the making of <i>tefillin</i>.</b> See <i>Sukkah</i> 8a.</i> " +
             "והנה<sup class=\"footnote-marker\">39</sup><i class=\"footnote\">See note 47</i>, שכן נראה"
         assertEquals("ע\"ש והנה, שכן נראה", cleanSefariaLine(line, stripFootnotes = true))
+    }
+
+    @Test
+    fun dropsMarkerRepeatedAtStartOfNoteBody() {
+        // Shape of Issur VeHeter HaArokh 35:11 (Otzaria/otzaria#4892)
+        val line = "לעיל<sup class=\"footnote-marker\">ב)</sup><i class=\"footnote\">ב) אמנם מהרי\"ש הורה</i>. והטעם"
+        val fixed = "לעיל<sup class=\"footnote-marker\">ב)</sup><i class=\"footnote\">אמנם מהרי\"ש הורה</i>. והטעם"
+        assertEquals(line, cleanSefariaLine(line))
+        assertEquals(fixed, dropRepeatedFootnoteMarkers(line))
+        // Once Sefaria drops the repeat, the same text comes out.
+        assertEquals(fixed, dropRepeatedFootnoteMarkers(fixed))
+    }
+
+    @Test
+    fun dropsOnlyTheRepeatedMarkerAmongSeveralNotes() {
+        val line = "א<sup class=\"footnote-marker\">*</sup><i class=\"footnote\"> * הערה</i> " +
+            "ב<sup class=\"footnote-marker\">2</sup><i class=\"footnote\">שנייה</i>"
+        assertEquals(
+            "א<sup class=\"footnote-marker\">*</sup><i class=\"footnote\"> הערה</i> " +
+                "ב<sup class=\"footnote-marker\">2</sup><i class=\"footnote\">שנייה</i>",
+            dropRepeatedFootnoteMarkers(line),
+        )
+    }
+
+    @Test
+    fun keepsBodyWhoseFirstWordStartsWithTheMarker() {
+        val line = "א<sup class=\"footnote-marker\">ב</sup><i class=\"footnote\">בדברי הרמב\"ם</i>"
+        assertEquals(line, dropRepeatedFootnoteMarkers(line))
+    }
+
+    @Test
+    fun keepsBodyThatIsOnlyTheMarker() {
+        val line = "א<sup class=\"footnote-marker\">ח)</sup><i class=\"footnote\">ח) </i>"
+        assertEquals(line, dropRepeatedFootnoteMarkers(line))
+    }
+
+    @Test
+    fun keepsNoteWithoutMarker() {
+        val line = "א <i class=\"footnote\">ב) אמנם</i>"
+        assertEquals(line, dropRepeatedFootnoteMarkers(line))
+    }
+
+    @Test
+    fun onlyIssurVeHeterDropsRepeatedMarkersWithoutChangingTheLineKey() {
+        val schema = Json.parseToJsonElement(
+            """{"nodeType":"JaggedArrayNode","depth":1,"sectionNames":["Paragraph"],"addressTypes":["Integer"]}""",
+        ).jsonObject
+        val reader = SefariaBookPayloadReader(Json, Logger.withTag("SefariaCleanSefariaLineTest"))
+        for (separator in listOf(" ", "<br />")) {
+            val raw = """לעיל${separator}הטעם<sup class="footnote-marker">ב)</sup><i class="footnote">ב) אמנם</i>."""
+            val text = JsonArray(listOf(JsonPrimitive(raw)))
+            val ordinary = reader.walkTextWithSchema(schema, text, "ספר אחר", "Another Book")
+            val affected = reader.walkTextWithSchema(schema, text, "איסור והיתר הארוך", "Issur VeHeter HaArokh")
+            val ordinaryIndex = ordinary.refs.single().lineIndex - 1
+            val affectedIndex = affected.refs.single().lineIndex - 1
+            val original = rawSegmentForKey(ordinary.lines[ordinaryIndex], ordinary.cleanShifts[ordinaryIndex])
+            val fixed = rawSegmentForKey(affected.lines[affectedIndex], affected.cleanShifts[affectedIndex])
+
+            assertEquals(cleanSefariaLine(raw), original)
+            assertEquals(original.replace("ב) אמנם", "אמנם"), fixed)
+            assertTrue(lineWasModifiedByCleaning(affected.cleanShifts.getValue(affectedIndex)))
+            val originalKey = ordinary.lineKeyHashOverrides[ordinaryIndex]
+                ?: IdAllocatorBindings.lineNaturalKeyHash(original)
+            assertContentEquals(originalKey, affected.lineKeyHashOverrides.getValue(affectedIndex))
+        }
     }
 
     @Test
