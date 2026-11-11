@@ -148,9 +148,20 @@ internal class SefariaInlineAnchors(
         val bookPath: String,
         val singleVersionTitle: String? = null,
         val cleanShiftByLineIndex: Map<Int, Int> = emptyMap(),
-        /** Seen while the serial writer already had the raw text in memory. */
-        val hasInlineItags: Boolean = true,
+        val inlineLines: List<InlineLine> = emptyList(),
+        /** Indices whose stored text has a dash-dibbur wrapper added by this import. */
+        val boldedLineIndexes: java.util.BitSet = java.util.BitSet(),
     )
+
+    internal data class InlineLine(val index: Int, val ref: String?, val itags: List<InlineItag>)
+
+    companion object {
+        fun collectInlineLines(lines: List<String>, refsByLineIndex: Map<Int, RefEntry>): List<InlineLine> =
+            lines.mapIndexedNotNull { index, content ->
+                val itags = parseInlineItags(content)
+                if (itags.isEmpty()) null else InlineLine(index, refsByLineIndex[index]?.ref, itags)
+            }
+    }
 
     private val skipCounts = linkedMapOf<String, Int>()
     private val skipSamples = linkedMapOf<String, String>()
@@ -168,9 +179,8 @@ internal class SefariaInlineAnchors(
     ) {
         val linesByPath = books.associate { it.bookPath to it.lines }
         generateCore(
-            books = books,
-            headers = books.map {
-                BookRef(it.bookId, it.enTitle, it.bookPath, it.singleVersionTitle, it.cleanShiftByLineIndex)
+            books = books.map {
+                BookRef(it.bookId, it.enTitle, it.bookPath, inlineLines = collectInlineLines(it.lines, it.refsByLineIndex))
             },
             printedLabelValue = { entry ->
                 linesByPath[entry.path]?.getOrNull(entry.lineIndex - 1)?.let(::leadingPrintedLabel)
@@ -181,36 +191,25 @@ internal class SefariaInlineAnchors(
         )
     }
 
-    /** Re-reads one book at a time and resolves cross-book printed labels from SQLite. */
-    suspend fun generateStreaming(
+    /** Resolves the collected itags against stored links and commentary text. */
+    suspend fun generateFromImportedLines(
         books: List<BookRef>,
-        loadBook: (BookRef) -> BookInput,
         bookMetaById: Map<Long, BookMeta>,
         refsByCanonical: Map<String, List<RefEntry>>,
         lineKeyToId: Map<Pair<String, Int>, Long>,
     ) {
-        val booksByPath = books.associateBy { it.bookPath }
-        val labels = object : java.util.LinkedHashMap<Pair<String, Int>, Int?>(512, 0.75f, true) {
-            override fun removeEldestEntry(eldest: MutableMap.MutableEntry<Pair<String, Int>, Int?>?): Boolean =
+        val labels = object : java.util.LinkedHashMap<Long, Int?>(512, 0.75f, true) {
+            override fun removeEldestEntry(eldest: MutableMap.MutableEntry<Long, Int?>?): Boolean =
                 size > 512
         }
         generateCore(
-            // Header metadata is still complete, but only source books which
-            // actually contain an itag must be parsed a second time.
-            books = books.asSequence().filter { it.hasInlineItags }.map(loadBook).asIterable(),
-            headers = books,
-            printedLabelValue = { entry ->
-                val key = entry.path to entry.lineIndex
-                if (labels.containsKey(key)) {
-                    labels[key]
+            books = books,
+            printedLabelValue = label@{ entry ->
+                val lineId = lineKeyToId[entry.path to (entry.lineIndex - 1)] ?: return@label null
+                if (labels.containsKey(lineId)) {
+                    labels[lineId]
                 } else {
-                    val book = booksByPath[entry.path]
-                    val label = if (book == null) null else {
-                        repository.getLineByIndex(book.bookId, entry.lineIndex - 1)
-                            ?.content?.let(::leadingPrintedLabel)
-                    }
-                    labels[key] = label
-                    label
+                    repository.getLine(lineId)?.content?.let(::leadingPrintedLabel).also { labels[lineId] = it }
                 }
             },
             bookMetaById = bookMetaById,
@@ -220,8 +219,7 @@ internal class SefariaInlineAnchors(
     }
 
     private suspend fun generateCore(
-        books: Iterable<BookInput>,
-        headers: List<BookRef>,
+        books: List<BookRef>,
         printedLabelValue: suspend (RefEntry) -> Int?,
         bookMetaById: Map<Long, BookMeta>,
         refsByCanonical: Map<String, List<RefEntry>>,
@@ -231,14 +229,14 @@ internal class SefariaInlineAnchors(
         // is the commentary's collective_title.en, or its index title when no
         // collective title exists (Sefaria's client falls back the same way).
         val candidatesByName = HashMap<String, MutableList<Long>>()
-        for (book in headers) {
+        for (book in books) {
             val collective = bookMetaById[book.bookId]?.collectiveTitleEn
             collective?.let { candidatesByName.getOrPut(it) { mutableListOf() }.add(book.bookId) }
             if (collective != book.enTitle) {
                 candidatesByName.getOrPut(book.enTitle) { mutableListOf() }.add(book.bookId)
             }
         }
-        val enTitleByBookId = headers.associate { it.bookId to it.enTitle }
+        val enTitleByBookId = books.associate { it.bookId to it.enTitle }
 
         var anchorsInserted = 0L
         var labelShiftsApplied = 0
@@ -246,11 +244,8 @@ internal class SefariaInlineAnchors(
         val batch = mutableListOf<LinkAnchor>()
 
         for (book in books) {
-            for ((idx, content) in book.lines.withIndex()) {
-                val itags = parseInlineItags(content)
-                if (itags.isEmpty()) continue
+            for ((idx, baseRef, itags) in book.inlineLines) {
                 linesWithItags++
-                val baseRef = book.refsByLineIndex[idx]?.ref
                 val srcLineId = lineKeyToId[book.bookPath to idx]
                 if (baseRef == null || srcLineId == null) {
                     skip("base line without ref") { "${book.enTitle} line $idx" }

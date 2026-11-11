@@ -22,6 +22,7 @@ import io.github.kdroidfilter.seforimlibrary.dao.repository.SeforimRepository
 import kotlinx.coroutines.coroutineScope
 import kotlinx.serialization.json.Json
 import java.nio.file.Path
+import java.util.BitSet
 import java.util.concurrent.ConcurrentHashMap
 import kotlin.io.path.exists
 import kotlin.io.path.isDirectory
@@ -247,12 +248,12 @@ class SefariaDirectImporter(
         val tocInserter = SefariaTocInserter(repository, bindings)
         val altTocBuilder = SefariaAltTocBuilder(repository, bindings)
         val linksImporter = SefariaLinksImporter(repository, bindings, logger)
-        // Inputs for the inline-anchor pass (itags → link_anchor), collected in
-        // the book loop so the pass can run after links exist.
         val anchorBookRefs = mutableListOf<SefariaInlineAnchors.BookRef>()
-        // Keep only a path and ids; the version pass re-reads one book at a
-        // time after all main-text lines have been inserted.
-        val versionBookRefs = mutableListOf<Triple<SefariaBookDescriptor, Long, String>>()
+        val printedMarkerTitles = printedMarkerEligibleTitles()
+        val sparseBaseTitles = sparseCommentaryBaseTitles()
+        val printedMarkerBooks = mutableListOf<SefariaInlineAnchors.BookInput>()
+        val sparseBaseLines = mutableMapOf<String, List<String>>()
+        val versionBooks = mutableListOf<SefariaVersionsImporter.BookInput>()
 
         // Before any book id is allocated.
         registerBookAliasesFromDescriptors(orderedDescriptors) { path ->
@@ -271,9 +272,8 @@ class SefariaDirectImporter(
             descriptors = orderedDescriptors,
             load = { path -> bookPayloadReader.parseBookFile(path, schemaDir, schemaLookup) },
             logger = logger,
-        ) { descriptor, payload ->
-            // Only this payload and at most one queued plus one being parsed
-            // can be live here. SQLite writes remain on this single consumer.
+        ) { _, payload ->
+            // SQLite writes remain on this single consumer, with at most one producer lookahead.
             val precomputed = payload.precomputed
                 ?: error("Payload '${payload.heTitle}' reached the insert loop without precomputed line data")
             check(precomputed.lineCount == payload.lines.size) {
@@ -381,21 +381,19 @@ class SefariaDirectImporter(
                 pendingInferredKeysByBookId[bookId] = payload.inferredBaseTextTitleKeys
             }
 
-            // The serial insert loop owns this list until link processing starts.
-            payload.refEntries.mapTo(allRefsWithPath) { it.copy(path = bookPath) }
+            val refsForBook = payload.refEntries.map { it.copy(path = bookPath) }
+            allRefsWithPath.addAll(refsForBook)
+            versionBooks += SefariaVersionsImporter.BookInput(payload, bookId, bookPath, refsForBook)
 
-            // Mapping from lineIndex to RefEntry, built on the parse worker.
             val refsByLineIndex = precomputed.refsByLineIndex
-
-            anchorBookRefs += SefariaInlineAnchors.BookRef(
-                bookId = bookId,
-                enTitle = payload.enTitle,
-                bookPath = bookPath,
-                singleVersionTitle = payload.singleVersionTitle,
-                cleanShiftByLineIndex = payload.cleanShiftByLineIndex,
-                hasInlineItags = payload.lines.any { it.contains("<i data-commentator=") },
-            )
-            versionBookRefs += Triple(descriptor, bookId, bookPath)
+            if (payload.enTitle in printedMarkerTitles) {
+                printedMarkerBooks += SefariaInlineAnchors.BookInput(
+                    bookId, payload.enTitle, bookPath, payload.lines, refsByLineIndex,
+                    payload.singleVersionTitle, payload.cleanShiftByLineIndex,
+                )
+            }
+            if (payload.enTitle in sparseBaseTitles) sparseBaseLines[bookPath] = payload.lines
+            val boldedLineIndexes = BitSet()
 
             payload.lines.forEachIndexed { idx, content ->
                 precomputed.reserveOmittedLineOccurrences(bookId, idx, lineOccurrences, legacyLineOccurrences)
@@ -408,11 +406,13 @@ class SefariaDirectImporter(
                 val legacy = LegacyLineKey(legacyHash, legacyLineOccurrences.next(bookId, legacyHash))
                 val lineId = allocator.lineId(bookId, contentHash, occurrence, legacy)
                 val lineCharCount = lineCharCounts[idx]
+                val storedContent = if (payload.boldDashDibburim) SefariaTalmudDibburBold.bold(content) else content
+                if (storedContent !== content) boldedLineIndexes.set(idx)
                 lineBatch += Line(
                     id = lineId,
                     bookId = bookId,
                     lineIndex = idx,
-                    content = if (payload.boldDashDibburim) SefariaTalmudDibburBold.bold(content) else content,
+                    content = storedContent,
                     heRef = refEntry?.heRef,
                     charCount = lineCharCount,
                 )
@@ -434,6 +434,11 @@ class SefariaDirectImporter(
                     lineBatch.clear()
                 }
             }
+
+            anchorBookRefs += SefariaInlineAnchors.BookRef(
+                bookId, payload.enTitle, bookPath, payload.singleVersionTitle, payload.cleanShiftByLineIndex,
+                SefariaInlineAnchors.collectInlineLines(payload.lines, refsByLineIndex), boldedLineIndexes,
+            )
 
             // Every precomputed per-line array has been consumed. Drop them now:
             // the allocator owns the hashes from here on, and the loop's peak
@@ -502,12 +507,8 @@ class SefariaDirectImporter(
         }
         SefariaVersionsImporter(
             repository, allocator, json, bookPayloadReader, logger, versionsBlacklist, versionHebrewTitles,
-        ).import(versionBookRefs.asSequence().map { (descriptor, bookId, bookPath) ->
-            val payload = bookPayloadReader.parseBookFile(descriptor.path, schemaDir, schemaLookup)
-                ?: error("Sefaria version payload disappeared: ${descriptor.path}")
-            descriptor.verify(payload)
-            SefariaVersionsImporter.BookInput(payload, bookId, bookPath)
-        }.asIterable(), lineKeyToId)
+        ).import(versionBooks, lineKeyToId)
+        versionBooks.clear()
 
         // Apply default mappings
         if (defaultCommentatorsConfig.isNotEmpty()) {
@@ -631,15 +632,9 @@ class SefariaDirectImporter(
                 allRefsWithPath,
                 lineKeyToId,
                 lineIdToBookId,
-                anchorBookRefs.asSequence()
-                    .filter { it.enTitle in sparseCommentaryBaseTitles() }
-                    .associate { book ->
-                        val descriptor = versionBookRefs.first { it.third == book.bookPath }.first
-                        val payload = bookPayloadReader.parseBookFile(descriptor.path, schemaDir, schemaLookup)
-                            ?: error("Sparse-commentary base missing: ${descriptor.path}")
-                        book.bookPath to payload.lines
-                    },
+                sparseBaseLines,
             )
+            sparseBaseLines.clear()
             val sparseLinks = sparseCommentaries.associateWith { SparseCommentaryLinks() }
             linksImporter.processLinksInParallel(
                 linksDir = linksDir,
@@ -670,25 +665,8 @@ class SefariaDirectImporter(
             // Word-level anchors: resolve the itags embedded in base texts to
             // the freshly inserted link rows (see SefariaInlineAnchors).
             logger.i { "Resolving inline commentary anchors (itags)..." }
-            val descriptorsByBookPath = versionBookRefs.associate { it.third to it.first }
-            fun loadAnchorBook(book: SefariaInlineAnchors.BookRef): SefariaInlineAnchors.BookInput {
-                val descriptor = descriptorsByBookPath.getValue(book.bookPath)
-                val payload = bookPayloadReader.parseBookFile(descriptor.path, schemaDir, schemaLookup)
-                    ?: error("Sefaria anchor payload disappeared: ${descriptor.path}")
-                descriptor.verify(payload)
-                return SefariaInlineAnchors.BookInput(
-                    bookId = book.bookId,
-                    enTitle = book.enTitle,
-                    bookPath = book.bookPath,
-                    lines = payload.lines,
-                    refsByLineIndex = payload.refEntries.associateBy { it.lineIndex - 1 },
-                    singleVersionTitle = book.singleVersionTitle,
-                    cleanShiftByLineIndex = book.cleanShiftByLineIndex,
-                )
-            }
-            SefariaInlineAnchors(repository, logger).generateStreaming(
+            SefariaInlineAnchors(repository, logger).generateFromImportedLines(
                 books = anchorBookRefs,
-                loadBook = ::loadAnchorBook,
                 bookMetaById = bookMetaById,
                 refsByCanonical = refsByCanonical,
                 lineKeyToId = lineKeyToId,
@@ -696,11 +674,12 @@ class SefariaDirectImporter(
             // #117's printed-marker anchors need only the two verified
             // base/commentary pairs; never pass every parsed Sefaria book.
             SefariaPrintedMarkerAnchors(repository, logger).generate(
-                books = anchorBookRefs.filter { it.enTitle in printedMarkerEligibleTitles() }
-                    .map(::loadAnchorBook),
+                books = printedMarkerBooks,
                 bookMetaById = bookMetaById,
                 lineKeyToId = lineKeyToId,
             )
+
+            printedMarkerBooks.clear()
 
             // Char-level anchors from the quotation finder's charLevelData —
             // exact-only (single-version + unmodified-line gates).

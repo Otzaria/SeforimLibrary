@@ -199,13 +199,12 @@ class SefariaInlineAnchorsIntegrationTest {
         assertEquals(listOf(0 to "א"), repo.getLinkAnchors(302).map { it.charStart to it.label })
         assertEquals(listOf(7 to "ב"), repo.getLinkAnchors(303).map { it.charStart to it.label })
 
-        // Compare the streaming production route against the existing legacy
-        // in-memory implementation, including the printed-label +1 shift.
+        // A coordinate shared by two paths must still resolve the printed label of the linked row.
+        repo.insertLinesBatch(listOf(Line(id = 299, bookId = 3, lineIndex = 1, content = "(ג) אחר", heRef = null)))
         val baseline302 = repo.getLinkAnchors(302).map { it.charStart to it.label }
         val baseline303 = repo.getLinkAnchors(303).map { it.charStart to it.label }
         repo.executeRawQuery("DELETE FROM link_anchor")
-        var loaded = 0
-        SefariaInlineAnchors(repo, Logger.withTag("InlineAnchorsStreamingParityTest")).generateStreaming(
+        SefariaInlineAnchors(repo, Logger.withTag("InlineAnchorsStreamingParityTest")).generateFromImportedLines(
             books = books.map { input ->
                 SefariaInlineAnchors.BookRef(
                     bookId = input.bookId,
@@ -213,18 +212,13 @@ class SefariaInlineAnchorsIntegrationTest {
                     bookPath = input.bookPath,
                     singleVersionTitle = input.singleVersionTitle,
                     cleanShiftByLineIndex = input.cleanShiftByLineIndex,
-                    hasInlineItags = input.bookId == 1L,
+                    inlineLines = SefariaInlineAnchors.collectInlineLines(input.lines, input.refsByLineIndex),
                 )
-            },
-            loadBook = { ref ->
-                loaded++
-                books.single { it.bookId == ref.bookId }
             },
             bookMetaById = bookMetaById,
             refsByCanonical = refsByCanonical,
             lineKeyToId = lineKeyToId,
         )
-        assertEquals(1, loaded, "only the base book with itags must be reparsed")
         assertEquals(baseline302, repo.getLinkAnchors(302).map { it.charStart to it.label })
         assertEquals(baseline303, repo.getLinkAnchors(303).map { it.charStart to it.label })
     }

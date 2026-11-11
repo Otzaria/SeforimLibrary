@@ -135,8 +135,9 @@ class SefariaCharLevelAnchorsTest {
         assertEquals(10 + "ויבז עשו את הבכורה".length, anchor.charEnd)
         assertTrue(anchor.label == null)
 
-        // The new production pass fetches text by bookId/lineIndex instead
-        // of retaining every BookPayload. Its exact-offset result must match.
+        // A second export path can share the same book ID and line index.
+        // The anchor must read the row at the actual target endpoint.
+        repo.insertLinesBatch(listOf(Line(id = 199, bookId = 2, lineIndex = 0, content = "אחר", heRef = null)))
         val baselineOffsets = anchors.map { Triple(it.side, it.charStart, it.charEnd) }
         repo.executeRawQuery("DELETE FROM link_anchor")
         SefariaCharLevelAnchors(repo, Logger.withTag("CharLevelDatabaseParityTest"))

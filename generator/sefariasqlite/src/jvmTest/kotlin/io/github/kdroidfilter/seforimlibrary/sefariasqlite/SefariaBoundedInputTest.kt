@@ -1,6 +1,12 @@
 package io.github.kdroidfilter.seforimlibrary.sefariasqlite
 
+import app.cash.sqldelight.driver.jdbc.sqlite.JdbcSqliteDriver
 import co.touchlab.kermit.Logger
+import co.touchlab.kermit.LogWriter
+import co.touchlab.kermit.Severity
+import co.touchlab.kermit.StaticConfig
+import io.github.kdroidfilter.seforimlibrary.dao.repository.SeforimRepository
+import io.github.kdroidfilter.seforimlibrary.db.SeforimDb
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -120,6 +126,70 @@ class SefariaBoundedInputTest {
             assertEquals(1, stats.booksWritten)
         } finally {
             dir.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun discoveryEstimateSendsExpandedBookDirectlyToConsumer() = runBlocking {
+        val (dir, descriptors) = fixture(1)
+        try {
+            val calls = AtomicInteger()
+            val text = "אבג".repeat(1000)
+            val stats = SefariaBoundedInput.consumeInOrder(
+                descriptors = descriptors.map { it.copy(estimatedDecodedBytes = text.length * 2L) },
+                load = {
+                    calls.incrementAndGet()
+                    payload(0).copy(lines = listOf(text))
+                },
+                logger = Logger.withTag("SefariaBoundedInputTest"),
+                budgetBytes = 1024L,
+            ) { _, book -> assertEquals(listOf(text), book.lines) }
+            assertEquals(1, calls.get())
+            assertEquals(1, stats.readOnConsumer)
+        } finally {
+            dir.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun metadataOnlyVersionUsesTheSameMergedDocumentAsInsertedLines() = runBlocking {
+        val root = Files.createTempDirectory("sefaria-version-snapshot")
+        val driver = JdbcSqliteDriver("jdbc:sqlite::memory:")
+        try {
+            SeforimDb.Schema.create(driver)
+            val repo = SeforimRepository(":memory:", driver)
+            Files.writeString(root.resolve("table_of_contents.json"), "[]")
+            val merged = Files.createDirectories(root.resolve("json/Fixture")).resolve("merged.json")
+            val schema = Files.createDirectories(root.resolve("schemas")).resolve("Fixture.json")
+            fun export(version: String) = """
+                {"title":"Fixture","heTitle":"ספר בדיקה","text":["טקסט בדיקה"],"versions":[["$version","source"]]}
+            """.trimIndent()
+            Files.writeString(merged, export("Original"))
+            Files.writeString(schema, """
+                {"heCategories":["בדיקות"],"schema":{"title":"Fixture","heTitle":"ספר בדיקה",
+                "nodeType":"JaggedArrayNode","depth":1,"sectionNames":["Paragraph"],
+                "heSectionNames":["פסקה"],"addressTypes":["Integer"]}}
+            """.trimIndent())
+
+            var changed = false
+            val editAfterInsert = object : LogWriter() {
+                override fun log(severity: Severity, message: String, tag: String, throwable: Throwable?) {
+                    if (message.startsWith("Inserted all books and lines")) {
+                        Files.writeString(merged, export("Edited"))
+                        changed = true
+                    }
+                }
+            }
+            val logger = Logger(StaticConfig(Severity.Info, listOf(editAfterInsert)), "version snapshot")
+            SefariaDirectImporter(root, repo, logger = logger).import()
+
+            assertTrue(changed)
+            val book = repo.getAllBooks().single()
+            val versions = SeforimDb(driver).bookVersionQueriesQueries.selectVersionsByBookId(book.id).executeAsList()
+            assertEquals(listOf("Original"), versions.map { it.versionTitle })
+        } finally {
+            driver.close()
+            root.toFile().deleteRecursively()
         }
     }
 

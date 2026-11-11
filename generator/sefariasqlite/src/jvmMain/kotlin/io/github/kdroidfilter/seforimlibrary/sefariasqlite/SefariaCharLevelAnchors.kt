@@ -37,7 +37,7 @@ internal class SefariaCharLevelAnchors(
                     it.bookId, it.enTitle, it.bookPath, it.singleVersionTitle, it.cleanShiftByLineIndex,
                 )
             },
-            lineContent = { book, index -> byPath[book.bookPath]?.lines?.getOrNull(index) },
+            lineContent = { book, entry -> byPath[book.bookPath]?.lines?.getOrNull(entry.lineIndex0) },
         )
     }
 
@@ -49,12 +49,14 @@ internal class SefariaCharLevelAnchors(
         generateCore(
             pending = pending,
             books = books,
-            // The persisted line may carry the generated dash-dibbur bold
-            // wrapper. Char-level offsets must use the original unbolded text,
-            // exactly as the legacy BookPayload-based anchor pass did.
-            lineContent = { book, index ->
-                repository.getLineByIndex(book.bookId, index)?.content
-                    ?.let(DhExtractor::sourceLineForIndex)
+            lineContent = { book, entry ->
+                val lineId = if (entry.side == 0) entry.srcLineId else entry.tgtLineId
+                val content = repository.getLine(lineId)?.content
+                if (content != null && book.boldedLineIndexes[entry.lineIndex0]) {
+                    DhExtractor.sourceLineForIndex(content)
+                } else {
+                    content
+                }
             },
         )
     }
@@ -62,7 +64,7 @@ internal class SefariaCharLevelAnchors(
     private suspend fun generateCore(
         pending: Collection<PendingCharLevelAnchor>,
         books: List<SefariaInlineAnchors.BookRef>,
-        lineContent: suspend (SefariaInlineAnchors.BookRef, Int) -> String?,
+        lineContent: suspend (SefariaInlineAnchors.BookRef, PendingCharLevelAnchor) -> String?,
     ) {
         if (pending.isEmpty()) return
         val booksByPath = books.associateBy { it.bookPath }
@@ -99,7 +101,7 @@ internal class SefariaCharLevelAnchors(
                 skip("line modified by cleaning")
                 continue
             }
-            val content = lineContent(book, entry.lineIndex0)
+            val content = lineContent(book, entry)
             if (content == null) {
                 skip("line not found")
                 continue

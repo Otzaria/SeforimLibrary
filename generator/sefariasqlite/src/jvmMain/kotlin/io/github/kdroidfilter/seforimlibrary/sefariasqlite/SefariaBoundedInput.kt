@@ -18,6 +18,7 @@ internal data class SefariaBookDescriptor(
     val heTitle: String,
     val enTitle: String,
     val categoriesHe: List<String>,
+    val estimatedDecodedBytes: Long = 0,
 ) {
     val normalizedPath: String get() = normalizedBookPath(categoriesHe, heTitle)
 
@@ -75,7 +76,9 @@ internal fun scanSefariaBooks(
                 skippedAuthorExamples += filtered.skippedAuthorExamples.take(5 - skippedAuthorExamples.size)
             }
         } else {
-            books += SefariaBookDescriptor(path, payload.heTitle, payload.enTitle, payload.categoriesHe)
+            books += SefariaBookDescriptor(
+                path, payload.heTitle, payload.enTitle, payload.categoriesHe, estimateDecodedBytes(payload),
+            )
         }
     }
     return SefariaBookScan(
@@ -144,7 +147,9 @@ internal object SefariaBoundedInput {
         val producer = launch(Dispatchers.IO) {
             try {
                 for (descriptor in descriptors) {
-                    val item = if (Files.size(descriptor.path) > budgetBytes) {
+                    val item = if (descriptor.estimatedDecodedBytes > budgetBytes ||
+                        Files.size(descriptor.path) > budgetBytes
+                    ) {
                         deferred++
                         Work.ReadOnConsumer(descriptor)
                     } else {
@@ -153,9 +158,7 @@ internal object SefariaBoundedInput {
                         descriptor.verify(payload)
                         // UTF-16 content and reference records can be far larger
                         // than the source JSON. Do not queue such a book.
-                        val estimatedBytes = payload.lines.sumOf { it.length.toLong() * 2L } +
-                            payload.refEntries.size.toLong() * 160L
-                        if (estimatedBytes > budgetBytes) {
+                        if (estimateDecodedBytes(payload) > budgetBytes) {
                             deferred++
                             Work.ReadOnConsumer(descriptor)
                         } else {
@@ -198,3 +201,6 @@ internal object SefariaBoundedInput {
         Stats(inserted, deferred, budgetBytes / (1024 * 1024))
     }
 }
+
+private fun estimateDecodedBytes(payload: BookPayload): Long =
+    payload.lines.sumOf { it.length.toLong() * 2L } + payload.refEntries.size.toLong() * 160L
