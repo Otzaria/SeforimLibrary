@@ -675,15 +675,8 @@ class SefariaDirectImporter(
                 linksImporter.insertDerivedCommentaryLinks(anchors.map { it.toDerivedLink(commentary) }, bookMetaById)
                 logger.i { "Anchored ${anchors.size} lines of book ${commentary.commentaryBookId} to its base text" }
             }
-            suspend fun storeDerived(derived: List<DerivedCommentaryLink>) {
-                linksImporter.insertDerivedCommentaryLinks(derived, bookMetaById).forEach(commentaryBaseLinks::record)
-                logger.i {
-                    "Derived ${derived.size} commentary links: " +
-                        derived.groupingBy { it.stage.metricKey }.eachCount().toSortedMap()
-                }
-            }
             // Stage 1 first: its links bound the daf-only runs of stage 2.
-            storeDerived(addressedCommentaries.flatMap { deriveSegmentAddressLinks(it, commentaryBaseLinks) })
+            storeDerived(addressedCommentaries.flatMap { deriveSegmentAddressLinks(it, commentaryBaseLinks) }, linksImporter, commentaryBaseLinks, bookMetaById)
             // Re-read one book at a time: no book list is kept for the text gate.
             val lineTexts = CachedLineTextSource { path ->
                 sourceDirByBookPath[path]?.let { dir ->
@@ -692,7 +685,7 @@ class SefariaDirectImporter(
                     }?.let { bookPayloadReader.parseBookFile(it, schemaDir, schemaLookup)?.lines }
                 }
             }
-            storeDerived(addressedCommentaries.flatMap { deriveTalmudNeighbourLinks(it, commentaryBaseLinks, lineTexts) })
+            storeDerived(addressedCommentaries.flatMap { deriveTalmudNeighbourLinks(it, commentaryBaseLinks, lineTexts) }, linksImporter, commentaryBaseLinks, bookMetaById)
             // After the anchors: they are counted as written links too.
             linkImportMetrics = linksImporter.metricsSnapshot()
             logger.i { "Links processed" }
@@ -793,6 +786,19 @@ class SefariaDirectImporter(
      * space) and of books another source held that Sefaria now provides: the
      * Otzaria importer skips any title Sefaria has, so the id moves here.
      */
+    private suspend fun storeDerived(
+        derived: List<DerivedCommentaryLink>,
+        linksImporter: SefariaLinksImporter,
+        commentaryBaseLinks: CommentaryBaseLinks,
+        bookMetaById: Map<Long, BookMeta>,
+    ) {
+        linksImporter.insertDerivedCommentaryLinks(derived, bookMetaById).forEach(commentaryBaseLinks::record)
+        logger.i {
+            "Derived ${derived.size} commentary links: " +
+                derived.groupingBy { it.stage.metricKey }.eachCount().toSortedMap()
+        }
+    }
+
     internal fun registerBookAliases(payloads: List<BookPayload>) {
         val currentBooks = payloads.associateBy { BookKey(sourceName, canonicalHeTitle(it)) }
         registerBookAliasesWithHashes(currentBooks.keys) { key ->
