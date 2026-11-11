@@ -47,6 +47,24 @@ class SefariaCharLevelAnchorsTest {
     }
 
     @Test
+    fun identifiesOnlyTheReportedTanyaQuotationCells() {
+        val type = "quotation_auto_tanakh"
+        val sourceRef = "Tanya, Part III; Iggeret HaTeshuvah 9:2"
+        val quotedRef = "Deuteronomy 22:6"
+        val second = SefariaLinksImporter.CharLevelCell(0, 32, "Kehot Publication Society", "he", false)
+        val first = second.copy(end = 34)
+        assertEquals(
+            "<i data-overlay=\"Vilna Pages\" data",
+            first.knownIncorrectSpan(type, "Tanya, Part III; Iggeret HaTeshuvah 9:1", quotedRef),
+        )
+        assertEquals("דְּהַיְינוּ, שֶׁעַל־יְדֵי שֶׁמִּ", second.knownIncorrectSpan(type, sourceRef, quotedRef))
+        assertNull(second.copy(start = 144, end = 166).knownIncorrectSpan(type, sourceRef, quotedRef))
+        assertNull(second.copy(versionTitle = "Other edition").knownIncorrectSpan(type, sourceRef, quotedRef))
+        assertNull(second.knownIncorrectSpan(type, sourceRef, "Psalms 119:66"))
+        assertNull(second.knownIncorrectSpan("quotation", sourceRef, quotedRef))
+    }
+
+    @Test
     fun rejectsEmptyAndMalformedCells() {
         assertNull(parseCharLevelCell(null))
         assertNull(parseCharLevelCell(""))
@@ -123,7 +141,9 @@ class SefariaCharLevelAnchorsTest {
             ),
         )
 
-        SefariaCharLevelAnchors(repo, Logger.withTag("CharLevelTest")).generate(pending, books)
+        val importer = SefariaCharLevelAnchors(repo, Logger.withTag("CharLevelTest"))
+        val knownIncorrect = pending.first().copy(startChar = 0, endChar = 3, incorrectSpan = "על ")
+        importer.generate(pending + knownIncorrect, books)
 
         val anchors = repo.getLinkAnchors(9)
         assertEquals(1, anchors.size)
@@ -135,6 +155,10 @@ class SefariaCharLevelAnchorsTest {
         assertEquals(10 + "ויבז עשו את הבכורה".length, anchor.charEnd)
         assertTrue(anchor.label == null)
 
+        // An upstream edit at the same offsets makes the exception inapplicable.
+        importer.generate(listOf(knownIncorrect.copy(incorrectSpan = "ישן")), books)
+        assertEquals(setOf(4, 10), repo.getLinkAnchors(9).map { it.charStart }.toSet())
+
         // A second export path can share the same book ID and line index.
         // The anchor must read the row at the actual target endpoint.
         repo.insertLinesBatch(listOf(Line(id = 199, bookId = 2, lineIndex = 0, content = "אחר", heRef = null)))
@@ -142,7 +166,7 @@ class SefariaCharLevelAnchorsTest {
         repo.executeRawQuery("DELETE FROM link_anchor")
         SefariaCharLevelAnchors(repo, Logger.withTag("CharLevelDatabaseParityTest"))
             .generateFromDatabase(
-                pending = pending,
+                pending = pending + knownIncorrect,
                 books = books.map { book ->
                     SefariaInlineAnchors.BookRef(
                         bookId = book.bookId,

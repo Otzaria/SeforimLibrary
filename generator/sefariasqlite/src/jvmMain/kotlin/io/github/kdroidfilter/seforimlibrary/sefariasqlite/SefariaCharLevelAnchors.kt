@@ -111,6 +111,11 @@ internal class SefariaCharLevelAnchors(
                 skip("offsets out of bounds")
                 continue
             }
+            val incorrectSpan = entry.incorrectSpan
+            if (incorrectSpan != null && content.startsWith(incorrectSpan, shift + entry.startChar)) {
+                skip("known incorrect quotation offset")
+                continue
+            }
             val linkIds = repository.getLinkIdsBetweenLines(entry.srcLineId, entry.tgtLineId)
             if (linkIds.isEmpty()) {
                 skip("no stored link")
