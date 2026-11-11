@@ -979,7 +979,15 @@ internal class SefariaBookPayloadReader(
                         simanTopicLines?.add(output.size)
                         output += topic.line
                     }
-                    val stored = topic?.seif ?: cleaned
+                    val originalStored = topic?.seif ?: cleaned
+                    // Issur VeHeter HaArokh repeats the footnote label at the start of
+                    // each body. Keep using the pre-cleanup segment for its line key
+                    // while Sefaria still ships the repeated label.
+                    val stored = if (bookEnTitle == "Issur VeHeter HaArokh" && "footnote" in originalStored) {
+                        dropRepeatedFootnoteMarkers(originalStored)
+                    } else {
+                        originalStored
+                    }
                     // Reproduce the old pipeline BEFORE the dashless repair: keeping
                     // a break can either enable or suppress that repair. Collapsing
                     // the final rendered line cannot undo an already inserted dash.

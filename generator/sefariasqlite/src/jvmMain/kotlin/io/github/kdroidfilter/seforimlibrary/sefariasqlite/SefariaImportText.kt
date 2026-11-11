@@ -119,8 +119,6 @@ internal fun cleanSefariaLine(
     var s = if (raw.contains('\n')) raw.replace("\n", "") else raw
     if (stripFootnotes) {
         s = stripSefariaFootnotes(s)
-    } else if (s.contains("footnote")) {
-        s = dropRepeatedFootnoteMarkers(s)
     }
     if (OTZAR_MARKUP_REGEX.containsMatchIn(s)) {
         s = OTZAR_MARKUP_REGEX.replace(s, "$1")
