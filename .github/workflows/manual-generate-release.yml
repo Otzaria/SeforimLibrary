@@ -1136,7 +1136,7 @@ jobs:
             echo "::error::$IMAGE_REPORT missing — the Sefaria image embedder did not run"
             exit 1
           fi
-          jq -r '"Image embedder: attempted=\(.attempted) cached=\(.cached) downloaded=\(.downloaded) fromDiskCache=\(.fromDiskCache) failed=\(.failed)"' "$IMAGE_REPORT"
+          jq -r '"Image embedder: attempted=\(.attempted) cached=\(.cached) fromBundle=\(.fromBundle // 0) downloaded=\(.downloaded) fromDiskCache=\(.fromDiskCache) failed=\(.failed)"' "$IMAGE_REPORT"
           jq -r '.failures[] | "::warning::image not embedded (\(.reason)): \(.url)"' "$IMAGE_REPORT"
           IMAGE_FAILED=$(jq -r '.failed' "$IMAGE_REPORT")
           if [ "$IMAGE_FAILED" -gt "$IMAGE_EMBED_MAX_FAILURES" ]; then

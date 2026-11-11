@@ -21,6 +21,7 @@ jsoup = "1.22.1"
 slf4j = "2.0.17"
 sqlite-jdbc = "3.50.3.0"
 jackson = "2.19.2"
+twelvemonkeys = "3.15.0"
 
 [libraries]
 
@@ -51,6 +52,7 @@ slf4j-simple = { module = "org.slf4j:slf4j-simple", version.ref = "slf4j" }
 sqlite-jdbc = { module = "org.xerial:sqlite-jdbc", version.ref = "sqlite-jdbc" }
 jackson-core = { module = "com.fasterxml.jackson.core:jackson-core", version.ref = "jackson" }
 jackson-databind = { module = "com.fasterxml.jackson.core:jackson-databind", version.ref = "jackson" }
+twelvemonkeys-webp = { module = "com.twelvemonkeys.imageio:imageio-webp", version.ref = "twelvemonkeys" }
 compose-runtime = { module = "org.jetbrains.compose.runtime:runtime", version.ref = "compose" }
 
 [plugins]

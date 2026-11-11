@@ -25,9 +25,21 @@ database_export/
 │       └── merged.json              # Complete text content
 ├── schemas/                         # Book structure definitions
 │   └── {BookName}.json              # Schema with hierarchy, sections, metadata
+├── textimages/                      # Optional image payloads and <sha256(url)>.url sidecars
 └── links/                           # Cross-references between texts
     └── *.csv                        # Format: Citation 1, Citation 2, Connection Type
 ```
+
+### Text images
+
+The importer validates images in `textimages/` and inlines them in the SQLite text.
+Each payload is named with the SHA-256 of the UTF-8 URL. Its `.url` sidecar contains
+the exact URL with no trailing newline. For missing or invalid bundled images,
+the importer checks the persistent image cache, then tries HTTP. Only validated
+HTTP downloads are written to the persistent cache. Each image is limited to
+5 MiB, regardless of source.
+
+The image embed report records hits from the bundle, cache, and HTTP, and lists URLs that could not be embedded.
 
 ### merged.json Structure
 ```json
