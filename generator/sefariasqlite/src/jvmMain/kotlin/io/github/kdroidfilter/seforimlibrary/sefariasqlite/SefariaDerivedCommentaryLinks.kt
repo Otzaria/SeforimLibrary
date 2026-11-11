@@ -187,6 +187,25 @@ internal fun interface LineTextSource {
     fun text(path: String, lineIndex: Int): String?
 }
 
+/**
+ * A [LineTextSource] that loads a book's lines through [load] on first use and keeps the last
+ * [capacity] books, so no book list stays in memory. Line indices are those of the stored lines.
+ */
+internal class CachedLineTextSource(
+    private val capacity: Int = 4,
+    private val load: (path: String) -> List<String>?,
+) : LineTextSource {
+    private val cache = object : LinkedHashMap<String, List<String>>(8, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, List<String>>) = size > capacity
+    }
+
+    @Synchronized
+    override fun text(path: String, lineIndex: Int): String? {
+        val lines = cache[path] ?: load(path)?.also { cache[path] = it } ?: return null
+        return lines.getOrNull(lineIndex)
+    }
+}
+
 // Text gate of stage 2: a segment keeps its neighbours' base line only when its own words
 // single that line out of the amud, and only in a book where this holds for Sefaria's own links.
 private const val TEXT_GATE_MIN_ACCURACY = 0.92

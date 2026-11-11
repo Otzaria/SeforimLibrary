@@ -270,6 +270,24 @@ class SefariaDerivedCommentaryLinksTest {
         assertTrue(derive(f).isEmpty())
     }
 
+    @Test
+    fun cachedTextSourceLoadsABookOnceAndKeepsOnlyTheLastFew() {
+        val loads = mutableListOf<String>()
+        val source = CachedLineTextSource(capacity = 2) { path -> loads += path; listOf("$path-0", "$path-1") }
+        assertEquals("a-1", source.text("a", 1))
+        assertEquals("a-0", source.text("a", 0))
+        assertEquals(null, source.text("a", 2))
+        source.text("b", 0)
+        source.text("c", 0)
+        source.text("a", 0)
+        assertEquals(listOf("a", "b", "c", "a"), loads)
+    }
+
+    @Test
+    fun cachedTextSourceWithoutABookGivesNothing() {
+        assertEquals(null, CachedLineTextSource { null }.text("missing", 0))
+    }
+
     // --- Collecting -----------------------------------------------------------------------
 
     @Test

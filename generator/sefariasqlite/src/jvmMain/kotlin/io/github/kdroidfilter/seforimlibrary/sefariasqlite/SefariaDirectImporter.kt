@@ -225,6 +225,7 @@ class SefariaDirectImporter(
         val lineIdToBookId = ConcurrentHashMap<Long, Long>()
         val allRefsWithPath = mutableListOf<RefEntry>()
         val canonicalTitleByBookPath = ConcurrentHashMap<String, String>()
+        val sourceDirByBookPath = ConcurrentHashMap<String, String>()
         val bookMetaById = ConcurrentHashMap<Long, BookMeta>()
         val normalizedTitleToBookId = ConcurrentHashMap<String, Long>()
         // Collected in priority order during the book loop; the title→bookId
@@ -296,6 +297,7 @@ class SefariaDirectImporter(
             }
             val bookPath = buildBookPath(payload.categoriesHe, payload.heTitle)
             val canonicalTitle = canonicalHeTitle(payload)
+            payload.sourceDirPath?.let { sourceDirByBookPath[bookPath] = it }
             val previousCanonicalTitle = canonicalTitleByBookPath.putIfAbsent(bookPath, canonicalTitle)
             check(previousCanonicalTitle == null || previousCanonicalTitle == canonicalTitle) {
                 "Conflicting Sefaria book identities for linker sidecar path $bookPath: " +
@@ -682,8 +684,14 @@ class SefariaDirectImporter(
             }
             // Stage 1 first: its links bound the daf-only runs of stage 2.
             storeDerived(addressedCommentaries.flatMap { deriveSegmentAddressLinks(it, commentaryBaseLinks) })
-            val linesByPath = anchorBookInputs.associate { it.bookPath to it.lines }
-            val lineTexts = LineTextSource { path, lineIndex -> linesByPath[path]?.getOrNull(lineIndex) }
+            // Re-read one book at a time: no book list is kept for the text gate.
+            val lineTexts = CachedLineTextSource { path ->
+                sourceDirByBookPath[path]?.let { dir ->
+                    java.nio.file.Files.list(java.nio.file.Paths.get(dir)).use { files ->
+                        files.filter { it.fileName.toString().equals("merged.json", ignoreCase = true) }.findFirst().orElse(null)
+                    }?.let { bookPayloadReader.parseBookFile(it, schemaDir, schemaLookup)?.lines }
+                }
+            }
             storeDerived(addressedCommentaries.flatMap { deriveTalmudNeighbourLinks(it, commentaryBaseLinks, lineTexts) })
             // After the anchors: they are counted as written links too.
             linkImportMetrics = linksImporter.metricsSnapshot()
