@@ -641,6 +641,7 @@ internal class SefariaLinksImporter(
                                 charLevelPending.add(
                                     cld1.toPending(
                                         entry = from,
+                                        incorrectSpan = cld1.knownIncorrectSpan(conn, c1, c2),
                                         storedSrcLine = storedSrcLine,
                                         storedTgtLine = storedTgtLine,
                                         side = if (wasSwapped) 1 else 0,
@@ -651,6 +652,7 @@ internal class SefariaLinksImporter(
                                 charLevelPending.add(
                                     cld2.toPending(
                                         entry = to,
+                                        incorrectSpan = cld2.knownIncorrectSpan(conn, c2, c1),
                                         storedSrcLine = storedSrcLine,
                                         storedTgtLine = storedTgtLine,
                                         side = if (wasSwapped) 0 else 1,
@@ -783,6 +785,7 @@ internal class SefariaLinksImporter(
             storedSrcLine: Long,
             storedTgtLine: Long,
             side: Int,
+            incorrectSpan: String?,
         ) = PendingCharLevelAnchor(
             path = entry.path,
             lineIndex0 = entry.lineIndex - 1,
@@ -794,7 +797,25 @@ internal class SefariaLinksImporter(
             versionTitle = versionTitle,
             language = language,
             isWordBased = isWordBased,
+            incorrectSpan = incorrectSpan,
         )
+
+        /**
+         * Otzaria/otzaria#4666: these two automatic quotation cells point at the opening
+         * of the Tanya paragraph. Match the original edition, refs and offsets, then let
+         * the anchor pass verify the exact raw text before discarding the stale offset.
+         */
+        fun knownIncorrectSpan(type: String, citation: String, quotedCitation: String): String? {
+            if (type != "quotation_auto_tanakh" || quotedCitation != "Deuteronomy 22:6" ||
+                isWordBased || versionTitle != "Kehot Publication Society" || start != 0
+            ) return null
+            val span = when (citation) {
+                "Tanya, Part III; Iggeret HaTeshuvah 9:1" -> "<i data-overlay=\"Vilna Pages\" data"
+                "Tanya, Part III; Iggeret HaTeshuvah 9:2" -> "דְּהַיְינוּ, שֶׁעַל־יְדֵי שֶׁמִּ"
+                else -> return null
+            }
+            return span.takeIf { it.length == end }
+        }
     }
 
     private fun lineBookId(lineId: Long, lineIdToBookId: Map<Long, Long>): Long =

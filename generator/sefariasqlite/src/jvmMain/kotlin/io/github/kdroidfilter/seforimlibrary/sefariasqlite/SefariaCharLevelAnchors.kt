@@ -15,8 +15,7 @@ import io.github.kdroidfilter.seforimlibrary.dao.repository.SeforimRepository
  *    the cell's `versionTitle` (merged text == version text verbatim), and
  *  - `cleanSefariaLine` did not modify the segment (the stored line is the raw
  *    segment, at most behind a known "(א) " prefix), and
- *  - the offsets are within the raw segment's bounds, and
- *  - the anchored span shares words with the quoted line ([spanSharesQuotedWords]).
+ *  - the offsets are within the raw segment's bounds.
  * Word-based cells (startWord/endWord, Tanakh verse sides) are skipped —
  * Sefaria's word-splitting convention is not reproducible here exactly.
  * Everything skipped is counted and reported, never guessed.
@@ -37,7 +36,6 @@ internal class SefariaCharLevelAnchors(
 
         var inserted = 0L
         val batch = mutableListOf<LinkAnchor>()
-        val quotedWordsByLine = HashMap<Long, Set<String>?>()
         for (entry in pending) {
             if (entry.isWordBased) {
                 skip("word-based offsets")
@@ -75,22 +73,14 @@ internal class SefariaCharLevelAnchors(
                 skip("offsets out of bounds")
                 continue
             }
+            val incorrectSpan = entry.incorrectSpan
+            if (incorrectSpan != null && content.startsWith(incorrectSpan, shift + entry.startChar)) {
+                skip("known incorrect quotation offset")
+                continue
+            }
             val linkIds = repository.getLinkIdsBetweenLines(entry.srcLineId, entry.tgtLineId)
             if (linkIds.isEmpty()) {
                 skip("no stored link")
-                continue
-            }
-            val quotedLineId = if (entry.side == 0) entry.tgtLineId else entry.srcLineId
-            val quotedWords = quotedWordsByLine.getOrPut(quotedLineId) {
-                repository.getLine(quotedLineId)?.content?.let { quoteMatchWords(it).toHashSet() }
-            }
-            if (quotedWords == null) {
-                skip("quoted line not found")
-                continue
-            }
-            val span = content.substring(shift + entry.startChar, shift + entry.endChar)
-            if (!spanSharesQuotedWords(span, quotedWords)) {
-                skip("span does not match quoted line")
                 continue
             }
             val charStart = countVisibleChars(content, shift + entry.startChar)

@@ -65,7 +65,7 @@ class SefariaTalmudDibburImportTest {
                 put("title", en); put("heTitle", he); put("language", "he"); put("actualLanguage", "he")
                 put("versionTitle", if (alternative) "Alternative Edition" else "Fixture Edition")
                 put("versions", JsonArray(listOf(strings(listOf("Fixture Edition", "")))))
-                val text = if (rows == "base") listOf("מקור הציטוט: עד שליש הלילה") else comments.map {
+                val text = if (rows == "base") listOf("מקור הציטוט") else comments.map {
                     if (alternative) it.replace("שליש הלילה", "תחילת הלילה") else it
                 }
                 put("text", JsonArray(listOf(JsonArray(emptyList()), JsonArray(emptyList()), strings(text))))

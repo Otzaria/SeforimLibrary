@@ -340,6 +340,8 @@ internal data class PendingCharLevelAnchor(
     val language: String,
     /** Sefaria uses startWord/endWord (word indices) for Tanakh verse sides. */
     val isWordBased: Boolean,
+    /** The exact bad span from a known upstream issue, if the CSV cell matches it. */
+    val incorrectSpan: String? = null,
 )
 
 internal data class Heading(

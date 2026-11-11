@@ -12,7 +12,6 @@ import io.github.kdroidfilter.seforimlibrary.db.SeforimDb
 import kotlinx.coroutines.runBlocking
 import kotlin.test.Test
 import kotlin.test.assertEquals
-import kotlin.test.assertFalse
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
@@ -48,27 +47,21 @@ class SefariaCharLevelAnchorsTest {
     }
 
     @Test
-    fun quotedSpanCheckAcceptsTheQuoteAndRejectsUnrelatedWords() {
-        // Tanya, Iggeret HaTeshuvah 9:2 — Sefaria's real offsets for Psalms 119:66.
-        val psalm = "(סו) טוּב טַעַם וָדַעַת לַמְּדֵנִי כִּי בְמִצְוֺתֶיךָ הֶאֱמָנְתִּי׃"
-        assertTrue(spanSharesQuotedWords("וּבְטוּב טַעַם וָדַעַת", psalm))
-        // Spelling variance between the quoting book and the Masoretic text.
-        assertTrue(spanSharesQuotedWords("יושב בשבת תחכמוני", "אֵלֶּה שְׁמוֹת הַגִּבֹּרִים אֲשֶׁר לְדָוִד יֹשֵׁב בַּשֶּׁבֶת תַּחְכְּמֹנִי"))
-
-        // Issue Otzaria/otzaria#4666: 9:2 got startChar=0 for Deuteronomy 22:6,
-        // whose quote is in 9:1.
-        val deuteronomy = "(ו) כִּי יִקָּרֵא צִפּוֹר ׀ לְפָנֶיךָ בַּדֶּרֶךְ בְּכׇל־עֵץ ׀ אוֹ עַל־הָאָרֶץ " +
-            "אֶפְרֹחִים אוֹ בֵיצִים וְהָאֵם רֹבֶצֶת עַל־הָאֶפְרֹחִים אוֹ עַל־הַבֵּיצִים לֹא־תִקַּח הָאֵם עַל־הַבָּנִים׃"
-        assertFalse(spanSharesQuotedWords("דְּהַיְינוּ, שֶׁעַל־יְדֵי שֶׁמִּ", deuteronomy))
-        assertTrue(spanSharesQuotedWords("״וְהָאֵם רוֹבֶצֶת עַל הָאֶפְרוֹחִים״", deuteronomy))
-
-        // A function word alone ("על") does not validate a span.
-        assertFalse(spanSharesQuotedWords("ועל זה", deuteronomy))
-        // Chassidic spelling of the divine name.
-        assertTrue(spanSharesQuotedWords("לאהבה את ה׳ אלקיך", "לְאַהֲבָה אֶת־יְהֹוָה אֱלֹהֶיךָ לָלֶכֶת בִּדְרָכָיו"))
-
-        assertFalse(spanSharesQuotedWords("", deuteronomy))
-        assertFalse(spanSharesQuotedWords("<i data-overlay=\"Vilna Pages\"></i> ", deuteronomy))
+    fun identifiesOnlyTheReportedTanyaQuotationCells() {
+        val type = "quotation_auto_tanakh"
+        val sourceRef = "Tanya, Part III; Iggeret HaTeshuvah 9:2"
+        val quotedRef = "Deuteronomy 22:6"
+        val second = SefariaLinksImporter.CharLevelCell(0, 32, "Kehot Publication Society", "he", false)
+        val first = second.copy(end = 34)
+        assertEquals(
+            "<i data-overlay=\"Vilna Pages\" data",
+            first.knownIncorrectSpan(type, "Tanya, Part III; Iggeret HaTeshuvah 9:1", quotedRef),
+        )
+        assertEquals("דְּהַיְינוּ, שֶׁעַל־יְדֵי שֶׁמִּ", second.knownIncorrectSpan(type, sourceRef, quotedRef))
+        assertNull(second.copy(start = 144, end = 166).knownIncorrectSpan(type, sourceRef, quotedRef))
+        assertNull(second.copy(versionTitle = "Other edition").knownIncorrectSpan(type, sourceRef, quotedRef))
+        assertNull(second.knownIncorrectSpan(type, sourceRef, "Psalms 119:66"))
+        assertNull(second.knownIncorrectSpan("quotation", sourceRef, quotedRef))
     }
 
     @Test
@@ -103,11 +96,7 @@ class SefariaCharLevelAnchorsTest {
         val quotingLine = "(א) על <b>כן</b> ויבז עשו את הבכורה"
         repo.insertLinesBatch(
             listOf(
-                Line(
-                    id = 100, bookId = 1, lineIndex = 0,
-                    content = "(לד) וְיַעֲקֹב נָתַן לְעֵשָׂו לֶחֶם וּנְזִיד עֲדָשִׁים וַיֹּאכַל וַיֵּשְׁתְּ וַיָּקָם וַיֵּלַךְ וַיִּבֶז עֵשָׂו אֶת־הַבְּכֹרָה׃",
-                    heRef = "בראשית כה, לד",
-                ),
+                Line(id = 100, bookId = 1, lineIndex = 0, content = "פסוק", heRef = "בראשית כה, לד"),
                 Line(id = 200, bookId = 2, lineIndex = 0, content = quotingLine, heRef = "צרור המור א"),
             )
         )
@@ -144,12 +133,6 @@ class SefariaCharLevelAnchorsTest {
                 startChar = 0, endChar = 5,
                 versionTitle = "Some Other Edition", language = "he", isWordBased = false,
             ),
-            // גרסה תואמת אבל הטווח "על <b" אינו מילות הפסוק — נחסם
-            PendingCharLevelAnchor(
-                path = "tzror", lineIndex0 = 0, srcLineId = 100, tgtLineId = 200, side = 1,
-                startChar = 0, endChar = 5,
-                versionTitle = "Tzeror Hamor, Warsaw, 1879", language = "he", isWordBased = false,
-            ),
             // מבוסס-מילים — נחסם
             PendingCharLevelAnchor(
                 path = "tzror", lineIndex0 = 0, srcLineId = 100, tgtLineId = 200, side = 0,
@@ -158,7 +141,9 @@ class SefariaCharLevelAnchorsTest {
             ),
         )
 
-        SefariaCharLevelAnchors(repo, Logger.withTag("CharLevelTest")).generate(pending, books)
+        val importer = SefariaCharLevelAnchors(repo, Logger.withTag("CharLevelTest"))
+        val knownIncorrect = pending.first().copy(startChar = 0, endChar = 3, incorrectSpan = "על ")
+        importer.generate(pending + knownIncorrect, books)
 
         val anchors = repo.getLinkAnchors(9)
         assertEquals(1, anchors.size)
@@ -169,5 +154,9 @@ class SefariaCharLevelAnchorsTest {
         assertEquals(10, anchor.charStart)
         assertEquals(10 + "ויבז עשו את הבכורה".length, anchor.charEnd)
         assertTrue(anchor.label == null)
+
+        // An upstream edit at the same offsets makes the exception inapplicable.
+        importer.generate(listOf(knownIncorrect.copy(incorrectSpan = "ישן")), books)
+        assertEquals(setOf(4, 10), repo.getLinkAnchors(9).map { it.charStart }.toSet())
     }
 }
