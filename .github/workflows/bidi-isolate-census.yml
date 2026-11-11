@@ -14,7 +14,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 100
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Test census script independently on synthetic SQLite DB
         run: python3 tool/bidi/scan_unicode_isolates.py --self-test
       - name: Disk space and system zstd support
@@ -69,7 +69,7 @@ jobs:
                     f"Time: {j['duration_seconds']} seconds.", file=out)
               print('\nScope excludes local imported files, PDFs outside SQLite and user notes.', file=out)
           PY
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: bidi-isolates-v37-census
           path: ${{ runner.temp }}/bidi-isolate-counts.json
