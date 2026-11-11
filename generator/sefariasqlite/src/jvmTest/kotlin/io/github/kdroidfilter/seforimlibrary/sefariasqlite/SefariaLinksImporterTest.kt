@@ -465,6 +465,58 @@ class SefariaLinksImporterTest {
         assertEquals(ConnectionType.COMMENTARY, result)
     }
 
+    private val tanakhBase = BookMeta(
+        isBaseBook = true, categoryLevel = 0, priorityRank = 0, topCategoryEn = "Tanakh",
+    )
+    private val tanakhCommentary = BookMeta(
+        isBaseBook = false, categoryLevel = 2, priorityRank = null,
+        dependence = Dependence.COMMENTARY, baseTextBookIds = setOf(10L),
+    )
+
+    private fun blankTanakhLink(baseRef: String, commentaryRef: String) = inferBlankConnectionType(
+        srcBookId = 10L, tgtBookId = 20L,
+        srcMeta = tanakhBase, tgtMeta = tanakhCommentary,
+        srcRef = baseRef, tgtRef = commentaryRef,
+    )
+
+    @Test
+    fun knownBlankTanakhCitationsAreReferences() {
+        val citations = listOf(
+            "Genesis 7:1" to "Rashi on Genesis 7:11:1",
+            "Genesis 7:5" to "Rashi on Genesis 7:7:2",
+            "Genesis 9:1" to "Rashi on Genesis 9:7:1",
+            "Genesis 9:1" to "Rashi on Genesis 9:9:1",
+            "Genesis 26:16" to "Rashi on Genesis 26:29:1",
+            "Deuteronomy 31:23" to "Ramban on Deuteronomy 31:14:1",
+        )
+        for ((baseRef, commentaryRef) in citations) {
+            assertEquals(ConnectionType.REFERENCE, blankTanakhLink(baseRef, commentaryRef), commentaryRef)
+            assertEquals(
+                ConnectionType.REFERENCE,
+                inferBlankConnectionType(
+                    srcBookId = 20L, tgtBookId = 10L,
+                    srcMeta = tanakhCommentary, tgtMeta = tanakhBase,
+                    srcRef = commentaryRef, tgtRef = baseRef,
+                ),
+                commentaryRef,
+            )
+        }
+    }
+
+    @Test
+    fun unlistedBlankTanakhLinksRetainCommentaryAcrossVerses() {
+        val links = listOf(
+            "Judges 11:37" to "Abarbanel on Judges 11:36:1",
+            "Judges 15:16" to "Abarbanel on Judges 15:9:1",
+            "Genesis 26:29" to "Rashi on Genesis 26:29:1",
+            "Genesis 26:16" to "Rashi on Genesis 26:29:2",
+            "Genesis 26:30" to "Rashi on Genesis 26:29:1-30:2",
+        )
+        for ((baseRef, commentaryRef) in links) {
+            assertEquals(ConnectionType.COMMENTARY, blankTanakhLink(baseRef, commentaryRef), commentaryRef)
+        }
+    }
+
     // Daf-style refs compare only when the pair proved daf-aligned in the typed-row
     // pre-scan; without that proof the gate never fires (protects Rif-paginated books).
     @Test
