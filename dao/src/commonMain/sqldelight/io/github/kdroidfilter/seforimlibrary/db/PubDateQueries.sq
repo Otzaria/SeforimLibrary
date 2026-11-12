@@ -27,6 +27,9 @@ INSERT INTO book_pub_date (bookId, pubDateId)
 VALUES (?, ?)
 ON CONFLICT (bookId, pubDateId) DO NOTHING;
 
+unlinkAllBookPubDates:
+DELETE FROM book_pub_date WHERE bookId = ?;
+
 delete:
 DELETE FROM pub_date WHERE id = ?;
 

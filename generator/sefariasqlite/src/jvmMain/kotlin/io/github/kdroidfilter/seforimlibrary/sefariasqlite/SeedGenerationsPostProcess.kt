@@ -8,14 +8,27 @@ import java.sql.DriverManager
 import kotlin.io.path.exists
 import kotlin.system.exitProcess
 
-/** Site-curated book info: the generation source. */
+/** Site-curated book info: the generation source, plus the per-book fields of [applyBookInfoExtensions]. */
 internal const val BOOK_INFO_FILE = "book_info.csv"
 
 /** The previous generation source, read only from an archive without [BOOK_INFO_FILE]. */
 internal const val GENERATIONS_FILE = "generations.csv"
 
-private val BOOK_INFO_HEADER =
+private val BOOK_INFO_BASE_COLUMNS =
     listOf("bookName", "authorName", "generationName", "subGenerationName", "startYear", "endYear")
+
+internal val BOOK_INFO_EXTENSION_COLUMNS = listOf("topics", "pubDate", "pubPlace", "description", "proofread")
+
+/** One [BOOK_INFO_FILE] row; [extension] is empty for a 6-column file. */
+internal data class BookInfoRecord(
+    val bookName: String,
+    val authorName: String,
+    val generationName: String,
+    val subGenerationName: String,
+    val startYear: String,
+    val endYear: String,
+    val extension: BookInfoExtension,
+)
 
 /**
  * Seeds the `generation` table and links books to their generation, driven by
@@ -88,7 +101,7 @@ fun main(args: Array<String>) {
  * moves from one file to the other. Neither file present is fatal.
  */
 internal fun loadGenerationRows(logger: Logger): List<Pair<String, String>> {
-    downloadOptionalForDbFile(BOOK_INFO_FILE, logger)?.let { return parseBookInfoGenerations(it, logger) }
+    loadBookInfo(logger)?.let { return bookInfoGenerations(it, logger) }
     val legacy = checkNotNull(downloadOptionalForDbFile(GENERATIONS_FILE, logger)) {
         "ForDB archive has neither $BOOK_INFO_FILE nor $GENERATIONS_FILE"
     }
@@ -96,30 +109,64 @@ internal fun loadGenerationRows(logger: Logger): List<Pair<String, String>> {
     return parseGenerations(legacy, logger)
 }
 
+/** The parsed [BOOK_INFO_FILE] of the ForDB archive, or null when the archive predates it. */
+internal fun loadBookInfo(logger: Logger): List<BookInfoRecord>? =
+    downloadOptionalForDbFile(BOOK_INFO_FILE, logger)?.let(::parseBookInfo)
+
 /**
- * [BOOK_INFO_FILE] → (book title, generation) pairs, one per title.
+ * Parses [BOOK_INFO_FILE] RFC-4180 style (fields are quoted and may span lines). The
+ * header is exactly the base columns, or the base plus [BOOK_INFO_EXTENSION_COLUMNS];
+ * anything else fails, as does a record of another width or without a book name.
+ */
+internal fun parseBookInfo(lines: List<String>): List<BookInfoRecord> {
+    val records = parseForDbCsvRecords(lines.joinToString("\n"))
+    require(records.isNotEmpty()) { "$BOOK_INFO_FILE is empty" }
+    val header = records.first()
+    require(header == BOOK_INFO_BASE_COLUMNS || header == BOOK_INFO_BASE_COLUMNS + BOOK_INFO_EXTENSION_COLUMNS) {
+        "$BOOK_INFO_FILE must start with the header ${BOOK_INFO_BASE_COLUMNS.joinToString(",")}" +
+            "[,${BOOK_INFO_EXTENSION_COLUMNS.joinToString(",")}], not ${header.joinToString(",")}"
+    }
+    val column = header.withIndex().associate { (index, name) -> name to index }
+
+    return records.drop(1).mapIndexed { index, fields ->
+        val recordNumber = index + 2
+        require(fields.size == header.size && fields[0].isNotEmpty()) {
+            "$BOOK_INFO_FILE record $recordNumber is malformed: $fields"
+        }
+        fun field(name: String): String = column[name]?.let { fields[it] }.orEmpty()
+        BookInfoRecord(
+            bookName = field("bookName"),
+            authorName = field("authorName"),
+            generationName = field("generationName"),
+            subGenerationName = field("subGenerationName"),
+            startYear = field("startYear"),
+            endYear = field("endYear"),
+            extension = parseBookInfoExtension(
+                field("topics"), field("pubDate"), field("pubPlace"), field("description"), field("proofread"),
+                recordNumber,
+            ),
+        )
+    }
+}
+
+/** [parseBookInfo] followed by [bookInfoGenerations]. */
+internal fun parseBookInfoGenerations(lines: List<String>, logger: Logger): List<Pair<String, String>> =
+    bookInfoGenerations(parseBookInfo(lines), logger)
+
+/**
+ * [BOOK_INFO_FILE] records → (book title, generation) pairs, one per title.
  *
  * The file has one row per (book, author), so a title may appear more than once;
  * rows without a generation are skipped. When a title's rows disagree, the most
  * frequent generation wins and a tie goes to the first row in the file (it is
  * sorted by book, then author), with a warning — a book is never linked to two
- * generations. Records are parsed RFC-4180 style, since fields are all quoted.
+ * generations.
  */
-internal fun parseBookInfoGenerations(lines: List<String>, logger: Logger): List<Pair<String, String>> {
-    val records = parseForDbCsvRecords(lines.joinToString("\n"))
-    require(records.isNotEmpty()) { "$BOOK_INFO_FILE is empty" }
-    require(records.first() == BOOK_INFO_HEADER) {
-        "$BOOK_INFO_FILE must start with the header ${BOOK_INFO_HEADER.joinToString(",")}"
-    }
-
+internal fun bookInfoGenerations(records: List<BookInfoRecord>, logger: Logger): List<Pair<String, String>> {
     val byTitle = LinkedHashMap<String, MutableList<String>>()
-    for ((index, fields) in records.drop(1).withIndex()) {
-        require(fields.size == BOOK_INFO_HEADER.size && fields[0].isNotEmpty()) {
-            "$BOOK_INFO_FILE record ${index + 2} is malformed: $fields"
-        }
-        val generation = fields[2]
-        if (generation.isEmpty()) continue
-        byTitle.getOrPut(fields[0]) { mutableListOf() } += generation
+    for (record in records) {
+        if (record.generationName.isEmpty()) continue
+        byTitle.getOrPut(record.bookName) { mutableListOf() } += record.generationName
     }
 
     val conflicts = mutableListOf<String>()
