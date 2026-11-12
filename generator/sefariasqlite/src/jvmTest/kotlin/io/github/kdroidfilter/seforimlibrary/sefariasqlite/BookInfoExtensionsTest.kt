@@ -12,6 +12,9 @@ import io.github.kdroidfilter.seforimlibrary.core.models.Category
 import io.github.kdroidfilter.seforimlibrary.dao.repository.SeforimRepository
 import io.github.kdroidfilter.seforimlibrary.db.SeforimDb
 import kotlinx.coroutines.runBlocking
+import java.nio.file.Files
+import java.nio.file.Path
+import java.sql.DriverManager
 import kotlin.test.Test
 import kotlin.test.assertContains
 import kotlin.test.assertEquals
@@ -199,5 +202,46 @@ class BookInfoExtensionsTest {
         assertEquals(listOf("אמשטרדם"), book.pubPlaces.map { it.name })
         assertEquals("תיאור ספריא", book.heDesc)
         repo.close()
+    }
+
+    @Test
+    fun `two builds of the same inputs write identical book-info rows and ids`() = runBlocking {
+        val dir = Files.createTempDirectory("book-info-stable")
+        val state = dir.resolve("build_state.json")
+        suspend fun build(name: String, statePath: Path?): List<String> {
+            val dbPath = dir.resolve("$name.db")
+            val driver = JdbcSqliteDriver(url = "jdbc:sqlite:$dbPath")
+            SeforimDb.Schema.create(driver)
+            val repo = SeforimRepository(dbPath.toString(), driver)
+            val allocator = InMemoryIdAllocator.load(statePath)
+            val bindings = IdAllocatorBindings(allocator, repo)
+            val sourceId = repo.insertSource("Otzaria")
+            val catId = repo.insertCategory(Category(0, null, "מוסר", level = 0, order = 1))
+            val bookId = repo.insertBook(Book(categoryId = catId, sourceId = sourceId, title = "ספר"))
+            repo.linkTopicToBook(bindings.upsertTopic("מוסר"), bookId)
+            val logger = Logger.withTag("test")
+            applyMetadata(repo, bindings, mapOf("ספר" to BulkMetadata(listOf(1740), "אמשטרדם")), emptyMap(), emptyList(), logger)
+            val ext = mapOf("ספר" to BookInfoExtension(listOf("מוסר", "חסידות"), "תק\"ס", "וילנא", "תיאור"))
+            applyBookInfoExtensions(repo, bindings, ext, emptyList(), logger)
+            allocator.snapshotTo(state, emptyMap())
+            repo.close()
+            return DriverManager.getConnection("jdbc:sqlite:$dbPath").use { conn ->
+                listOf(
+                    "SELECT id, date FROM pub_date", "SELECT bookId, pubDateId FROM book_pub_date",
+                    "SELECT id, name FROM pub_place", "SELECT bookId, pubPlaceId FROM book_pub_place",
+                    "SELECT id, name FROM topic", "SELECT bookId, topicId FROM book_topic",
+                    "SELECT id, heDesc FROM book",
+                ).flatMap { sql ->
+                    conn.createStatement().use { st ->
+                        st.executeQuery("$sql ORDER BY 1, 2").use { rs ->
+                            buildList { while (rs.next()) add("$sql: ${rs.getString(1)}|${rs.getString(2)}") }
+                        }
+                    }
+                }
+            }
+        }
+
+        val first = build("v1", null)
+        assertEquals(first, build("v2", state))
     }
 }
