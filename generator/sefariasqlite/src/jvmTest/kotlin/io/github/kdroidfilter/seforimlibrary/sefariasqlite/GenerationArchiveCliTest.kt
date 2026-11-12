@@ -19,6 +19,8 @@ class GenerationArchiveCliTest {
     private val header = "bookName,authorName,generationName,subGenerationName,startYear,endYear"
     private val bookInfo = "$header\n\"New title\",\"Author\nwith a quote \"\"\",\"New era\",\"\",\"\",\"\"\n"
     private val legacy = "שם ספר,קבוצת דור\nNew title,Legacy era\n"
+    private val extendedBookInfo = "$header,topics,pubDate,pubPlace,description,proofread\n" +
+        "\"New title\",\"Author\",\"New era\",\"\",\"\",\"\",\"a;b\",\"1925\",\"Vilna\",\"Line one,\nline two\",\"1\"\n"
 
     @Test
     fun `legacy archive passes rename preflight and seeds generations`() =
@@ -27,6 +29,15 @@ class GenerationArchiveCliTest {
     @Test
     fun `book info archive passes rename preflight and seeds generations`() =
         succeeds(mapOf(BOOK_INFO_FILE to bookInfo), "New era")
+
+    @Test
+    fun `book info with the extension columns seeds generations the same way`() =
+        succeeds(mapOf(BOOK_INFO_FILE to extendedBookInfo), "New era")
+
+    @Test
+    fun `an unknown book info header fails before rename writes`() =
+        failsBeforeWrites(mapOf(BOOK_INFO_FILE to "$header,topics\n\"New title\",\"\",\"New era\",\"\",\"\",\"\",\"\"\n"),
+            "book_info.csv must start with the header")
 
     @Test
     fun `book info wins when an archive also contains malformed legacy data`() =
