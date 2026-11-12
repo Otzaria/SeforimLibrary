@@ -23,6 +23,9 @@ private const val MAX_TOPIC_LENGTH = 60
 private const val MAX_PUB_FIELD_LENGTH = 100
 private const val MAX_DESCRIPTION_LENGTH = 4000
 
+// האורכים נספרים בתווים (code points), כמו ב-CI של הספרייה ובאתר.
+private fun String.charCount() = codePointCount(0, length)
+
 /** Parses and validates the extension fields of one [BOOK_INFO_FILE] record (1-based [recordNumber]). */
 internal fun parseBookInfoExtension(
     topics: String,
@@ -36,19 +39,19 @@ internal fun parseBookInfoExtension(
 
     val topicList = topics.split(';').map { it.trim() }.filter { it.isNotEmpty() }.distinct()
     if (topicList.size > MAX_TOPICS) fail("more than $MAX_TOPICS topics")
-    topicList.firstOrNull { it.length > MAX_TOPIC_LENGTH || '\n' in it }
+    topicList.firstOrNull { it.charCount() > MAX_TOPIC_LENGTH || '\n' in it }
         ?.let { fail("topic longer than $MAX_TOPIC_LENGTH characters or multi-line: '$it'") }
 
     fun singleLine(name: String, raw: String): String? {
         val value = raw.trim().ifEmpty { return null }
-        if (value.length > MAX_PUB_FIELD_LENGTH || '\n' in value || '\r' in value) {
+        if (value.charCount() > MAX_PUB_FIELD_LENGTH || '\n' in value || '\r' in value) {
             fail("$name must be one line of at most $MAX_PUB_FIELD_LENGTH characters")
         }
         return value
     }
 
     val text = description.replace("\r\n", "\n").trim().ifEmpty { null }
-    if (text != null && ('\r' in text || text.length > MAX_DESCRIPTION_LENGTH)) {
+    if (text != null && ('\r' in text || text.charCount() > MAX_DESCRIPTION_LENGTH)) {
         fail("description must have LF line breaks and at most $MAX_DESCRIPTION_LENGTH characters")
     }
     if (proofread.trim() !in setOf("", "1")) fail("proofread must be empty or 1, not '$proofread'")

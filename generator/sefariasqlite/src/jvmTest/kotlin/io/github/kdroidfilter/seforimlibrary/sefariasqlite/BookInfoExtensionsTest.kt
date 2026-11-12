@@ -112,6 +112,14 @@ class BookInfoExtensionsTest {
     }
 
     @Test
+    fun `lengths count code points like the library CI and the site`() {
+        val astral = "📖"
+        val line = "\"ס\",\"\",\"\",\"\",\"\",\"\",\"${astral.repeat(60)}\",\"\",\"\",\"${astral.repeat(4000)}\",\"\""
+        val record = parseBookInfo(listOf(header, line)).single()
+        assertEquals(listOf(astral.repeat(60)), record.extension.topics)
+    }
+
+    @Test
     fun `rows of one book that disagree keep the first non-empty value, with a warning`() {
         val capture = Capture()
         val records = parseBookInfo(
