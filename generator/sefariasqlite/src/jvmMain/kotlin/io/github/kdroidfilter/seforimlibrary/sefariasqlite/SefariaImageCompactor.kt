@@ -1,5 +1,6 @@
 package io.github.kdroidfilter.seforimlibrary.sefariasqlite
 
+import java.awt.color.ColorSpace
 import java.awt.image.BufferedImage
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
@@ -17,7 +18,7 @@ import kotlin.math.roundToInt
  * before inlining. Output is a pure function of the input: relink recovery compares lines across builds. */
 internal object SefariaImageCompactor {
     // A portrait page scan becomes ~1130 px wide: a reader column on a HiDPI screen.
-    // For issue 5033's 63 scans that is 27 MB of base64 instead of 236 MB.
+    // Issue 5033's 78 images: 27 MB of base64 instead of 236 MB.
     internal const val MAX_SIDE = 1600
     private const val JPEG_QUALITY = 0.85f
 
@@ -30,9 +31,10 @@ internal object SefariaImageCompactor {
         val original = Embeddable(mime, bytes)
         if (mime != "image/png" && mime != "image/jpeg" && mime != "image/webp") return original
         if (mime == "image/png" && isAnimatedPng(bytes)) return original
+        if (mime == "image/jpeg" && exifOrientation(bytes) != 1) return original
         decoders.acquire()
         return try {
-            val image = readSingleFrame(bytes) ?: return original
+            val image = readSingleFrame(bytes)?.let(::grayToArgb) ?: return original
             if (max(image.width, image.height) <= MAX_SIDE) return original
             val smaller = encodeSmallest(downscale(image)) ?: return original
             if (smaller.bytes.size < bytes.size) smaller else original
@@ -59,6 +61,55 @@ internal object SefariaImageCompactor {
         val chunks = String(bytes, Charsets.ISO_8859_1)
         val actl = chunks.indexOf("acTL")
         return actl >= 0 && actl < chunks.indexOf("IDAT")
+    }
+
+    // ImageIO decodes gray as linear CS_GRAY, and getRGB would brighten it on the way to sRGB.
+    // Browsers show gray samples as-is, so copy the raw levels instead.
+    private fun grayToArgb(image: BufferedImage): BufferedImage {
+        val model = image.colorModel
+        if (model.colorSpace.type != ColorSpace.TYPE_GRAY) return image
+        val raster = image.raster
+        val grayMax = (1 shl model.getComponentSize(0)) - 1
+        val alphaMax = if (model.hasAlpha()) (1 shl model.getComponentSize(1)) - 1 else 0
+        val out = BufferedImage(image.width, image.height, BufferedImage.TYPE_INT_ARGB)
+        for (y in 0 until image.height) for (x in 0 until image.width) {
+            val v = ((raster.getSample(x, y, 0).toLong() * 255 + grayMax / 2) / grayMax).toInt()
+            val a = if (alphaMax == 0) 255 else ((raster.getSample(x, y, 1).toLong() * 255 + alphaMax / 2) / alphaMax).toInt()
+            out.setRGB(x, y, (a shl 24) or (v shl 16) or (v shl 8) or v)
+        }
+        return out
+    }
+
+    /** The Exif orientation tag of a JPEG, or 1 (upright) when there is none. ImageIO ignores it. */
+    private fun exifOrientation(jpeg: ByteArray): Int {
+        fun u16(at: Int, bigEndian: Boolean = true): Int {
+            val hi = jpeg[if (bigEndian) at else at + 1].toInt() and 0xFF
+            val lo = jpeg[if (bigEndian) at + 1 else at].toInt() and 0xFF
+            return (hi shl 8) or lo
+        }
+        fun u32(at: Int, bigEndian: Boolean) =
+            if (bigEndian) (u16(at) shl 16) or u16(at + 2) else (u16(at + 2, false) shl 16) or u16(at, false)
+        return try {
+            var pos = 2
+            while (pos + 4 <= jpeg.size && jpeg[pos] == 0xFF.toByte()) {
+                val marker = jpeg[pos + 1].toInt() and 0xFF
+                if (marker == 0xDA || marker == 0xD9) break
+                val length = u16(pos + 2)
+                val tiff = pos + 10
+                if (marker == 0xE1 && String(jpeg, pos + 4, 6, Charsets.ISO_8859_1) == "Exif\u0000\u0000") {
+                    val big = jpeg[tiff] == 'M'.code.toByte()
+                    val ifd = tiff + u32(tiff + 4, big)
+                    for (i in 0 until u16(ifd, big)) {
+                        val entry = ifd + 2 + i * 12
+                        if (u16(entry, big) == 0x0112) return u16(entry + 8, big)
+                    }
+                }
+                pos += 2 + length
+            }
+            1
+        } catch (_: IndexOutOfBoundsException) {
+            1
+        }
     }
 
     /**
