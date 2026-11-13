@@ -152,6 +152,25 @@ class SefariaImageEmbedderTest {
         assertEquals(0, report.downloaded)
     }
 
+    @Test
+    fun oversizedImageIsEmbeddedDownscaledWhileTheCacheKeepsTheOriginal() = runBlocking {
+        val url = "https://textimages.sefaria.org/scan/page.png"
+        val (dir, json) = mergedJsonWith(url)
+        val random = kotlin.random.Random(7)
+        val scan = BufferedImage(2000, 1000, BufferedImage.TYPE_BYTE_GRAY).apply {
+            for (y in 0 until height) for (x in 0 until width) setRGB(x, y, random.nextInt())
+        }
+        val original = ByteArrayOutputStream().use { check(ImageIO.write(scan, "png", it)); it.toByteArray() }
+        SefariaImageEmbedder.downloader = { original }
+
+        SefariaImageEmbedder.prefetch(listOf(json), cacheDir = dir, reportPath = reportPath(dir))
+
+        assertContentEquals(original, Files.readAllBytes(cacheFile(dir, url)))
+        val embedded = Regex("""base64,([^"]+)""").find(cleanSefariaLine("""<img src="$url">"""))!!.groupValues[1]
+        val image = ImageIO.read(Base64.getDecoder().decode(embedded).inputStream())
+        assertEquals(SefariaImageCompactor.MAX_SIDE, image.width)
+    }
+
     // --- content-filter answers that are not the image ----------------------
 
     private fun netfreePlaceholder(): ByteArray =
