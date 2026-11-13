@@ -34,8 +34,9 @@ internal object SefariaImageCompactor {
         if (mime == "image/jpeg" && exifOrientation(bytes) != 1) return original
         decoders.acquire()
         return try {
-            val image = readSingleFrame(bytes)?.let(::grayToArgb) ?: return original
-            if (max(image.width, image.height) <= MAX_SIDE) return original
+            val decoded = readSingleFrame(bytes) ?: return original
+            if (max(decoded.width, decoded.height) <= MAX_SIDE) return original
+            val image = grayToArgb(decoded)
             val smaller = encodeSmallest(downscale(image)) ?: return original
             if (smaller.bytes.size < bytes.size) smaller else original
         } catch (_: Exception) {
