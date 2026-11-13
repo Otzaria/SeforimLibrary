@@ -548,8 +548,11 @@ object SefariaImageEmbedder {
         return HexFormat.of().formatHex(digest)
     }
 
+    // The cache keeps the original bytes; only the embedded copy is compacted.
     private fun toDataUri(mime: String, bytes: ByteArray): String =
-        "data:$mime;base64,${Base64.getEncoder().encodeToString(bytes)}"
+        SefariaImageCompactor.compact(mime, bytes).let {
+            "data:${it.mime};base64,${Base64.getEncoder().encodeToString(it.bytes)}"
+        }
 }
 
 /** One URL that could not be inlined, and why — see [SefariaImageEmbedder.failureReason]. */
