@@ -1122,8 +1122,10 @@ internal class SefariaBookPayloadReader(
                 else -> ""
             }
 
+            // פסקי הרא"ש על יומא ועל נדה: ספריא מסמנת את ההלכה כלא-מצוטטת, אך הספר מחולק בה כמו שאר מסכתות הרא"ש.
+            val isHeading = isReferenceable || sectionName == "הלכה"
             var sectionTitle: String? = null
-            if (depth > 1 && sectionName?.isBlank() != true && isReferenceable) {
+            if (depth > 1 && sectionName?.isBlank() != true && isHeading) {
                 val tag = when (level) {
                     1 -> "<h2>" to "</h2>"
                     2 -> "<h3>" to "</h3>"
