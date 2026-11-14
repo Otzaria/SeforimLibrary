@@ -4,6 +4,8 @@ import java.awt.color.ColorSpace
 import java.awt.image.BufferedImage
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
 import java.util.concurrent.Semaphore
 import javax.imageio.IIOImage
 import javax.imageio.ImageIO
@@ -30,12 +32,11 @@ internal object SefariaImageCompactor {
     fun compact(mime: String, bytes: ByteArray): Embeddable {
         val original = Embeddable(mime, bytes)
         if (mime != "image/png" && mime != "image/jpeg" && mime != "image/webp") return original
-        if (mime == "image/png" && isAnimatedPng(bytes)) return original
+        if (mime == "image/png" && !canReencodePng(bytes)) return original
         if (mime == "image/jpeg" && exifOrientation(bytes) != 1) return original
         decoders.acquire()
         return try {
             val decoded = readSingleFrame(bytes) ?: return original
-            if (max(decoded.width, decoded.height) <= MAX_SIDE) return original
             val image = grayToArgb(decoded)
             val smaller = encodeSmallest(downscale(image)) ?: return original
             if (smaller.bytes.size < bytes.size) smaller else original
@@ -51,21 +52,72 @@ internal object SefariaImageCompactor {
             val reader = ImageIO.getImageReaders(input).asSequence().firstOrNull() ?: return null
             try {
                 reader.setInput(input, false, true)
+                // Validation already decoded the payload. Read only its dimensions here
+                // when it cannot be compacted, avoiding a second raster allocation.
+                if (max(reader.getWidth(0), reader.getHeight(0)) <= MAX_SIDE) return null
                 if (reader.getNumImages(true) != 1) null else reader.read(0)
             } finally {
                 reader.dispose()
             }
         }
 
-    // ImageIO ignores APNG's acTL chunk and would flatten the animation to its first frame.
-    private fun isAnimatedPng(bytes: ByteArray): Boolean {
-        val chunks = String(bytes, Charsets.ISO_8859_1)
-        val actl = chunks.indexOf("acTL")
-        return actl >= 0 && actl < chunks.indexOf("IDAT")
+    /**
+     * ImageIO ignores APNG and PNG orientation/color metadata when reading pixels.
+     * Preserve those inputs rather than stripping information needed for display.
+     * Walk actual chunks: text and compressed data can also contain chunk names.
+     * CRCs and payload completeness are checked by [SefariaImageValidation].
+     */
+    private fun canReencodePng(bytes: ByteArray): Boolean {
+        if (bytes.size < 8) return false
+        val input = ByteBuffer.wrap(bytes).position(8)
+        while (input.remaining() >= 12) {
+            val length = input.int
+            if (length < 0 || length > input.remaining() - 8) return false
+            when (input.int) {
+                0x6163544C, // acTL: animation must not be flattened
+                0x67414D41, // gAMA
+                0x6348524D, // cHRM
+                0x69434350, // iCCP
+                0x63494350, // cICP
+                0x6D444356, // mDCV
+                0x634C4C49, // cLLI: color/HDR metadata is not applied by ImageIO
+                -> return false
+                0x65584966 -> if (!isUprightExif(bytes, input.position(), length)) return false // eXIf
+                0x49454E44 -> return length == 0 && input.remaining() == 4 // IEND + CRC
+            }
+            input.position(input.position() + length + 4) // payload + CRC
+        }
+        return false
+    }
+
+    // PNG eXIf contains a TIFF header without JPEG's "Exif\0\0" prefix.
+    // Unreadable orientation metadata is also kept intact, not silently discarded.
+    private fun isUprightExif(bytes: ByteArray, start: Int, length: Int): Boolean {
+        if (length < 8) return false
+        val tiff = ByteBuffer.wrap(bytes, start, length).slice()
+        when (tiff.getShort(0).toInt() and 0xFFFF) {
+            0x4949 -> tiff.order(ByteOrder.LITTLE_ENDIAN)
+            0x4D4D -> tiff.order(ByteOrder.BIG_ENDIAN)
+            else -> return false
+        }
+        if (tiff.getShort(2).toInt() != 42) return false
+        val ifd = tiff.getInt(4)
+        if (ifd < 8 || ifd > length - 2) return false
+        val entries = tiff.getShort(ifd).toInt() and 0xFFFF
+        if (entries * 12 > length - ifd - 2) return false
+        for (i in 0 until entries) {
+            val entry = ifd + 2 + i * 12
+            if (tiff.getShort(entry).toInt() and 0xFFFF == 0x0112) {
+                return tiff.getShort(entry + 2).toInt() == 3 && // SHORT
+                    tiff.getInt(entry + 4) == 1 &&
+                    tiff.getShort(entry + 8).toInt() == 1
+            }
+        }
+        return true
     }
 
     // ImageIO decodes gray as linear CS_GRAY, and getRGB would brighten it on the way to sRGB.
-    // Browsers show gray samples as-is, so copy the raw levels instead.
+    // Copy untagged gray levels as-is; tagged PNG color spaces are kept intact above.
     private fun grayToArgb(image: BufferedImage): BufferedImage {
         val model = image.colorModel
         if (model.colorSpace.type != ColorSpace.TYPE_GRAY) return image

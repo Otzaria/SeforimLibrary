@@ -2,12 +2,26 @@ package io.github.kdroidfilter.seforimlibrary.sefariasqlite
 
 import java.awt.Transparency
 import java.awt.color.ColorSpace
+import java.awt.color.ICC_Profile
 import java.awt.image.BufferedImage
 import java.awt.image.ComponentColorModel
 import java.awt.image.DataBuffer
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
+import java.io.DataOutputStream
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
+import java.util.Locale
+import java.util.zip.CRC32
+import java.util.zip.DeflaterOutputStream
+import javax.imageio.ImageReadParam
+import javax.imageio.ImageReader
 import javax.imageio.ImageIO
+import javax.imageio.ImageTypeSpecifier
+import javax.imageio.metadata.IIOMetadata
+import javax.imageio.spi.IIORegistry
+import javax.imageio.spi.ImageReaderSpi
+import javax.imageio.stream.ImageInputStream
 import kotlin.random.Random
 import kotlin.test.Test
 import kotlin.test.assertContentEquals
@@ -197,5 +211,200 @@ class SefariaImageCompactorTest {
 
         assertNotSame(upright, SefariaImageCompactor.compact("image/jpeg", upright).bytes, "orientation 1 is compacted")
         assertSame(rotated, SefariaImageCompactor.compact("image/jpeg", rotated).bytes)
+    }
+
+    private fun pngChunk(type: String, data: ByteArray): ByteArray = ByteArrayOutputStream().use { out ->
+        val tag = type.toByteArray(Charsets.US_ASCII)
+        DataOutputStream(out).apply {
+            writeInt(data.size)
+            write(tag)
+            write(data)
+            writeInt(CRC32().apply { update(tag); update(data) }.value.toInt())
+        }
+        out.toByteArray()
+    }
+
+    /** Insert complete chunks after IHDR, preserving the encoded pixels and all CRCs. */
+    private fun withPngChunks(png: ByteArray, vararg chunks: ByteArray): ByteArray =
+        png.copyOfRange(0, 33) + chunks.fold(byteArrayOf()) { out, chunk -> out + chunk } +
+            png.copyOfRange(33, png.size)
+
+    private fun tiffOrientation(orientation: Int, order: ByteOrder): ByteArray =
+        ByteBuffer.allocate(26).order(order).apply {
+            putShort(if (order == ByteOrder.BIG_ENDIAN) 0x4D4D.toShort() else 0x4949.toShort())
+            putShort(42)
+            putInt(8)
+            putShort(1)
+            putShort(0x0112)
+            putShort(3) // SHORT
+            putInt(1)
+            putShort(orientation.toShort())
+            putShort(0)
+            putInt(0)
+        }.array()
+
+    private fun assertPngKept(original: ByteArray) {
+        assertEquals(SefariaImageValidation.Valid("image/png"), SefariaImageValidation.validate(original))
+        val result = SefariaImageCompactor.compact("image/png", original)
+        assertSame(original, result.bytes, "pixels and display metadata must stay together")
+        assertEquals("image/png", result.mime)
+    }
+
+    @Test
+    fun pngWithExplicitGammaKeepsItsOriginalDisplayLevels() {
+        // These raw levels display near 152 with gAMA=1.0, but near 80 if the
+        // metadata is stripped. ImageIO's raw-sample gray tests cannot detect that.
+        val png = encode(grayNoise(bound * 2, bound / 8, 80), "png")
+        val gamma = pngChunk("gAMA", ByteBuffer.allocate(4).putInt(100_000).array())
+        assertPngKept(withPngChunks(png, gamma))
+    }
+
+    @Test
+    fun pngWithColorProfileOrChromaticitiesIsKept() {
+        val png = encode(noise(bound * 2, bound / 8, BufferedImage.TYPE_INT_RGB), "png")
+        val profile = ByteArrayOutputStream().use { out ->
+            DeflaterOutputStream(out).use { it.write(ICC_Profile.getInstance(ColorSpace.CS_LINEAR_RGB).data) }
+            out.toByteArray()
+        }
+        val iccp = pngChunk("iCCP", "linear RGB\u0000\u0000".toByteArray(Charsets.US_ASCII) + profile)
+        val chromaticities = ByteBuffer.allocate(32).apply {
+            listOf(31270, 32900, 64000, 33000, 30000, 60000, 15000, 6000).forEach { putInt(it) }
+        }.array()
+        assertPngKept(withPngChunks(png, iccp))
+        assertPngKept(withPngChunks(png, pngChunk("cHRM", chromaticities)))
+    }
+
+    @Test
+    fun rotatedAndMirroredExifPngIsKeptInEitherByteOrder() {
+        val png = encode(noise(bound * 2, bound / 8, BufferedImage.TYPE_INT_RGB), "png")
+        for (order in listOf(ByteOrder.BIG_ENDIAN, ByteOrder.LITTLE_ENDIAN)) {
+            for (orientation in listOf(2, 6, 8)) {
+                assertPngKept(withPngChunks(png, pngChunk("eXIf", tiffOrientation(orientation, order))))
+            }
+            val upright = withPngChunks(png, pngChunk("eXIf", tiffOrientation(1, order)))
+            assertNotSame(upright, SefariaImageCompactor.compact("image/png", upright).bytes)
+        }
+    }
+
+    @Test
+    fun unreadablePngExifIsNotDiscarded() {
+        val png = encode(noise(bound * 2, bound / 8, BufferedImage.TYPE_INT_RGB), "png")
+        val tiff = tiffOrientation(6, ByteOrder.BIG_ENDIAN)
+        assertPngKept(withPngChunks(png, pngChunk("eXIf", tiff.copyOf(18))))
+        val invalidOffset = tiff.copyOf().apply { ByteBuffer.wrap(this).putInt(4, Int.MAX_VALUE) }
+        assertPngKept(withPngChunks(png, pngChunk("eXIf", invalidOffset)))
+    }
+
+    private fun pngImageData(png: ByteArray): ByteArray = ByteArrayOutputStream().use { out ->
+        val input = ByteBuffer.wrap(png).position(8)
+        while (input.remaining() >= 12) {
+            val length = input.int
+            if (input.int == 0x49444154) out.write(png, input.position(), length)
+            input.position(input.position() + length + 4)
+        }
+        out.toByteArray()
+    }
+
+    private fun frameControl(sequence: Int, width: Int, height: Int): ByteArray =
+        pngChunk("fcTL", ByteBuffer.allocate(26).apply {
+            putInt(sequence)
+            putInt(width)
+            putInt(height)
+            putInt(0)
+            putInt(0)
+            putShort(1) // delay numerator
+            putShort(10) // delay denominator
+            put(0) // dispose: none
+            put(0) // blend: source
+        }.array())
+
+    @Test
+    fun animatedPngWithIdatInTextBeforeActlKeepsBothFrames() {
+        val first = grayNoise(bound * 2, bound / 8, 80)
+        val second = grayNoise(first.width, first.height, 180)
+        val png = encode(first, "png")
+        val text = pngChunk("tEXt", "Description\u0000IDAT is the image data chunk".toByteArray())
+        val actl = pngChunk("acTL", ByteBuffer.allocate(8).putInt(2).putInt(0).array())
+        val secondData = ByteBuffer.allocate(4).putInt(2).array() + pngImageData(encode(second, "png"))
+        val animated = png.copyOfRange(0, 33) + text + actl +
+            frameControl(0, first.width, first.height) + pngChunk("IDAT", pngImageData(png)) +
+            frameControl(1, first.width, first.height) + pngChunk("fdAT", secondData) +
+            pngChunk("IEND", byteArrayOf())
+
+        // The old substring search misses acTL and re-encodes just the first frame.
+        assertPngKept(animated)
+    }
+
+    @Test
+    fun chunkNamesInsidePngTextDoNotPreventCompaction() {
+        val png = encode(noise(bound * 2, bound / 8, BufferedImage.TYPE_INT_RGB), "png")
+        val text = pngChunk("tEXt", "Description\u0000acTL precedes IDAT; eXIf gAMA iCCP are optional".toByteArray())
+        val original = withPngChunks(png, text)
+        assertEquals(SefariaImageValidation.Valid("image/png"), SefariaImageValidation.validate(original))
+        assertNotSame(original, SefariaImageCompactor.compact("image/png", original).bytes)
+    }
+
+    @Test
+    fun smallImageOnlyReadsDimensionsWhileLargeImageIsDecodedAndReadersAreDisposed() {
+        val small = encode(noise(bound, bound / 8, BufferedImage.TYPE_INT_RGB), "png")
+        val large = encode(noise(bound * 2, bound / 8, BufferedImage.TYPE_INT_RGB), "png")
+        val registry = IIORegistry.getDefaultInstance()
+        val providers = registry.getServiceProviders(ImageReaderSpi::class.java, true).asSequence().toList()
+        val delegate = ImageIO.getImageReadersByFormatName("png").next().let { reader ->
+            reader.originatingProvider.also { reader.dispose() }
+        }
+        val probe = CountingPngReaderSpi(delegate)
+        registry.registerServiceProvider(probe)
+        try {
+            providers.forEach { registry.setOrdering(ImageReaderSpi::class.java, probe, it) }
+
+            assertSame(small, SefariaImageCompactor.compact("image/png", small).bytes)
+            assertEquals(0, probe.reads, "an unchanged small image must not allocate or decode a raster")
+            assertEquals(1, probe.disposals)
+
+            assertNotSame(large, SefariaImageCompactor.compact("image/png", large).bytes)
+            assertEquals(1, probe.reads, "large images still need one compactor decode")
+            assertEquals(2, probe.disposals)
+        } finally {
+            registry.deregisterServiceProvider(probe)
+        }
+    }
+
+    private class CountingPngReaderSpi(private val delegate: ImageReaderSpi) : ImageReaderSpi(
+        "SeforimLibrary", "1", arrayOf("png"), arrayOf("png"), arrayOf("image/png"),
+        CountingPngReader::class.java.name, arrayOf(ImageInputStream::class.java), null,
+        false, null, null, null, null, false, null, null, null, null,
+    ) {
+        var reads = 0
+        var disposals = 0
+
+        override fun canDecodeInput(source: Any?): Boolean = delegate.canDecodeInput(source)
+        override fun createReaderInstance(extension: Any?): ImageReader = CountingPngReader(delegate.createReaderInstance(), this)
+        override fun getDescription(locale: Locale?): String = "PNG reader that counts raster decodes"
+    }
+
+    private class CountingPngReader(private val delegate: ImageReader, private val probe: CountingPngReaderSpi) : ImageReader(probe) {
+        override fun setInput(input: Any?, seekForwardOnly: Boolean, ignoreMetadata: Boolean) {
+            super.setInput(input, seekForwardOnly, ignoreMetadata)
+            delegate.setInput(input, seekForwardOnly, ignoreMetadata)
+        }
+
+        override fun getNumImages(allowSearch: Boolean): Int = delegate.getNumImages(allowSearch)
+        override fun getWidth(imageIndex: Int): Int = delegate.getWidth(imageIndex)
+        override fun getHeight(imageIndex: Int): Int = delegate.getHeight(imageIndex)
+        override fun getImageTypes(imageIndex: Int): MutableIterator<ImageTypeSpecifier> = delegate.getImageTypes(imageIndex)
+        override fun getStreamMetadata(): IIOMetadata? = delegate.streamMetadata
+        override fun getImageMetadata(imageIndex: Int): IIOMetadata? = delegate.getImageMetadata(imageIndex)
+
+        override fun read(imageIndex: Int, param: ImageReadParam?): BufferedImage {
+            probe.reads++
+            return delegate.read(imageIndex, param)
+        }
+
+        override fun dispose() {
+            probe.disposals++
+            delegate.dispose()
+            super.dispose()
+        }
     }
 }
