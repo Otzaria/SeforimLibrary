@@ -50,6 +50,40 @@ class SefariaTurSeifMarkersTest {
     }
 
     @Test
+    fun `drops an original offset that now falls inside a word`() {
+        val changed = "מעשה האיש ההוא"
+        assertEquals(changed, SefariaTurSeifMarkers.insert(changed, listOf(Point(1, "א", "עשה האיש ההוא"))))
+    }
+
+    @Test
+    fun `recovers at a complete word instead of accepting a matching word suffix`() {
+        val changed = "מעשה האיש ההוא עשה האיש ההוא"
+        assertEquals(
+            "מעשה האיש ההוא <b>[סעיף א]</b> עשה האיש ההוא",
+            SefariaTurSeifMarkers.insert(changed, listOf(Point(1, "א", "עשה האיש ההוא"))),
+        )
+    }
+
+    @Test
+    fun `accepts words attached to brackets or sentence punctuation in both lookup paths`() {
+        for (prefix in listOf("[", "{", "משפט קודם.")) {
+            val changed = "${prefix}עשה האיש ההוא"
+            val expected = "$prefix <b>[סעיף א]</b> עשה האיש ההוא"
+            for (offset in listOf(prefix.length, changed.length)) {
+                assertEquals(expected, SefariaTurSeifMarkers.insert(changed, listOf(Point(offset, "א", "עשה האיש ההוא"))))
+            }
+        }
+    }
+
+    @Test
+    fun `a second blessing on the large tallit is seif thirteen and not the small tallit formula`() {
+        val points = SefariaTurSeifMarkers.loadPoints(SefariaTurSeifMarkers::class.java.classLoader)
+            .getValue("טור, אורח חיים,  ח, א")
+        assertEquals(listOf("יג"), points.filter { it.context == "לכן מי שרגיל" }.map { it.seif })
+        assertTrue(points.none { it.seif == "ו" })
+    }
+
+    @Test
     fun `leaves other books and refs without points untouched`() {
         assertEquals(line, SefariaTurSeifMarkers.apply("שולחן ערוך, אורח חיים", "טור, אורח חיים,  א, א", line))
         assertEquals(line, SefariaTurSeifMarkers.apply("טור", "טור, אורח חיים,  תתתת, א", line))

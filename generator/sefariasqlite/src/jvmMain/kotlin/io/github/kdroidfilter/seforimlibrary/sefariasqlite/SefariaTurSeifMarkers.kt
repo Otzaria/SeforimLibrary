@@ -79,15 +79,16 @@ internal object SefariaTurSeifMarkers {
 
     /** The offset of [point] in [line]: its own offset when the words still follow it, else the nearest match. */
     private fun locate(line: String, point: Point): Int? {
-        if (point.offset in 0..line.length && wordsAt(line, point.offset, point.context)) return point.offset
+        if (point.offset in 0..line.length && isWordStart(line, point.offset) && wordsAt(line, point.offset, point.context)) {
+            return point.offset
+        }
         val first = point.context.substringBefore(' ')
         var best: Int? = null
         var from = maxOf(0, point.offset - MAX_DRIFT)
         while (true) {
             val i = line.indexOf(first, from)
             if (i < 0 || i > point.offset + MAX_DRIFT) break
-            val boundary = i == 0 || line[i - 1].isWhitespace() || line[i - 1] == '>'
-            if (boundary && wordsAt(line, i, point.context) &&
+            if (isWordStart(line, i) && wordsAt(line, i, point.context) &&
                 (best == null || kotlin.math.abs(i - point.offset) < kotlin.math.abs(best - point.offset))
             ) {
                 best = i
@@ -96,6 +97,9 @@ internal object SefariaTurSeifMarkers {
         }
         return best
     }
+
+    private fun isWordStart(line: String, at: Int): Boolean =
+        at == 0 || line[at - 1].isWhitespace() || line[at - 1] in ">.,;:!?()[]{}"
 
     private fun wordsAt(line: String, at: Int, context: String): Boolean {
         val n = context.split(' ').size

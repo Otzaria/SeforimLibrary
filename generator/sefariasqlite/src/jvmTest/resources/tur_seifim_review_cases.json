@@ -1,0 +1,359 @@
+{
+  "sefariaExport": "2026-11-12_17-17-43245592963-1",
+  "cases": [
+    {
+      "sourceRef": "Shulchan Arukh, Orach Chayim 8:6",
+      "turRefPrefix": "טור, אורח חיים,  ח, ",
+      "seif": "ו",
+      "decision": "omitted",
+      "expected": null,
+      "sourceText": "על טלית קטן יכול לברך להתעטף אע\"פ שאינו מתעטף אלא לובשו. הגה וי\"א שמברכין עליו על מצות ציצית וכן נוהגין ואין לשנות: (כל בו סי' כ\"ב ונ\"י בה\"ק דף פ\"ו ט\"ב):",
+      "reason": "The small-tallit blessing formula is not a separate blessing on the large tallit at the synagogue (seif 13)."
+    },
+    {
+      "sourceRef": "Shulchan Arukh, Orach Chayim 147:2",
+      "turRefPrefix": "טור, אורח חיים,  קמז, ",
+      "seif": "ב",
+      "decision": "omitted",
+      "expected": null,
+      "sourceText": "יכול מי שירצה לקנות להושיט המעילין להגולל ואין הגולל יכול למחות בו כי אף על פי שקנה הגלילה לא קנה ליקח המעילים: [וכן במקומות הנוהגין לקנות הוצאה והכנסה אין הש\"ץ יכול למחות כי אין זה שייך לחזנים] [מרדכי סוף מגילה וא\"ז:",
+      "reason": "Purchasing the rolling honor does not discuss another person handing the wrapper to the roller."
+    },
+    {
+      "sourceRef": "Shulchan Arukh, Orach Chayim 168:17",
+      "turRefPrefix": "טור, אורח חיים,  קסח, ",
+      "seif": "יז",
+      "decision": "omitted",
+      "expected": null,
+      "sourceText": "פשטיד\"ה הנאפת בתנור בבשר או בדגים או בגבינה מברך עליה המוציא וברכת המזון: הגה ודוקא שאפאו בתנור בלא משקה אבל אפאו במחבת במשקה אין לברך עליו ואין לאכלו רק תוך הסעודה כמו שנתבא' [דעת עצמו וכ\"כ ש\"ל]:",
+      "reason": "Decoratively shaped bread is not a savory meat, fish or cheese pie."
+    },
+    {
+      "sourceRef": "Shulchan Arukh, Orach Chayim 177:5",
+      "turRefPrefix": "טור, אורח חיים,  קעז, ",
+      "seif": "ה",
+      "decision": "omitted",
+      "expected": null,
+      "sourceText": "אם אחר שבירך על הפת שלחו לו מבית אחרים שאינו סמוך עליהן ולא היה דעתו על הדורון אפי' מדברים שדרכן לבא ללפת את הפת צריך לברך עליהם כדין נמלך: (ולא ראיתי נזהרים בזה ואפשר דטעמא דסתם דעת האדם על כל מה שמביאים לו בסעודה וע\"ל סי' ר\"ו):",
+      "reason": "Fruit brought during a meal is not an unexpected gift of food from another household."
+    },
+    {
+      "sourceRef": "Shulchan Arukh, Orach Chayim 183:3",
+      "turRefPrefix": "טור, אורח חיים,  קפג, ",
+      "seif": "ג",
+      "decision": "moved",
+      "expected": {
+        "ref": "טור, אורח חיים,  קפג, א",
+        "context": "ויש מפרשים על"
+      },
+      "sourceText": "צריך לחזור אחר כוס שלם:",
+      "reason": "The whole unbroken vessel is discussed under chai; malei instead means a full cup."
+    },
+    {
+      "sourceRef": "Shulchan Arukh, Orach Chayim 187:4",
+      "turRefPrefix": "טור, אורח חיים,  קפז, ",
+      "seif": "ד",
+      "decision": "retained",
+      "expected": {
+        "ref": "טור, אורח חיים,  קפז, א",
+        "context": "ובחנוכה ופורים אומרים"
+      },
+      "sourceText": "אם לא הזכיר בבונה ירושלים מלכות בית דוד מחזירין אותו: הגה ואומרים על הנסים בחנוכה ובפורים קודם על הכל וכו' ואם לא אמרו אין מחזירין אותו [טור] וע\"ל סי' תרפ\"ב ומ\"מ יוכל לאמרו בתוך שאר הרחמן ויאמר הרחמן הוא יעשה לנו נסים כמו שעשה בימים ההם וכו' והכי נהוג [כל בו]:",
+      "reason": "Retain: the Al HaNissim continuation in the Rema matches the assigned passage."
+    },
+    {
+      "sourceRef": "Shulchan Arukh, Orach Chayim 188:9",
+      "turRefPrefix": "טור, אורח חיים,  קפח, ",
+      "seif": "ט",
+      "decision": "omitted",
+      "expected": null,
+      "sourceText": "ג' שאכלו בשבתות וי\"ט ושכחו להזכיר מעין המאורע והם צריכין לחזור לראש בהמ\"ז יברך כל אחד בפני עצמו כי מידי זימון כבר יצאו:",
+      "reason": "Repeating grace after a missed festival insertion does not discuss repeating zimmun."
+    },
+    {
+      "sourceRef": "Shulchan Arukh, Orach Chayim 191:2",
+      "turRefPrefix": "טור, אורח חיים,  קצא, ",
+      "seif": "ב",
+      "decision": "omitted",
+      "expected": null,
+      "sourceText": "והאידנא לעולם מברכים כל ארבע ברכו' שאין דרך בני אדם עכשיו להקפיד בכך ומסתמא אדעתא דהכי שוכרים פועלים שיברכו כל ד' ברכות כתקנם:",
+      "reason": "The meal-only wage exception does not discuss the contemporary agreement allowing four blessings."
+    },
+    {
+      "sourceRef": "Shulchan Arukh, Orach Chayim 203:3",
+      "turRefPrefix": "טור, אורח חיים,  רג, ",
+      "seif": "ג",
+      "decision": "omitted",
+      "expected": null,
+      "sourceText": "על המאוזי\"ש בורא פרי האדמה:",
+      "reason": "Humelta is identified as a spice and sugar preparation, not bananas (maozish)."
+    },
+    {
+      "sourceRef": "Shulchan Arukh, Orach Chayim 263:6",
+      "turRefPrefix": "טור, אורח חיים,  רסג, ",
+      "seif": "ו",
+      "decision": "omitted",
+      "expected": null,
+      "sourceText": "בחורים ההולכים ללמוד חוץ לביתם צריכים להדליק נר שבת בחדרם ולברך עליו אבל מי שהוא אצל אשתו א\"צ להדליק בחדרו ולברך עליו לפי שאשתו מברכת בשבילו:",
+      "reason": "The general candle blessing does not discuss students away from home or wives lighting for them."
+    },
+    {
+      "sourceRef": "Shulchan Arukh, Orach Chayim 312:2",
+      "turRefPrefix": "טור, אורח חיים,  שיב, ",
+      "seif": "ב",
+      "decision": "omitted",
+      "expected": null,
+      "sourceText": "אם ירדו גשמים על האבנים ונטבעו אם רישומן ניכר מותר ליטלן כדי לקנח ואין בזה משום סותר ולא משום טוחן:",
+      "reason": "Prior use for wiping is not burial of a stone by rain with its outline still visible."
+    },
+    {
+      "sourceRef": "Shulchan Arukh, Orach Chayim 317:2",
+      "turRefPrefix": "טור, אורח חיים,  שיז, ",
+      "seif": "ב",
+      "decision": "retained",
+      "expected": {
+        "ref": "טור, אורח חיים,  שיז, א",
+        "context": "רצועות שבבגד שעל"
+      },
+      "sourceText": "נשמטו לו רצועות מנעל וסנדל או שנשמט רוב הרגל מותר להחזיר הרצועות למקומם ובלבד שלא יקשור: הגה ודוקא שיוכל להחזירו בלא טורח אבל אם צריך טורח לזה אסור דחיישי' שמא יקשור (תו' והרא\"ש פ' במה טומנין):",
+      "reason": "Retain: the Rema concerns reinserting straps and subsequent tying, as in the garment-strap discussion."
+    },
+    {
+      "sourceRef": "Shulchan Arukh, Orach Chayim 318:17",
+      "turRefPrefix": "טור, אורח חיים,  שיח, ",
+      "seif": "יז",
+      "decision": "moved",
+      "expected": {
+        "ref": "טור, אורח חיים,  שיח, א",
+        "context": "כלי שיש בו"
+      },
+      "sourceText": "אסור ליתן צונן (על המיחם) אפי' להפשיר כל שהמיחם חם כל כך שאלו היה מניחו שם הרבה היה בא לידי בישול דהיינו שיהיה היד סולדת בו שדין מניח על גבי מיחם כדין מניח כנגד המדורה ואם אינו חם כל כך מותר:",
+      "reason": "Placing cold food on top of a hot pot is not pouring cold water into that pot."
+    },
+    {
+      "sourceRef": "Shulchan Arukh, Orach Chayim 392:5",
+      "turRefPrefix": "טור, אורח חיים,  שצב, ",
+      "seif": "ה",
+      "decision": "omitted",
+      "expected": null,
+      "sourceText": "במה דברים אמורי' שאין מערבין אותה לחצאין בעיר מוקפת חומה גבוה י\"ט ויש לה דלתו' אבל אם לא היתה העיר כולה מוכשרת במחיצו' ובאו להכשיר חציה ולערבה הרשו' בידם:",
+      "reason": "Partitioning lengthwise or crosswise does not discuss enclosing only the unwalled part."
+    },
+    {
+      "sourceRef": "Shulchan Arukh, Orach Chayim 696:5",
+      "turRefPrefix": "טור, אורח חיים,  תרצו, ",
+      "seif": "ה",
+      "decision": "omitted",
+      "expected": null,
+      "sourceText": "אם חל פורים במוצאי שבת ואבל יושב בבית הכנסת בשבת במנחה לא יצא משם עד שיתפלל תפלת ערבי' וישמע קריאת מגילה ולמחרת לא יצא מפתח ביתו:",
+      "reason": "Attending on Purim night is not remaining in the synagogue after Shabbat afternoon prayers."
+    },
+    {
+      "sourceRef": "Shulchan Arukh, Yoreh De'ah 181:9",
+      "turRefPrefix": "טור, יורה דעה,  קפא, ",
+      "seif": "ט",
+      "decision": "moved",
+      "expected": {
+        "ref": "טור, יורה דעה,  קפא, א",
+        "context": "ופיאות הראש הם"
+      },
+      "sourceText": "שיעור הפאה מכנגד שער שעל פדחתו ועד למטה מן האוזן מקום שהלחי התחתון יוצא ומתפרד שם וכל רוחב מקום זה לא תגע בו יד:",
+      "reason": "The anatomical location is defined earlier; the Rambam passage counts the hairs to leave."
+    },
+    {
+      "sourceRef": "Shulchan Arukh, Yoreh De'ah 217:7",
+      "turRefPrefix": "טור, יורה דעה,  ריז, ",
+      "seif": "ז",
+      "decision": "omitted",
+      "expected": null,
+      "sourceText": "הנודר מהבשר [אסור] בגידין מהגידין מותר בבשר:",
+      "reason": "Kinds of meat do not address whether a meat vow includes sinews."
+    },
+    {
+      "sourceRef": "Shulchan Arukh, Yoreh De'ah 242:18",
+      "turRefPrefix": "טור, יורה דעה,  רמב, ",
+      "seif": "יח",
+      "decision": "omitted",
+      "expected": null,
+      "sourceText": "אם קראו לרבו לקרות בתורה בצבור אינו צריך לעמוד כל זמן שרבו עומד: הגה וכן כשהרב עומד למעלה בבית והתלמיד על הקרקע א\"צ לעמוד לפניו ואפי' כשהס\"ת על הבימה אין צבור שבבהכ\"נ צריכים לעמוד דהספר ברשות אחרת (ב\"י בשם תשובת הרשב\"א) :",
+      "reason": "Standing for a teacher in general is not Torah reading or an elevated separate domain."
+    },
+    {
+      "sourceRef": "Shulchan Arukh, Yoreh De'ah 267:10",
+      "turRefPrefix": "טור, יורה דעה,  רסז, ",
+      "seif": "י",
+      "decision": "omitted",
+      "expected": null,
+      "sourceText": "במה דברים אמורים שכשלקח עבד מהעובד כוכבים אין הגוף קנוי לו כשאותו עובד כוכבים קנה אותו עבד על ידי שנמכר לו הוא עצמו אבל אם קנאו בדינא דמלכותא דקני ליה גופיה ולקחו ממנו ישראל אם קדם וטבל לשם בן חורין לא קנה עצמו בן חורין:",
+      "reason": "An Israelite captive acquired for labor is not a gentile slave acquired bodily under royal law."
+    },
+    {
+      "sourceRef": "Shulchan Arukh, Yoreh De'ah 267:18",
+      "turRefPrefix": "טור, יורה דעה,  רסז, ",
+      "seif": "יח",
+      "decision": "omitted",
+      "expected": null,
+      "sourceText": "מלך עובד כוכבים שעשה מלחמה והביא שבויים ומכרם וכן אם הרשה לכל מי שירצה שילך ויגנוב מאומה שהיה עושה עמו מלחמה יביא וימכור לעצמו וכן אם היו דיניו דכל מי שלא יתן המס ימכר או מי שיעשה כך וכך או לא יעשה ימכר הרי דיניו דין ועבד הנלקח בדינים אלו הרי הוא כעבד כנעני לכל דבר:",
+      "reason": "The assigned captive paragraph explicitly denies the Canaanite-slave status granted by this seif."
+    },
+    {
+      "sourceRef": "Shulchan Arukh, Yoreh De'ah 331:24",
+      "turRefPrefix": "טור, יורה דעה,  שלא, ",
+      "seif": "כד",
+      "decision": "retained",
+      "expected": {
+        "ref": "טור, יורה דעה,  שלא, א",
+        "context": "ומפרישין תרומת מעשר"
+      },
+      "sourceText": "תרומת מעשר אין מפרישין אותה באומד אלא מדקדק בשיעורה ואפי' בזמן הזה דבר שדרכו למדוד מודד ודבר הנשקל שוקל ודבר שאפשר למנותו מונה היה אפשר למנותו ולשקלו ולמדדו המונה משובח והמודד משובח ממנו והשוקל משובח משניהם: (וניטלת שלא מן המוקף ותלמידי חכמים אין תורמין אלא מן המוקף) (הרמב\"ם פ\"ג) :",
+      "reason": "Retain: the closing Rema explicitly permits separation without proximity, matching the assigned passage."
+    },
+    {
+      "sourceRef": "Shulchan Arukh, Even HaEzer 12:3",
+      "turRefPrefix": "טור, אבן העזר,  יב, ",
+      "seif": "ג",
+      "decision": "omitted",
+      "expected": null,
+      "sourceText": "וכלם שנשאו לאחרים ונתאלמנו או נתגרשו מותרות לינשא להם:",
+      "reason": "The men losing their own wives is seif 4, not the women marrying other men and later becoming free."
+    },
+    {
+      "sourceRef": "Shulchan Arukh, Even HaEzer 20:1",
+      "turRefPrefix": "טור, אבן העזר,  כ, ",
+      "seif": "א",
+      "decision": "moved",
+      "expected": {
+        "ref": "טור, אבן העזר,  כ, א",
+        "context": "הבא על אחד"
+      },
+      "sourceText": "באיזו ביאה חייב הבא על הערוה. ובו ב סעיפים: הבא על אחת מן העריות דרך איברים או שחבק ונשק ונהנה בקירוב בשר הרי זה לוקה וחשוד על העריות: הגה והבא עליה בין כדרכה בין שלא כדרכה כיון שהערה בה דהיינו שהכניס העטרה חייב עליה מיתה או כרת ואין צריכים לראות כמכחול בשפופרת אלא משיראו העדים אותם דבוקים זה בזה כדרך המנאפים נהרגים על זה (טור) והאשה נאסרת על בעלה (נ\"י פ' שני דיבמות) אשה גדולה שבא עליה קטן פחות מבן ט' שנים אינה חייבת מיתה על ידו (טור) ונ\"ל דה\"ה אינה נאסרת על בעלה ולכן כתב הרב בעל הטורים הרבה דינים אימתי חייבים מיתה או לא נפקא מיניה בזמן הזה באיזה ביאה אשה נאסרת על בעלה וע' בפנים אשה פחותה מבת שלש אין ביאתה ביאה (טור) דכל פחותה משלש שנים אין ביאתה ביאה ובתוליה חוזרין (בהגהות דיבמות) אפילו נתעברו השנים בתוליה חוזרין (דברי הרב מהירושלמי):",
+      "reason": "Prefer the opening Mechaber topic of nonintercourse contact; the former intercourse paragraph also supported a later Rema clause."
+    },
+    {
+      "sourceRef": "Shulchan Arukh, Even HaEzer 118:1",
+      "turRefPrefix": "טור, אבן העזר,  קיח, ",
+      "seif": "א",
+      "decision": "moved",
+      "expected": {
+        "ref": "טור, אבן העזר,  קיח, א",
+        "context": "וששאלת אלמנה שיש"
+      },
+      "sourceText": "תקנת נשואין של קהל טוליטולה ודיני נדוניא. ובו יט סעיפים: אלמנה שיש לה לחלוק עם יורשי בעלה בכח התקנה של טוליטולה שמין בגדי שבת שעליה אבל לא בגדי חול תנאי השיור אינו אלא אם תמות האשה בחיי בעלה אבל לא אם תמות שומרת יבם (טור):",
+      "reason": "Prefer the opening Mechaber question about a widow's clothes; the former Toledo regulation also supported the Rema continuation."
+    },
+    {
+      "sourceRef": "Shulchan Arukh, Even HaEzer 176:6",
+      "turRefPrefix": "טור, אבן העזר,  קעו, ",
+      "seif": "ו",
+      "decision": "moved",
+      "expected": {
+        "ref": "טור, אבן העזר,  קעו, א",
+        "context": "מתו הבנים הודאין"
+      },
+      "sourceText": "מתו הבנים הוודאים של הזקנה והכלה והספקות קיימים הספיקות לנשי בני הזקנה חולצין ולא מייבמין ולנשי בני הכלה א' מהספקות חולץ לה תחלה והשני מייבם:",
+      "reason": "The definite sons dying is the reverse of the uncertain sons dying in seif 5."
+    },
+    {
+      "sourceRef": "Shulchan Arukh, Choshen Mishpat 33:14",
+      "turRefPrefix": "טור, חושן משפט,  לג, ",
+      "seif": "יד",
+      "decision": "moved",
+      "expected": {
+        "ref": "טור, חושן משפט,  לג, לז",
+        "context": "לפיכך שכיב מרע"
+      },
+      "sourceText": "שכיב מרע שצוה בפני עדים הקרובים לו ורחוקים מבניו אין הצוואה כלום כיון שהיו קרובים בשעה שנמסר להם העדות ויש מי שמכשיר:",
+      "reason": "The will witnessed by relatives is in paragraph 37, not the witness's financial interest."
+    },
+    {
+      "sourceRef": "Shulchan Arukh, Choshen Mishpat 33:15",
+      "turRefPrefix": "טור, חושן משפט,  לג, ",
+      "seif": "טו",
+      "decision": "moved",
+      "expected": {
+        "ref": "טור, חושן משפט,  לג, לט",
+        "context": "והא דבעינן תחילתו"
+      },
+      "sourceText": "בפיסול ממון לא בעינן תחלתו וסופו בכשרו' שאם היה נוגע בדבר בשעת ראיית העדות מפני שהי' לו הנאה בדבר יכול להסתלק בענין שלא יהי' לו הנאה בדבר ויעיד:",
+      "reason": "Removing a financial interest is in paragraph 39, not relatives of a guarantor."
+    },
+    {
+      "sourceRef": "Shulchan Arukh, Choshen Mishpat 33:17",
+      "turRefPrefix": "טור, חושן משפט,  לג, ",
+      "seif": "יז",
+      "decision": "omitted",
+      "expected": null,
+      "sourceText": "העדים שקרובים זה לזה או שקרובים לדיינים פסולים:",
+      "reason": "Accepting witnesses related to a litigant is not witnesses related to each other or to judges."
+    },
+    {
+      "sourceRef": "Shulchan Arukh, Choshen Mishpat 103:4",
+      "turRefPrefix": "טור, חושן משפט,  קג, ",
+      "seif": "ד",
+      "decision": "moved",
+      "expected": {
+        "ref": "טור, חושן משפט,  קג, ט",
+        "context": "וכן לענין אם"
+      },
+      "sourceText": "ב\"ד ששמו לטורף בנכסי לוקח וטעו בכל שהוא מכרן בטל אפי' הכריזו אבל אם היו נכסים בני חורין וטעו בשומא דינם כבית דין שמכרו נכסי יתומים וטעו שיתבאר בסימן ק\"ט:",
+      "reason": "Appraisal errors are discussed after the separate rule on a sale without its required announcement."
+    },
+    {
+      "sourceRef": "Shulchan Arukh, Choshen Mishpat 107:5",
+      "turRefPrefix": "טור, חושן משפט,  קז, ",
+      "seif": "ה",
+      "decision": "moved",
+      "expected": {
+        "ref": "טור, חושן משפט,  קז, יג",
+        "context": "כתב א\"א הרא\"ש"
+      },
+      "sourceText": "האידנא שתקנו הגאונים לגבות מהיורשים אף מהמטלטלים שהניח אביהם אם תפס המלוה מטלטלי הלוה אפילו לאחר מיתה מהניא אפי' אין לו עדים על חובו שאם לא תפס לא היה מגבינן ליה והשתא דתפס נאמן לגבות מהם בשבועה במיגו דאי בעי אמר לא תפסתי:",
+      "reason": "Post-death seizure belongs with the Geonic enactment, not lifetime seizure."
+    },
+    {
+      "sourceRef": "Shulchan Arukh, Choshen Mishpat 119:5",
+      "turRefPrefix": "טור, חושן משפט,  קיט, ",
+      "seif": "ה",
+      "decision": "moved",
+      "expected": {
+        "ref": "טור, חושן משפט,  קיט, ד",
+        "context": "מכרן לאחד בזה"
+      },
+      "sourceText": "מכרן לאחד זה אחר זה הרי הלוקח נכנס תחת הבעלי' בד\"א כשלקח עידית באחרונה (או קנאם בבת אחת (טור) אבל אם קנה זיבורית באחרונה) (שם בשם הרמב\"ם) כולם גובים מהזיבורית: הגה י\"א דאפילו אם קנה עידית באחרונה דוקא שמת המוכר אבל אם מוכר עדיין חי דיוכל להחזיר השטר הזיבורית למוכר ואז יצטרכו כולם לגבות מן המוכר וה\"ה אם קנה זיבורית באחרונה אע\"פ שמת המוכר כולן גובין מן הזיבורית לקח בינונית באחרונ' ניזקין ובע\"ח בבינונית וכתובה בזיבורית (טור) .",
+      "reason": "The single buyer acquiring properties in sequence is before resale to a second buyer."
+    },
+    {
+      "sourceRef": "Shulchan Arukh, Choshen Mishpat 154:15",
+      "turRefPrefix": "טור, חושן משפט,  קנד, ",
+      "seif": "טו",
+      "decision": "moved",
+      "expected": {
+        "ref": "טור, חושן משפט,  קנד, יא",
+        "context": "שאלה לא\"א הרא\"ש"
+      },
+      "sourceText": "וה\"מ במקום שאין אדם רשאי להוציא זיזין וגזוזטראות מעלייתו לרשות הרבים אבל במקום שרשאי להוציאם לא הוי האור שלפני עלייתו הפקר אלא הוי כחצר השותפין וכשפתח זה חלונו כנגד אויר שלפני עלייה שכנגדה שלא כדין פתח כיון שגם האחר יכול להוציא בניינו לרשות הרבים:",
+      "reason": "A city allowing public-space projections is the later responsum, not ownerless public light."
+    },
+    {
+      "sourceRef": "Shulchan Arukh, Choshen Mishpat 155:41",
+      "turRefPrefix": "טור, חושן משפט,  קנה, ",
+      "seif": "מא",
+      "decision": "moved",
+      "expected": {
+        "ref": "טור, חושן משפט,  קנה, נט",
+        "context": "וכן ההיא דרב"
+      },
+      "sourceText": "כל דבר שידוע שאין המערער יכול לסבלו אע\"פ ששאר בני אדם סובלים אותו אין לו חזקה כנגד מערער זה:",
+      "reason": "Unusual personal sensitivity is Rav Yosef's case, not a universally intolerable nuisance."
+    },
+    {
+      "sourceRef": "Shulchan Arukh, Choshen Mishpat 176:35",
+      "turRefPrefix": "טור, חושן משפט,  קעו, ",
+      "seif": "לה",
+      "decision": "omitted",
+      "expected": null,
+      "sourceText": "שני אחים או שלשה שיש להם דין עם אחר אינו יכול לומר יבא א' מכם ויטעון בעד כולכם:",
+      "reason": "Forcing several claimants to appoint one representative is not one partner suing for the full joint claim."
+    }
+  ]
+}
