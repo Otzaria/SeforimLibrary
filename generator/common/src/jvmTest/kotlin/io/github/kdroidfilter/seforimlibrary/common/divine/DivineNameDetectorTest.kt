@@ -363,6 +363,34 @@ class DivineNameDetectorTest {
     }
 
     @Test
+    fun `a sacred elohim verse also marks the name after the article`() {
+        val listed = DivineNameDetector(
+            DivineNameOverrides.parse(
+                listOf(
+                    DivineNameOverrides.HEADER,
+                    listOf("בראשית 22:1", "ELOHIM", "sacred", "", "x"),
+                    listOf("בראשית 22:2", "EL", "sacred", "", "x"),
+                ),
+            ).overrides!!,
+        )
+        fun listedHits(text: String, verse: VerseRef) =
+            listed.detect(text, verse).spans.map { Hit(text.substring(it.rawStart, it.rawEnd), it.kind, it.source) }
+
+        val text = "וְהָאֱלֹהִים נִסָּה אֶת־אַבְרָהָם"
+        assertEquals(
+            listOf(Hit("אֱלֹהִים", DivineKind.ELOHIM, DivineSource.EXCEPTION_LIST)),
+            listedHits(text, VerseRef("בראשית", 22, 1)),
+        )
+        assertEquals(
+            listOf(Hit("אֱלֹהִים", DivineKind.ELOHIM, DivineSource.EXCEPTION_LIST)),
+            listedHits("נִסָּה הָאֱלֹהִים", VerseRef("בראשית", 22, 1)),
+        )
+        assertEquals(emptyList(), listedHits(text, VerseRef("בראשית", 22, 3)))
+        // Only ELOHIM takes the article: a sacred EL verse leaves הָאֵל alone.
+        assertEquals(emptyList(), listedHits("הָאֵל הַגָּדוֹל", VerseRef("בראשית", 22, 2)))
+    }
+
+    @Test
     fun `profane verse suppresses everything but hvyh`() {
         val text = "$hvyh אלהים ו$hvyh אלהי ישראל"
         val inVerse = kinds(text, VerseRef("שופטים", 17, 3))

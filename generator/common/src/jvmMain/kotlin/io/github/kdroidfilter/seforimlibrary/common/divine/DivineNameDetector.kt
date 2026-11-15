@@ -405,7 +405,12 @@ internal class DivineNameDetector(private val overrides: DivineNameOverrides?) {
             DivineKind.YAH -> setOf("יה")
             DivineKind.HVYH -> return null
         }
-        val prefixes = if (kind == DivineKind.EHYEH) emptySet() else PREFIXES_NO_HEH
+        // A reviewed ELOHIM verse also covers האלהים / והאלהים; the app accepts ה as a prefix.
+        val prefixes = when (kind) {
+            DivineKind.EHYEH -> emptySet()
+            DivineKind.ELOHIM -> PREFIXES_WITH_HEH
+            else -> PREFIXES_NO_HEH
+        }
         for (k in prefixLengths(word, prefixes)) {
             val body = word.letters.subList(k, word.letters.size)
             if (skeletonOf(body) !in bodies) continue
@@ -473,6 +478,7 @@ internal class DivineNameDetector(private val overrides: DivineNameOverrides?) {
 
         /** הָאֵל may be "these" (Gen 19:8), so a heh prefix never proves a name. */
         private val PREFIXES_NO_HEH: Set<Char> = "ובכלמש".toSet()
+        private val PREFIXES_WITH_HEH: Set<Char> = PREFIXES_NO_HEH + 'ה'
 
         private val YAH_PREFIXES: Set<Char> = "בלכמ".toSet()
         private val YAH_SHEM_WORDS = setOf("שם", "בשם", "ושם")
