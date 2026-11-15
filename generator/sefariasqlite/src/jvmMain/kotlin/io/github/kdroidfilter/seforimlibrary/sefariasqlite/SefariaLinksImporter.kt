@@ -788,6 +788,54 @@ internal class SefariaLinksImporter(
         return written
     }
 
+    /**
+     * Stores each of [sections] as one RELATED link between the first segments of the two
+     * sections, with both sides ranged over their whole section. Returns the number inserted.
+     */
+    suspend fun insertParallelSectionLinks(
+        sections: List<ParallelSectionLink>,
+        lineKeyToId: Map<Pair<String, Int>, Long>,
+        lineIdToBookId: Map<Long, Long>,
+        headingLineIds: Set<Long>,
+        bookMetaById: Map<Long, BookMeta>,
+    ): Int {
+        val typeId = bindings.upsertConnectionType(ConnectionType.RELATED.name)
+        val ranges = ArrayList<LinkRange>()
+        val coverage = ArrayList<LinkCoverage>()
+        var written = 0
+        for (section in sections) {
+            val sourceLine = lineKeyToId[section.source.first.path to section.source.first.lineIndex - 1] ?: continue
+            val targetLine = lineKeyToId[section.target.first.path to section.target.first.lineIndex - 1] ?: continue
+            val sourceBookId = lineIdToBookId[sourceLine] ?: continue
+            val targetBookId = lineIdToBookId[targetLine] ?: continue
+            val link = Link(
+                id = bindings.allocator.linkId(sourceLine, targetLine, typeId),
+                sourceBookId = sourceBookId,
+                targetBookId = targetBookId,
+                sourceLineId = sourceLine,
+                targetLineId = targetLine,
+                targetLineIndex = section.target.first.lineIndex - 1,
+                connectionType = ConnectionType.RELATED,
+                baseProvenance = computeBaseProvenance(sourceBookId, bookMetaById[targetBookId]),
+            )
+            if (!repository.insertLinksBatchReportingInserted(listOf(link)).single()) continue
+            linksWrittenByType.bump(ConnectionType.RELATED)
+            written++
+            listOf(0 to section.source, 1 to section.target).forEach { (side, span) ->
+                if (span.last.lineIndex == span.first.lineIndex) return@forEach
+                val endLineId = lineKeyToId[span.last.path to span.last.lineIndex - 1] ?: return@forEach
+                ranges += LinkRange(link.id, side, endLineId, span.last.lineIndex - 1)
+                for (lineIndex in span.first.lineIndex until span.last.lineIndex) {
+                    val covered = lineKeyToId[span.first.path to lineIndex] ?: continue
+                    if (covered !in headingLineIds) coverage += LinkCoverage(covered, link.id, side)
+                }
+            }
+        }
+        repository.insertLinkRangesBatch(ranges)
+        repository.insertLinkCoverageBatch(coverage)
+        return written
+    }
+
     private data class StoredLink(
         val srcBookId: Long,
         val tgtBookId: Long,

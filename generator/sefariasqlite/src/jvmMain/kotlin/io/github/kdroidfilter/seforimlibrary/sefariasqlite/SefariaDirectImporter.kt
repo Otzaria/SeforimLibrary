@@ -677,6 +677,11 @@ class SefariaDirectImporter(
             val addressLinks = addressedCommentaries.flatMap { deriveSegmentAddressLinks(it, commentaryBaseLinks) }
             val inserted = linksImporter.insertDerivedCommentaryLinks(addressLinks, bookMetaById)
             logger.i { "Derived $inserted commentary links from Sefaria segment addresses" }
+            val parallelSections = linksImporter.insertParallelSectionLinks(
+                PARALLEL_SECTION_BOOKS.flatMap { parallelSectionLinks(it, refsByPath) },
+                lineKeyToId, lineIdToBookId, headingLineIds, bookMetaById,
+            )
+            logger.i { "Linked $parallelSections sections of parallel books" }
             // After the anchors: they are counted as written links too.
             linkImportMetrics = linksImporter.metricsSnapshot()
             logger.i { "Links processed" }
