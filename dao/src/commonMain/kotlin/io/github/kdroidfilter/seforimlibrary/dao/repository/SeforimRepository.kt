@@ -1019,6 +1019,16 @@ class SeforimRepository(databasePath: String, private val driver: SqlDriver) : L
         logger.d{"Linked publication date $pubDateId to book $bookId"}
     }
 
+    /** Removes every publication-date link of [bookId]; the pub_date rows stay. */
+    suspend fun deleteBookPubDates(bookId: Long) = withContext(Dispatchers.IO) {
+        database.pubDateQueriesQueries.unlinkAllBookPubDates(bookId)
+    }
+
+    /** Removes every publication-place link of [bookId]; the pub_place rows stay. */
+    suspend fun deleteBookPubPlaces(bookId: Long) = withContext(Dispatchers.IO) {
+        database.pubPlaceQueriesQueries.unlinkAllBookPubPlaces(bookId)
+    }
+
     /**
      * Inserts a book into the database, including all related data (authors, topics, etc.).
      * If the book has an ID greater than 0, uses that ID; otherwise, generates a new ID.

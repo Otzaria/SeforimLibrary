@@ -132,6 +132,7 @@ fun main(args: Array<String>) {
     // generations/metadata file can therefore never pass this gate merely because
     // the rename/move subset was valid.
     val generations = loadGenerationRows(logger)
+    val bookInfoFields = loadBookInfo(logger)?.let { bookInfoExtensions(it, logger) }.orEmpty()
     val bulkMetadata = parseBulkMetadata(downloadRequiredForDbFile("all_metadata.json", logger))
     val descriptionOverrides = parseDescriptionOverrides(
         downloadRequiredForDbFile("sefaria_metadata_changes.csv", logger),
@@ -211,6 +212,7 @@ fun main(args: Array<String>) {
                 val bindings = IdAllocatorBindings(allocator, repository)
                 failOnLostCategoryDescriptions(repository, categoryDescriptionOverrides, lostCategories)
                 applyMetadata(repository, bindings, bulkMetadata, descriptionOverrides, retitledBooks, logger)
+                applyBookInfoExtensions(repository, bindings, bookInfoFields, retitledBooks, logger)
                 applyCategoryDescriptionOverrides(repository, categoryDescriptionOverrides, logger)
             } finally {
                 repository.close()
@@ -231,6 +233,7 @@ fun main(args: Array<String>) {
             "ForDB validation passed all real consumers: ${categoryRenames.size} category renames, " +
                 "${categoryMoves.size} category moves, ${bookRenames.size} book renames, " +
                 "${bookMoves.size} book moves, ${generations.size} generation rows, " +
+                "${bookInfoFields.size} book-info extension rows, " +
                 "${bulkMetadata.size} bulk metadata rows, ${descriptionOverrides.size} description overrides, " +
                 "${categoryDescriptionOverrides.size} category-description overrides, " +
                 "${authorCanonicalNames.size} author renames, ${bookNotices.banners.size} banner rows, " +

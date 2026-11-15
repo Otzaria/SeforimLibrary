@@ -33,6 +33,8 @@ import kotlin.system.exitProcess
  *  - ForDB/all_metadata.json — publication dates/places per book.
  *  - ForDB/sefaria_metadata_changes.csv — per-title description overrides
  *    (columns: categoryPath,title,author,heShortDesc,heDesc,heDescNew).
+ *  - ForDB/book_info.csv — its topics/pubDate/pubPlace/description columns, applied
+ *    last so they win over both files above (see [applyBookInfoExtensions]).
  *
  * Runs after appendOtzaria and renameCategories so every book exists under its
  * final title. Matching is exact by book title. The metadata covers the whole
@@ -70,6 +72,8 @@ fun main(args: Array<String>) = runBlocking {
     val categoryOverrides = parseCategoryDescriptionOverrides(
         downloadRequiredForDbFile(CATEGORY_DESCRIPTIONS_FILE, logger),
     )
+    val bookInfo = loadBookInfo(logger)?.let { bookInfoExtensions(it, logger) }
+    if (bookInfo == null) logger.w { "$BOOK_INFO_FILE is not in this ForDB archive; no book-info fields to apply" }
 
     val retitledBooks = DriverManager.getConnection("jdbc:sqlite:$dbPath").use(::loadRetitledBooks)
     val driver = JdbcSqliteDriver(url = "jdbc:sqlite:$dbPath")
@@ -93,6 +97,8 @@ fun main(args: Array<String>) = runBlocking {
         // metadata committed even though the task reports failure.
         val categoryPlan = planCategoryDescriptionOverrides(repository, categoryOverrides)
         val result = applyMetadata(repository, bindings, bulk, descriptions, retitledBooks, logger)
+        val bookInfoResult =
+            applyBookInfoExtensions(repository, bindings, bookInfo.orEmpty(), retitledBooks, logger)
         val categoryResult = applyCategoryDescriptionPlan(repository, categoryPlan, logger)
         // This stage writes straight to the on-disk DB (no VACUUM INTO), so there
         // is no persist step for the snapshot to run ahead of.
@@ -118,6 +124,7 @@ fun main(args: Array<String>) = runBlocking {
         )
         logger.i {
             "All-metadata done: updated=${result.updated} unmatched=${result.unmatched}; " +
+                "book-info updated=${bookInfoResult.updated} unmatched=${bookInfoResult.unmatched}; " +
                 "category records=${categoryResult.records} updates=${categoryResult.updated} " +
                 "unchanged=${categoryResult.unchanged}"
         }
