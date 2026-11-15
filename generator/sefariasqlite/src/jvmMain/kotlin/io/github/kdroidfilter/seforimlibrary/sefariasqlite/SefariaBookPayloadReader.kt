@@ -988,10 +988,18 @@ internal class SefariaBookPayloadReader(
                     // Issur VeHeter HaArokh repeats the footnote label at the start of
                     // each body. Keep using the pre-cleanup segment for its line key
                     // while Sefaria still ships the repeated label.
-                    val stored = if (bookEnTitle == "Issur VeHeter HaArokh" && "footnote" in originalStored) {
+                    val unmarked = if (bookEnTitle == "Issur VeHeter HaArokh" && "footnote" in originalStored) {
                         dropRepeatedFootnoteMarkers(originalStored)
                     } else {
                         originalStored
+                    }
+                    // Only the main text: editions are joined to it by ref and keep their own wording.
+                    val stored = if (lineKeyHashOverrides != null) {
+                        SefariaTurSeifMarkers.apply(
+                            bookHeTitle, trimTrailingSeparators(heRefPrefix), unmarked, recordStats = !labels.repeatedWalk,
+                        )
+                    } else {
+                        unmarked
                     }
                     // Reproduce the old pipeline BEFORE the dashless repair: keeping
                     // a break can either enable or suppress that repair. Collapsing

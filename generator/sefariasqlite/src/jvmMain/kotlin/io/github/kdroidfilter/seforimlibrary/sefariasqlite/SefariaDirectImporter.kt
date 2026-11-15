@@ -265,6 +265,7 @@ class SefariaDirectImporter(
         // not insert them. Reset diagnostics so they describe the actual
         // serial insertion pass, not those preparatory re-reads.
         SefariaDashlessDibburim.resetSummary()
+        SefariaTurSeifMarkers.resetSummary()
         logger.i { "Inserting books and lines..." }
         var processedBooks = 0
 
@@ -491,6 +492,7 @@ class SefariaDirectImporter(
 
         logger.i { "Inserted all books and lines ($rangeMarkerLines range-marker lines excluded from links)" }
         SefariaDashlessDibburim.logSummary(logger)
+        SefariaTurSeifMarkers.logSummary(logger)
 
         // Build the title→bookId index in two global phases (all primaries, then
         // all aliases) so a primary title always beats any alias regardless of
