@@ -5,7 +5,7 @@ enum class OverrideDecision { SACRED, PROFANE }
 /**
  * One reviewed verse-level decision. [kind] null means every kind except HVYH
  * (written `*`), YAH included. A SACRED entry names one verse and one kind; it forces every word
- * of that verse whose body spells the kind (source EXCEPTION_LIST).
+ * of that verse whose body spells the kind (source EXCEPTION_LIST); for ELOHIM that includes האלהים.
  */
 data class DivineOverride(
     val from: VerseRef,
