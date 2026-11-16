@@ -3,6 +3,7 @@ package io.github.kdroidfilter.seforimlibrary.sefariasqlite
 import co.touchlab.kermit.Logger
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.jsonObject
 import java.nio.file.Files
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -10,6 +11,23 @@ import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 
 class SefariaBookPayloadReaderTest {
+    @Test
+    fun correctsOnlyTheKnownSheneiLuchotNodeTitleInContentAndToc() {
+        val reader = SefariaBookPayloadReader(Json, Logger.withTag("SefariaBookPayloadReaderTest"))
+        val schema = Json.parseToJsonElement(
+            """{"nodes":[{"title":"Beit Hashem","heTitle":"'בית ה","key":"Beit Hashem","depth":1}]}"""
+        ).jsonObject
+        val text = Json.parseToJsonElement("""{"Beit Hashem":["תוכן"]}""")
+
+        val corrected = reader.walkTextWithSchema(schema, text, "שני לוחות הברית", "Shenei Luchot HaBerit")
+        val otherBook = reader.walkTextWithSchema(schema, text, "ספר אחר", "Another Book")
+
+        assertTrue(corrected.lines.contains("<h2>בית ה'</h2>"))
+        assertTrue(corrected.headings.any { it.title == "בית ה'" })
+        assertTrue(otherBook.lines.contains("<h2>'בית ה</h2>"))
+        assertTrue(otherBook.headings.any { it.title == "'בית ה" })
+    }
+
     @Test
     fun defaultNodeWithoutTitleKeepsSimanimAtSameLevelAsIntroduction() = runBlocking {
         val tempDir = Files.createTempDirectory("seforim-test")
