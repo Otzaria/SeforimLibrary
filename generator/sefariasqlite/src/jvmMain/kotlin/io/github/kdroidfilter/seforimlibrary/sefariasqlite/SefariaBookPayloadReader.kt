@@ -730,7 +730,9 @@ internal class SefariaBookPayloadReader(
             heRefPrefix: String
         ) {
             val empty = text.isTriviallyEmpty()
-            val nodeTitle = node["heTitle"]?.stringOrNull()?.takeIf { it.isNotBlank() }
+            val nodeTitle = node["heTitle"]?.stringOrNull()?.takeIf { it.isNotBlank() }?.let {
+                if (bookHeTitle == "שני לוחות הברית" && it == "'בית ה") "בית ה'" else it
+            }
                 ?: node["title"]?.stringOrNull()?.takeIf { it.isNotBlank() }
             val hasTitle = nodeTitle != null
             if (hasTitle && level > 0) {
