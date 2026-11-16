@@ -30,4 +30,24 @@ class SefariaCategoryOrderTest {
         assertEquals(65, orders["תלמוד בבלי/ספרות עזר"])
         assertTrue(orders.getValue("תלמוד בבלי/ספרות עזר") > orders.getValue("תלמוד בבלי/מפרשים על המסכתות הקטנות"))
     }
+
+    @Test
+    fun mishnahBerurahIsOrderedBeforeBiurHalakha() {
+        val root = Files.createTempDirectory("toc")
+        Files.writeString(
+            root.resolve("table_of_contents.json"),
+            """
+            [{"category":"Halakhah","heCategory":"הלכה","order":4,"contents":[
+              {"title":"Biur Halakha","heTitle":"ביאור הלכה","order":10},
+              {"title":"Mishnah Berurah","heTitle":"משנה ברורה","order":20}
+            ]}]
+            """.trimIndent(),
+        )
+
+        val orders = parseTableOfContentsMetadata(root, Json, Logger.withTag("test")).bookOrders
+
+        assertTrue(orders.getValue("Mishnah Berurah") < orders.getValue("Biur Halakha"))
+        assertEquals(orders.getValue("Mishnah Berurah"), orders.getValue("משנה ברורה"))
+        assertEquals(orders.getValue("Biur Halakha"), orders.getValue("ביאור הלכה"))
+    }
 }
