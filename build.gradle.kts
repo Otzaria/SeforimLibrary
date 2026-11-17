@@ -54,6 +54,7 @@ tasks.register("generateSeforimDb") {
     dependsOn(":sefariasqlite:seedGenerations")
     dependsOn(":sefariasqlite:seedAllMetadata")
     dependsOn(":sefariasqlite:seedBookNotices")
+    dependsOn(":generator-common:buildCommentarySideAnchors")
     dependsOn(":generator-common:buildLineNoteIndex")
     dependsOn(":generator-common:buildLineRefIndex")
     dependsOn(":generator-common:buildLineDhIndex")
@@ -82,6 +83,7 @@ val lineContentWriters = listOf(
     ":sefariasqlite:seedGenerations",
     ":sefariasqlite:seedAllMetadata",
     ":sefariasqlite:seedBookNotices",
+    ":generator-common:buildCommentarySideAnchors",
     ":generator-common:buildLineNoteIndex",
     ":sefariasqlite:synthesizeSeifimAltToc",
     ":sefariasqlite:synthesizeSimanNamesAltToc",
@@ -164,10 +166,23 @@ listOf(
     }
 }
 
+// Commentary-side anchors read the base-side anchors and the full line text, so they follow
+// every link writer and precede buildLineNoteIndex (ordered after them below).
+project(":generator-common").tasks.matching { it.name == "buildCommentarySideAnchors" }.configureEach {
+    mustRunAfter(":sefariasqlite:generateSefariaSqlite")
+    mustRunAfter(":otzariasqlite:appendOtzaria")
+    mustRunAfter(":otzariasqlite:generateHavroutaLinks")
+    mustRunAfter(":sefariasqlite:renameCategories")
+    mustRunAfter(":sefariasqlite:seedGenerations")
+    mustRunAfter(":sefariasqlite:seedAllMetadata")
+    mustRunAfter(":sefariasqlite:seedBookNotices")
+}
+
 // line_note moves footnote bodies out of line text (link_anchor keeps counting them),
 // so it follows every line writer and precedes every stage that reads
 // the text or stores offsets into it (each of those orders itself after it below).
 project(":generator-common").tasks.matching { it.name == "buildLineNoteIndex" }.configureEach {
+    mustRunAfter(":generator-common:buildCommentarySideAnchors")
     mustRunAfter(":otzariasqlite:appendOtzaria")
     mustRunAfter(":otzariasqlite:generateHavroutaLinks")
     mustRunAfter(":sefariasqlite:renameCategories")

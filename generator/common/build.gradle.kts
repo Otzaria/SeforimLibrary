@@ -327,6 +327,19 @@ tasks.register<JavaExec>("buildLineNoteIndex") {
     jvmArgs = listOf("-Xmx2g")
 }
 
+tasks.register<JavaExec>("buildCommentarySideAnchors") {
+    group = "application"
+    description = "Anchor the printed marker that opens a commentary line to its base-text link (link_anchor side 1)."
+    dependsOn("jvmJar")
+    mainClass.set("io.github.kdroidfilter.seforimlibrary.common.anchors.BuildCommentarySideAnchorsCliKt")
+    classpath = files(tasks.named("jvmJar")) + configurations.getByName("jvmRuntimeClasspath")
+    val dbPath = (project.findProperty("dbPath") ?: project.findProperty("seforimDb")) as String?
+        ?: System.getenv("SEFORIM_DB")
+        ?: rootProject.layout.buildDirectory.file("seforim.db").get().asFile.absolutePath
+    systemProperty("dbPath", dbPath)
+    jvmArgs = listOf("-Xmx2g")
+}
+
 tasks.register<JavaExec>("diagnoseHashMismatch") {
     group = "verification"
     description = "Apply a patch.db onto a copy of prevDb and report which tables hash-differ from newDb."
