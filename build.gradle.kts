@@ -61,6 +61,7 @@ tasks.register("generateSeforimDb") {
     dependsOn(":sefariasqlite:synthesizeSeifimAltToc")
     dependsOn(":sefariasqlite:synthesizeSimanNamesAltToc")
     dependsOn(":sefariasqlite:inheritChaptersAltToc")
+    dependsOn(":sefariasqlite:buildInlineMarkerAltToc")
     dependsOn(":packaging:writeReleaseInfo")
     dependsOn(":packaging:downloadLexicalDb")
     // Stamps schema_meta.db_version into the produced seforim.db so the
@@ -85,6 +86,7 @@ val lineContentWriters = listOf(
     ":sefariasqlite:synthesizeSeifimAltToc",
     ":sefariasqlite:synthesizeSimanNamesAltToc",
     ":sefariasqlite:inheritChaptersAltToc",
+    ":sefariasqlite:buildInlineMarkerAltToc",
     ":generator-common:buildLineRefIndex",
     ":generator-common:buildLineDhIndex",
     ":sefariasqlite:buildLineDivineNameIndex",
@@ -187,6 +189,7 @@ project(":generator-common").tasks.matching { it.name == "buildLineRefIndex" }.c
     mustRunAfter(":sefariasqlite:synthesizeSeifimAltToc")
     mustRunAfter(":sefariasqlite:synthesizeSimanNamesAltToc")
     mustRunAfter(":sefariasqlite:inheritChaptersAltToc")
+    mustRunAfter(":sefariasqlite:buildInlineMarkerAltToc")
 }
 
 // line_dh is derived from line.content, so it must be rebuilt after every
@@ -218,6 +221,7 @@ project(":sefariasqlite").tasks.matching { it.name == "buildLineDivineNameIndex"
     mustRunAfter(":sefariasqlite:synthesizeSeifimAltToc")
     mustRunAfter(":sefariasqlite:synthesizeSimanNamesAltToc")
     mustRunAfter(":sefariasqlite:inheritChaptersAltToc")
+    mustRunAfter(":sefariasqlite:buildInlineMarkerAltToc")
     mustRunAfter(":generator-common:buildLineRefIndex")
     mustRunAfter(":generator-common:buildLineDhIndex")
 }
@@ -304,6 +308,20 @@ project(":sefariasqlite").tasks.matching { it.name == "inheritChaptersAltToc" }.
     mustRunAfter(":sefariasqlite:synthesizeSeifimAltToc")
     mustRunAfter(":sefariasqlite:synthesizeSimanNamesAltToc")
 }
+// buildInlineMarkerAltToc replaces a listed book's structure of the rule's key, so it
+// runs after every other alt-TOC writer (and after renames: it matches final titles).
+project(":sefariasqlite").tasks.matching { it.name == "buildInlineMarkerAltToc" }.configureEach {
+    mustRunAfter(":generator-common:buildLineNoteIndex")
+    mustRunAfter(":otzariasqlite:appendOtzaria")
+    mustRunAfter(":otzariasqlite:generateHavroutaLinks")
+    mustRunAfter(":sefariasqlite:renameCategories")
+    mustRunAfter(":sefariasqlite:seedGenerations")
+    mustRunAfter(":sefariasqlite:seedAllMetadata")
+    mustRunAfter(":sefariasqlite:seedBookNotices")
+    mustRunAfter(":sefariasqlite:synthesizeSeifimAltToc")
+    mustRunAfter(":sefariasqlite:synthesizeSimanNamesAltToc")
+    mustRunAfter(":sefariasqlite:inheritChaptersAltToc")
+}
 project(":catalog").tasks.matching { it.name == "buildCatalog" }.configureEach {
     mustRunAfter(":generator-common:buildLineNoteIndex")
     mustRunAfter(":otzariasqlite:generateHavroutaLinks")
@@ -313,6 +331,7 @@ project(":catalog").tasks.matching { it.name == "buildCatalog" }.configureEach {
     mustRunAfter(":sefariasqlite:synthesizeSeifimAltToc")
     mustRunAfter(":sefariasqlite:synthesizeSimanNamesAltToc")
     mustRunAfter(":sefariasqlite:inheritChaptersAltToc")
+    mustRunAfter(":sefariasqlite:buildInlineMarkerAltToc")
     mustRunAfter(":generator-common:buildLineDhIndex")
     mustRunAfter(":sefariasqlite:buildLineDivineNameIndex")
 }

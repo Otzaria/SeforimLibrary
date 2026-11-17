@@ -153,6 +153,8 @@ fun main(args: Array<String>) {
     val libraryTrees = baseTreePath?.let { readLibraryTree(Path.of(it)) to readLibraryTree(Path.of(candidateTreePath!!)) }
     if (libraryTrees == null) logger.w { "No library trees given: categories of removed library folders are not checked" }
     val bookNotices = loadBookNoticeRows(logger)
+    val inlineMarkerRules = downloadOptionalForDbFile(INLINE_MARKER_ALT_TOC_FILE, logger)
+        ?.let(::parseInlineMarkerRules).orEmpty()
 
     DriverManager.getConnection("jdbc:sqlite:$dbPath").use { conn ->
         conn.autoCommit = false
@@ -225,6 +227,16 @@ fun main(args: Array<String>) {
             applyBookNotices(conn, bookNotices, logger, strict = false)
             conn.commit()
         }
+        // Parsed above; a book this published DB lacks (a new one) only warns. Its line text is
+        // compressed here, so the markers themselves are checked by the build stage.
+        DriverManager.getConnection("jdbc:sqlite:$tempDb").use { conn ->
+            val titles = conn.createStatement().use { st ->
+                st.executeQuery("SELECT title FROM book").use { rs -> buildSet { while (rs.next()) add(rs.getString(1)) } }
+            }
+            for (rule in inlineMarkerRules.filter { it.bookTitle !in titles }) {
+                logger.w { "ForDB $INLINE_MARKER_ALT_TOC_FILE: no book titled '${rule.bookTitle}' in this DB" }
+            }
+        }
         // Fails like the build on a missing list or an unreadable row; unmatched refs only warn.
         val divineNameOverrides = DriverManager.getConnection("jdbc:sqlite:$tempDb").use {
             validateDivineNameOverrides(it, logger)
@@ -237,7 +249,8 @@ fun main(args: Array<String>) {
                 "${bulkMetadata.size} bulk metadata rows, ${descriptionOverrides.size} description overrides, " +
                 "${categoryDescriptionOverrides.size} category-description overrides, " +
                 "${authorCanonicalNames.size} author renames, ${bookNotices.banners.size} banner rows, " +
-                "${bookNotices.protections.size} protection rows, $divineNameOverrides divine-name override rows. " +
+                "${bookNotices.protections.size} protection rows, $divineNameOverrides divine-name override rows, " +
+                "${inlineMarkerRules.size} inline-marker alt-TOC rules. " +
                 "Original DB/buildstate untouched."
         }
     } finally {
