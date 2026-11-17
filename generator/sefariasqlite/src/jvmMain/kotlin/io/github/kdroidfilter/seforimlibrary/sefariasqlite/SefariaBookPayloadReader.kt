@@ -282,7 +282,7 @@ internal class SefariaBookPayloadReader(
             // A heading cannot carry an edition's text overlay. Only fold a title
             // when no Hebrew edition has different text at the same address.
             val preservedTitleRefs = findTitleVariantRefs(initial, textPath.parent, schemaObj, hebrewTitle, englishTitle)
-            val (lines, refs, headings, cleanShifts, lineKeyHashOverrides, simanTopicLines, omittedLinesBefore, titleSegmentHeadingLines) = SefariaSameTractateRefs.apply(
+            val (lines, refs, headings, cleanShifts, lineKeyHashOverrides, simanTopicLines, omittedLinesBefore, titleSegmentHeadingLines, _, paragraphLineIndexes) = SefariaSameTractateRefs.apply(
                 if (preservedTitleRefs.isEmpty()) initial else build(preservedTitleRefs, recordStats = false),
                 sameTractateHeTitle,
             )
@@ -359,6 +359,7 @@ internal class SefariaBookPayloadReader(
                 boldDashDibburim = SefariaTalmudDibburBold.appliesTo(categoriesEn, dependence, lines),
                 isReferenceWork = isReferenceWork,
                 sameTractateHeTitle = sameTractateHeTitle,
+                paragraphLineIndexes = paragraphLineIndexes,
             )
         }.onFailure { e ->
             // גרסה מוצהרת שחסרה בייצוא היא שגיאת קלט — לא בולעים אותה.
@@ -589,6 +590,7 @@ internal class SefariaBookPayloadReader(
         val titleSegmentHeadingLines: Set<Int> = emptySet(),
         // Section numbers admit a terminal geresh; schema-node names do not.
         val foldedSectionTitleRefs: Set<String> = emptySet(),
+        val paragraphLineIndexes: java.util.BitSet = java.util.BitSet(),
     )
 
     /**
@@ -699,6 +701,27 @@ internal class SefariaBookPayloadReader(
         // Pre-allocate with estimated capacity
         val output = ArrayList<String>(1000)
         val refs = ArrayList<RefEntry>(1000)
+        val paragraphLineIndexes = java.util.BitSet()
+
+        fun recordParagraphLines(node: JsonObject, firstRefIndex: Int) {
+            val sections = (node["sectionNames"] as? JsonArray)?.mapNotNull { it.jsonPrimitive.contentOrNull }
+            val heSections = (node["heSectionNames"] as? JsonArray)?.mapNotNull { it.jsonPrimitive.contentOrNull }
+            val depth = node["depth"]?.jsonPrimitive?.intOrNull ?: return
+            if (depth < 2) return
+            // Paragraph alone can also be an individual comment on a Verse/Chapter.
+            // This fallback needs paragraphs INSIDE a numbered comment (Seif/Comment).
+            val isCommentParagraph = if (!sections.isNullOrEmpty()) {
+                sections.size == depth && sections.last().equals("Paragraph", ignoreCase = true) &&
+                    (sections[depth - 2].equals("Seif", ignoreCase = true) ||
+                        sections[depth - 2].equals("Comment", ignoreCase = true))
+            } else {
+                heSections != null && heSections.size == depth && heSections.last() == "פסקה" &&
+                    heSections[depth - 2] in setOf("סעיף", "פירוש", "הערה")
+            }
+            if (isCommentParagraph) {
+                for (i in firstRefIndex until refs.size) paragraphLineIndexes.set(refs[i].lineIndex - 1)
+            }
+        }
         val headings = ArrayList<Heading>(100)
         // See BookPayload.cleanShiftByLineIndex — sparse raw-offset bookkeeping.
         val cleanShifts = HashMap<Int, Int>()
@@ -770,6 +793,7 @@ internal class SefariaBookPayloadReader(
                 }
             } else {
                 val firstContentLine = output.size
+                val firstRefIndex = refs.size
                 val sectionNames = readHeSectionNames(node)
                 val depth = node["depth"]?.jsonPrimitive?.intOrNullSafe() ?: sectionNames.size
                 val addressTypes = node["addressTypes"]?.jsonArray?.mapNotNull { it.jsonPrimitive.contentOrNull } ?: emptyList()
@@ -801,6 +825,7 @@ internal class SefariaBookPayloadReader(
                     preservedTitleRefs = preservedTitleRefs,
                     foldedSectionTitleRefs = foldedSectionTitleRefs,
                 )
+                recordParagraphLines(node, firstRefIndex)
                 if (empty) {
                     omittedLineIndices.addAll(firstContentLine until output.size)
                 } else if (foldTitleSegments && nodeTitle != null && level > 0 && firstContentLine < output.size &&
@@ -837,6 +862,7 @@ internal class SefariaBookPayloadReader(
                 processNode(node, nodeText, 1, refPrefix, heRefPrefix)
             }
         } else {
+            val firstRefIndex = refs.size
             val sectionNames = readHeSectionNames(schemaObj)
             val depth = schemaObj["depth"]?.jsonPrimitive?.intOrNullSafe() ?: sectionNames.size
             val addressTypes = schemaObj["addressTypes"]?.jsonArray?.mapNotNull { it.jsonPrimitive.contentOrNull } ?: emptyList()
@@ -870,11 +896,15 @@ internal class SefariaBookPayloadReader(
                 preservedTitleRefs = preservedTitleRefs,
                 foldedSectionTitleRefs = foldedSectionTitleRefs,
             )
+            recordParagraphLines(schemaObj, firstRefIndex)
         }
 
         omittedLineIndices += titleSegmentHeadings.keys
         if (omittedLineIndices.isEmpty()) {
-            return BuiltBookContent(output, refs, headings, cleanShifts, lineKeyHashOverrides.orEmpty(), simanTopicLines)
+            return BuiltBookContent(
+                output, refs, headings, cleanShifts, lineKeyHashOverrides.orEmpty(), simanTopicLines,
+                paragraphLineIndexes = paragraphLineIndexes,
+            )
         }
 
         // Compact affected books once, in place. Keep the old key positions and
@@ -914,12 +944,21 @@ internal class SefariaBookPayloadReader(
         val titleSegmentHeadingLines = titleSegmentHeadings.values.mapTo(HashSet()) { newIndex[it] }
         // Char offsets into the folded segment do not index the heading's text.
         val shifts = remap(cleanShifts) + titleSegmentHeadingLines.associateWith { CLEAN_MODIFIED }
+        val remappedParagraphLines = java.util.BitSet()
+        var paragraphLine = paragraphLineIndexes.nextSetBit(0)
+        while (paragraphLine >= 0) {
+            if (paragraphLine !in omittedLineIndices || paragraphLine in titleSegmentHeadings) {
+                remappedParagraphLines.set(newIndex[titleSegmentHeadings[paragraphLine] ?: paragraphLine])
+            }
+            paragraphLine = paragraphLineIndexes.nextSetBit(paragraphLine + 1)
+        }
         return BuiltBookContent(
             output, refs, headings, shifts, remap(lineKeyHashOverrides.orEmpty()),
             simanTopicLines.filterNot { it in omittedLineIndices }.mapTo(HashSet()) { newIndex[it] },
             omittedLinesBefore,
             titleSegmentHeadingLines,
             foldedSectionTitleRefs,
+            remappedParagraphLines,
         )
     }
 

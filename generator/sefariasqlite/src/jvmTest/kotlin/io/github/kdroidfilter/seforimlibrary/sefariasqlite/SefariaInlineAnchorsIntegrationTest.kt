@@ -222,4 +222,125 @@ class SefariaInlineAnchorsIntegrationTest {
         assertEquals(baseline302, repo.getLinkAnchors(302).map { it.charStart to it.label })
         assertEquals(baseline303, repo.getLinkAnchors(303).map { it.charStart to it.label })
     }
+
+    /**
+     * Shach (siman:sk:paragraph) anchors tag N to "...:N:1", the paragraph Sefaria links (Otzaria/otzaria#4127);
+     * a halakha-addressed commentary reaches ":1" only by coincidence and stays unanchored.
+     */
+    @Test
+    fun itagsAnchorToFirstParagraphOfParagraphedComment() = assertParagraphAnchors(
+        baseAddress = "1:1", hagahotOrders = (1..3).toList(),
+        hagahotRefs = listOf("1:1:1", "1:1:2", "1:1:3"),
+    )
+
+    @Test
+    fun singleHalakhaTagDoesNotAnchorTheFirstCommentByCoincidence() = assertParagraphAnchors(
+        baseAddress = "1:2", hagahotOrders = listOf(2),
+        hagahotRefs = listOf("1:2:1", "1:2:2", "1:2:3"),
+    )
+
+    private fun assertParagraphAnchors(
+        baseAddress: String,
+        hagahotOrders: List<Int>,
+        hagahotRefs: List<String>,
+    ) = runBlocking {
+        val driver = JdbcSqliteDriver(url = "jdbc:sqlite::memory:")
+        SeforimDb.Schema.create(driver)
+        val repo = SeforimRepository(":memory:", driver)
+
+        val sourceId = repo.insertSource("Sefaria-Test")
+        val catId = repo.insertCategory(Category(0, null, "הלכה", level = 0, order = 1))
+        fun book(id: Long, title: String) = Book(
+            id = id, categoryId = catId, sourceId = sourceId, title = title, heRef = title,
+            authors = emptyList(), pubPlaces = emptyList(), pubDates = emptyList(),
+            heShortDesc = null, notesContent = null, order = id.toFloat(), topics = emptyList(),
+            isBaseBook = id == 1L, totalLines = 3, hasAltStructures = false,
+            hasTeamim = false, hasNekudot = false,
+        )
+        repo.insertBook(book(1, "שולחן ערוך"))
+        repo.insertBook(book(2, "שפתי כהן"))
+        repo.insertBook(book(3, "הגהות"))
+
+        val baseContent = "אב <i data-commentator=\"Siftei Kohen\" data-label=\"א\" data-order=\"1\"></i>" +
+            "גד <i data-commentator=\"Siftei Kohen\" data-label=\"ב\" data-order=\"2\"></i>" +
+            "הו <i data-commentator=\"Siftei Kohen\" data-label=\"ג\" data-order=\"3\"></i>" +
+            hagahotOrders.joinToString("") { "<i data-commentator=\"Hagahot\" data-order=\"$it\"></i>" }
+        val shachRefs = listOf("1:1:1", "1:1:2", "1:2:1")
+        repo.insertLinesBatch(
+            listOf(Line(id = 100, bookId = 1, lineIndex = 0, content = baseContent, heRef = "יורה דעה א:א")) +
+                shachRefs.mapIndexed { i, ref ->
+                    Line(id = 201L + i, bookId = 2, lineIndex = i, content = "פסקה", heRef = ref)
+                } +
+                hagahotRefs.mapIndexed { i, ref ->
+                    Line(id = 301L + i, bookId = 3, lineIndex = i, content = "הגהה", heRef = ref)
+                }
+        )
+        // As in Sefaria's links CSV: each seif katan is linked by its first paragraph only,
+        // and every comment of the halakha-addressed commentary is linked.
+        repo.insertLinksBatch(
+            listOf(201L, 203L).map { target ->
+                Link(id = target, sourceBookId = 1, targetBookId = 2, sourceLineId = 100, targetLineId = target,
+                    targetLineIndex = (target - 201).toInt(), connectionType = ConnectionType.COMMENTARY)
+            } + listOf(301L, 302L, 303L).map { target ->
+                Link(id = target, sourceBookId = 1, targetBookId = 3, sourceLineId = 100, targetLineId = target,
+                    targetLineIndex = (target - 301).toInt(), connectionType = ConnectionType.COMMENTARY)
+            }
+        )
+
+        val shachTitle = "Siftei Kohen on Shulchan Arukh, Yoreh De'ah"
+        val hagahotTitle = "Hagahot on Shulchan Arukh, Yoreh De'ah"
+        val books = listOf(
+            SefariaInlineAnchors.BookInput(
+                bookId = 1, enTitle = "Shulchan Arukh, Yoreh De'ah", bookPath = "sa",
+                lines = listOf(baseContent),
+                refsByLineIndex = mapOf(0 to RefEntry("Shulchan Arukh, Yoreh De'ah $baseAddress", "יורה דעה א:א", "sa", 1)),
+            ),
+            SefariaInlineAnchors.BookInput(
+                bookId = 2, enTitle = shachTitle, bookPath = "shach",
+                lines = shachRefs.map { "פסקה" },
+                refsByLineIndex = shachRefs.indices.associateWith {
+                    RefEntry("$shachTitle ${shachRefs[it]}", shachRefs[it], "shach", it + 1)
+                },
+                paragraphLineIndexes = java.util.BitSet().apply { set(0, shachRefs.size) },
+            ),
+            SefariaInlineAnchors.BookInput(
+                bookId = 3, enTitle = hagahotTitle, bookPath = "hagahot",
+                lines = hagahotRefs.map { "הגהה" },
+                refsByLineIndex = hagahotRefs.indices.associateWith {
+                    RefEntry("$hagahotTitle ${hagahotRefs[it]}", hagahotRefs[it], "hagahot", it + 1)
+                },
+            ),
+        )
+        val bookMetaById = mapOf(
+            1L to BookMeta(isBaseBook = true, categoryLevel = 0, priorityRank = 0),
+            2L to BookMeta(
+                isBaseBook = false, categoryLevel = 0, priorityRank = null,
+                dependence = Dependence.COMMENTARY,
+                sefariaDeclaredBaseTextBookIds = setOf(1L),
+                collectiveTitleEn = "Siftei Kohen",
+            ),
+            3L to BookMeta(
+                isBaseBook = false, categoryLevel = 0, priorityRank = null,
+                dependence = Dependence.COMMENTARY,
+                sefariaDeclaredBaseTextBookIds = setOf(1L),
+                collectiveTitleEn = "Hagahot",
+            ),
+        )
+        val refsByCanonical = books.flatMap { input ->
+            input.refsByLineIndex.values.map { it.copy(path = input.bookPath) }
+        }.groupBy { canonicalCitation(it.ref) }
+        val lineKeyToId = mapOf("sa" to 0 to 100L) + shachRefs.indices.associate { ("shach" to it) to 201L + it } +
+            hagahotRefs.indices.associate { ("hagahot" to it) to 301L + it }
+
+        SefariaInlineAnchors(repo, Logger.withTag("InlineAnchorsTest")).generate(
+            books = books,
+            bookMetaById = bookMetaById,
+            refsByCanonical = refsByCanonical,
+            lineKeyToId = lineKeyToId,
+        )
+
+        assertEquals(listOf(3 to "א"), repo.getLinkAnchors(201).map { it.charStart to it.label })
+        assertEquals(listOf(6 to "ב"), repo.getLinkAnchors(203).map { it.charStart to it.label })
+        assertEquals(emptyList(), (301L..303L).flatMap { repo.getLinkAnchors(it) })
+    }
 }

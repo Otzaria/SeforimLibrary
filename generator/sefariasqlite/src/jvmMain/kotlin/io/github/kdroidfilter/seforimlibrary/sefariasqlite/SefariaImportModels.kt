@@ -163,6 +163,8 @@ internal data class BookPayload(
     val isReferenceWork: Boolean = false,
     // Base tractate whose name is dropped after לקמן/לעיל — see SefariaSameTractateRefs.
     val sameTractateHeTitle: String? = null,
+    // 0-based content lines whose schema leaf ends in Seif/Comment → Paragraph.
+    val paragraphLineIndexes: java.util.BitSet = java.util.BitSet(),
 ) {
     /**
      * Text-only per-line derivations for this book: computed on the parallel

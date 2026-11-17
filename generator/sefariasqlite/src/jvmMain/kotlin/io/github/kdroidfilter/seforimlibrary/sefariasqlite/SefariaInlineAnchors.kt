@@ -139,6 +139,8 @@ internal class SefariaInlineAnchors(
         /** See BookPayload.singleVersionTitle / cleanShiftByLineIndex. */
         val singleVersionTitle: String? = null,
         val cleanShiftByLineIndex: Map<Int, Int> = emptyMap(),
+        /** Content lines belonging to schema-declared paragraphs inside a numbered comment. */
+        val paragraphLineIndexes: java.util.BitSet = java.util.BitSet(),
     )
 
     /** Lightweight per-book metadata retained across import phases. */
@@ -151,6 +153,8 @@ internal class SefariaInlineAnchors(
         val inlineLines: List<InlineLine> = emptyList(),
         /** Indices whose stored text has a dash-dibbur wrapper added by this import. */
         val boldedLineIndexes: java.util.BitSet = java.util.BitSet(),
+        /** Same per-node metadata as [BookInput.paragraphLineIndexes], retained after parsing. */
+        val paragraphLineIndexes: java.util.BitSet = java.util.BitSet(),
     )
 
     internal data class InlineLine(val index: Int, val ref: String?, val itags: List<InlineItag>)
@@ -180,7 +184,11 @@ internal class SefariaInlineAnchors(
         val linesByPath = books.associate { it.bookPath to it.lines }
         generateCore(
             books = books.map {
-                BookRef(it.bookId, it.enTitle, it.bookPath, inlineLines = collectInlineLines(it.lines, it.refsByLineIndex))
+                BookRef(
+                    it.bookId, it.enTitle, it.bookPath,
+                    inlineLines = collectInlineLines(it.lines, it.refsByLineIndex),
+                    paragraphLineIndexes = it.paragraphLineIndexes,
+                )
             },
             printedLabelValue = { entry ->
                 linesByPath[entry.path]?.getOrNull(entry.lineIndex - 1)?.let(::leadingPrintedLabel)
@@ -237,11 +245,19 @@ internal class SefariaInlineAnchors(
             }
         }
         val enTitleByBookId = books.associate { it.bookId to it.enTitle }
+        val booksByPath = books.associateBy { it.bookPath }
 
         var anchorsInserted = 0L
         var labelShiftsApplied = 0
         var linesWithItags = 0
         val batch = mutableListOf<LinkAnchor>()
+        suspend fun flushIfFull() {
+            if (batch.size >= SefariaImportTuning.LINK_BATCH_SIZE) {
+                anchorsInserted += batch.size
+                repository.insertLinkAnchorsBatch(batch)
+                batch.clear()
+            }
+        }
 
         for (book in books) {
             for ((idx, baseRef, itags) in book.inlineLines) {
@@ -287,6 +303,15 @@ internal class SefariaInlineAnchors(
                         continue
                     }
                     var entries = refsByCanonical[canonicalCitation(targetRef)]
+                    // A comment split into paragraphs (Shach on Yoreh De'ah: siman:sk:paragraph)
+                    // has no line at its own ref; Sefaria links its first paragraph.
+                    if (entries.isNullOrEmpty()) {
+                        // Only paragraphs INSIDE a numbered comment can add this component. A minor-tractate
+                        // Chapter:Halakhah:Comment ref can coincidentally exist at the same path.
+                        entries = refsByCanonical[canonicalCitation("$targetRef:1")]?.filter { entry ->
+                            booksByPath[entry.path]?.paragraphLineIndexes?.get(entry.lineIndex - 1) == true
+                        }
+                    }
                     if (entries.isNullOrEmpty()) {
                         skip("comment ref not found") { targetRef }
                         continue
@@ -323,29 +348,25 @@ internal class SefariaInlineAnchors(
                     // ההערה (זו האות המודפסת אצל הפרשנים מבוססי-data-order:
                     // ס"ק ז של הט"ז מסומן "ז").
                     val label = itag.label ?: toGematria(order)
-                    var anchored = false
+                    val found = mutableListOf<LinkAnchor>()
                     for (entry in entries) {
                         val tgtLineId = lineKeyToId[entry.path to (entry.lineIndex - 1)] ?: continue
                         for (linkId in repository.getLinkIdsBetweenLines(srcLineId, tgtLineId)) {
-                            batch += LinkAnchor(
+                            found += LinkAnchor(
                                 linkId = linkId,
                                 side = 0,
                                 charStart = itag.charStart,
                                 charEnd = null,
                                 label = label,
                             )
-                            anchored = true
                         }
                     }
-                    if (!anchored) {
+                    if (found.isEmpty()) {
                         skip("no stored link for anchor") { "$baseRef -> $targetRef" }
                         continue
                     }
-                    if (batch.size >= SefariaImportTuning.LINK_BATCH_SIZE) {
-                        anchorsInserted += batch.size
-                        repository.insertLinkAnchorsBatch(batch)
-                        batch.clear()
-                    }
+                    batch += found
+                    flushIfFull()
                 }
             }
         }
