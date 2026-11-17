@@ -139,6 +139,8 @@ internal class SefariaInlineAnchors(
         /** See BookPayload.singleVersionTitle / cleanShiftByLineIndex. */
         val singleVersionTitle: String? = null,
         val cleanShiftByLineIndex: Map<Int, Int> = emptyMap(),
+        /** Content lines belonging to schema-declared paragraphs inside a numbered comment. */
+        val paragraphLineIndexes: java.util.BitSet = java.util.BitSet(),
     )
 
     /** Lightweight per-book metadata retained across import phases. */
@@ -151,6 +153,8 @@ internal class SefariaInlineAnchors(
         val inlineLines: List<InlineLine> = emptyList(),
         /** Indices whose stored text has a dash-dibbur wrapper added by this import. */
         val boldedLineIndexes: java.util.BitSet = java.util.BitSet(),
+        /** Same per-node metadata as [BookInput.paragraphLineIndexes], retained after parsing. */
+        val paragraphLineIndexes: java.util.BitSet = java.util.BitSet(),
     )
 
     internal data class InlineLine(val index: Int, val ref: String?, val itags: List<InlineItag>)
@@ -180,7 +184,11 @@ internal class SefariaInlineAnchors(
         val linesByPath = books.associate { it.bookPath to it.lines }
         generateCore(
             books = books.map {
-                BookRef(it.bookId, it.enTitle, it.bookPath, inlineLines = collectInlineLines(it.lines, it.refsByLineIndex))
+                BookRef(
+                    it.bookId, it.enTitle, it.bookPath,
+                    inlineLines = collectInlineLines(it.lines, it.refsByLineIndex),
+                    paragraphLineIndexes = it.paragraphLineIndexes,
+                )
             },
             printedLabelValue = { entry ->
                 linesByPath[entry.path]?.getOrNull(entry.lineIndex - 1)?.let(::leadingPrintedLabel)
@@ -237,6 +245,7 @@ internal class SefariaInlineAnchors(
             }
         }
         val enTitleByBookId = books.associate { it.bookId to it.enTitle }
+        val booksByPath = books.associateBy { it.bookPath }
 
         var anchorsInserted = 0L
         var labelShiftsApplied = 0
@@ -251,9 +260,6 @@ internal class SefariaInlineAnchors(
         }
 
         for (book in books) {
-            val tagsByTarget = HashMap<Long, Int>()
-            val paragraphTagsByTarget = HashMap<Long, Int>()
-            val paragraphAnchorsByTarget = HashMap<Long, MutableList<LinkAnchor>>()
             for ((idx, baseRef, itags) in book.inlineLines) {
                 linesWithItags++
                 val srcLineId = lineKeyToId[book.bookPath to idx]
@@ -284,7 +290,6 @@ internal class SefariaInlineAnchors(
                         }
                         else -> candidates.single()
                     }
-                    tagsByTarget.merge(targetBookId, 1, Int::plus)
 
                     fun commentRef(segment: Int) = buildCommentRef(
                         baseRef = baseRef,
@@ -300,10 +305,12 @@ internal class SefariaInlineAnchors(
                     var entries = refsByCanonical[canonicalCitation(targetRef)]
                     // A comment split into paragraphs (Shach on Yoreh De'ah: siman:sk:paragraph)
                     // has no line at its own ref; Sefaria links its first paragraph.
-                    var viaParagraph = false
                     if (entries.isNullOrEmpty()) {
-                        entries = refsByCanonical[canonicalCitation("$targetRef:1")]
-                        viaParagraph = true
+                        // Only paragraphs INSIDE a numbered comment can add this component. A minor-tractate
+                        // Chapter:Halakhah:Comment ref can coincidentally exist at the same path.
+                        entries = refsByCanonical[canonicalCitation("$targetRef:1")]?.filter { entry ->
+                            booksByPath[entry.path]?.paragraphLineIndexes?.get(entry.lineIndex - 1) == true
+                        }
                     }
                     if (entries.isNullOrEmpty()) {
                         skip("comment ref not found") { targetRef }
@@ -326,7 +333,6 @@ internal class SefariaInlineAnchors(
                             when {
                                 shifted != null -> {
                                     entries = shifted
-                                    viaParagraph = false
                                     labelShiftsApplied++
                                 }
                                 // Commentaries that print no "(X)" keep the plain gematria segment.
@@ -359,28 +365,8 @@ internal class SefariaInlineAnchors(
                         skip("no stored link for anchor") { "$baseRef -> $targetRef" }
                         continue
                     }
-                    if (viaParagraph) {
-                        paragraphAnchorsByTarget.getOrPut(targetBookId) { mutableListOf() } += found
-                        paragraphTagsByTarget.merge(targetBookId, 1, Int::plus)
-                    } else {
-                        batch += found
-                        flushIfFull()
-                    }
-                }
-            }
-            // Only a commentary whose tags mostly resolve this way is paragraph-structured; elsewhere
-            // (minor tractates: chapter:halakha:comment) ":1" lands on a wrong comment by coincidence.
-            for ((targetBookId, anchors) in paragraphAnchorsByTarget) {
-                val paragraphTags = paragraphTagsByTarget.getValue(targetBookId)
-                if (paragraphTags * 2 > tagsByTarget.getValue(targetBookId)) {
-                    batch += anchors
+                    batch += found
                     flushIfFull()
-                } else {
-                    repeat(paragraphTags) {
-                        skip("paragraph ref in a commentary not split into paragraphs") {
-                            "${book.enTitle} -> ${enTitleByBookId[targetBookId]}"
-                        }
-                    }
                 }
             }
         }

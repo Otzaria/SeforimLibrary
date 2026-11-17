@@ -228,7 +228,22 @@ class SefariaInlineAnchorsIntegrationTest {
      * a halakha-addressed commentary reaches ":1" only by coincidence and stays unanchored.
      */
     @Test
-    fun itagsAnchorToFirstParagraphOfParagraphedComment() = runBlocking {
+    fun itagsAnchorToFirstParagraphOfParagraphedComment() = assertParagraphAnchors(
+        baseAddress = "1:1", hagahotOrders = (1..3).toList(),
+        hagahotRefs = listOf("1:1:1", "1:1:2", "1:1:3"),
+    )
+
+    @Test
+    fun singleHalakhaTagDoesNotAnchorTheFirstCommentByCoincidence() = assertParagraphAnchors(
+        baseAddress = "1:2", hagahotOrders = listOf(2),
+        hagahotRefs = listOf("1:2:1", "1:2:2", "1:2:3"),
+    )
+
+    private fun assertParagraphAnchors(
+        baseAddress: String,
+        hagahotOrders: List<Int>,
+        hagahotRefs: List<String>,
+    ) = runBlocking {
         val driver = JdbcSqliteDriver(url = "jdbc:sqlite::memory:")
         SeforimDb.Schema.create(driver)
         val repo = SeforimRepository(":memory:", driver)
@@ -249,9 +264,8 @@ class SefariaInlineAnchorsIntegrationTest {
         val baseContent = "אב <i data-commentator=\"Siftei Kohen\" data-label=\"א\" data-order=\"1\"></i>" +
             "גד <i data-commentator=\"Siftei Kohen\" data-label=\"ב\" data-order=\"2\"></i>" +
             "הו <i data-commentator=\"Siftei Kohen\" data-label=\"ג\" data-order=\"3\"></i>" +
-            (1..3).joinToString("") { "<i data-commentator=\"Hagahot\" data-order=\"$it\"></i>" }
+            hagahotOrders.joinToString("") { "<i data-commentator=\"Hagahot\" data-order=\"$it\"></i>" }
         val shachRefs = listOf("1:1:1", "1:1:2", "1:2:1")
-        val hagahotRefs = listOf("1:1:1", "1:1:2", "1:1:3")
         repo.insertLinesBatch(
             listOf(Line(id = 100, bookId = 1, lineIndex = 0, content = baseContent, heRef = "יורה דעה א:א")) +
                 shachRefs.mapIndexed { i, ref ->
@@ -279,7 +293,7 @@ class SefariaInlineAnchorsIntegrationTest {
             SefariaInlineAnchors.BookInput(
                 bookId = 1, enTitle = "Shulchan Arukh, Yoreh De'ah", bookPath = "sa",
                 lines = listOf(baseContent),
-                refsByLineIndex = mapOf(0 to RefEntry("Shulchan Arukh, Yoreh De'ah 1:1", "יורה דעה א:א", "sa", 1)),
+                refsByLineIndex = mapOf(0 to RefEntry("Shulchan Arukh, Yoreh De'ah $baseAddress", "יורה דעה א:א", "sa", 1)),
             ),
             SefariaInlineAnchors.BookInput(
                 bookId = 2, enTitle = shachTitle, bookPath = "shach",
@@ -287,6 +301,7 @@ class SefariaInlineAnchorsIntegrationTest {
                 refsByLineIndex = shachRefs.indices.associateWith {
                     RefEntry("$shachTitle ${shachRefs[it]}", shachRefs[it], "shach", it + 1)
                 },
+                paragraphLineIndexes = java.util.BitSet().apply { set(0, shachRefs.size) },
             ),
             SefariaInlineAnchors.BookInput(
                 bookId = 3, enTitle = hagahotTitle, bookPath = "hagahot",

@@ -441,6 +441,7 @@ class SefariaDirectImporter(
             anchorBookRefs += SefariaInlineAnchors.BookRef(
                 bookId, payload.enTitle, bookPath, payload.singleVersionTitle, payload.cleanShiftByLineIndex,
                 SefariaInlineAnchors.collectInlineLines(payload.lines, refsByLineIndex), boldedLineIndexes,
+                payload.paragraphLineIndexes,
             )
 
             // Every precomputed per-line array has been consumed. Drop them now:
