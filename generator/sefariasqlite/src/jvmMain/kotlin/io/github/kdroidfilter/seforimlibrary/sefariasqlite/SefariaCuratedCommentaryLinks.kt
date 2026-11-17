@@ -6,16 +6,21 @@ import java.util.concurrent.ConcurrentHashMap
 
 /**
  * Commentary segments that Sefaria leaves without a link to their base, linked to a reviewed base
- * line (Otzaria/otzaria#3264). [RESOURCE] names both lines by heRef and keeps the words that open
- * the segment: an entry whose ref is missing or ambiguous, or whose segment no longer opens with
- * those words, is skipped, so a renumbered export never links the wrong paragraph. A segment that
+ * line (Otzaria/otzaria#3264). [RESOURCE] names both lines by heRef and keeps their opening words.
+ * An entry whose ref is missing or ambiguous, or whose commentary or base opening has changed,
+ * is skipped rather than following a potentially renumbered ref. A segment that
  * Sefaria has since linked to the base, or covers with a range, keeps Sefaria's link alone.
  */
 internal object SefariaCuratedCommentaryLinks {
 
     const val RESOURCE = "curated_commentary_links.tsv"
 
-    internal data class Entry(val commentaryHeRef: String, val baseHeRef: String, val opening: String)
+    internal data class Entry(
+        val commentaryHeRef: String,
+        val baseHeRef: String,
+        val opening: String,
+        val baseOpening: String,
+    )
 
     internal data class Resolved(
         val entry: Entry,
@@ -28,6 +33,7 @@ internal object SefariaCuratedCommentaryLinks {
 
     private val TAG = Regex("<[^>]+>")
     private val SPACES = Regex("""\s+""")
+    private val HEBREW_MARKS = Regex("[\u0591-\u05BD\u05BF\u05C1\u05C2\u05C4\u05C5\u05C7]")
 
     fun load(classLoader: ClassLoader?): List<Entry> {
         val stream = classLoader?.getResourceAsStream(RESOURCE)
@@ -38,8 +44,8 @@ internal object SefariaCuratedCommentaryLinks {
     internal fun parse(lines: Sequence<String>): List<Entry> {
         val entries = lines.filter { it.isNotBlank() && !it.startsWith("#") }.map { row ->
             val cols = row.split('\t')
-            require(cols.size == 3 && cols.none { it.isBlank() }) { "$RESOURCE: expected 3 columns in '$row'" }
-            Entry(cols[0], cols[1], cols[2])
+            require(cols.size == 4 && cols.none { it.isBlank() }) { "$RESOURCE: expected 4 columns in '$row'" }
+            Entry(cols[0], cols[1], cols[2], cols[3])
         }.toList()
         require(entries.map { it.commentaryHeRef }.distinct().size == entries.size) { "$RESOURCE: duplicate segment" }
         return entries
@@ -74,16 +80,16 @@ internal object SefariaCuratedCommentaryLinks {
         }
     }
 
-    /** True when the visible text of [content] opens with the words of [opening]. */
+    /** Matches opening words without HTML, whitespace differences or Hebrew vocalization. */
     internal fun opensWith(content: String, opening: String): Boolean {
-        val expected = SPACES.split(opening.trim())
-        val visible = SPACES.split(TAG.replace(content, " ").trim())
+        val expected = SPACES.split(HEBREW_MARKS.replace(opening, "").trim())
+        val visible = SPACES.split(HEBREW_MARKS.replace(TAG.replace(content, " "), "").trim())
         return visible.take(expected.size) == expected
     }
 
     /**
      * The links to write: entries still unlinked to their base whose segment opens with the
-     * entry's words. [contentOf] reads a stored line.
+     * entry's words on both sides. [contentOf] reads a stored line.
      */
     suspend fun linksToWrite(
         resolved: List<Resolved>,
@@ -94,6 +100,10 @@ internal object SefariaCuratedCommentaryLinks {
         if (guard.isLinked(r)) return@mapNotNull null
         if (!opensWith(contentOf(r.commentaryLineId).orEmpty(), r.entry.opening)) {
             logger.w { "Curated commentary link skipped, segment text changed: ${r.entry.commentaryHeRef}" }
+            return@mapNotNull null
+        }
+        if (!opensWith(contentOf(r.baseLineId).orEmpty(), r.entry.baseOpening)) {
+            logger.w { "Curated commentary link skipped, base text changed: ${r.entry.baseHeRef}" }
             return@mapNotNull null
         }
         DerivedCommentaryLink(
