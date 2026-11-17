@@ -651,6 +651,14 @@ class SefariaDirectImporter(
                 excludedBookIds = sparseCommentaries.mapTo(HashSet()) { it.commentaryBookId },
             )
             val commentaryBaseLinks = CommentaryBaseLinks(addressedCommentaries)
+            val curatedLinks = SefariaCuratedCommentaryLinks.resolve(
+                SefariaCuratedCommentaryLinks.load(SefariaCuratedCommentaryLinks::class.java.classLoader),
+                allRefsWithPath,
+                lineKeyToId,
+                lineIdToBookId,
+                logger,
+            )
+            val curatedGuard = SefariaCuratedCommentaryLinks.Guard(curatedLinks)
             linksImporter.processLinksInParallel(
                 linksDir = linksDir,
                 refsByCanonical = refsByCanonical,
@@ -667,18 +675,34 @@ class SefariaDirectImporter(
                         sparseLinks.forEach { (commentary, links) -> links.record(commentary, link) }
                     }
                     commentaryBaseLinks.record(link)
+                    curatedGuard.record(link)
                 },
-                onRangeResolved = commentaryBaseLinks::recordRange,
+                onRangeResolved = { bookId, first, last ->
+                    commentaryBaseLinks.recordRange(bookId, first, last)
+                    curatedGuard.recordRange(bookId, first, last)
+                },
                 onNonExactCommentary = commentaryBaseLinks::recordNonExactCommentary,
             )
             sparseLinks.forEach { (commentary, links) ->
-                val anchors = anchorUnlinkedCommentaryLines(commentary, links)
-                linksImporter.insertDerivedCommentaryLinks(anchors.map { it.toDerivedLink(commentary) }, bookMetaById)
+                val anchors = anchorUnlinkedCommentaryLines(commentary, links).map { it.toDerivedLink(commentary) }
+                curatedGuard.recordDerived(anchors)
+                linksImporter.insertDerivedCommentaryLinks(anchors, bookMetaById)
                 logger.i { "Anchored ${anchors.size} lines of book ${commentary.commentaryBookId} to its base text" }
             }
             val addressLinks = addressedCommentaries.flatMap { deriveSegmentAddressLinks(it, commentaryBaseLinks) }
+            curatedGuard.recordDerived(addressLinks)
             val inserted = linksImporter.insertDerivedCommentaryLinks(addressLinks, bookMetaById)
             logger.i { "Derived $inserted commentary links from Sefaria segment addresses" }
+            val curated = linksImporter.insertDerivedCommentaryLinks(
+                SefariaCuratedCommentaryLinks.linksToWrite(
+                    curatedLinks,
+                    curatedGuard,
+                    { repository.getLine(it)?.content },
+                    logger,
+                ),
+                bookMetaById,
+            )
+            logger.i { "Wrote $curated of ${curatedLinks.size} curated commentary links" }
             val parallelSections = linksImporter.insertParallelSectionLinks(
                 PARALLEL_SECTION_BOOKS.flatMap { parallelSectionLinks(it, refsByPath) },
                 lineKeyToId, lineIdToBookId, headingLineIds, bookMetaById,

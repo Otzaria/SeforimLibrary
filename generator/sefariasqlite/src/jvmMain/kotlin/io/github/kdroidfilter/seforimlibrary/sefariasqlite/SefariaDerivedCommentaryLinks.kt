@@ -15,6 +15,9 @@ internal enum class DerivedLinkStage(val metricKey: String) {
 
     /** The segment's own address names its base line ([deriveSegmentAddressLinks]). */
     SEGMENT_ADDRESS("segment_address"),
+
+    /** Listed after review in [SefariaCuratedCommentaryLinks.RESOURCE]. */
+    CURATED("curated"),
 }
 
 /** A COMMENTARY link from a base line to a commentary line that Sefaria does not link. */
