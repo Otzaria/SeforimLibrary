@@ -26,7 +26,6 @@ import io.github.kdroidfilter.seforimlibrary.core.models.LinkSuppressedSide
 import io.github.kdroidfilter.seforimlibrary.core.models.VersionLine
 import io.github.kdroidfilter.seforimlibrary.core.models.PubDate
 import io.github.kdroidfilter.seforimlibrary.core.models.PubPlace
-import io.github.kdroidfilter.seforimlibrary.core.models.SandwichedDependantGap
 import io.github.kdroidfilter.seforimlibrary.core.models.Source
 import io.github.kdroidfilter.seforimlibrary.core.models.TocEntry
 import io.github.kdroidfilter.seforimlibrary.core.models.Topic
@@ -3157,88 +3156,6 @@ class SeforimRepository(databasePath: String, private val driver: SqlDriver) : L
     suspend fun deleteAcronymsForBook(bookId: Long) = withContext(Dispatchers.IO) {
         database.acronymQueriesQueries.deleteByBookId(bookId)
     }
-
-    /**
-     * Base→dependant links of [connectionTypeId] whose dependant line is followed, after
-     * unlinked lines, by the next line linked from the same base book to the same base line.
-     * Links that already carry a dependant-side range are excluded.
-     */
-    suspend fun findSandwichedDependantGaps(connectionTypeId: Long): List<SandwichedDependantGap> =
-        withContext(Dispatchers.IO) {
-            val result = mutableListOf<SandwichedDependantGap>()
-            driver.executeQuery(
-                identifier = null,
-                sql = """
-                    WITH dep AS (
-                        SELECT l.id AS linkId, l.sourceBookId AS baseBookId, l.sourceLineId AS baseLineId,
-                               l.targetBookId AS depBookId, tl.lineIndex AS idx
-                        FROM link l
-                        JOIN line tl ON tl.id = l.targetLineId
-                        JOIN book sb ON sb.id = l.sourceBookId
-                        JOIN book tb ON tb.id = l.targetBookId
-                        WHERE l.connectionTypeId = ? AND sb.isBaseBook = 1 AND tb.isBaseBook = 0
-                    ),
-                    nxt AS (
-                        SELECT depBookId, baseBookId, idx,
-                               LEAD(idx) OVER (PARTITION BY depBookId, baseBookId ORDER BY idx) AS nextIdx
-                        FROM (SELECT DISTINCT depBookId, baseBookId, idx FROM dep)
-                    )
-                    SELECT d.linkId, d.depBookId, d.baseBookId, d.idx, n.nextIdx - 1
-                    FROM dep d
-                    JOIN nxt n ON n.depBookId = d.depBookId AND n.baseBookId = d.baseBookId AND n.idx = d.idx
-                    WHERE n.nextIdx > d.idx + 1
-                      AND EXISTS (
-                          SELECT 1 FROM dep d2
-                          WHERE d2.depBookId = d.depBookId AND d2.baseBookId = d.baseBookId
-                            AND d2.idx = n.nextIdx AND d2.baseLineId = d.baseLineId
-                      )
-                      AND NOT EXISTS (SELECT 1 FROM link_range r WHERE r.linkId = d.linkId AND r.side = 1)
-                    ORDER BY d.depBookId, d.idx, d.linkId
-                """.trimIndent(),
-                mapper = { cursor: SqlCursor ->
-                    while (cursor.next().value) {
-                        result += SandwichedDependantGap(
-                            linkId = checkNotNull(cursor.getLong(0)),
-                            dependantBookId = checkNotNull(cursor.getLong(1)),
-                            baseBookId = checkNotNull(cursor.getLong(2)),
-                            startLineIndex = checkNotNull(cursor.getLong(3)).toInt(),
-                            endLineIndex = checkNotNull(cursor.getLong(4)).toInt(),
-                        )
-                    }
-                    QueryResult.Value(Unit)
-                },
-                parameters = 1,
-            ) { bindLong(0, connectionTypeId) }.await()
-            result
-        }
-
-    /** True when any of [lineIds] has, or is covered by, a link with [otherBookId] in either direction. */
-    suspend fun anyLineLinkedWithBook(lineIds: Collection<Long>, otherBookId: Long): Boolean =
-        withContext(Dispatchers.IO) {
-            if (lineIds.isEmpty()) return@withContext false
-            val ids = lineIds.joinToString(",")
-            driver.executeQuery(
-                identifier = null,
-                sql = """
-                    SELECT EXISTS (
-                        SELECT 1 FROM link WHERE sourceLineId IN ($ids) AND targetBookId = ?
-                        UNION ALL
-                        SELECT 1 FROM link WHERE targetLineId IN ($ids) AND sourceBookId = ?
-                        UNION ALL
-                        SELECT 1 FROM link_coverage c JOIN link l ON l.id = c.linkId
-                        WHERE c.lineId IN ($ids) AND ? IN (l.sourceBookId, l.targetBookId)
-                    )
-                """.trimIndent(),
-                mapper = { cursor: SqlCursor ->
-                    QueryResult.Value(cursor.next().value && cursor.getLong(0) == 1L)
-                },
-                parameters = 3,
-            ) {
-                bindLong(0, otherBookId)
-                bindLong(1, otherBookId)
-                bindLong(2, otherBookId)
-            }.value
-        }
 
     /**
      * Returns all line IDs that are heading lines (content starts with <h1, <h2, <h3, or <h4).

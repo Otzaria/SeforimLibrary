@@ -70,15 +70,3 @@ object SuppressionReason {
     /** Every bit currently defined — anything outside this is an unknown reason. */
     const val ALL = ANCHOR_NOT_SEGMENT or OTHER_TOO_COARSE or WHOLE_PEREK or WHOLE_PARASHA
 }
-
-/**
- * Unlinked dependant lines (startLineIndex, endLineIndex] between two lines that
- * link to the same base line, candidates for extending link [linkId] on side 1.
- */
-data class SandwichedDependantGap(
-    val linkId: Long,
-    val dependantBookId: Long,
-    val baseBookId: Long,
-    val startLineIndex: Int,
-    val endLineIndex: Int,
-)

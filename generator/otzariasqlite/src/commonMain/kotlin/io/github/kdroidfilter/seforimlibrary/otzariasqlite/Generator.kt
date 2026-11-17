@@ -2111,7 +2111,6 @@ class DatabaseGenerator(
             logger.i { "Removed ${legacyLinkIdsToDelete.size} superseded legacy Otzaria links" }
         }
         reportDroppedManualLinks()
-        extendSandwichedCommentaryRanges()
 
         // Count links after processing
         val linksAfter = repository.countLinks()
@@ -2345,41 +2344,6 @@ class DatabaseGenerator(
         if (anchorCount > 0) logger.i { "Inserted $anchorCount word-level anchors for $bookTitle" }
         if (rangeCount > 0) logger.i { "Inserted $rangeCount link ranges ($coverageCount coverage rows) for $bookTitle" }
         return processed
-    }
-
-    /**
-     * A dependant paragraph without its own link, between two paragraphs that explain the
-     * same base line, is part of that explanation (e.g. חברותא, otzaria#5230). Extends the
-     * first paragraph's link over it, unless a gap line is a heading or linked with the base.
-     */
-    private suspend fun extendSandwichedCommentaryRanges() {
-        val commentaryTypeId = bindings.upsertConnectionType(ConnectionType.COMMENTARY.name)
-        val ranges = mutableListOf<LinkRange>()
-        val coverage = mutableListOf<LinkCoverage>()
-        var extendedLinks = 0
-        var coveredLines = 0
-        suspend fun flush() {
-            repository.insertLinkRangesBatch(ranges)
-            repository.insertLinkCoverageBatch(coverage)
-            ranges.clear()
-            coverage.clear()
-        }
-        for (gap in repository.findSandwichedDependantGaps(commentaryTypeId)) {
-            currentCoroutineContext().ensureActive()
-            if (gap.dependantBookId in sefariaBookIds) continue
-            val gapLines = repository.getLineIdIndexPairs(gap.dependantBookId, gap.startLineIndex + 1, gap.endLineIndex)
-            if (gapLines.size != gap.endLineIndex - gap.startLineIndex) continue
-            val gapIds = gapLines.map { it.second }
-            if (gapIds.any { it in headingLineIds }) continue
-            if (repository.anyLineLinkedWithBook(gapIds, gap.baseBookId)) continue
-            ranges += LinkRange(linkId = gap.linkId, side = 1, endLineId = gapIds.last(), endLineIndex = gap.endLineIndex)
-            gapIds.forEach { coverage += LinkCoverage(lineId = it, linkId = gap.linkId, side = 1) }
-            extendedLinks++
-            coveredLines += gapIds.size
-            if (coverage.size >= 1000) flush()
-        }
-        flush()
-        logger.i { "Sandwiched commentary paragraphs: extended $extendedLinks links over $coveredLines lines" }
     }
 
     /**

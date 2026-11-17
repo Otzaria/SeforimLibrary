@@ -19,6 +19,7 @@ import kotlinx.serialization.json.Json
 import java.io.File
 import java.nio.file.Path
 import java.nio.file.Paths
+import java.sql.DriverManager
 
 /**
  * Generates links between Havrouta commentaries and their corresponding Talmud tractates.
@@ -74,6 +75,12 @@ fun main(args: Array<String>) = runBlocking {
         logger.i { "Starting Havrouta-Hearot link generation from Otzaria files..." }
         val hearotLinksCreated = generateHavroutaHearotLinks(repository, bindings, logger, sourceDir)
         logger.i { "Havrouta-Hearot link generation completed. Created $hearotLinksCreated links." }
+
+        // The reviewed continuation needs the links just created above. Running it during
+        // appendOtzaria/processLinks would see no Havrouta anchors on a clean build.
+        DriverManager.getConnection(jdbcUrl).use { conn ->
+            extendCuratedHavroutaContinuations(conn, logger)
+        }
 
         // After both steps, so flags include Hearot FOOTNOTES links.
         updateBookHasLinks(repository, logger)
