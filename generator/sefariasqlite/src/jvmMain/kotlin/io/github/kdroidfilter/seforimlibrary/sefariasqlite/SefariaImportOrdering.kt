@@ -61,7 +61,8 @@ internal fun parseTableOfContentsMetadata(
         val heCategory = item["heCategory"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
         val heShortDesc = item["heShortDesc"]?.jsonPrimitive?.contentOrNull?.trim()?.takeIf { it.isNotEmpty() }
         val heDesc = item["heDesc"]?.jsonPrimitive?.contentOrNull?.trim()?.takeIf { it.isNotEmpty() }
-        val order = item["order"]?.jsonPrimitive?.intOrNull
+        val order = heTitle?.let(BOOK_ORDER_OVERRIDES::get)
+            ?: item["order"]?.jsonPrimitive?.intOrNull
             ?: item["base_text_order"]?.jsonPrimitive?.intOrNull
             ?: item["base_text_order"]?.jsonPrimitive?.doubleOrNull?.toInt()
 
@@ -128,6 +129,9 @@ internal fun parseTableOfContentsMetadata(
 
 // Sefaria lists Bavli reference works before the Rishonim; we place them after all commentators.
 internal val CATEGORY_ORDER_OVERRIDES = mapOf("תלמוד בבלי/ספרות עזר" to 65)
+
+// Sefaria orders Biur Halakha (10) before Mishnah Berurah (20); the main work comes first.
+internal val BOOK_ORDER_OVERRIDES = mapOf("משנה ברורה" to 10, "ביאור הלכה" to 20)
 
 internal fun normalizePriorityEntry(raw: String): String {
     var entry = raw.trim().replace('\\', '/')
