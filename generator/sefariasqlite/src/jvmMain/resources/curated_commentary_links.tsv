@@ -1,0 +1,14 @@
+# Explicit corrections for the two reported omissions only; no inference from neighboring links.
+# Textual targets verified against v38 and live Sefaria on 2026-11-17.
+# Columns: commentaryHeRef, baseHeRef, commentaryOpening, baseOpening (tab-separated).
+# A new correction requires textual evidence for its exact target and opening guards on BOTH sides.
+# Meiri explains the mishnah about eating the gid hanasheh, including its kezayit and whole-gid cases.
+# https://www.sefaria.org/Meiri_on_Chullin.96a.3
+# https://www.sefaria.org/Chullin.96a.6
+מאירי על חולין,  צו., ג	חולין, צו., ו	המשנה החמישית והיא גם כן מענין החלק השני האוכל כזית מגיד הנשה	האוכל מגיד הנשה כזית
+# Maharsha explicitly discusses Tosafot's dibbur "והיכא איתמר", including the elephant/monkey baraita.
+# Tosafot's comment is anchored at the same gemara line; this is not inferred from adjacent Maharsha links.
+# https://www.sefaria.org/Chidushei_Halachot_on_Eruvin.31b.2
+# https://www.sefaria.org/Tosafot_on_Eruvin.31b.19.1
+# https://www.sefaria.org/Eruvin.31b.19
+חידושי הלכות על עירובין, לא:, ב	עירובין, לא:, יט	בד"ה היכא אתמר	והיכא איתמר דרב חסדא ורב יחיאל?
