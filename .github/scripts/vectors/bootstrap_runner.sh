@@ -81,6 +81,7 @@ build_bin() {  # <name> <repo> <rev> <package dir in the repo> [cargo args...]
 build_bin otzaria-semantic-search "$SIDECAR_REPO" "$SIDECAR_REV" . --features onnx-backend --bin otzaria-semantic-search
 if [ -n "$PLUGIN_REV" ]; then
   build_bin export_semantic_plan "$PLUGIN_REPO" "$PLUGIN_REV" rust --features semantic-integration --bin export_semantic_plan
+  build_bin build_semantic_index "$PLUGIN_REPO" "$PLUGIN_REV" rust --features semantic-integration --bin build_semantic_index
   build_bin validate_semantic_vectors "$PLUGIN_REPO" "$PLUGIN_REV" rust --features semantic --bin validate_semantic_vectors
 else
   echo "export_semantic_plan, validate_semantic_vectors: PLUGIN_REV is not pinned — the build can neither plan nor validate"

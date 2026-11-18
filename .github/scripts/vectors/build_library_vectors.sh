@@ -127,10 +127,17 @@ if [ -n "$RESUME" ]; then
     || { echo "::error::--resume supports only compact Pardes in mode base"; exit 64; }
 fi
 VERSION=${TAG#v}; VERSION=${VERSION%%-*}
+COMPLETE_NOTES=""
+if [[ " ${NAMES[*]} " == *" meivin-qa491-complete-notes-onnx "* ]]; then
+  [ "${#NAMES[@]}" -eq 1 ] || { echo "::error::the complete-notes family requires its own fresh-index run"; exit 64; }
+  COMPLETE_NOTES=1
+fi
+if [ -n "$COMPLETE_NOTES" ] && [ -z "$WORK" ]; then WORK=$STATE/work/$TAG-complete-notes-v1; fi
 WORK=${WORK:-$STATE/work/$TAG}
 CLI=${OTZARIA_SEMANTIC_CLI:-$STATE/bin/otzaria-semantic-search}
 EXPORT=${EXPORT_SEMANTIC_PLAN:-$STATE/bin/export_semantic_plan}
 VALIDATE=${VALIDATE_SEMANTIC_VECTORS:-$STATE/bin/validate_semantic_vectors}
+BUILD_INDEX=${BUILD_SEMANTIC_INDEX:-$STATE/bin/build_semantic_index}
 PY=${VECTOR_PYTHON:-$STATE/venv/bin/python}
 GH=${GH:-gh}
 ZSTD=${ZSTD:-zstd}
@@ -197,6 +204,12 @@ fi
 [ -n "$PLUGIN_REV" ] || [ -n "${EXPORT_SEMANTIC_PLAN:-}" ] || die "export_semantic_plan v2 (plugin P5) is not pinned yet in pins.env: the release cannot be planned"
 [ -x "$EXPORT" ] || die "export_semantic_plan is not at $EXPORT — run bootstrap_runner.sh"
 [ -x "$VALIDATE" ] || die "validate_semantic_vectors is not at $VALIDATE — run bootstrap_runner.sh"
+if [ -n "$COMPLETE_NOTES" ]; then
+  [ -x "$BUILD_INDEX" ] || die "build_semantic_index is not at $BUILD_INDEX — run bootstrap_runner.sh"
+  if [ -z "${BUILD_SEMANTIC_INDEX:-}" ]; then
+    [ "$(cat "$BUILD_INDEX.rev" 2>/dev/null)" = "$PLUGIN_REV" ] || die "the fresh index builder is not the pinned plugin $PLUGIN_REV"
+  fi
+fi
 if [ -z "${EXPORT_SEMANTIC_PLAN:-}${VALIDATE_SEMANTIC_VECTORS:-}" ]; then
   for bin in "$EXPORT" "$VALIDATE"; do
     [ "$(cat "$bin.rev" 2>/dev/null)" = "$PLUGIN_REV" ] || die "$bin is not the pinned plugin $PLUGIN_REV — run bootstrap_runner.sh"
@@ -267,6 +280,10 @@ fi
 if [[ " ${NAMES[*]} " == *" pardesqa491-windows-onnx "* ]] \
   && [ -d "$WORK" ] && [ -n "$(find "$WORK" -mindepth 1 -maxdepth 1 -print -quit)" ]; then
   [ -n "$RESUME" ] || die "retained compact Pardes work exists at $WORK; use --resume to verify and retain its atomic shards (refusing to erase it)"
+fi
+if [ -n "$COMPLETE_NOTES" ] && [ -d "$WORK" ] \
+  && [ -n "$(find "$WORK" -mindepth 1 -maxdepth 1 -print -quit)" ]; then
+  die "retained complete-notes work exists at $WORK; preserve it for recovery and select a separate --work for another attempt"
 fi
 if [ -n "$RESUME" ]; then
   select_model_profile "${NAMES[0]}"
@@ -391,6 +408,16 @@ cat "${db_parts[@]}" | "$ZSTD" -dc --long=31 --memory=2048MB > "$DB" || die "cou
 rm -f "${db_parts[@]}"
 [ -s "$DB" ] || die "$db_name expanded to nothing"
 echo "database: $db_name, $(du -sh "$DB" | cut -f1)"
+if [ -n "$COMPLETE_NOTES" ]; then
+  # The released index supplies canonical book metadata/order only. Its old note
+  # provenance cannot certify recipe 4: reconstruct all line text from this DB.
+  "$BUILD_INDEX" --source-index "$INDEX" --seforim-db "$DB" \
+    --out "$WORK/complete-notes-index" --library-version "$VERSION" \
+    | tee "$WORK/complete-notes-index.log"
+  INDEX=$WORK/complete-notes-index
+  jq -e '.semantic_projection_version == 1' "$INDEX/otzaria_index_meta.json" >/dev/null \
+    || die "the rebuilt candidate index lacks semantic note provenance"
+fi
 endgroup
 
 else
@@ -659,6 +686,11 @@ build_family() {  # <name> <release prefix> <codec, or ""> <alias threshold, or 
   local CACHE_POLICY=()
   [ "${MODEL_REQUIRE_CACHE:-false}" != true ] || CACHE_POLICY=(--cache-only)
   local FAMILY=$STATE/bin/families/$name/model.json FW=$WORK/$name RELEASE_TAG=$prefix-$TAG FRESH="" anchor
+  local TOKEN_AUDIT=() CPU_AUDIT=()
+  if [ "$name" = meivin-qa491-complete-notes-onnx ]; then
+    TOKEN_AUDIT=(--audit-tokens)
+    CPU_AUDIT=(--allow-truncation)
+  fi
   anchor=${FAMILY_CONFIGS%% *}; anchor=${anchor%%:*}; anchor=${anchor##*/}
   need_free_space   # the families before this one hold space too
   mkdir -p "$FW/shards" "$FW/files"
@@ -695,7 +727,7 @@ build_family() {  # <name> <release prefix> <codec, or ""> <alias threshold, or 
       echo "on the CPU: embed-shard in $CPU_PROCESSES process(es) of $CPU_THREADS thread(s), ONNX Runtime $ORT"
       EMBEDDED_BY="otzaria-semantic-search embed-shard (onnxruntime, cpu)"
       OTZARIA_ONNX_RUNTIME=$ORT "$CLI" embed-shard --plan "$PLAN" --model-file "$PKG/$MODEL_GRAPH" \
-        --processes "$CPU_PROCESSES" --threads "$CPU_THREADS" --out "$FW/shards/cpu"
+        --processes "$CPU_PROCESSES" --threads "$CPU_THREADS" ${CPU_AUDIT[@]+"${CPU_AUDIT[@]}"} --out "$FW/shards/cpu"
     else
       if [ "${MODEL_DEVICE:-cuda}" = cpu ]; then
         EMBEDDED_BY="seforim exact ONNX Runtime CPU worker"
@@ -713,7 +745,7 @@ build_family() {  # <name> <release prefix> <codec, or ""> <alias threshold, or 
         fi
         "$PY" "$HERE/embed_worker.py" --device "${MODEL_DEVICE:-cuda}" --cpu-procs "$CPU_PROCESSES" --cpu-threads "$CPU_THREADS" --chunk "${MODEL_WRITE_CHUNK:-65536}" --model-kind "${MODEL_WORKER_KIND:-meivin}" --token-budget "${MODEL_TOKEN_BUDGET:-32768}" --max-batch "${MODEL_MAX_BATCH:-1024}" --plan "$PLAN" --out "$FW/shards/$(printf 's%03d' "$n")" \
           --skip "$skip" --take "$active_embed_window" --cache "$STATE/model-cache" \
-          --repo "$MODEL_REPO" --revision "$MODEL_REVISION" --graph "$MODEL_GRAPH" --remote-graph "${MODEL_REMOTE_GRAPH:-}" --token-env OTZARIA_HF_TOKEN ${CACHE_POLICY[@]+"${CACHE_POLICY[@]}"}
+          --repo "$MODEL_REPO" --revision "$MODEL_REVISION" --graph "$MODEL_GRAPH" --remote-graph "${MODEL_REMOTE_GRAPH:-}" --token-env OTZARIA_HF_TOKEN ${CACHE_POLICY[@]+"${CACHE_POLICY[@]}"} ${TOKEN_AUDIT[@]+"${TOKEN_AUDIT[@]}"}
         skip=$((skip + active_embed_window)); n=$((n + 1))
       done
     fi
@@ -724,7 +756,7 @@ build_family() {  # <name> <release prefix> <codec, or ""> <alias threshold, or 
     [ -z "$FRESH" ] || CREATE=(--create --model "$FAMILY" --passage-quantization "$PASSAGE_QUANTIZATION")
     "$CLI" warehouse-add --warehouse "$WAREHOUSE" ${CREATE[@]+"${CREATE[@]}"} --plan "$PLAN" --shards "$FW/shards"
     # Keep compact shards even after import; a recovery must never destroy completed work.
-    [ "$name" = pardesqa491-windows-onnx ] || rm -rf "$FW/shards"
+    [[ "$name" = pardesqa491-windows-onnx || "$name" = meivin-qa491-complete-notes-onnx ]] || rm -rf "$FW/shards"
     endgroup
   fi
 
@@ -798,7 +830,7 @@ build_family() {  # <name> <release prefix> <codec, or ""> <alias threshold, or 
 
   if [ "$MODE" = dry-run ]; then
     # Kept for inspection: the plan, the release, the files and the logs; the rest (the validator's set) goes.
-    [ "$name" = pardesqa491-windows-onnx ] || find "$FW" -mindepth 1 -maxdepth 1 ! -name plan ! -name release ! -name files ! -name '*.log' ! -name rotation.bin -exec rm -rf {} +
+    [[ "$name" = pardesqa491-windows-onnx || "$name" = meivin-qa491-complete-notes-onnx ]] || find "$FW" -mindepth 1 -maxdepth 1 ! -name plan ! -name release ! -name files ! -name '*.log' ! -name rotation.bin -exec rm -rf {} +
     echo "dry run: built and verified $STEM ($name); nothing published, the ledger is not persisted; $(du -sh "$FW" | cut -f1) kept in $FW"
     return 0
   fi

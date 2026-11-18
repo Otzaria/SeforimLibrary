@@ -76,6 +76,8 @@ def parse_args(argv=None):
     ap.add_argument("--model-kind", default="meivin", choices=("meivin", "pardesqa491"))
     ap.add_argument("--cpu-procs", type=int, default=8, help="persistent exact ONNX CPU processes for compact Pardes")
     ap.add_argument("--cpu-threads", type=int, default=2, help="intra-op threads per exact ONNX CPU process")
+    ap.add_argument("--audit-tokens", action="store_true",
+                    help="record uncapped passage lengths without changing inference token IDs")
     a = ap.parse_args(argv)
     if a.skip < 0 or (a.take is not None and a.take < 0):
         ap.error("--skip and --take are counts")
@@ -181,9 +183,13 @@ def main(argv=None) -> int:
               "device": (torch.cuda.get_device_name(0) if on_gpu else "cpu"),
               "ep": ("rocm" if getattr(torch.version, "hip", None) else "cuda") if on_gpu else "cpu",
               "mode": f"torch-{a.mode}", "model_kind": a.model_kind}
+    audit = None
+    if a.audit_tokens:
+        from token_audit import PassageAudit
+        audit = PassageAudit(root / model_package.TOKENIZER_FILE, tok, plan, a.out, a.skip)
 
     def embed(texts):
-        ids = [e.ids for e in tok.encode_batch(texts, add_special_tokens=True)]
+        ids = audit.encode(texts) if audit else [e.ids for e in tok.encode_batch(texts, add_special_tokens=True)]
         return torch_bert.embed_id_lists(model, ids, a.token_budget, a.max_batch)
 
     timing = {}
@@ -218,6 +224,10 @@ def main(argv=None) -> int:
     t1 = time.time()
     manifest = vector_shard.write_shard(a.plan, a.out, a.skip, take, embed, worker, parity_fn=parity,
                                         chunk=a.chunk, log=log)
+    if audit:
+        report = audit.finish(manifest["records"])
+        log(f"token audit: {report['passages']} passages, {report['over_budget_passages']} over cap, "
+            f"{report['discarded_tokens']} discarded tokens (token-audit.json)")
     t2 = time.time()
     summary = {"out": str(a.out), "skip": a.skip, "take": take, "records": manifest["records"],
                "vectors_sha256": manifest["vectors_sha256"], "keys_sha256": manifest["keys_sha256"],

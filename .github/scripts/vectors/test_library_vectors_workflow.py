@@ -87,6 +87,7 @@ ROTATION_KEY = f"{FAMILIES[1][0]}.fp32-4a4a2ae8"   # the windows family's rotati
 CHUNKING_IDENTITY = {"meivin-round2-onnx": 2685558872390372738, "meivin-round2-windows-onnx": 320260894818558297}
 CHUNKING_IDENTITY.update({"meivin-qa491-onnx": 2685558872390372738, "meivin-qa491-windows-onnx": 320260894818558297})
 CHUNKING_IDENTITY["pardesqa491-windows-onnx"] = 13334152532150206612
+CHUNKING_IDENTITY["meivin-qa491-complete-notes-onnx"] = 12470596585207933847
 
 
 def run_text(job):
@@ -795,6 +796,61 @@ class Driver(unittest.TestCase):
         df = self.root / "net/df"
         df.write_text(STUB_DF); df.chmod(0o755)
         return {"DF_COUNT": str(self.root / "df-count"), "DF_FREE_KB": " ".join(["999999999"] * 20)}
+
+    def candidate_builder(self):
+        builder = self.root / "bin/build_semantic_index"
+        builder.write_text('''#!/usr/bin/env bash
+set -eu
+echo "build_semantic_index $*" >> "$CALLS"
+out=""; while [ $# -gt 0 ]; do case "$1" in --out) out=$2; shift 2;; *) shift;; esac; done
+mkdir -p "$out"
+echo '{"segments":[]}' > "$out/meta.json"
+echo "{\\"semantic_projection_version\\":${REBUILT_PROJECTION:-1}}" > "$out/otzaria_index_meta.json"
+''')
+        builder.chmod(0o755)
+        return {"BUILD_SEMANTIC_INDEX": str(builder)}
+
+    def test_complete_notes_rebuilds_private_index_and_keeps_gpu_token_audits(self):
+        name = "meivin-qa491-complete-notes-onnx"
+        p, calls = self.run_driver(TO_EMBED=100000, args=("--family", name), **self.candidate_builder())
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        work = self.state / "work" / (TAG + "-complete-notes-v1")
+        builder = next(c for c in calls if c.startswith("build_semantic_index "))
+        self.assertIn("--source-index " + str(work / "index/index"), builder)
+        self.assertIn("--seforim-db " + str(work / "seforim.db"), builder)
+        export = next(c for c in calls if c.startswith("export "))
+        self.assertIn("--index " + str(work / "complete-notes-index"), export)
+        gpu = next(c for c in calls if "embed_worker.py" in c)
+        self.assertIn("--audit-tokens", gpu)
+        self.assertTrue((work / name / "shards").is_dir())
+        self.assertFalse(any("release upload" in c or "release create" in c for c in calls))
+
+    def test_complete_notes_refuses_rebuild_without_semantic_provenance(self):
+        p, calls = self.run_driver(TO_EMBED=100000,
+            args=("--family", "meivin-qa491-complete-notes-onnx"),
+            REBUILT_PROJECTION=0, **self.candidate_builder())
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn("lacks semantic note provenance", p.stdout)
+        self.assertFalse(any(c.startswith("export ") for c in calls))
+
+    def test_complete_notes_retry_preserves_completed_shards_before_any_download(self):
+        name = "meivin-qa491-complete-notes-onnx"
+        work = self.state / "work" / (TAG + "-complete-notes-v1")
+        kept = work / name / "shards/s000/vectors.f32"
+        kept.parent.mkdir(parents=True)
+        kept.write_bytes(b"paid-for completed vectors")
+        p, calls = self.run_driver(args=("--family", name), **self.candidate_builder())
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn("retained complete-notes work exists", p.stdout)
+        self.assertEqual(kept.read_bytes(), b"paid-for completed vectors")
+        self.assertFalse(any("release download" in c for c in calls))
+
+    def test_complete_notes_requires_an_isolated_run(self):
+        p, calls = self.run_driver(args=("--family", LEGACY,
+            "--family", "meivin-qa491-complete-notes-onnx"))
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn("requires its own fresh-index run", p.stdout)
+        self.assertFalse(calls)
 
     def test_low_windows_host_space_preserves_retained_work_before_any_download(self):
         df_env = self.install_host_df_stub()
@@ -2271,7 +2327,7 @@ if [ "$1" = clone ]; then           # git clone -q --filter=blob:none <url> <des
   url=${@: -2:1}; dest=${@: -1}
   mkdir -p "$dest"
   case "$url" in *otzaria-semantic-search*)
-    for family in meivin-round2-onnx meivin-round2-windows-onnx meivin-qa491-onnx meivin-qa491-windows-onnx pardesqa491-windows-onnx; do
+    for family in meivin-round2-onnx meivin-round2-windows-onnx meivin-qa491-onnx meivin-qa491-windows-onnx pardesqa491-windows-onnx meivin-qa491-complete-notes-onnx; do
       mkdir -p "$dest/config/models/$family"
       echo "{\"family_id\":\"$family\"}" > "$dest/config/models/$family/model.json"
       echo '{"chunking_version":1}' > "$dest/config/models/$family/chunking.json"
@@ -2340,6 +2396,7 @@ class Bootstrap(unittest.TestCase):
         for name, rev, build in (
                 ("otzaria-semantic-search", PIN["SIDECAR_REV"], "--features onnx-backend --bin otzaria-semantic-search"),
                 ("export_semantic_plan", PIN["PLUGIN_REV"], "--features semantic-integration --bin export_semantic_plan"),
+                ("build_semantic_index", PIN["PLUGIN_REV"], "--features semantic-integration --bin build_semantic_index"),
                 ("validate_semantic_vectors", PIN["PLUGIN_REV"], "--features semantic --bin validate_semantic_vectors")):
             self.assertTrue(os.access(b / name, os.X_OK), name)
             self.assertEqual((b / f"{name}.rev").read_text().strip(), rev, name)
