@@ -52,14 +52,17 @@ was 3,889,391,688 bytes, above the unchanged G7 limit of 3,500,000,000 bytes.
 G3/G4/G6 did not run because verification stopped at G7. The original oversized
 release is retained as evidence.
 
-The candidate now fits a fresh full-rank rotation with 224 int8 and 32 int4
-components (`rot192-i8i4` is the format name; this epoch retains all 256
-components). No neighbor alias threshold is enabled. Format 3 also stores more
-compact key/reference tables; the actual assembled size must still pass G7.
-G5 retains the codec's established round-trip checks; its codec-specific cosine
-floor differs from the i8 codec's floor. Retrieval requirements remain the
-original **recall@10 >= 0.98 and recall@50 >= 0.99**, passed explicitly to the
-validator. No size budget or retrieval threshold is relaxed.
+[Compact recovery 44291306747](https://github.com/Otzaria/SeforimLibrary/actions/runs/44291306747)
+then passed G7 at approximately 3.408 GB and passed G3 coverage and G4
+resolution. Its retrieval recall@10 was 0.9835 and recall@50 was 0.987, below
+the required 0.99 at 50, so publication stopped. Its output is also retained.
+
+The candidate now returns to the original `i8-sym-vec` encoding. The approved
+G7 budget is 4,000,000,000 bytes; actual assembly verification must still pass
+that limit. No rotation or neighbor aliases are enabled. This preserves the
+original i8 codec's G5 checks. Retrieval requirements remain **recall@10 >= 0.98
+and recall@50 >= 0.99**, passed explicitly to the validator. The new i8 recovery
+must pass every gate; the earlier compact run does not certify its retrieval.
 
 ```sh
 gh workflow run build-library-vectors.yml --repo Otzaria/SeforimLibrary \
@@ -78,9 +81,9 @@ replanning, downloading, re-importing or deleting retained work. A verification
 receipt preserves aggregate token overflow counts.
 
 Each attempt creates a separate
-`meivin-qa491-complete-notes-onnx/recovery-full256-224i8-32i4.<unique>/`
-for its fresh rotation, assembly and reports. The existing plan, all shards,
-private index, DB and original `release/` remain unchanged. Assembly gates run
+`meivin-qa491-complete-notes-onnx/recovery-i8.<unique>/`
+for its fresh i8 assembly and reports. The existing plan, all shards,
+private index, DB, original `release/` and previous compact recovery remain unchanged. Assembly gates run
 again, followed by full G3 coverage and book/text hash validation, G4 runtime
 resolution, and G6 retrieval against the retained private index. Dry-run keeps
 all diagnostics and publishes no artifacts. Base mode also requires successful

@@ -822,6 +822,10 @@ echo "{\\"semantic_projection_version\\":${REBUILT_PROJECTION:-1}}" > "$out/otza
         self.assertIn("--index " + str(work / "complete-notes-index"), export)
         gpu = next(c for c in calls if "embed_worker.py" in c)
         self.assertIn("--audit-tokens", gpu)
+        base = next(c for c in calls if "cli assemble --kind base" in c)
+        self.assertIn("--codec i8-sym-vec", base)
+        self.assertNotIn("--alias-threshold", base)
+        self.assertFalse(any("cli fit-rotation" in c for c in calls))
         self.assertTrue((work / name / "shards").is_dir())
         self.assertFalse(any("release upload" in c or "release create" in c for c in calls))
 
@@ -931,6 +935,10 @@ echo "{\\"semantic_projection_version\\":${REBUILT_PROJECTION:-1}}" > "$out/otza
         warehouse = self.state / "warehouse/fp32-5f80c47d"
         fw = fixture(work, self.model(name), warehouse, tag=TAG, window=1048576)
         shutil.copy(self.model(name), fw / "plan/model.json")  # stub assembler diagnostic
+        # Preserve diagnostics from the earlier compact recovery as well.
+        compact = fw / "recovery-full256-224i8-32i4.previous/release"
+        compact.mkdir(parents=True)
+        (compact / "validation.json").write_text('{"passed":false,"gate":"G6"}')
         before = {str(f): (f.read_bytes(), f.stat().st_mtime_ns) for f in work.rglob("*") if f.is_file()}
         kept = self.state / "ledger/rotations" / (name + ".fp32-5f80c47d.bin")
         kept.parent.mkdir(parents=True); kept.write_bytes(b"wrong legacy rotation")
@@ -939,10 +947,11 @@ echo "{\\"semantic_projection_version\\":${REBUILT_PROJECTION:-1}}" > "$out/otza
         self.assertFalse(any("embed_worker.py" in c or "cli embed-shard" in c or "cli warehouse-add" in c
                              or c.startswith("export ") or "release download" in c or "build_semantic_index" in c for c in calls))
         self.assertNotIn("--repair", next(c for c in calls if "cli warehouse-verify" in c))
-        self.assertIn("--head 224 --tail 32", next(c for c in calls if "cli fit-rotation" in c))
+        self.assertFalse(any("cli fit-rotation" in c for c in calls))
         base = next(c for c in calls if "cli assemble --kind base" in c)
-        self.assertIn("--codec rot192-i8i4", base); self.assertNotIn("--alias-threshold", base)
-        self.assertIn("recovery-full256-224i8-32i4.", base)
+        self.assertIn("--codec i8-sym-vec", base); self.assertNotIn("--alias-threshold", base)
+        self.assertNotIn("--rotation", base)
+        self.assertIn("recovery-i8.", base)
         validate = next(c for c in calls if c.startswith("validate "))
         self.assertIn("--index " + str(work / "complete-notes-index"), validate)
         self.assertIn("--min-recall-10 0.98 --min-recall-50 0.99", validate)
@@ -950,7 +959,7 @@ echo "{\\"semantic_projection_version\\":${REBUILT_PROJECTION:-1}}" > "$out/otza
         after = {str(f): (f.read_bytes(), f.stat().st_mtime_ns) for f in work.rglob("*") if f.is_file()}
         self.assertEqual(before, {k: v for k, v in after.items() if k in before})
         self.assertEqual(kept.read_bytes(), b"wrong legacy rotation")
-        self.assertEqual(len(list(fw.glob("recovery-full256-224i8-32i4.*/release/validation.json"))), 1)
+        self.assertEqual(len(list(fw.glob("recovery-i8.*/release/validation.json"))), 1)
 
     def test_resume_rejects_other_families_before_preflight(self):
         p, calls = self.run_driver(mode="base", args=("--family", LEGACY, "--resume"))

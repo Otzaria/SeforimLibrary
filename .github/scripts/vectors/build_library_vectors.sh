@@ -558,15 +558,7 @@ epoch_rotation() {  # <name>: ROTATION, the rot192-i8i4 epoch a new base of the 
   local entry pinned="" printed
   for entry in ${ROTATIONS:-}; do [ "${entry%%=*}" != "$1" ] || pinned=${entry#*=}; done
   ROTATION_FITTED=""
-  if [ "$1" = meivin-qa491-complete-notes-onnx ]; then
-    # A fresh, full-rank 224xint8 + 32xint4 epoch. Never load a legacy
-    # 192-dimensional fit or a fitted ledger rotation for this candidate.
-    ROTATION=$FW/rotation.bin; ROTATION_FITTED=1
-    "$CLI" fit-rotation --warehouse "$WAREHOUSE" --head 224 --tail 32 --out "$ROTATION" | tee "$FW/fit-rotation.log"
-    printed=$(sed -n 's/^Epoch SHA-256: *\([0-9a-f]\{64\}\)$/\1/p' "$FW/fit-rotation.log")
-    [ -n "$printed" ] && [ "$(sha256sum < "$ROTATION" | cut -d' ' -f1)" = "$printed" ] \
-      || die "candidate fit-rotation did not write its declared epoch"
-  elif [ -n "$pinned" ]; then
+  if [ -n "$pinned" ]; then
     ROTATION=$HERE/rotation/$1.bin
     [ "$(sha256sum < "$ROTATION" | cut -d' ' -f1)" = "$pinned" ] || die "$ROTATION is not the rotation ROTATIONS pins ($pinned)"
   elif [ -f "$ROTATION_KEPT" ]; then
@@ -706,8 +698,8 @@ build_family() {  # <name> <release prefix> <codec, or ""> <alias threshold, or 
   if [ -n "$RESUME" ] && [ "$name" = meivin-qa491-complete-notes-onnx ]; then
     COMPLETE_RECOVERY=1; RETAINED_PLAN=$FW/plan
     # A failed assembly remains available byte-for-byte. Every recovery gets
-    # its own fresh output directory, including its fitted rotation and logs.
-    FW=$(mktemp -d "$FW/recovery-full256-224i8-32i4.XXXXXXXX")
+    # its own fresh i8 output directory and reports.
+    FW=$(mktemp -d "$FW/recovery-i8.XXXXXXXX")
     echo "recovery output: $FW; retained plan/shards and original release are read-only"
   fi
   if [ "$name" = meivin-qa491-complete-notes-onnx ]; then
