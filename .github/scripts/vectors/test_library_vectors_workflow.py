@@ -582,7 +582,7 @@ esac
 STUB_PY = r"""#!/usr/bin/env bash
 echo "py $*" >> "$CALLS"
 script=$1; shift
-case "$script" in */resume_compact.py) exec "${REAL_PYTHON:-python3}" "$script" "$@";; esac
+case "$script" in */resume_compact.py|*/resume_complete_notes.py) exec "${REAL_PYTHON:-python3}" "$script" "$@";; esac
 out=""; cache=""; checksum=""; graph=""
 while [ $# -gt 0 ]; do case "$1" in --out) out=$2; shift 2;; --cache) cache=$2; shift 2;;
   --checksum) checksum=$2; shift 2;; --graph) graph=$2; shift 2;; *) shift;; esac; done
@@ -923,6 +923,34 @@ echo "{\\"semantic_projection_version\\":${REBUILT_PROJECTION:-1}}" > "$out/otza
         self.assertEqual({str(f): (f.read_bytes(), f.stat().st_mtime_ns) for d in completed for f in d.iterdir()}, before)
         self.assertEqual(next((work / "recovery-partials").rglob("vectors.f32.partial")).read_bytes(), b"preserve partial")
         self.assertTrue(any("gh release edit vectors-pardesqa491-windows-" in c for c in calls))
+
+    def test_complete_notes_imported_recovery_never_embeds_or_imports_and_validates_all_gates(self):
+        from test_resume_complete_notes import fixture
+        name = "meivin-qa491-complete-notes-onnx"
+        work = self.state / "work" / (TAG + "-complete-notes-v1")
+        warehouse = self.state / "warehouse/fp32-5f80c47d"
+        fw = fixture(work, self.model(name), warehouse, tag=TAG, window=1048576)
+        shutil.copy(self.model(name), fw / "plan/model.json")  # stub assembler diagnostic
+        before = {str(f): (f.read_bytes(), f.stat().st_mtime_ns) for f in work.rglob("*") if f.is_file()}
+        kept = self.state / "ledger/rotations" / (name + ".fp32-5f80c47d.bin")
+        kept.parent.mkdir(parents=True); kept.write_bytes(b"wrong legacy rotation")
+        p, calls = self.run_driver(REAL_PYTHON=sys.executable, args=("--family", name, "--resume"), **self.candidate_builder())
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertFalse(any("embed_worker.py" in c or "cli embed-shard" in c or "cli warehouse-add" in c
+                             or c.startswith("export ") or "release download" in c or "build_semantic_index" in c for c in calls))
+        self.assertNotIn("--repair", next(c for c in calls if "cli warehouse-verify" in c))
+        self.assertIn("--head 224 --tail 32", next(c for c in calls if "cli fit-rotation" in c))
+        base = next(c for c in calls if "cli assemble --kind base" in c)
+        self.assertIn("--codec rot192-i8i4", base); self.assertNotIn("--alias-threshold", base)
+        self.assertIn("recovery-full256-224i8-32i4.", base)
+        validate = next(c for c in calls if c.startswith("validate "))
+        self.assertIn("--index " + str(work / "complete-notes-index"), validate)
+        self.assertIn("--min-recall-10 0.98 --min-recall-50 0.99", validate)
+        self.assertFalse(any("gh release create" in c or "gh release upload" in c for c in calls))
+        after = {str(f): (f.read_bytes(), f.stat().st_mtime_ns) for f in work.rglob("*") if f.is_file()}
+        self.assertEqual(before, {k: v for k, v in after.items() if k in before})
+        self.assertEqual(kept.read_bytes(), b"wrong legacy rotation")
+        self.assertEqual(len(list(fw.glob("recovery-full256-224i8-32i4.*/release/validation.json"))), 1)
 
     def test_resume_rejects_other_families_before_preflight(self):
         p, calls = self.run_driver(mode="base", args=("--family", LEGACY, "--resume"))

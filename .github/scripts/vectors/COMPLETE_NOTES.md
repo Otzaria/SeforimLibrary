@@ -42,3 +42,48 @@ retains the sidecar's equivalent automatic report.
 must include `build_semantic_index` and itself pin the same published sidecar.
 The model cache must contain the verified QA491 packages. No Kaggle job or legacy
 GGUF queue is used by this workflow.
+
+## Imported-build recovery
+
+[Run 44257768773](https://github.com/Otzaria/SeforimLibrary/actions/runs/44257768773)
+completed all four GPU shards (3,988,353 new vectors), passed their fp32 parity
+checks and imported them into the compatible warehouse. Its original i8 base
+was 3,889,391,688 bytes, above the unchanged G7 limit of 3,500,000,000 bytes.
+G3/G4/G6 did not run because verification stopped at G7. The original oversized
+release is retained as evidence.
+
+The candidate now fits a fresh full-rank rotation with 224 int8 and 32 int4
+components (`rot192-i8i4` is the format name; this epoch retains all 256
+components). No neighbor alias threshold is enabled. Format 3 also stores more
+compact key/reference tables; the actual assembled size must still pass G7.
+G5 retains the codec's established round-trip checks; its codec-specific cosine
+floor differs from the i8 codec's floor. Retrieval requirements remain the
+original **recall@10 >= 0.98 and recall@50 >= 0.99**, passed explicitly to the
+validator. No size budget or retrieval threshold is relaxed.
+
+```sh
+gh workflow run build-library-vectors.yml --repo Otzaria/SeforimLibrary \
+  --ref otzaria -f release_tag=v38-20261112163847 -f mode=dry-run \
+  -f family=meivin-qa491-complete-notes-onnx -f resume=true
+```
+
+Recovery verifies the DB against the canonical rebuild's SHA-256, source index
+metadata/order, private projection provenance, every frozen plan file (including
+book hashes), all complete shard windows/data/parity documents/token audits,
+and warehouse identity. It checks every retained vector is finite and unit
+length. The imported batch must match both the exact plan and the concatenated
+retained shard bytes. Native `warehouse-verify` then rehashes and checks the
+warehouse without repair. A mismatch stops recovery without inference,
+replanning, downloading, re-importing or deleting retained work. A verification
+receipt preserves aggregate token overflow counts.
+
+Each attempt creates a separate
+`meivin-qa491-complete-notes-onnx/recovery-full256-224i8-32i4.<unique>/`
+for its fresh rotation, assembly and reports. The existing plan, all shards,
+private index, DB and original `release/` remain unchanged. Assembly gates run
+again, followed by full G3 coverage and book/text hash validation, G4 runtime
+resolution, and G6 retrieval against the retained private index. Dry-run keeps
+all diagnostics and publishes no artifacts. Base mode also requires successful
+validation before the existing publication path; retained recovery inputs are
+preserved in that mode too. Pardes's embedding-stage recovery retains its
+separate policy.

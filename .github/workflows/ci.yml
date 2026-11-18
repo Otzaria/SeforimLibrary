@@ -154,7 +154,7 @@ jobs:
       - name: Validate the library-vectors build
         run: |
           set -euo pipefail
-          for suite in test_library_vectors_workflow test_vectors_worker test_token_audit; do
+          for suite in test_library_vectors_workflow test_vectors_worker test_token_audit test_resume_complete_notes; do
             log="$RUNNER_TEMP/$suite.log"
             if ! python ".github/scripts/vectors/$suite.py" -v > "$log" 2>&1; then
               cat "$log"

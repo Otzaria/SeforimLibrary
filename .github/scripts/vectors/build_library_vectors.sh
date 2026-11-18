@@ -123,8 +123,12 @@ for name in ${WANTED[@]+"${WANTED[@]}"}; do
 done
 [ "${#NAMES[@]}" -gt 0 ] || { echo "::error::pins.env names no family in FAMILY_CONFIGS"; exit 64; }
 if [ -n "$RESUME" ]; then
-  [ "$MODE" = base ] && [ "${#NAMES[@]}" -eq 1 ] && [ "${NAMES[0]}" = pardesqa491-windows-onnx ] \
-    || { echo "::error::--resume supports only compact Pardes in mode base"; exit 64; }
+  if [ "${#NAMES[@]}" -eq 1 ] && [ "${NAMES[0]}" = meivin-qa491-complete-notes-onnx ]; then
+    [[ "$MODE" = dry-run || "$MODE" = base ]] || { echo "::error::complete-notes recovery supports dry-run or base"; exit 64; }
+  else
+    [ "$MODE" = base ] && [ "${#NAMES[@]}" -eq 1 ] && [ "${NAMES[0]}" = pardesqa491-windows-onnx ] \
+      || { echo "::error::--resume supports only compact Pardes in mode base, or complete-notes in dry-run/base"; exit 64; }
+  fi
 fi
 VERSION=${TAG#v}; VERSION=${VERSION%%-*}
 COMPLETE_NOTES=""
@@ -283,13 +287,16 @@ if [[ " ${NAMES[*]} " == *" pardesqa491-windows-onnx "* ]] \
 fi
 if [ -n "$COMPLETE_NOTES" ] && [ -d "$WORK" ] \
   && [ -n "$(find "$WORK" -mindepth 1 -maxdepth 1 -print -quit)" ]; then
-  die "retained complete-notes work exists at $WORK; preserve it for recovery and select a separate --work for another attempt"
+  [ -n "$RESUME" ] || die "retained complete-notes work exists at $WORK; use --resume to verify and retain completed work (refusing to erase it)"
 fi
 if [ -n "$RESUME" ]; then
   select_model_profile "${NAMES[0]}"
-  "$PY" "$HERE/resume_compact.py" --work "$WORK" --tag "$TAG" \
+  recovery_helper=resume_compact.py; recovery_args=()
+  if [ -n "$COMPLETE_NOTES" ]; then recovery_helper=resume_complete_notes.py; recovery_args=(--cli "$CLI"); fi
+  "$PY" "$HERE/$recovery_helper" --work "$WORK" --tag "$TAG" \
     --model "$STATE/bin/families/${NAMES[0]}/model.json" --package "$PASSAGE_PACKAGE_CHECKSUM" \
-    --window "$MODEL_EMBED_WINDOW" --warehouse "$STATE/warehouse/$PASSAGE_QUANTIZATION-${PASSAGE_PACKAGE_CHECKSUM:0:8}"
+    --window "${MODEL_EMBED_WINDOW:-$EMBED_WINDOW}" --warehouse "$STATE/warehouse/$PASSAGE_QUANTIZATION-${PASSAGE_PACKAGE_CHECKSUM:0:8}" \
+    ${recovery_args[@]+"${recovery_args[@]}"}
   select_model_profile ""
 else
   rm -rf "$WORK"; mkdir -p "$WORK/dl" "$WORK/index"
@@ -424,6 +431,7 @@ else
   RELEASE_JSON=$WORK/library-release.json
   CREATED=$(jq -r .published_at "$RELEASE_JSON")
   INDEX=$WORK/index/index; DB=$WORK/seforim.db
+  [ -z "$COMPLETE_NOTES" ] || INDEX=$WORK/complete-notes-index
   echo "resume: retained database, index and verified plan; no download or replanning"
   endgroup
 fi
@@ -550,7 +558,15 @@ epoch_rotation() {  # <name>: ROTATION, the rot192-i8i4 epoch a new base of the 
   local entry pinned="" printed
   for entry in ${ROTATIONS:-}; do [ "${entry%%=*}" != "$1" ] || pinned=${entry#*=}; done
   ROTATION_FITTED=""
-  if [ -n "$pinned" ]; then
+  if [ "$1" = meivin-qa491-complete-notes-onnx ]; then
+    # A fresh, full-rank 224xint8 + 32xint4 epoch. Never load a legacy
+    # 192-dimensional fit or a fitted ledger rotation for this candidate.
+    ROTATION=$FW/rotation.bin; ROTATION_FITTED=1
+    "$CLI" fit-rotation --warehouse "$WAREHOUSE" --head 224 --tail 32 --out "$ROTATION" | tee "$FW/fit-rotation.log"
+    printed=$(sed -n 's/^Epoch SHA-256: *\([0-9a-f]\{64\}\)$/\1/p' "$FW/fit-rotation.log")
+    [ -n "$printed" ] && [ "$(sha256sum < "$ROTATION" | cut -d' ' -f1)" = "$printed" ] \
+      || die "candidate fit-rotation did not write its declared epoch"
+  elif [ -n "$pinned" ]; then
     ROTATION=$HERE/rotation/$1.bin
     [ "$(sha256sum < "$ROTATION" | cut -d' ' -f1)" = "$pinned" ] || die "$ROTATION is not the rotation ROTATIONS pins ($pinned)"
   elif [ -f "$ROTATION_KEPT" ]; then
@@ -578,7 +594,7 @@ make_plan() {  # $FW/plan, split against the warehouse and, with one, against $P
       --model "$FAMILY" --passage-quantization "$PASSAGE_QUANTIZATION" \
       ${split[@]+"${split[@]}"} --created-at "$CREATED" --out "$FW/plan" | tee "$FW/plan.log"
   fi
-  PLAN=$FW/plan
+  PLAN=${RETAINED_PLAN:-$FW/plan}
   jq -e '.format == "otzaria-vector-plan" and .version == 1' "$PLAN/plan-manifest.json" >/dev/null || die "the plan is not an otzaria-vector-plan version 1"
   [ "$(jq -r .library_release_tag "$PLAN/plan-manifest.json")" = "$TAG" ] || die "the plan was made for another release"
   [ "$(jq -r .parity.mismatches "$PLAN/plan-manifest.json")" = 0 ] || die "the planner's key parity (G2) failed"
@@ -686,7 +702,14 @@ build_family() {  # <name> <release prefix> <codec, or ""> <alias threshold, or 
   local CACHE_POLICY=()
   [ "${MODEL_REQUIRE_CACHE:-false}" != true ] || CACHE_POLICY=(--cache-only)
   local FAMILY=$STATE/bin/families/$name/model.json FW=$WORK/$name RELEASE_TAG=$prefix-$TAG FRESH="" anchor
-  local TOKEN_AUDIT=() CPU_AUDIT=()
+  local TOKEN_AUDIT=() CPU_AUDIT=() RETAINED_PLAN="" COMPLETE_RECOVERY=""
+  if [ -n "$RESUME" ] && [ "$name" = meivin-qa491-complete-notes-onnx ]; then
+    COMPLETE_RECOVERY=1; RETAINED_PLAN=$FW/plan
+    # A failed assembly remains available byte-for-byte. Every recovery gets
+    # its own fresh output directory, including its fitted rotation and logs.
+    FW=$(mktemp -d "$FW/recovery-full256-224i8-32i4.XXXXXXXX")
+    echo "recovery output: $FW; retained plan/shards and original release are read-only"
+  fi
   if [ "$name" = meivin-qa491-complete-notes-onnx ]; then
     TOKEN_AUDIT=(--audit-tokens)
     CPU_AUDIT=(--allow-truncation)
@@ -712,7 +735,11 @@ build_family() {  # <name> <release prefix> <codec, or ""> <alias threshold, or 
   # ─── 3 embed + 4 warehouse ───────────────────────────────────────────────
   group "3 embed ($name): $TO_EMBED text(s) the warehouse lacks"
   EMBEDDED_BY="none: every vector came from the warehouse"
-  if [ "$TO_EMBED" -eq 0 ]; then
+  if [ -n "$COMPLETE_RECOVERY" ]; then
+    EMBEDDED_BY="retained verified GPU shards, imported warehouse; no inference or re-import"
+    echo "recovery: all $TO_EMBED pending-plan vectors were already imported and verified; skipping embedding and warehouse-add"
+    endgroup
+  elif [ "$TO_EMBED" -eq 0 ]; then
     [ -z "$FRESH" ] || die "the plan has no text to embed and there is no warehouse: nothing to assemble a release from"
     echo "every text of the plan has its vector in the warehouse already"
     endgroup
@@ -973,7 +1000,7 @@ build_family() {  # <name> <release prefix> <codec, or ""> <alias threshold, or 
     fi
     endgroup
   fi
-  [ "$name" = pardesqa491-windows-onnx ] || rm -rf "$FW"
+  [[ "$name" = pardesqa491-windows-onnx || "$name" = meivin-qa491-complete-notes-onnx ]] || rm -rf "$FW"
 }
 
 PUBLISHED=()
@@ -988,7 +1015,7 @@ for i in "${!NAMES[@]}"; do
   fi
   [ "$MODE" = dry-run ] || PUBLISHED+=("${PREFIXES[$i]}-$TAG")
 done
-if [ "$MODE" = dry-run ] || [[ " ${NAMES[*]} " == *" pardesqa491-windows-onnx "* ]]; then
+if [ "$MODE" = dry-run ] || [ -n "$COMPLETE_NOTES" ] || [[ " ${NAMES[*]} " == *" pardesqa491-windows-onnx "* ]]; then
   echo "work directory kept: $WORK"
 else
   rm -rf "$WORK"

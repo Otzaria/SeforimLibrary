@@ -53,7 +53,7 @@ on:
           - pardesqa491-windows-onnx
           - meivin-qa491-complete-notes-onnx
       resume:
-        description: 'Resume retained compact Pardes work; verify completed shards and never recompute them (base mode only)'
+        description: 'Resume retained Pardes embedding (base) or imported complete-notes work (dry-run/base); verify and reuse completed vectors'
         type: boolean
         required: false
         default: false
