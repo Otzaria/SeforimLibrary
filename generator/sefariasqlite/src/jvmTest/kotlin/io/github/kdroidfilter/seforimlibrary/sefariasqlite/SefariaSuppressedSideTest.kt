@@ -33,6 +33,8 @@ class SefariaSuppressedSideTest {
         /** (linkId, side, reasonMask) */
         val suppressed: List<List<Long>>,
         val coverage: Int,
+        val linkCount: Int,
+        val relatedCount: Int,
     )
 
     private val perekRef = "Bava Batra 28a:1-28b:1"
@@ -58,30 +60,21 @@ class SefariaSuppressedSideTest {
         val repo = SeforimRepository(":memory:", driver)
 
         val sourceId = repo.insertSource("Sefaria-Test")
-        val catId = repo.insertCategory(Category(0, null, "תלמוד", level = 0, order = 1))
-        fun book(id: Long, title: String, isBase: Boolean, lines: Int) = Book(
-            id = id, categoryId = catId, sourceId = sourceId, title = title, heRef = title,
+        val talmud = repo.insertCategory(Category(0, null, "תלמוד בבלי", level = 0, order = 1))
+        val halakha = repo.insertCategory(Category(0, null, "הלכה", level = 0, order = 2))
+        val yerushalmi = repo.insertCategory(Category(0, null, "תלמוד ירושלמי", level = 0, order = 3))
+        fun book(id: Long, title: String, isBase: Boolean, lines: Int, category: Long) = Book(
+            id = id, categoryId = category, sourceId = sourceId, title = title, heRef = title,
             authors = emptyList(), pubPlaces = emptyList(), pubDates = emptyList(),
             heShortDesc = null, notesContent = null, order = id.toFloat(), topics = emptyList(),
             isBaseBook = isBase, totalLines = lines, hasAltStructures = true,
             hasTeamim = false, hasNekudot = false,
         )
-        repo.insertBook(book(1, "בבא בתרא", isBase = true, lines = 4))
-        repo.insertBook(book(2, "מגדל עוז", isBase = false, lines = 2))
-        repo.insertLinesBatch(
-            listOf(
-                Line(id = 1, bookId = 1, lineIndex = 0, content = "bb 28a:1", heRef = "בבא בתרא כח., א"),
-                Line(id = 2, bookId = 1, lineIndex = 1, content = "bb 28a:2", heRef = "בבא בתרא כח., ב"),
-                Line(id = 3, bookId = 1, lineIndex = 2, content = "bb 28a:3", heRef = "בבא בתרא כח., ג"),
-                Line(id = 4, bookId = 1, lineIndex = 3, content = "bb 28b:1", heRef = "בבא בתרא כח:, א"),
-            )
-        )
-        repo.insertLinesBatch(
-            listOf(
-                Line(id = 10, bookId = 2, lineIndex = 0, content = "mo 5:1", heRef = "מגדל עוז ה, א"),
-                Line(id = 11, bookId = 2, lineIndex = 1, content = "mo 5:3", heRef = "מגדל עוז ה, ג"),
-            )
-        )
+        repo.insertBook(book(1, "בבא בתרא", isBase = true, lines = 4, category = talmud))
+        repo.insertBook(book(2, "מגדל עוז", isBase = false, lines = 2, category = talmud))
+        repo.insertBook(book(3, "טור", isBase = true, lines = 2, category = halakha))
+        repo.insertBook(book(4, "בית יוסף", isBase = false, lines = 3, category = halakha))
+        repo.insertBook(book(5, "ירושלמי כתובות", isBase = true, lines = 1, category = yerushalmi))
 
         val allRefs = listOf(
             RefEntry("Bava Batra 28a:1", "בבא בתרא כח., א", "Bava Batra", 1),
@@ -90,7 +83,26 @@ class SefariaSuppressedSideTest {
             RefEntry("Bava Batra 28b:1", "בבא בתרא כח:, א", "Bava Batra", 4),
             RefEntry("Migdal Oz 5:1", "מגדל עוז ה, א", "Migdal Oz", 1),
             RefEntry("Migdal Oz 5:3", "מגדל עוז ה, ג", "Migdal Oz", 2),
+            RefEntry("Tur, Choshen Mishpat 157:1", "טור, חושן משפט, קנז, א", "Tur", 1),
+            RefEntry("Tur, Even HaEzer 111:1", "טור, אבן העזר, קיא, א", "Tur", 2),
+            RefEntry("Beit Yosef, Choshen Mishpat 157:1:1", "בית יוסף, חושן משפט, קנז, א, א", "Beit Yosef", 1),
+            RefEntry("Beit Yosef, Choshen Mishpat 157:1:2", "בית יוסף, חושן משפט, קנז, א, ב", "Beit Yosef", 2),
+            RefEntry("Beit Yosef, Choshen Mishpat 157:2:1", "בית יוסף, חושן משפט, קנז, ב, א", "Beit Yosef", 3),
+            RefEntry("Jerusalem Talmud Ketubot 10:1:1", "תלמוד ירושלמי כתובות, י, א, א", "Jerusalem Talmud Ketubot", 1),
         )
+        val bookIds = mapOf(
+            "Bava Batra" to 1L, "Migdal Oz" to 2L, "Tur" to 3L, "Beit Yosef" to 4L, "Jerusalem Talmud Ketubot" to 5L,
+        )
+        val lines = allRefs.mapIndexed { index, ref ->
+            Line(
+                id = index + 1L,
+                bookId = bookIds.getValue(ref.path),
+                lineIndex = ref.lineIndex - 1,
+                content = ref.ref,
+                heRef = ref.heRef,
+            )
+        }
+        repo.insertLinesBatch(lines)
         val refsByBase = mutableMapOf<String, RefEntry>()
         allRefs.forEach { e ->
             val base = canonicalBase(e.ref)
@@ -98,20 +110,17 @@ class SefariaSuppressedSideTest {
             if (existing == null || e.lineIndex < existing.lineIndex) refsByBase[base] = e
         }
 
-        SefariaLinksImporter(
+        val importer = SefariaLinksImporter(
             repo,
             IdAllocatorBindings(InMemoryIdAllocator.load(path = null), repo),
             Logger.withTag("SefariaSuppressedSideTest"),
-        ).processLinksInParallel(
+        )
+        importer.processLinksInParallel(
             linksDir = linksDir,
             refsByCanonical = allRefs.groupBy { canonicalCitation(it.ref) },
             refsByBase = refsByBase,
-            lineKeyToId = mapOf(
-                "Bava Batra" to 0 to 1L, "Bava Batra" to 1 to 2L,
-                "Bava Batra" to 2 to 3L, "Bava Batra" to 3 to 4L,
-                "Migdal Oz" to 0 to 10L, "Migdal Oz" to 1 to 11L,
-            ),
-            lineIdToBookId = mapOf(1L to 1L, 2L to 1L, 3L to 1L, 4L to 1L, 10L to 2L, 11L to 2L),
+            lineKeyToId = allRefs.zip(lines).associate { (ref, line) -> (ref.path to line.lineIndex) to line.id },
+            lineIdToBookId = lines.associate { it.id to it.bookId },
             bookMetaById = mapOf(
                 1L to BookMeta(isBaseBook = true, categoryLevel = 0, priorityRank = 0),
                 2L to BookMeta(
@@ -122,10 +131,18 @@ class SefariaSuppressedSideTest {
                     baseTextBookIds = setOf(1L),
                     sefariaDeclaredBaseTextBookIds = setOf(1L),
                 ),
+                3L to BookMeta(isBaseBook = true, categoryLevel = 0, priorityRank = 1),
+                4L to BookMeta(
+                    isBaseBook = false, categoryLevel = 1, priorityRank = null, dependence = Dependence.COMMENTARY,
+                ),
+                5L to BookMeta(isBaseBook = true, categoryLevel = 0, priorityRank = 0),
             ),
             refsByPath = allRefs.groupBy { it.path },
             requireExportedVisibility = requireExportedVisibility,
         )
+        repo.rebuildCategoryClosure()
+        importer.demoteCrossCorpusDependantLinks()
+        importer.showTurCommentarySectionLinks()
 
         fun query(sql: String): List<List<Long>> {
             val conn: Connection = driver.getConnection()
@@ -143,6 +160,9 @@ class SefariaSuppressedSideTest {
                 "SELECT linkId, side, reasonMask FROM link_suppressed_side ORDER BY linkId, side"
             ),
             coverage = query("SELECT COUNT(*) FROM link_coverage").single().single().toInt(),
+            linkCount = query("SELECT COUNT(*) FROM link").single().single().toInt(),
+            relatedCount = query("SELECT COUNT(*) FROM link l JOIN connection_type c ON l.connectionTypeId = c.id WHERE c.name = 'RELATED'")
+                .single().single().toInt(),
         )
         repo.close()
         result
@@ -155,6 +175,9 @@ class SefariaSuppressedSideTest {
         const val HEADER_LEGACY = "Citation 1,Citation 2,Conection Type"
         fun row(c1: String, c2: String, m1: Int, m2: Int, type: String = "reference") =
             """"$c1","$c2","$type","","","","","","",$m1,$m2"""
+
+        fun turSectionRow(mask: Int = SuppressionReason.ANCHOR_NOT_SEGMENT) =
+            row("Beit Yosef, Choshen Mishpat 157:1", "Tur, Choshen Mishpat 157:1", mask, 0, type = "commentary")
 
         fun writeVisibilityMetadata(root: java.nio.file.Path, rows: List<String>) {
             fun sha256(value: String): String = java.security.MessageDigest.getInstance("SHA-256")
@@ -212,7 +235,7 @@ class SefariaSuppressedSideTest {
             row(
                 "Migdal Oz 5:1",
                 "Bava Batra 28a:1",
-                SuppressionReason.ANCHOR_NOT_SEGMENT,
+                SuppressionReason.OTHER_TOO_COARSE,
                 0,
                 type = "commentary",
             ),
@@ -220,6 +243,76 @@ class SefariaSuppressedSideTest {
 
         // The dependant→base CSV row is stored base→dependant. Citation 1's
         // verdict must therefore land on stored side 1, not side 0.
+        assertEquals(1, imported.suppressed.size)
+        assertEquals(
+            listOf(1L, SuppressionReason.OTHER_TOO_COARSE.toLong()),
+            imported.suppressed[0].drop(1),
+        )
+    }
+
+    @Test
+    fun turSectionLevelCommentaryCitationStaysVisibleOnTheCommentary() {
+        val imported = importWith(HEADER_WITH_MASKS, turSectionRow())
+        assertEquals(1, imported.linkCount)
+        assertTrue(imported.suppressed.isEmpty(), "got ${imported.suppressed}")
+    }
+
+    @Test
+    fun turSectionLevelRangeContributionKeepsTheSideHidden() {
+        val imported = importWith(
+            HEADER_WITH_MASKS,
+            turSectionRow(),
+            row(
+                "Beit Yosef, Choshen Mishpat 157:1-2", "Tur, Choshen Mishpat 157:1",
+                SuppressionReason.ANCHOR_NOT_SEGMENT, 0, type = "commentary",
+            ),
+        )
+        assertEquals(1, imported.linkCount)
+        assertEquals(2, imported.coverage)
+        assertEquals(listOf(1L, SuppressionReason.ANCHOR_NOT_SEGMENT.toLong()), imported.suppressed.single().drop(1))
+    }
+
+    @Test
+    fun turSectionLevelCommentaryKeepsOtherSuppressionReasons() {
+        val imported = importWith(
+            HEADER_WITH_MASKS,
+            turSectionRow(),
+            turSectionRow(SuppressionReason.OTHER_TOO_COARSE),
+        )
+        assertEquals(1, imported.linkCount)
+        val combined = SuppressionReason.ANCHOR_NOT_SEGMENT or SuppressionReason.OTHER_TOO_COARSE
+        assertEquals(listOf(1L, combined.toLong()), imported.suppressed.single().drop(1))
+    }
+
+    @Test
+    fun unrelatedSectionLevelCommentaryCitationStaysHidden() {
+        val imported = importWith(
+            HEADER_WITH_MASKS,
+            row("Migdal Oz 5:1", "Bava Batra 28a:1", SuppressionReason.ANCHOR_NOT_SEGMENT, 0, type = "commentary"),
+        )
+        assertEquals(1, imported.linkCount)
+        assertEquals(listOf(1L, SuppressionReason.ANCHOR_NOT_SEGMENT.toLong()), imported.suppressed.single().drop(1))
+    }
+
+    @Test
+    fun crossCorpusCommentaryCitationStaysHiddenAfterDemotion() {
+        val imported = importWith(
+            HEADER_WITH_MASKS,
+            row(
+                "Jerusalem Talmud Ketubot 10:1:1", "Tur, Even HaEzer 111",
+                0, SuppressionReason.ANCHOR_NOT_SEGMENT, type = "commentary",
+            ),
+        )
+        assertEquals(1, imported.relatedCount)
+        assertEquals(listOf(1L, SuppressionReason.ANCHOR_NOT_SEGMENT.toLong()), imported.suppressed.single().drop(1))
+    }
+
+    @Test
+    fun sectionLevelReferenceCitationStaysHidden() {
+        val imported = importWith(
+            HEADER_WITH_MASKS,
+            row("Bava Batra 28a:1", "Migdal Oz 5:1", 0, SuppressionReason.ANCHOR_NOT_SEGMENT),
+        )
         assertEquals(1, imported.suppressed.size)
         assertEquals(
             listOf(1L, SuppressionReason.ANCHOR_NOT_SEGMENT.toLong()),

@@ -756,6 +756,7 @@ class SefariaDirectImporter(
         // See [SefariaLinksImporter.demoteCrossCorpusDependantLinks].
         logger.i { "Demoting cross-corpus dependant links per Sefaria categorisation..." }
         linksImporter.demoteCrossCorpusDependantLinks(densityPrimaryBaseEdges)
+        linksImporter.showTurCommentarySectionLinks()
         linksImporter.updateBookHasLinks()
 
         // Capture the authoritative post-demotion per-type split. Demotion only
