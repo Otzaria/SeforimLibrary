@@ -212,7 +212,7 @@ class SefariaSuppressedSideTest {
             row(
                 "Migdal Oz 5:1",
                 "Bava Batra 28a:1",
-                SuppressionReason.ANCHOR_NOT_SEGMENT,
+                SuppressionReason.OTHER_TOO_COARSE,
                 0,
                 type = "commentary",
             ),
@@ -220,6 +220,28 @@ class SefariaSuppressedSideTest {
 
         // The dependant→base CSV row is stored base→dependant. Citation 1's
         // verdict must therefore land on stored side 1, not side 0.
+        assertEquals(1, imported.suppressed.size)
+        assertEquals(
+            listOf(1L, SuppressionReason.OTHER_TOO_COARSE.toLong()),
+            imported.suppressed[0].drop(1),
+        )
+    }
+
+    @Test
+    fun sectionLevelCommentaryCitationStaysVisibleOnTheCommentary() {
+        val imported = importWith(
+            HEADER_WITH_MASKS,
+            row("Migdal Oz 5:1", "Bava Batra 28a:1", SuppressionReason.ANCHOR_NOT_SEGMENT, 0, type = "commentary"),
+        )
+        assertTrue(imported.suppressed.isEmpty(), "got ${imported.suppressed}")
+    }
+
+    @Test
+    fun sectionLevelReferenceCitationStaysHidden() {
+        val imported = importWith(
+            HEADER_WITH_MASKS,
+            row("Bava Batra 28a:1", "Migdal Oz 5:1", 0, SuppressionReason.ANCHOR_NOT_SEGMENT),
+        )
         assertEquals(1, imported.suppressed.size)
         assertEquals(
             listOf(1L, SuppressionReason.ANCHOR_NOT_SEGMENT.toLong()),

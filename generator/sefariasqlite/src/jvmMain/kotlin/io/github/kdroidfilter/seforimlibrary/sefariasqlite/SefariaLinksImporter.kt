@@ -631,7 +631,7 @@ internal class SefariaLinksImporter(
                             val srcSideMask = if (wasSwapped) exportedMask2 else exportedMask1
                             val tgtSideMask = if (wasSwapped) exportedMask1 else exportedMask2
                             queueSuppression(linkId, side = 0, mask = srcSideMask)
-                            queueSuppression(linkId, side = 1, mask = tgtSideMask)
+                            queueSuppression(linkId, side = 1, mask = commentarySideMask(storedType, tgtSideMask))
                         }
 
                         // Ranged sides: record the range end + per-line coverage.
@@ -1235,6 +1235,13 @@ internal fun computeBaseProvenance(storedSrcBook: Long, storedTgtMeta: BookMeta?
 
 /** The reasons that make a ranged side stop covering its unit's lines. */
 internal const val WHOLE_UNIT_REASONS = SuppressionReason.WHOLE_PEREK or SuppressionReason.WHOLE_PARASHA
+
+/**
+ * The commentary side of a COMMENTARY link stays visible when Sefaria hid it only for citing a
+ * whole section (Tur Choshen Mishpat → Beit Yosef 157:1): the link resolves to the section's first line.
+ */
+internal fun commentarySideMask(storedType: ConnectionType, mask: Int): Int =
+    if (storedType == ConnectionType.COMMENTARY && mask == SuppressionReason.ANCHOR_NOT_SEGMENT) 0 else mask
 
 /**
  * A required `Suppression Mask 1/2` cell from a new-format export. Zero must be
