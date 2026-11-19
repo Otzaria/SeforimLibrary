@@ -128,11 +128,16 @@ internal data class SeifimHeading(
 
 internal data class SeifMarker(val lineId: Long, val lineIndex: Long, val label: String)
 
-/** One COMMENTARY link row: the book line it lands on and the SA source ref. */
+/**
+ * One COMMENTARY link row: the book line it lands on, and the SA source line
+ * (its book, its position in that book, its heRef).
+ */
 internal data class SeifLinkRow(
     val lineId: Long,
     val lineIndex: Long,
     val baseHeRef: String,
+    val baseBookId: Long,
+    val baseLineIndex: Long,
 )
 
 internal data class SeifimSynthesisResult(val structures: Int, val leaves: Int)
@@ -272,33 +277,51 @@ internal fun synthesizeSeifimAltTocs(
 /**
  * Derives the group-opening markers from COMMENTARY link rows.
  *
- * [rows] must be ordered by `(lineIndex, base lineIndex)` so the first link
- * of a multi-linked line decides its se'if. The group key is the base line's
- * full heRef (siman+se'if) — not the se'if letter alone — so a new siman
- * whose first commented se'if carries the same letter still opens a group.
- * The label is the se'if alone: the trailing comma-separated heRef segment.
+ * [rows] must be ordered by `(lineIndex, base lineIndex)`. The group key is
+ * the base line's full heRef (siman+se'if) — not the se'if letter alone — so a
+ * new siman whose first commented se'if carries the same letter still opens a
+ * group. The label is the se'if alone: the trailing comma-separated heRef
+ * segment.
+ *
+ * A ס"ק that bears on several se'ifim is linked from each of them, so a
+ * multi-linked line may name an earlier se'if besides its own. Such a line
+ * stays in the current group when one of its links is that group's se'if;
+ * otherwise it opens the nearest se'if after it in the same base book. Only a
+ * line with no such link falls back to its first link — even backwards, since
+ * then nothing else says where it belongs.
  */
 internal fun computeSeifMarkers(rows: List<SeifLinkRow>): List<SeifMarker> {
-    val refByLine = LinkedHashMap<Long, Triple<Long, String, String>>() // lineIndex -> (lineId, key, seif)
+    val candidatesByLine = sortedMapOf<Long, MutableList<SeifLinkRow>>()
     for (row in rows) {
-        if (refByLine.containsKey(row.lineIndex)) continue
-        val comma = row.baseHeRef.lastIndexOf(',')
-        if (comma < 0) continue
-        val seif = row.baseHeRef.substring(comma + 1).trim()
-        if (seif.isEmpty()) continue
-        refByLine[row.lineIndex] = Triple(row.lineId, row.baseHeRef, seif)
+        if (seifOfHeRef(row.baseHeRef).isEmpty()) continue
+        candidatesByLine.getOrPut(row.lineIndex) { mutableListOf() } += row
     }
 
     val markers = mutableListOf<SeifMarker>()
-    var previousKey: String? = null
-    for (lineIndex in refByLine.keys.sorted()) {
-        val (lineId, key, seif) = refByLine.getValue(lineIndex)
-        if (key != previousKey) {
-            markers += SeifMarker(lineId = lineId, lineIndex = lineIndex, label = "סעיף $seif")
-            previousKey = key
+    var current: SeifLinkRow? = null
+    for ((lineIndex, candidates) in candidatesByLine) {
+        val group = current
+        if (group != null && candidates.any { it.baseHeRef == group.baseHeRef }) continue
+        val nextInGroupBook = group?.let { g ->
+            candidates
+                .filter { it.baseBookId == g.baseBookId && it.baseLineIndex > g.baseLineIndex }
+                .minByOrNull { it.baseLineIndex }
         }
+        val chosen = nextInGroupBook ?: candidates.first()
+        markers += SeifMarker(
+            lineId = chosen.lineId,
+            lineIndex = lineIndex,
+            label = "סעיף ${seifOfHeRef(chosen.baseHeRef)}",
+        )
+        current = chosen
     }
     return markers
+}
+
+/** The se'if segment of an SA heRef — the text after its last comma — or "". */
+private fun seifOfHeRef(heRef: String): String {
+    val comma = heRef.lastIndexOf(',')
+    return if (comma < 0) "" else heRef.substring(comma + 1).trim()
 }
 
 /**
@@ -363,7 +386,7 @@ internal fun readLinkedSeifimCandidateSnapshots(conn: Connection): List<SeifimBo
         var declaredBaseLinkCount = 0
         conn.prepareStatement(
             """
-            SELECT ml.id, ml.lineIndex, bl.heRef, k.sourceBookId
+            SELECT ml.id, ml.lineIndex, bl.heRef, k.sourceBookId, bl.lineIndex
             FROM link k INDEXED BY idx_link_target_book
             JOIN connection_type c ON c.id = k.connectionTypeId
             JOIN line ml ON ml.id = k.targetLineId
@@ -379,7 +402,13 @@ internal fun readLinkedSeifimCandidateSnapshots(conn: Connection): List<SeifimBo
                 while (rs.next()) {
                     declaredBaseLinkCount++
                     if (rs.getLong(4) in shulchanAruchBaseIds) {
-                        linkRows += SeifLinkRow(rs.getLong(1), rs.getLong(2), rs.getString(3))
+                        linkRows += SeifLinkRow(
+                            lineId = rs.getLong(1),
+                            lineIndex = rs.getLong(2),
+                            baseHeRef = rs.getString(3),
+                            baseBookId = rs.getLong(4),
+                            baseLineIndex = rs.getLong(5),
+                        )
                     }
                 }
             }

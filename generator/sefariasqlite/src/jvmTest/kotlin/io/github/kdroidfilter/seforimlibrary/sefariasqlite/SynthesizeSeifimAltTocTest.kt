@@ -27,8 +27,90 @@ import kotlin.test.assertTrue
 
 class ComputeSeifMarkersTest {
 
-    private fun row(lineIndex: Long, heRef: String, lineId: Long = lineIndex * 10) =
-        SeifLinkRow(lineId = lineId, lineIndex = lineIndex, baseHeRef = heRef)
+    // Base line order follows the heRef here: siman * 1000 + se'if, both as gematria.
+    private fun row(lineIndex: Long, heRef: String, lineId: Long = lineIndex * 10, baseBookId: Long = 1) =
+        SeifLinkRow(
+            lineId = lineId,
+            lineIndex = lineIndex,
+            baseHeRef = heRef,
+            baseBookId = baseBookId,
+            baseLineIndex = baseLineOf(heRef),
+        )
+
+    private fun baseLineOf(heRef: String): Long {
+        val segments = heRef.split(',').map { it.trim() }
+        if (segments.size < 2) return 0
+        val siman = gematria(segments[segments.size - 2].substringAfterLast(' '))
+        return siman * 1000 + gematria(segments.last())
+    }
+
+    private fun gematria(text: String): Long = text.sumOf { letter ->
+        val i = "אבגדהוזחטיכלמנסעפצקרשת".indexOf(letter)
+        when {
+            i < 0 -> 0L
+            i < 10 -> (i + 1).toLong()
+            i < 18 -> ((i - 8) * 10).toLong()
+            else -> ((i - 17) * 100).toLong()
+        }
+    }
+
+    private fun magenAvraham447(lineIndex: Long, vararg seifim: String) =
+        seifim.map { row(lineIndex, "שולחן ערוך, אורח חיים, תמז, $it") }
+
+    @Test
+    fun `a link to an earlier seif does not reopen it, like Magen Avraham siman 447`() {
+        // Otzaria/otzaria#5503: the multi-linked lines of siman 447 in the 2026-11 library.
+        val rows = listOf(
+            magenAvraham447(4774, "א", "ב"), magenAvraham447(4777, "א"),
+            magenAvraham447(4778, "ב", "ה"), magenAvraham447(4780, "ג", "ד"),
+            magenAvraham447(4783, "ב", "ד"), magenAvraham447(4784, "ד", "ט"),
+            magenAvraham447(4788, "ג", "ה"), magenAvraham447(4803, "ב", "ה"),
+            magenAvraham447(4805, "ו"), magenAvraham447(4806, "ז", "ח"),
+            magenAvraham447(4811, "ד", "ה", "ח"), magenAvraham447(4813, "ט"),
+            magenAvraham447(4814, "י"), magenAvraham447(4815, "ד", "יא", "יב"),
+            magenAvraham447(4816, "יא"), magenAvraham447(4818, "א", "יא"),
+            magenAvraham447(4819, "יא", "יב"),
+        ).flatten()
+
+        assertEquals(
+            listOf(
+                4774L to "סעיף א", 4778L to "סעיף ב", 4780L to "סעיף ג", 4783L to "סעיף ד",
+                4788L to "סעיף ה", 4805L to "סעיף ו", 4806L to "סעיף ז", 4811L to "סעיף ח",
+                4813L to "סעיף ט", 4814L to "סעיף י", 4815L to "סעיף יא",
+            ),
+            computeSeifMarkers(rows).map { it.lineIndex to it.label },
+        )
+    }
+
+    @Test
+    fun `a line linked only to an earlier seif still opens it`() {
+        val markers = computeSeifMarkers(
+            listOf(
+                row(1, "שולחן ערוך, יורה דעה, קמב, ה"),
+                row(2, "שולחן ערוך, יורה דעה, קמב, ו"),
+                row(3, "שולחן ערוך, יורה דעה, קמב, ה"),
+            ),
+        )
+        assertEquals(
+            listOf(1L to "סעיף ה", 2L to "סעיף ו", 3L to "סעיף ה"),
+            markers.map { it.lineIndex to it.label },
+        )
+    }
+
+    @Test
+    fun `forward choice stays within the current base book`() {
+        val markers = computeSeifMarkers(
+            listOf(
+                row(1, "שולחן ערוך, אורח חיים, ב, ג", baseBookId = 1),
+                row(2, "שולחן ערוך, אורח חיים, ב, א", baseBookId = 1),
+                row(2, "שולחן ערוך הרב, אורח חיים, ב, ה", baseBookId = 2),
+            ),
+        )
+        assertEquals(
+            listOf(1L to "סעיף ג", 2L to "סעיף א"),
+            markers.map { it.lineIndex to it.label },
+        )
+    }
 
     @Test
     fun `marker opens each seif group, like Mishnah Berurah siman 1`() {
@@ -49,7 +131,7 @@ class ComputeSeifMarkersTest {
     }
 
     @Test
-    fun `first link decides a multi-linked line`() {
+    fun `first link decides a multi-linked line with no current group`() {
         val markers = computeSeifMarkers(
             listOf(
                 row(10, "שולחן ערוך, אורח חיים ב, א"),
