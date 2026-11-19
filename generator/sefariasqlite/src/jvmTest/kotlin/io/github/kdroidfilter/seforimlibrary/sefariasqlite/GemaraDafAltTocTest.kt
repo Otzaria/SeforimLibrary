@@ -41,10 +41,17 @@ class GemaraDafAltTocTest {
         assertEquals(listOf("דף ב.", "דף ב:"), texts("<b><big>גמ'</big></b> (דף ב.) תנו רבנן (דף ב:) עוד"))
         assertEquals(listOf("דף קעו."), texts("(דף קעו.)"))
         assertEquals(listOf("דף יז.", "דף ג:"), texts("(דף יז ע\"א) ו(דף ג ע\"ב)"))
+        // A stray `(` before a marker is common; reference words only matter there.
+        assertEquals(listOf("דף כא:"), texts("משתעי אינשי הכי ((דף כא ע\"ב) מי דמי"))
+        assertEquals(listOf("דף כז."), texts("<b>גמ'</b> ((דף כז.) אמר"))
+        assertEquals(listOf("דף ב:"), texts("לקמן מפורש (דף ב:) תנו"))
+        assertEquals(listOf("דף נו:"), texts("כדלקמן א ב ג ((דף נו:)"))
         for (reference in listOf(
             "(דף ח: ע\"ש)", "(דף לעיל מח:)", "(דף לקמן יח.)", "(דף יד: טו.)", "(דף ו. דף לג.)",
             "(דף כא. ובפ\"א דחלה)", "(דף נ. ע\"ש (ג\"א)", "(דף ס)", "(דף קל)", "(ברכות דף יב.)", "(דף ח.]",
-            "[דף ח ע\"א]", "([דף ח ע\"א])", "לקמן ((דף י\"ט ע\"ב)", "(דף יז  ע\"א)",
+            "[דף ח ע\"א]", "([דף ח ע\"א])", "(דף יז  ע\"א)", "(((דף ב.)",
+            "דאמרי' לקמן ((דף י\"ט ע\"ב)", "בפרק בני העיר ((דף ל ע\"א)", "וגרסינן (בה) בפירקא קמא ((דף ג ע\"א)",
+            "ודלעיל <b>א</b> ((דף ג.)",
         )) {
             assertEquals(emptyList(), texts(reference), reference)
         }

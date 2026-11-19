@@ -57,15 +57,24 @@ internal data class GemaraAmud(val daf: String, val value: Int, val side: Char) 
     val key get() = value * 2 + if (side == '.') 0 else 1
 }
 
-// Nothing but the daf and amud inside one pair of round brackets: `(דף ח: ע"ש)`,
-// `(דף לעיל מח:)` and `((דף יט ע"ב)` are references.
-private val GEMARA_DAF_MARKER = Regex("""(?<!\()\(דף ([א-ת"'׳״]{1,5})(?:([.:])| ע"([אב]))\)""")
+// Nothing but the daf and amud inside round brackets: `(דף ח: ע"ש)` and `(דף לעיל מח:)`
+// are references. A stray extra `(` is common in the text, so `((דף` counts too.
+private val GEMARA_DAF_MARKER = Regex("""(?<!\()(\(?)\(דף ([א-ת"'׳״]{1,5})(?:([.:])| ע"([אב]))\)""")
 private val GEMARA_DAF_HEADING = Regex("""דף ([א-ת"'׳״]{1,5})[.:]""")
+private val HTML_TAG = Regex("<[^>]*>")
+private val WHITESPACE = Regex("""\s+""")
+private val REFERENCE_WORD = Regex("""ו?(?:ד|כד)?(?:לקמן|לעיל|בפרק|בפירקא)""")
+
+/** `לקמן ((דף יט ע"ב)`: one of the three words before a `((` marker makes it a reference. */
+private fun followsReferenceWord(textBefore: String): Boolean =
+    textBefore.replace(HTML_TAG, " ").split(WHITESPACE).filter { it.isNotEmpty() }.takeLast(3)
+        .any { REFERENCE_WORD.matches(it.trim('(', ')', '\'', '"', ',', '.', ':')) }
 
 /** The Gemara-daf markers of [content], in order. */
 internal fun findGemaraDafMarkers(content: String): List<GemaraAmud> =
     GEMARA_DAF_MARKER.findAll(content).mapNotNull { match ->
-        val (daf, side, amud) = match.destructured
+        val (extraParen, daf, side, amud) = match.destructured
+        if (extraParen.isNotEmpty() && followsReferenceWord(content.substring(0, match.range.first))) return@mapNotNull null
         val value = gematriaValue(daf) ?: return@mapNotNull null
         GemaraAmud(daf, value, side.firstOrNull() ?: if (amud == "א") '.' else ':')
     }.toList()
