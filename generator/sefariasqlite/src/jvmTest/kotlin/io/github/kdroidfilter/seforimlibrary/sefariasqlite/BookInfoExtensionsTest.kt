@@ -186,6 +186,46 @@ class BookInfoExtensionsTest {
     }
 
     @Test
+    fun `a delete marker clears the book description, an empty cell keeps it`() = runBlocking {
+        val driver = JdbcSqliteDriver(url = "jdbc:sqlite::memory:")
+        SeforimDb.Schema.create(driver)
+        val repo = SeforimRepository(":memory:", driver)
+        val sourceId = repo.insertSource("Sefaria")
+        val catId = repo.insertCategory(Category(0, null, "תלמוד", level = 0, order = 1))
+        fun book(title: String) = repo.insertBook(
+            Book(categoryId = catId, sourceId = sourceId, title = title, heShortDesc = "קצר ספריא", heDesc = "ארוך ספריא"),
+        )
+        val cleared = book("כרך")
+        val shortOnly = book("קצר בלבד")
+        val kept = book("נשמר")
+        val bindings = IdAllocatorBindings(InMemoryIdAllocator.load(path = null), repo)
+        val descriptions = parseDescriptionOverrides(
+            listOf(
+                "categoryPath,title,author,heShortDesc,heDesc,heDescNew",
+                "תלמוד,כרך,,[מחק],ארוך ספריא,[מחק]",
+                "תלמוד,קצר בלבד,,[מחק],ארוך ספריא,ארוך חדש",
+                "תלמוד,נשמר,,,ארוך ספריא,",
+            ),
+        )
+
+        applyMetadata(repo, bindings, emptyMap(), descriptions, emptyList(), Logger.withTag("test"))
+
+        repo.getBook(cleared)!!.let {
+            assertEquals(null, it.heShortDesc)
+            assertEquals(null, it.heDesc)
+        }
+        repo.getBook(shortOnly)!!.let {
+            assertEquals(null, it.heShortDesc)
+            assertEquals("ארוך חדש", it.heDesc)
+        }
+        repo.getBook(kept)!!.let {
+            assertEquals("קצר ספריא", it.heShortDesc)
+            assertEquals("ארוך ספריא", it.heDesc)
+        }
+        repo.close()
+    }
+
+    @Test
     fun `empty extension fields leave the book untouched`() = runBlocking {
         val driver = JdbcSqliteDriver(url = "jdbc:sqlite::memory:")
         SeforimDb.Schema.create(driver)

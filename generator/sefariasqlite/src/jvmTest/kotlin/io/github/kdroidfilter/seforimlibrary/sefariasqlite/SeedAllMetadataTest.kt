@@ -3,6 +3,7 @@ package io.github.kdroidfilter.seforimlibrary.sefariasqlite
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
+import kotlin.test.assertFalse
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
@@ -59,6 +60,36 @@ class SeedAllMetadataTest {
         // heDesc comes from heDescNew (column index 5), not the original heDesc (index 4).
         assertEquals("new long desc", mahram.heDesc)
         assertEquals("new", map.getValue("בראשית").heDesc)
+    }
+
+    @Test
+    fun descriptions_deleteMarkerClearsOnlyItsCell() {
+        val map = parseDescriptionOverrides(
+            listOf(
+                "categoryPath,title,author,heShortDesc,heDesc,heDescNew",
+                "cat,שני התאים,author,[מחק],old,[מחק]",
+                "cat,רק הקצר,author,[מחק],old,new long",
+                "cat,ריק,author,,old,",
+            ),
+        )
+
+        val both = map.getValue("שני התאים")
+        assertTrue(both.clearShortDesc)
+        assertTrue(both.clearDesc)
+        assertNull(both.heShortDesc)
+        assertNull(both.heDesc)
+
+        val shortOnly = map.getValue("רק הקצר")
+        assertTrue(shortOnly.clearShortDesc)
+        assertFalse(shortOnly.clearDesc)
+        assertEquals("new long", shortOnly.heDesc)
+
+        // An empty cell still keeps the existing text: nothing is cleared.
+        val empty = map.getValue("ריק")
+        assertFalse(empty.clearShortDesc)
+        assertFalse(empty.clearDesc)
+        assertNull(empty.heShortDesc)
+        assertNull(empty.heDesc)
     }
 
     @Test

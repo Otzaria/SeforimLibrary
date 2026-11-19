@@ -1234,6 +1234,16 @@ class SeforimRepository(databasePath: String, private val driver: SqlDriver) : L
         }
     }
 
+    /** Clears the descriptions that an explicit `[מחק]` override names. */
+    suspend fun clearBookDescriptions(
+        bookId: Long,
+        clearShortDesc: Boolean,
+        clearDesc: Boolean,
+    ) = withContext(Dispatchers.IO) {
+        if (clearShortDesc) database.bookQueriesQueries.clearShortDescription(bookId)
+        if (clearDesc) database.bookQueriesQueries.clearDescription(bookId)
+    }
+
     /** Lightweight (id, title) pairs for every book — used by ForDB metadata post-processes. */
     suspend fun getAllBookTitleIds(): List<Pair<Long, String>> = withContext(Dispatchers.IO) {
         database.bookQueriesQueries.selectAllTitleId().executeAsList().map { it.id to it.title }
