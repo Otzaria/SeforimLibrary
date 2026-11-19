@@ -155,6 +155,8 @@ fun main(args: Array<String>) {
     val bookNotices = loadBookNoticeRows(logger)
     val inlineMarkerRules = downloadOptionalForDbFile(INLINE_MARKER_ALT_TOC_FILE, logger)
         ?.let(::parseInlineMarkerRules).orEmpty()
+    val gemaraDafRules = downloadOptionalForDbFile(GEMARA_DAF_ALT_TOC_FILE, logger)
+        ?.let(::parseGemaraDafRules).orEmpty()
 
     DriverManager.getConnection("jdbc:sqlite:$dbPath").use { conn ->
         conn.autoCommit = false
@@ -236,6 +238,9 @@ fun main(args: Array<String>) {
             for (rule in inlineMarkerRules.filter { it.bookTitle !in titles }) {
                 logger.w { "ForDB $INLINE_MARKER_ALT_TOC_FILE: no book titled '${rule.bookTitle}' in this DB" }
             }
+            for (rule in gemaraDafRules.filter { it.bookTitle !in titles }) {
+                logger.w { "ForDB $GEMARA_DAF_ALT_TOC_FILE: no book titled '${rule.bookTitle}' in this DB" }
+            }
         }
         // Fails like the build on a missing list or an unreadable row; unmatched refs only warn.
         val divineNameOverrides = DriverManager.getConnection("jdbc:sqlite:$tempDb").use {
@@ -250,7 +255,7 @@ fun main(args: Array<String>) {
                 "${categoryDescriptionOverrides.size} category-description overrides, " +
                 "${authorCanonicalNames.size} author renames, ${bookNotices.banners.size} banner rows, " +
                 "${bookNotices.protections.size} protection rows, $divineNameOverrides divine-name override rows, " +
-                "${inlineMarkerRules.size} inline-marker alt-TOC rules. " +
+                "${inlineMarkerRules.size} inline-marker alt-TOC rules, ${gemaraDafRules.size} Gemara-daf alt-TOC rules. " +
                 "Original DB/buildstate untouched."
         }
     } finally {

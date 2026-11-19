@@ -26,9 +26,21 @@ import kotlin.system.exitProcess
  * Usage:
  *   ./gradlew :sefariasqlite:buildInlineMarkerAltToc -PseforimDb=/path/to/seforim.db
  */
-fun main(args: Array<String>) {
+fun main(args: Array<String>) =
+    runMarkerAltTocStage(args, "InlineMarkerAltToc", INLINE_MARKER_ALT_TOC_FILE, ::parseInlineMarkerRules) { conn, rules, ids ->
+        writeInlineMarkerAltTocs(conn, rules, ids)
+    }
+
+/** Runs a ForDB-driven alt-TOC stage against the DB and its build state; exits 1 on failure. */
+internal fun <R> runMarkerAltTocStage(
+    args: Array<String>,
+    tag: String,
+    forDbFile: String,
+    parse: (List<String>) -> List<R>,
+    write: (Connection, List<R>, AttachedBuildStateIds) -> Map<String, Int>,
+) {
     Logger.setMinSeverity(Severity.Info)
-    val logger = Logger.withTag("InlineMarkerAltToc")
+    val logger = Logger.withTag(tag)
 
     val dbPath = resolveSeforimDbPath(args)
     if (!dbPath.exists()) {
@@ -37,10 +49,9 @@ fun main(args: Array<String>) {
     }
     try {
         // An archive published before the file existed has no rules.
-        val rules = downloadOptionalForDbFile(INLINE_MARKER_ALT_TOC_FILE, logger)
-            ?.let(::parseInlineMarkerRules).orEmpty()
+        val rules = downloadOptionalForDbFile(forDbFile, logger)?.let(parse).orEmpty()
         if (rules.isEmpty()) {
-            logger.i { "No $INLINE_MARKER_ALT_TOC_FILE rules" }
+            logger.i { "No $forDbFile rules" }
             return
         }
         val buildStatePath = resolveSeifimBuildStatePath(dbPath)
@@ -52,12 +63,12 @@ fun main(args: Array<String>) {
                 st.setString(1, buildStatePath.toAbsolutePath().toString())
                 st.execute()
             }
-            val written = writeInlineMarkerAltTocs(conn, rules, AttachedBuildStateIds(conn))
+            val written = write(conn, rules, AttachedBuildStateIds(conn))
             for ((title, count) in written) logger.i { "  $title: $count entries" }
         }
         BuildStateVerifier.verifyFreshSnapshot(buildStatePath, dbPath, emptyMap())
     } catch (e: Exception) {
-        logger.e(e) { "Failed to build inline-marker alt-TOCs; aborting" }
+        logger.e(e) { "Failed to build the $forDbFile alt-TOCs; aborting" }
         exitProcess(1)
     }
 }
@@ -66,8 +77,8 @@ internal const val INLINE_MARKER_ALT_TOC_FILE = "inline_marker_alt_toc.csv"
 private const val INLINE_MARKER_HEADER = "bookName,marker,structureKey,structureHeTitle,groupBy"
 
 /** Keys the app gives other meanings (label or heading injection, sidebar order). */
-private val RESERVED_STRUCTURE_KEYS = setOf("Simanim", "Seifim", "Topic", "Parasha", "SimanNames")
-private val STRUCTURE_KEY_REGEX = Regex("[A-Za-z][A-Za-z0-9]*")
+internal val RESERVED_STRUCTURE_KEYS = setOf("Simanim", "Seifim", "Topic", "Parasha", "SimanNames")
+internal val STRUCTURE_KEY_REGEX = Regex("[A-Za-z][A-Za-z0-9]*")
 private val MARKER_WORD_REGEX = Regex("[א-ת]+")
 
 internal data class InlineMarkerRule(
@@ -172,19 +183,29 @@ internal fun writeInlineMarkerAltTocs(
     conn: Connection,
     rules: List<InlineMarkerRule>,
     stableIds: AttachedBuildStateIds? = null,
+): Map<String, Int> = writeEachBookAtomically(conn, INLINE_MARKER_ALT_TOC_FILE, rules.map { it.bookTitle to it }) { bookId, rule ->
+    val lines = readMarkerLines(conn, bookId)
+    val planned = planInlineMarkerEntries(rule, lines, readMarkerToc(conn, bookId))
+    check(planned.any { it.isMarker }) { "$INLINE_MARKER_ALT_TOC_FILE: no '[${rule.marker} …]' marker in '${rule.bookTitle}'" }
+    writeMarkerStructure(conn, bookId, rule.structureKey, rule.structureHeTitle, planned, lines, stableIds)
+}
+
+/** Runs [write] for each book title in one transaction; returns its counts by title. */
+internal fun <R> writeEachBookAtomically(
+    conn: Connection,
+    forDbFile: String,
+    rulesByTitle: List<Pair<String, R>>,
+    write: (bookId: Long, rule: R) -> Int,
 ): Map<String, Int> {
-    check(conn.autoCommit) { "writeInlineMarkerAltTocs requires an unowned JDBC connection" }
+    check(conn.autoCommit) { "$forDbFile stage requires an unowned JDBC connection" }
     conn.autoCommit = false
     return try {
-        val written = rules.associate { rule ->
+        val written = rulesByTitle.associate { (title, rule) ->
             val bookId = conn.prepareStatement("SELECT id FROM book WHERE title = ?").use { st ->
-                st.setString(1, rule.bookTitle)
+                st.setString(1, title)
                 st.executeQuery().use { rs -> if (rs.next()) rs.getLong(1) else null }
-            } ?: error("$INLINE_MARKER_ALT_TOC_FILE: no book titled '${rule.bookTitle}'")
-            val lines = readMarkerLines(conn, bookId)
-            val planned = planInlineMarkerEntries(rule, lines, readMarkerToc(conn, bookId))
-            check(planned.any { it.isMarker }) { "$INLINE_MARKER_ALT_TOC_FILE: no '[${rule.marker} …]' marker in '${rule.bookTitle}'" }
-            rule.bookTitle to writeStructure(conn, bookId, rule, planned, lines, stableIds)
+            } ?: error("$forDbFile: no book titled '$title'")
+            title to write(bookId, rule)
         }
         conn.commit()
         written
@@ -196,7 +217,7 @@ internal fun writeInlineMarkerAltTocs(
     }
 }
 
-private fun readMarkerLines(conn: Connection, bookId: Long): List<MarkerLineRow> =
+internal fun readMarkerLines(conn: Connection, bookId: Long): List<MarkerLineRow> =
     conn.prepareStatement(
         """
         SELECT l.id, l.lineIndex, l.content, lt.tocEntryId
@@ -214,7 +235,7 @@ private fun readMarkerLines(conn: Connection, bookId: Long): List<MarkerLineRow>
         }
     }
 
-private fun readMarkerToc(conn: Connection, bookId: Long): List<MarkerTocRow> =
+internal fun readMarkerToc(conn: Connection, bookId: Long): List<MarkerTocRow> =
     conn.prepareStatement(
         """
         SELECT t.id, t.parentId, tt.text, t.lineId, l.lineIndex
@@ -235,13 +256,21 @@ private fun readMarkerToc(conn: Connection, bookId: Long): List<MarkerTocRow> =
         }
     }
 
-private fun writeStructure(
+/**
+ * Replaces the book's structure of [structureKey] with [planned]. Each line belongs to
+ * its entry in [ownerPathByLineIndex], or the preceding entry when [carryOwner] is set.
+ */
+internal fun writeMarkerStructure(
     conn: Connection,
     bookId: Long,
-    rule: InlineMarkerRule,
+    structureKey: String,
+    structureHeTitle: String,
     planned: List<PlannedMarkerEntry>,
     lines: List<MarkerLineRow>,
     stableIds: AttachedBuildStateIds?,
+    // One line with several markers maps to its last (the app keeps a clicked earlier one selected).
+    ownerPathByLineIndex: Map<Int, String> = planned.filter { it.isMarker }.associate { it.lineIndex to it.path },
+    carryOwner: Boolean = true,
 ): Int {
     for (sql in listOf(
         "DELETE FROM line_alt_toc WHERE structureId IN (SELECT id FROM alt_toc_structure WHERE bookId = ? AND key = ?)",
@@ -250,20 +279,20 @@ private fun writeStructure(
     )) {
         conn.prepareStatement(sql).use { st ->
             st.setLong(1, bookId)
-            st.setString(2, rule.structureKey)
+            st.setString(2, structureKey)
             st.executeUpdate()
         }
     }
-    val structureId = stableIds?.altTocStructureId(bookId, rule.structureKey)
+    val structureId = stableIds?.altTocStructureId(bookId, structureKey)
         ?: (queryMaxId(conn, "alt_toc_structure") + 1)
     conn.prepareStatement(
         "INSERT INTO alt_toc_structure (id, bookId, key, title, heTitle) VALUES (?, ?, ?, ?, ?)",
     ).use { st ->
         st.setLong(1, structureId)
         st.setLong(2, bookId)
-        st.setString(3, rule.structureKey)
-        st.setString(4, rule.structureKey)
-        st.setString(5, rule.structureHeTitle)
+        st.setString(3, structureKey)
+        st.setString(4, structureKey)
+        st.setString(5, structureHeTitle)
         st.executeUpdate()
     }
 
@@ -291,13 +320,11 @@ private fun writeStructure(
         st.executeBatch()
     }
 
-    // Each line belongs to the last marker at or before it; one line with several
-    // markers maps to its last (the app keeps a clicked earlier one selected).
-    val ownerByLineIndex = planned.filter { it.isMarker }.associate { it.lineIndex to idByPath.getValue(it.path) }
+    val ownerByLineIndex = ownerPathByLineIndex.mapValues { (_, path) -> idByPath.getValue(path) }
     conn.prepareStatement("INSERT INTO line_alt_toc (lineId, structureId, altTocEntryId) VALUES (?, ?, ?)").use { st ->
         var owner: Long? = null
         for (line in lines) {
-            owner = ownerByLineIndex[line.index] ?: owner
+            owner = ownerByLineIndex[line.index] ?: owner.takeIf { carryOwner }
             st.setLong(1, line.id)
             st.setLong(2, structureId)
             st.setLong(3, owner ?: continue)

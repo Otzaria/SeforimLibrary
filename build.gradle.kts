@@ -63,6 +63,7 @@ tasks.register("generateSeforimDb") {
     dependsOn(":sefariasqlite:synthesizeSimanNamesAltToc")
     dependsOn(":sefariasqlite:inheritChaptersAltToc")
     dependsOn(":sefariasqlite:buildInlineMarkerAltToc")
+    dependsOn(":sefariasqlite:buildGemaraDafAltToc")
     dependsOn(":packaging:writeReleaseInfo")
     dependsOn(":packaging:downloadLexicalDb")
     // Stamps schema_meta.db_version into the produced seforim.db so the
@@ -89,6 +90,7 @@ val lineContentWriters = listOf(
     ":sefariasqlite:synthesizeSimanNamesAltToc",
     ":sefariasqlite:inheritChaptersAltToc",
     ":sefariasqlite:buildInlineMarkerAltToc",
+    ":sefariasqlite:buildGemaraDafAltToc",
     ":generator-common:buildLineRefIndex",
     ":generator-common:buildLineDhIndex",
     ":sefariasqlite:buildLineDivineNameIndex",
@@ -205,6 +207,7 @@ project(":generator-common").tasks.matching { it.name == "buildLineRefIndex" }.c
     mustRunAfter(":sefariasqlite:synthesizeSimanNamesAltToc")
     mustRunAfter(":sefariasqlite:inheritChaptersAltToc")
     mustRunAfter(":sefariasqlite:buildInlineMarkerAltToc")
+    mustRunAfter(":sefariasqlite:buildGemaraDafAltToc")
 }
 
 // line_dh is derived from line.content, so it must be rebuilt after every
@@ -237,6 +240,7 @@ project(":sefariasqlite").tasks.matching { it.name == "buildLineDivineNameIndex"
     mustRunAfter(":sefariasqlite:synthesizeSimanNamesAltToc")
     mustRunAfter(":sefariasqlite:inheritChaptersAltToc")
     mustRunAfter(":sefariasqlite:buildInlineMarkerAltToc")
+    mustRunAfter(":sefariasqlite:buildGemaraDafAltToc")
     mustRunAfter(":generator-common:buildLineRefIndex")
     mustRunAfter(":generator-common:buildLineDhIndex")
 }
@@ -337,6 +341,9 @@ project(":sefariasqlite").tasks.matching { it.name == "buildInlineMarkerAltToc" 
     mustRunAfter(":sefariasqlite:synthesizeSimanNamesAltToc")
     mustRunAfter(":sefariasqlite:inheritChaptersAltToc")
 }
+project(":sefariasqlite").tasks.matching { it.name == "buildGemaraDafAltToc" }.configureEach {
+    mustRunAfter(":sefariasqlite:buildInlineMarkerAltToc")
+}
 project(":catalog").tasks.matching { it.name == "buildCatalog" }.configureEach {
     mustRunAfter(":generator-common:buildLineNoteIndex")
     mustRunAfter(":otzariasqlite:generateHavroutaLinks")
@@ -347,6 +354,7 @@ project(":catalog").tasks.matching { it.name == "buildCatalog" }.configureEach {
     mustRunAfter(":sefariasqlite:synthesizeSimanNamesAltToc")
     mustRunAfter(":sefariasqlite:inheritChaptersAltToc")
     mustRunAfter(":sefariasqlite:buildInlineMarkerAltToc")
+    mustRunAfter(":sefariasqlite:buildGemaraDafAltToc")
     mustRunAfter(":generator-common:buildLineDhIndex")
     mustRunAfter(":sefariasqlite:buildLineDivineNameIndex")
 }

@@ -480,6 +480,34 @@ tasks.register<JavaExec>("buildInlineMarkerAltToc") {
     jvmArgs = listOf("-Xmx1g")
 }
 
+// Alt-TOC by the Gemara daf cited inline (`(דף ח:)`), for the books in ForDB
+// gemara_daf_alt_toc.csv. Runs right after buildInlineMarkerAltToc.
+// Usage:
+//   ./gradlew :sefariasqlite:buildGemaraDafAltToc -PseforimDb=/path/to/seforim.db
+tasks.register<JavaExec>("buildGemaraDafAltToc") {
+    group = "application"
+    description = "Build Gemara-daf alt-TOCs for the books in ForDB gemara_daf_alt_toc.csv."
+
+    dependsOn("jvmJar")
+    mainClass.set("io.github.kdroidfilter.seforimlibrary.sefariasqlite.GemaraDafAltTocPostProcessKt")
+    mustRunAfter(tasks.matching { it.name == "buildInlineMarkerAltToc" })
+    classpath = files(tasks.named("jvmJar")) + configurations.getByName("jvmRuntimeClasspath")
+
+    if (project.hasProperty("seforimDb")) {
+        systemProperty("seforimDb", project.property("seforimDb") as String)
+    } else if (System.getenv("SEFORIM_DB") != null) {
+        systemProperty("seforimDb", System.getenv("SEFORIM_DB"))
+    } else {
+        val defaultDbPath = rootProject.layout.buildDirectory.file("seforim.db").get().asFile.absolutePath
+        systemProperty("seforimDb", defaultDbPath)
+    }
+    if (project.hasProperty("buildStatePath")) {
+        systemProperty("buildStatePath", project.property("buildStatePath") as String)
+    }
+
+    jvmArgs = listOf("-Xmx1g")
+}
+
 // Each ForDB consumer runs as its own JVM. When the release build pins the
 // ForDB archive (-PforDbArchive + -PforDbSha256), forward both properties to all
 // of them so they read byte-identical inputs instead of resolving the repository
@@ -498,6 +526,7 @@ tasks.matching {
         "seedAllMetadata",
         "seedBookNotices",
         "buildInlineMarkerAltToc",
+        "buildGemaraDafAltToc",
         "buildLineDivineNameIndex",
         "reportLineDivineNames",
         "validateForDbInputs",
