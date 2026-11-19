@@ -56,7 +56,7 @@ class GemaraDafAltTocTest {
         assertEquals(listOf("דף ט.", "דף ט:", "דף י.", "דף קעו."), keys.sortedBy { it.key }.map { it.text })
     }
 
-    /** Title (sole root) › Rif pages; Gemara amud ח: is reached twice, once from each Rif page. */
+    /** Title (sole root) › Rif pages; Gemara amud ח: is reached twice from page א. and once from ג:. */
     private val toc = listOf(
         MarkerTocRow(1, null, "רי\"ף ברכות", 100, 0),
         MarkerTocRow(2, 1, "דף א.", 101, 1),
@@ -66,14 +66,14 @@ class GemaraDafAltTocTest {
         MarkerLineRow(100, 0, "<h1>רי\"ף ברכות</h1>", 1),
         MarkerLineRow(101, 1, "<h2>דף א.</h2>", 2),
         MarkerLineRow(102, 2, "(דף ב.) מאימתי (דף ח:) קורין (דף ח:) עוד", 2),
-        MarkerLineRow(103, 3, "המשך", 2),
+        MarkerLineRow(103, 3, "(דף ח:) המשך באותו דף רי\"ף", 2),
         MarkerLineRow(104, 4, "(דף ט.) ו(דף ב:)", 2),
         MarkerLineRow(105, 5, "<h2>דף ג:</h2>", 3),
         MarkerLineRow(106, 6, "<b>גמ'</b> (דף ח:) תנו רבנן", 3),
     )
 
     @Test
-    fun `an amud reached twice gets a child per occurrence named by its Rif page`() {
+    fun `an amud reached from two Rif pages gets one child per page`() {
         val plan = planGemaraDafEntries(lines, toc)
         assertEquals(
             listOf(
@@ -86,14 +86,21 @@ class GemaraDafAltTocTest {
             ),
             plan.entries,
         )
-        assertEquals(mapOf(2 to "3/1", 4 to "2", 6 to "3/2"), plan.ownerPathByLineIndex)
+        assertEquals(mapOf(2 to "3/1", 3 to "3/1", 4 to "2", 6 to "3/2"), plan.ownerPathByLineIndex)
+    }
+
+    @Test
+    fun `an amud reached twice from one Rif page is a single leaf`() {
+        val plan = planGemaraDafEntries(lines.filter { it.index != 6 }, toc)
+        assertEquals(PlannedMarkerEntry("3", null, 0, "דף ח:", 102, 2, isMarker = true), plan.entries.single { it.text == "דף ח:" })
+        assertEquals(mapOf(2 to "3", 3 to "3", 4 to "2"), plan.ownerPathByLineIndex)
     }
 
     @Test
     fun `an occurrence without a Rif page heading is numbered`() {
         val flat = lines.map { it.copy(tocEntryId = 1) }
         val texts = planGemaraDafEntries(flat, toc).entries.map { it.text }
-        assertEquals(listOf("דף ח: – 1", "דף ח: – 2"), texts.filter { it.startsWith("דף ח: –") })
+        assertEquals(listOf("דף ח: – 1", "דף ח: – 2", "דף ח: – 3"), texts.filter { it.startsWith("דף ח: –") })
     }
 
     private val dbFile = Files.createTempFile("gemara-daf-alt-toc", ".db")

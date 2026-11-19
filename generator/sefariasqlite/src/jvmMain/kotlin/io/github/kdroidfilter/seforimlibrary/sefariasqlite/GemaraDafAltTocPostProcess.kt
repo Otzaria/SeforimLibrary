@@ -7,9 +7,9 @@ import java.sql.Connection
  * Alt-TOC by the Gemara daf a commentary cites inline — `(דף ח:)` or `(דף יז ע"א)` in the
  * middle of a Rif paragraph — for the books listed in ForDB [GEMARA_DAF_ALT_TOC_FILE].
  *
- * Entries follow the Gemara's order, one per amud; an amud the text reaches more than
- * once gets a child per occurrence (in reading order), named by the main-TOC heading
- * above it. Each line belongs to the occurrence of the last marker at or before it.
+ * Entries follow the Gemara's order, one per amud; an amud the text reaches from more
+ * than one main-TOC heading (Rif page) gets a child per heading, in reading order.
+ * Each line belongs to the entry of the last marker at or before it.
  * Like [INLINE_MARKER_ALT_TOC_FILE], the stage owns the rule's structure key for the
  * listed books, and ids come from the build-state allocator keyed on ancestor paths.
  *
@@ -88,18 +88,23 @@ internal fun planGemaraDafEntries(lines: List<MarkerLineRow>, toc: List<MarkerTo
     val pathByOccurrence = HashMap<Pair<Int, Int>, String>()
     occurrences.entries.sortedBy { it.key }.forEachIndexed { i, (key, list) ->
         val path = altTocChildPath("", i + 1)
-        val (amud, first) = list.first()
-        entries += PlannedMarkerEntry(path, null, 0, amud.text, first.id, first.index, isMarker = list.size == 1)
-        if (list.size == 1) {
-            pathByOccurrence[key to first.index] = path
+        val amud = list.first().first
+        // One child per Rif page; lines without a page heading stay separate.
+        val byPage = list.groupBy { (_, line) -> line.tocEntryId?.takeIf { it != soleRoot && it in tocById } ?: -1L - line.index }
+            .values.map { group -> group.map { it.second } }
+        val first = byPage.first().first()
+        entries += PlannedMarkerEntry(path, null, 0, amud.text, first.id, first.index, isMarker = byPage.size == 1)
+        if (byPage.size == 1) {
+            for (line in byPage.single()) pathByOccurrence[key to line.index] = path
             return@forEachIndexed
         }
-        list.forEachIndexed { j, (_, line) ->
+        byPage.forEachIndexed { j, group ->
+            val line = group.first()
             val heading = line.tocEntryId?.takeIf { it != soleRoot }?.let(tocById::get)?.text?.trimHeadingStart()?.trim()
             val childPath = altTocChildPath(path, j + 1)
             val text = "${amud.text} – ${heading?.let { "רי\"ף $it" } ?: "${j + 1}"}"
             entries += PlannedMarkerEntry(childPath, path, 1, text, line.id, line.index, isMarker = true)
-            pathByOccurrence[key to line.index] = childPath
+            for (occurrence in group) pathByOccurrence[key to occurrence.index] = childPath
         }
     }
     val owners = lastKeyByLineIndex.mapValues { (index, key) -> pathByOccurrence.getValue(key to index) }
