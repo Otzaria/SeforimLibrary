@@ -4,6 +4,7 @@ import co.touchlab.kermit.Logger
 import co.touchlab.kermit.Severity
 import io.github.kdroidfilter.seforimlibrary.common.buildstate.BuildStateVerifier
 import io.github.kdroidfilter.seforimlibrary.common.buildstate.IdTable
+import io.github.kdroidfilter.seforimlibrary.common.db.LineContentShape
 import io.github.kdroidfilter.seforimlibrary.common.ids.altTocChildPath
 import java.nio.file.Files
 import java.nio.file.Path
@@ -17,12 +18,10 @@ import kotlin.system.exitProcess
  * Synthesizes a **"Seifim"** alternate-TOC for nosei-kelim on the Shulchan
  * Aruch (Mishnah Berurah, Shach, Taz, Magen Avraham, Be'er Heitev...).
  *
- * These books ship from Sefaria as flat siman × se'if-katan structures: the
- * running text never says which SA se'if a group of se'ifim-ketanim explains,
- * so a standalone reader cannot tell where one se'if ends and the next
- * begins. The association does exist — every ס"ק line is the target of a
- * COMMENTARY link from the exact SA se'if line — so this post-process derives
- * it once at build time and materializes it in the regular alt_toc tables:
+ * These books ship from Sefaria as flat siman × se'if-katan structures. Their
+ * running text often omits the base se'if, but COMMENTARY links connect the
+ * base text to the ס"ק. This stage derives the groups from those links once
+ * at build time and materializes them in the regular alt_toc tables:
  *
  * - containers mirror the book's own main-TOC headings (סימן א, סימן ב...),
  * - one leaf "סעיף X" per contiguous ס"ק group hangs beneath its heading,
@@ -128,11 +127,17 @@ internal data class SeifimHeading(
 
 internal data class SeifMarker(val lineId: Long, val lineIndex: Long, val label: String)
 
-/** One COMMENTARY link row: the book line it lands on and the SA source ref. */
+/**
+ * One COMMENTARY link from a Shulchan Aruch se'if to a commentary line.
+ */
 internal data class SeifLinkRow(
     val lineId: Long,
     val lineIndex: Long,
     val baseHeRef: String,
+    val baseBookId: Long = 0,
+    val baseLineId: Long = 0,
+    val commentHeRef: String? = null,
+    val hasSourceAnchor: Boolean = false,
 )
 
 internal data class SeifimSynthesisResult(val structures: Int, val leaves: Int)
@@ -272,33 +277,91 @@ internal fun synthesizeSeifimAltTocs(
 /**
  * Derives the group-opening markers from COMMENTARY link rows.
  *
- * [rows] must be ordered by `(lineIndex, base lineIndex)` so the first link
- * of a multi-linked line decides its se'if. The group key is the base line's
- * full heRef (siman+se'if) — not the se'if letter alone — so a new siman
- * whose first commented se'if carries the same letter still opens a group.
- * The label is the se'if alone: the trailing comma-separated heRef segment.
+ * [rows] must be ordered by `(lineIndex, base lineIndex)`. The group key is
+ * the base line's full heRef (siman+se'if) — not the se'if letter alone — so a
+ * new siman whose first commented se'if carries the same letter still opens a
+ * group. The label is the se'if alone: the trailing comma-separated heRef
+ * segment.
+ *
+ * The first link retains the historical assignment. A unique numbered inline
+ * marker on the base text can identify the actual se'if among several links.
+ * The entire group is emitted at once, including valid backward transitions.
  */
-internal fun computeSeifMarkers(rows: List<SeifLinkRow>): List<SeifMarker> {
-    val refByLine = LinkedHashMap<Long, Triple<Long, String, String>>() // lineIndex -> (lineId, key, seif)
-    for (row in rows) {
-        if (refByLine.containsKey(row.lineIndex)) continue
-        val comma = row.baseHeRef.lastIndexOf(',')
-        if (comma < 0) continue
-        val seif = row.baseHeRef.substring(comma + 1).trim()
-        if (seif.isEmpty()) continue
-        refByLine[row.lineIndex] = Triple(row.lineId, row.baseHeRef, seif)
+internal fun computeSeifMarkers(
+    rows: List<SeifLinkRow>,
+    commentator: String? = null,
+    commentPrefix: String = "",
+    readText: (Long) -> String? = { null },
+): List<SeifMarker> {
+    val markers = mutableListOf<SeifMarker>()
+    val candidates = ArrayList<SeifLinkRow>()
+    val ordersByBaseLine = HashMap<Long, Set<Int>>()
+    var previousRef: String? = null
+
+    fun emitGroup() {
+        val first = candidates.firstOrNull() ?: return
+        val inline = if (commentator != null && candidates.size > 1) {
+            findInlineSeif(candidates, commentPrefix) { baseLineId ->
+                ordersByBaseLine.getOrPut(baseLineId) {
+                    parseInlineItags(readText(baseLineId).orEmpty()).mapNotNullTo(HashSet()) { tag ->
+                        tag.order?.takeIf { tag.commentator == commentator }
+                    }
+                }
+            }
+        } else null
+        val chosen = if (
+            inline != null && inline != first && inline.baseBookId == first.baseBookId &&
+            readText(first.lineId)?.let { !EXPLICIT_SEIF_OPENING.containsMatchIn(it) } == true
+        ) inline else first
+        if (chosen.baseHeRef != previousRef) {
+            markers += SeifMarker(chosen.lineId, chosen.lineIndex, "סעיף ${seifOfHeRef(chosen.baseHeRef)}")
+            previousRef = chosen.baseHeRef
+        }
+        candidates.clear()
     }
 
-    val markers = mutableListOf<SeifMarker>()
-    var previousKey: String? = null
-    for (lineIndex in refByLine.keys.sorted()) {
-        val (lineId, key, seif) = refByLine.getValue(lineIndex)
-        if (key != previousKey) {
-            markers += SeifMarker(lineId = lineId, lineIndex = lineIndex, label = "סעיף $seif")
-            previousKey = key
-        }
+    for (row in rows) {
+        if (seifOfHeRef(row.baseHeRef).isEmpty()) continue
+        if (candidates.isNotEmpty() && candidates[0].lineIndex != row.lineIndex) emitGroup()
+        candidates += row
     }
+    emitGroup()
     return markers
+}
+
+// A printed section heading takes precedence over an inline anchor when the
+// two might disagree. A suffix or incidental cross-reference does not veto it.
+private val EXPLICIT_SEIF_OPENING = Regex("""^\s*(?:<[^>]*>\s*)*\(?\s*(?:<[^>]*>\s*)*סעיף(?:\s|&nbsp;)""")
+
+private fun findInlineSeif(
+    candidates: List<SeifLinkRow>,
+    commentPrefix: String,
+    ordersOnBaseLine: (Long) -> Set<Int>,
+): SeifLinkRow? {
+    val commentRef = candidates.first().commentHeRef ?: return null
+    if (!commentRef.startsWith(commentPrefix)) return null
+    val address = commentRef.substring(commentPrefix.length)
+    val comma = address.indexOf(',')
+    if (comma < 0) return null
+    val commentOrder = gematriaValue(address.substring(comma + 1).trim()) ?: return null
+    val siman = gematriaValue(address.substring(0, comma).trim()) ?: return null
+    var found: SeifLinkRow? = null
+    for (candidate in candidates) {
+        if (!candidate.hasSourceAnchor || simanOfHeRef(candidate.baseHeRef) != siman) continue
+        if (commentOrder !in ordersOnBaseLine(candidate.baseLineId)) continue
+        if (found != null) return null
+        found = candidate
+    }
+    return found
+}
+
+private fun simanOfHeRef(ref: String): Int? =
+    gematriaValue(ref.substringBeforeLast(',').substringAfterLast(',').trim())
+
+/** The se'if segment of an SA heRef — the text after its last comma — or "". */
+private fun seifOfHeRef(heRef: String): String {
+    val comma = heRef.lastIndexOf(',')
+    return if (comma < 0) "" else heRef.substring(comma + 1).trim()
 }
 
 /**
@@ -315,6 +378,8 @@ internal fun readLinkedSeifimCandidateSnapshots(conn: Connection): List<SeifimBo
     data class Candidate(
         val bookId: Long,
         val title: String,
+        val heRef: String,
+        val commentator: String?,
         val baseBookIds: MutableList<Long>,
         val shulchanAruchBaseBookIds: MutableList<Long>,
     )
@@ -324,7 +389,7 @@ internal fun readLinkedSeifimCandidateSnapshots(conn: Connection): List<SeifimBo
     val candidatesByBook = LinkedHashMap<Long, Candidate>()
     conn.prepareStatement(
         """
-        SELECT bbt.bookId, bbt.baseBookId, bb.title, b.title
+        SELECT bbt.bookId, bbt.baseBookId, bb.title, b.title, b.heRef, b.collectiveTitleEn
         FROM book_base_text bbt
         JOIN book b ON b.id = bbt.bookId
         JOIN book bb ON bb.id = bbt.baseBookId
@@ -345,7 +410,7 @@ internal fun readLinkedSeifimCandidateSnapshots(conn: Connection): List<SeifimBo
             while (rs.next()) {
                 val bookId = rs.getLong(1)
                 val candidate = candidatesByBook.getOrPut(bookId) {
-                    Candidate(bookId, rs.getString(4), mutableListOf(), mutableListOf())
+                    Candidate(bookId, rs.getString(4), rs.getString(5).orEmpty(), rs.getString(6), mutableListOf(), mutableListOf())
                 }
                 candidate.baseBookIds += rs.getLong(2)
                 if (rs.getString(3).startsWith("שולחן ערוך")) {
@@ -360,10 +425,15 @@ internal fun readLinkedSeifimCandidateSnapshots(conn: Connection): List<SeifimBo
         val linkRows = mutableListOf<SeifLinkRow>()
         val basePlaceholders = candidate.baseBookIds.joinToString(",") { "?" }
         val shulchanAruchBaseIds = candidate.shulchanAruchBaseBookIds.toHashSet()
+        val commentPrefix = "${candidate.heRef},"
         var declaredBaseLinkCount = 0
         conn.prepareStatement(
             """
-            SELECT ml.id, ml.lineIndex, bl.heRef, k.sourceBookId
+            SELECT ml.id, ml.lineIndex, bl.heRef, k.sourceBookId, bl.id, ml.heRef,
+                   EXISTS (
+                       SELECT 1 FROM link_anchor a
+                       WHERE a.linkId = k.id AND a.side = 0 AND a.label != ''
+                   )
             FROM link k INDEXED BY idx_link_target_book
             JOIN connection_type c ON c.id = k.connectionTypeId
             JOIN line ml ON ml.id = k.targetLineId
@@ -379,7 +449,15 @@ internal fun readLinkedSeifimCandidateSnapshots(conn: Connection): List<SeifimBo
                 while (rs.next()) {
                     declaredBaseLinkCount++
                     if (rs.getLong(4) in shulchanAruchBaseIds) {
-                        linkRows += SeifLinkRow(rs.getLong(1), rs.getLong(2), rs.getString(3))
+                        linkRows += SeifLinkRow(
+                            lineId = rs.getLong(1),
+                            lineIndex = rs.getLong(2),
+                            baseHeRef = rs.getString(3),
+                            baseBookId = rs.getLong(4),
+                            baseLineId = rs.getLong(5),
+                            commentHeRef = rs.getString(6),
+                            hasSourceAnchor = rs.getBoolean(7),
+                        )
                     }
                 }
             }
@@ -392,12 +470,11 @@ internal fun readLinkedSeifimCandidateSnapshots(conn: Connection): List<SeifimBo
         // as Pri Megadim whose real base is Magen Avraham/Taz.
         if (linkRows.size * 2 < declaredBaseLinkCount) continue
 
-        val markers = computeSeifMarkers(linkRows)
-        if (markers.isEmpty()) continue
-
         val headingRows = readTocHeadingRows(conn, candidate.bookId)
         val headings = simanHeadingMirror(headingRows) ?: continue
         if (headings.isEmpty()) continue
+        val markers = readLinkedSeifMarkers(conn, linkRows, commentPrefix, candidate.commentator)
+        if (markers.isEmpty()) continue
 
         snapshots += SeifimBookSnapshot(
             bookId = candidate.bookId,
@@ -409,6 +486,27 @@ internal fun readLinkedSeifimCandidateSnapshots(conn: Connection): List<SeifimBo
         )
     }
     return snapshots
+}
+
+private fun readLinkedSeifMarkers(
+    conn: Connection,
+    rows: List<SeifLinkRow>,
+    commentPrefix: String,
+    commentator: String?,
+): List<SeifMarker> {
+    if (commentator.isNullOrBlank() || commentPrefix == ",") return computeSeifMarkers(rows)
+    val split = LineContentShape.isSplit(conn)
+    val content = LineContentShape.contentExpr(split)
+    // The build reads the working text. A manual rerun without accessible text
+    // can still derive the original link-only markers.
+    return conn.prepareStatement(
+        "SELECT $content FROM line l ${LineContentShape.contentJoin(split)} WHERE l.id = ? AND typeof($content) = 'text'",
+    ).use { st ->
+        computeSeifMarkers(rows, commentator, commentPrefix) { lineId ->
+            st.setLong(1, lineId)
+            st.executeQuery().use { rs -> if (rs.next()) rs.getString(1) else null }
+        }
+    }
 }
 
 /**

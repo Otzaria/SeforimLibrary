@@ -12,6 +12,7 @@ import io.github.kdroidfilter.seforimlibrary.core.models.Category
 import io.github.kdroidfilter.seforimlibrary.core.models.ConnectionType
 import io.github.kdroidfilter.seforimlibrary.core.models.Line
 import io.github.kdroidfilter.seforimlibrary.core.models.Link
+import io.github.kdroidfilter.seforimlibrary.core.models.LinkAnchor
 import io.github.kdroidfilter.seforimlibrary.core.models.TocEntry
 import io.github.kdroidfilter.seforimlibrary.dao.repository.SeforimRepository
 import io.github.kdroidfilter.seforimlibrary.db.SeforimDb
@@ -27,8 +28,99 @@ import kotlin.test.assertTrue
 
 class ComputeSeifMarkersTest {
 
-    private fun row(lineIndex: Long, heRef: String, lineId: Long = lineIndex * 10) =
-        SeifLinkRow(lineId = lineId, lineIndex = lineIndex, baseHeRef = heRef)
+    private fun row(lineIndex: Long, heRef: String) =
+        SeifLinkRow(lineId = lineIndex * 10, lineIndex = lineIndex, baseHeRef = heRef)
+
+    @Test
+    fun `a link to an earlier seif does not reopen it, like Magen Avraham siman 447`() {
+        // Otzaria/otzaria#5503: these lines and order markers are from the 2026-11 export.
+        val sourceOrders = mutableMapOf<Long, MutableList<Int>>()
+        fun magenAvraham447(lineIndex: Long, vararg seifim: String, anchoredSeif: String = seifim.first()): List<SeifLinkRow> {
+            val order = (lineIndex - 4773).toInt()
+            return seifim.map { seif ->
+                val baseLineId = gematriaValue(seif)!!.toLong()
+                if (seif == anchoredSeif) sourceOrders.getOrPut(baseLineId) { mutableListOf() } += order
+                row(lineIndex, "שולחן ערוך, אורח חיים, תמז, $seif").copy(
+                    baseLineId = baseLineId,
+                    commentHeRef = "מגן אברהם, תמז, ${toGematria(order)}",
+                    hasSourceAnchor = seif == anchoredSeif,
+                )
+            }
+        }
+        val rows = listOf(
+            magenAvraham447(4774, "א", "ב"), magenAvraham447(4777, "א"),
+            magenAvraham447(4778, "ב", "ה"), magenAvraham447(4780, "ג", "ד"),
+            magenAvraham447(4783, "ב", "ד", anchoredSeif = "ד"), magenAvraham447(4784, "ד", "ט"),
+            magenAvraham447(4788, "ג", "ה", anchoredSeif = "ה"), magenAvraham447(4803, "ב", "ה", anchoredSeif = "ה"),
+            magenAvraham447(4805, "ו"), magenAvraham447(4806, "ז", "ח"),
+            magenAvraham447(4811, "ד", "ה", "ח", anchoredSeif = "ח"), magenAvraham447(4813, "ט"),
+            magenAvraham447(4814, "י"), magenAvraham447(4815, "ד", "יא", "יב", anchoredSeif = "יא"),
+            magenAvraham447(4816, "יא"), magenAvraham447(4818, "א", "יא", anchoredSeif = "יא"),
+            magenAvraham447(4819, "יא", "יב", anchoredSeif = "יב"),
+        ).flatten()
+        val markers = computeSeifMarkers(rows, "Magen Avraham", "מגן אברהם,") { lineId ->
+            sourceOrders[lineId]?.joinToString("") { order ->
+                """<i data-commentator="Magen Avraham" data-order="$order"></i>"""
+            } ?: "טקסט"
+        }
+
+        assertEquals(
+            listOf(
+                4774L to "סעיף א", 4778L to "סעיף ב", 4780L to "סעיף ג", 4783L to "סעיף ד",
+                4788L to "סעיף ה", 4805L to "סעיף ו", 4806L to "סעיף ז", 4811L to "סעיף ח",
+                4813L to "סעיף ט", 4814L to "סעיף י", 4815L to "סעיף יא", 4819L to "סעיף יב",
+            ),
+            markers.map { it.lineIndex to it.label },
+        )
+    }
+
+    @Test
+    fun `a line linked only to an earlier seif still opens it`() {
+        val markers = computeSeifMarkers(
+            listOf(
+                row(1, "שולחן ערוך, יורה דעה, קמב, ה"),
+                row(2, "שולחן ערוך, יורה דעה, קמב, ו"),
+                row(3, "שולחן ערוך, יורה דעה, קמב, ה"),
+            ),
+        )
+        assertEquals(
+            listOf(1L to "סעיף ה", 2L to "סעיף ו", 3L to "סעיף ה"),
+            markers.map { it.lineIndex to it.label },
+        )
+    }
+
+    @Test
+    fun `printed section protects an intentional backward transition`() {
+        val rows = listOf(
+            row(381, "שולחן ערוך, אבן העזר, קכד, ה"),
+            row(382, "שולחן ערוך, אבן העזר, קכד, ב").copy(commentHeRef = "חכמת שלמה, קכד, ט"),
+            row(382, "שולחן ערוך, אבן העזר, קכד, ו").copy(baseLineId = 60, hasSourceAnchor = true),
+            row(383, "שולחן ערוך, אבן העזר, קכד, ו"),
+        )
+        val markers = computeSeifMarkers(rows, "Chokhmat Shlomo", "חכמת שלמה,") { lineId ->
+            when (lineId) {
+                60L -> """<i data-commentator="Chokhmat Shlomo" data-order="9"></i>"""
+                3820L -> "<small>סעיף ב</small> <b>כותב כו' על יד העבד כו'.</b>"
+                else -> null
+            }
+        }
+        assertEquals(listOf(381L to "סעיף ה", 382L to "סעיף ב", 383L to "סעיף ו"), markers.map { it.lineIndex to it.label })
+    }
+
+    @Test
+    fun `multiple numbered anchors keep the original first link`() {
+        val rows = listOf("ב", "ד").map { seif ->
+            row(3, "שולחן ערוך, אורח חיים, א, $seif").copy(
+                baseLineId = gematriaValue(seif)!!.toLong(),
+                commentHeRef = "מגן אברהם, א, ג",
+                hasSourceAnchor = true,
+            )
+        }
+        val markers = computeSeifMarkers(rows, "Magen Avraham", "מגן אברהם,") {
+            """<i data-commentator="Magen Avraham" data-order="3"></i>"""
+        }
+        assertEquals("סעיף ב", markers.single().label)
+    }
 
     @Test
     fun `marker opens each seif group, like Mishnah Berurah siman 1`() {
@@ -49,7 +141,7 @@ class ComputeSeifMarkersTest {
     }
 
     @Test
-    fun `first link decides a multi-linked line`() {
+    fun `first link decides a multi-linked line with no current group`() {
         val markers = computeSeifMarkers(
             listOf(
                 row(10, "שולחן ערוך, אורח חיים ב, א"),
@@ -114,7 +206,7 @@ class SynthesizeSeifimAltTocIntegrationTest {
      * se'if-katan main-TOC hierarchy, then ס"ק lines linked to seifim א,א,ג.
      * The synthesized tree must retain section/siman but drop se'if-katan.
      */
-    private fun seedMiniDb(): Pair<Long, Long> = runBlocking {
+    private fun seedMiniDb(ambiguousFinalSeif: Boolean = false): Pair<Long, Long> = runBlocking {
         SeforimDb.Schema.create(driver)
         repo = SeforimRepository(dbFile.toString(), driver)
 
@@ -125,10 +217,17 @@ class SynthesizeSeifimAltTocIntegrationTest {
             Book(categoryId = catId, sourceId = sourceId, title = "שולחן ערוך, אורח חיים", heRef = "שולחן ערוך, אורח חיים"),
         )
         val saSeifA = repo.insertLine(Line(bookId = saId, lineIndex = 0, content = "סעיף א", heRef = "שולחן ערוך, אורח חיים א, א"))
-        val saSeifC = repo.insertLine(Line(bookId = saId, lineIndex = 1, content = "סעיף ג", heRef = "שולחן ערוך, אורח חיים א, ג"))
+        val saSeifC = repo.insertLine(
+            Line(
+                bookId = saId,
+                lineIndex = 1,
+                content = """סעיף ג <i data-commentator="Mishnah Berurah" data-order="3"></i>""",
+                heRef = "שולחן ערוך, אורח חיים, א, ג",
+            ),
+        )
 
         val mbId = repo.insertBook(
-            Book(categoryId = catId, sourceId = sourceId, title = "משנה ברורה", heRef = "משנה ברורה"),
+            Book(categoryId = catId, sourceId = sourceId, title = "משנה ברורה", heRef = "משנה ברורה", collectiveTitleEn = "Mishnah Berurah"),
         )
         repo.insertBookBaseText(mbId, saId)
         // בסיס שני (כמו קול יעקב שמוצהר גם על שו"ע וגם על שו"ע הרב) — הספר
@@ -144,7 +243,7 @@ class SynthesizeSeifimAltTocIntegrationTest {
         val seifKatan = repo.insertLine(Line(bookId = mbId, lineIndex = 3, content = "<h4>סעיף קטן א</h4>"))
         val sk1 = repo.insertLine(Line(bookId = mbId, lineIndex = 4, content = "(א) ס\"ק ראשון"))
         val sk2 = repo.insertLine(Line(bookId = mbId, lineIndex = 5, content = "(ב) ס\"ק שני"))
-        val sk3 = repo.insertLine(Line(bookId = mbId, lineIndex = 6, content = "(ג) ס\"ק שלישי"))
+        val sk3 = repo.insertLine(Line(bookId = mbId, lineIndex = 6, content = "(ג) ס\"ק שלישי", heRef = "משנה ברורה, א, ג"))
         check(intro > 0)
 
         val sectionEntry = repo.insertTocEntry(
@@ -158,7 +257,7 @@ class SynthesizeSeifimAltTocIntegrationTest {
         )
 
         for ((skLine, saLine) in listOf(sk1 to saSeifA, sk2 to saSeifA, sk3 to saSeifC)) {
-            repo.insertLink(
+            val linkId = repo.insertLink(
                 Link(
                     sourceBookId = saId,
                     targetBookId = mbId,
@@ -168,8 +267,31 @@ class SynthesizeSeifimAltTocIntegrationTest {
                     connectionType = ConnectionType.COMMENTARY,
                 ),
             )
+            if (ambiguousFinalSeif && skLine == sk3) {
+                repo.insertLinkAnchorsBatch(listOf(LinkAnchor(linkId = linkId, side = 0, charStart = 7, label = "ג")))
+                repo.insertLink(
+                    Link(
+                        sourceBookId = saId,
+                        targetBookId = mbId,
+                        sourceLineId = saSeifA,
+                        targetLineId = sk3,
+                        targetLineIndex = 6,
+                        connectionType = ConnectionType.COMMENTARY,
+                    ),
+                )
+            }
         }
         saId to mbId
+    }
+
+    @Test
+    fun `uses a numbered inline marker to resolve multiple links to the same comment`() {
+        seedMiniDb(ambiguousFinalSeif = true)
+
+        val markers = DriverManager.getConnection("jdbc:sqlite:$dbFile").use { conn ->
+            readLinkedSeifimCandidateSnapshots(conn).single().markers
+        }
+        assertEquals(listOf(4L to "סעיף א", 6L to "סעיף ג"), markers.map { it.lineIndex to it.label })
     }
 
     private fun attachEmptyBuildState(conn: java.sql.Connection): java.nio.file.Path {
