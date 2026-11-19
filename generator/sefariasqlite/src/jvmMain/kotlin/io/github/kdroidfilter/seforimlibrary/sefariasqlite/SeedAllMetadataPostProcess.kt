@@ -151,6 +151,10 @@ internal data class BulkMetadata(
 internal data class Description(
     val heShortDesc: String?,
     val heDesc: String?,
+    /** `[מחק]` in heShortDesc: clear the book's short description instead of keeping it. */
+    val clearShortDesc: Boolean = false,
+    /** `[מחק]` in heDescNew: clear the book's description instead of keeping it. */
+    val clearDesc: Boolean = false,
 )
 
 internal data class MetadataResult(
@@ -335,6 +339,10 @@ internal fun parseBulkMetadata(lines: List<String>): Map<String, BulkMetadata> =
  * categoryPath,title,author,heShortDesc,heDesc,heDescNew. Only heShortDesc and
  * heDescNew are used (heDescNew is the corrected text that becomes the book's
  * heDesc); the original heDesc column and the rest are ignored.
+ *
+ * Each of the two cells follows [parseDescriptionEdit], as in the category file:
+ * an empty cell keeps the book's existing text, `[מחק]` clears it, and any other
+ * value replaces it.
  */
 internal fun parseDescriptionOverrides(lines: List<String>): Map<String, Description> {
     if (lines.isEmpty()) return emptyMap()
@@ -346,9 +354,13 @@ internal fun parseDescriptionOverrides(lines: List<String>): Map<String, Descrip
     return parseForDbCsvRecords(lines.joinToString("\n")).drop(1).mapNotNull { record ->
         val cols = record.map { it.trim() }
         val title = cols.getOrNull(1)?.takeIf { it.isNotBlank() } ?: return@mapNotNull null
+        val shortEdit = parseDescriptionEdit(cols.getOrNull(3).orEmpty())
+        val longEdit = parseDescriptionEdit(cols.getOrNull(5).orEmpty())
         title to Description(
-            heShortDesc = cols.getOrNull(3)?.takeIf { it.isNotBlank() },
-            heDesc = cols.getOrNull(5)?.takeIf { it.isNotBlank() },
+            heShortDesc = (shortEdit as? DescriptionEdit.Replace)?.value,
+            heDesc = (longEdit as? DescriptionEdit.Replace)?.value,
+            clearShortDesc = shortEdit == DescriptionEdit.Clear,
+            clearDesc = longEdit == DescriptionEdit.Clear,
         )
     }.toMap()
 }
@@ -397,6 +409,13 @@ internal suspend fun applyMetadata(
             heShortDesc = description?.heShortDesc,
             heDesc = description?.heDesc,
         )
+        if (description != null && (description.clearShortDesc || description.clearDesc)) {
+            repository.clearBookDescriptions(
+                bookId = bookId,
+                clearShortDesc = description.clearShortDesc,
+                clearDesc = description.clearDesc,
+            )
+        }
 
         // pub_date / pub_place go through the allocator for stable ids (delta-safety).
         meta?.pubDates?.forEach { year ->
