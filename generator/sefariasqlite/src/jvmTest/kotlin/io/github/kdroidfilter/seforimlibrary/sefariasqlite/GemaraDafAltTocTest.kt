@@ -5,7 +5,9 @@ import io.github.kdroidfilter.seforimlibrary.core.models.AltTocEntry
 import io.github.kdroidfilter.seforimlibrary.core.models.AltTocStructure
 import io.github.kdroidfilter.seforimlibrary.core.models.Book
 import io.github.kdroidfilter.seforimlibrary.core.models.Category
+import io.github.kdroidfilter.seforimlibrary.core.models.ConnectionType
 import io.github.kdroidfilter.seforimlibrary.core.models.Line
+import io.github.kdroidfilter.seforimlibrary.core.models.Link
 import io.github.kdroidfilter.seforimlibrary.core.models.TocEntry
 import io.github.kdroidfilter.seforimlibrary.dao.repository.SeforimRepository
 import io.github.kdroidfilter.seforimlibrary.db.SeforimDb
@@ -35,31 +37,60 @@ class GemaraDafAltTocTest {
         assertFailsWith<IllegalArgumentException> { parseGemaraDafRules(listOf("bookName,marker", "רי\"ף ברכות,x")) }
     }
 
+    private fun evidence(vararg refs: Pair<String, String>): GemaraDafEvidence =
+        GemaraDafEvidence(refs.associate { (heading, text) -> parseDafHeading(heading)!!.start to listOf(text) })
+
     @Test
-    fun `accepts only a bare daf and amud`() {
-        fun texts(content: String) = findGemaraDafMarkers(content).map { it.text }
-        assertEquals(listOf("דף ב.", "דף ב:"), texts("<b><big>גמ'</big></b> (דף ב.) תנו רבנן (דף ב:) עוד"))
-        assertEquals(listOf("דף קעו."), texts("(דף קעו.)"))
-        assertEquals(listOf("דף יז.", "דף ג:"), texts("(דף יז ע\"א) ו(דף ג ע\"ב)"))
-        // A stray `(` before a marker is common; reference words only matter there.
-        assertEquals(listOf("דף כא:"), texts("משתעי אינשי הכי ((דף כא ע\"ב) מי דמי"))
-        assertEquals(listOf("דף כז."), texts("<b>גמ'</b> ((דף כז.) אמר"))
-        assertEquals(listOf("דף ב:"), texts("לקמן מפורש (דף ב:) תנו"))
-        assertEquals(listOf("דף נו:"), texts("כדלקמן א ב ג ((דף נו:)"))
-        for (reference in listOf(
-            "(דף ח: ע\"ש)", "(דף לעיל מח:)", "(דף לקמן יח.)", "(דף יד: טו.)", "(דף ו. דף לג.)",
-            "(דף כא. ובפ\"א דחלה)", "(דף נ. ע\"ש (ג\"א)", "(דף ס)", "(דף קל)", "(ברכות דף יב.)", "(דף ח.]",
-            "[דף ח ע\"א]", "([דף ח ע\"א])", "(דף יז  ע\"א)", "(((דף ב.)",
-            "דאמרי' לקמן ((דף י\"ט ע\"ב)", "בפרק בני העיר ((דף ל ע\"א)", "וגרסינן (בה) בפירקא קמא ((דף ג ע\"א)",
-            "ודלעיל <b>א</b> ((דף ג.)",
+    fun `printed markers need corroboration from the base page`() {
+        val samePage = evidence("דף מה." to "אמר רב יהודה אמר רב נכרים שצרו על עיר")
+        assertEquals(emptyList(), findGemaraDafMarkers("(דף מה.) תנו רבנן", GemaraDafEvidence()))
+        assertEquals(emptyList(), findGemaraDafMarkers(
+            "גרסינן בעירובין (דף מה.) אמר רב יהודה אמר רב נכרים שצרו על עיר",
+            samePage.copy(foreignAmudim = setOf(parseDafHeading("דף מה.")!!.start)),
+        ))
+        assertEquals(emptyList(), findGemaraDafMarkers(
+            "קל וחומר ומה סוטה (דף כח.) שלא ניתנה ליתבע בעד אחד מגלגלין אשה",
+            evidence("דף כח." to "תנא משום רבי ישמעאל מנין לגלגול שבועה מן התורה"),
+        ))
+        assertEquals(listOf("דף מה."), findGemaraDafMarkers(
+            "(דף מה.) אמר רב יהודה אמר רב נכרים שצרו על עיר", samePage,
+        ).map { it.text })
+        assertEquals(listOf("דף מה."), findGemaraDafMarkers(
+            "והלכתא (דף מה.) אמר רב יהודה אמר רב נכרים שצרו על עיר", samePage,
+        ).map { it.text })
+        assertEquals(emptyList(), findGemaraDafMarkers(
+            "והלכתא (דף מה.) אמר רב יהודה אמר רב", samePage,
+        ))
+        for (citation in listOf(
+            "לקמן (דף מה.) אמר רב יהודה אמר רב נכרים שצרו על עיר",
+            "גרסינן [(דף מה.) אמר רב יהודה אמר רב נכרים שצרו על עיר]",
+            "(דף מה.) אמר רב יהודה אמר רב (דף מה.) אמר רב יהודה אמר רב פלוני כתב בדבר",
         )) {
-            assertEquals(emptyList(), texts(reference), reference)
+            assertEquals(emptyList(), findGemaraDafMarkers(citation, samePage), citation)
         }
     }
 
     @Test
+    fun `qualified openings navigate to the start and a daf alone needs a unique amud`() {
+        val b = evidence("דף עג:" to "אמר רב יהודה אמר רב אסופי כל זמן")
+        assertEquals(listOf("דף עג:"), findGemaraDafMarkers(
+            "<b>גמ'</b> (דף עג: ע\"ש) אמר רב יהודה אמר רב אסופי כל זמן", b,
+        ).map { it.text })
+        assertEquals(emptyList(), findGemaraDafMarkers(
+            "כבר כתבנו (דף עג: ע\"ש) אמר רב יהודה אמר רב אסופי כל זמן", b,
+        ))
+        assertEquals(listOf("דף עג:"), findGemaraDafMarkers("(דף עג) אמר רב יהודה אמר רב אסופי כל זמן", b).map { it.text })
+        assertEquals(emptyList(), findGemaraDafMarkers(
+            "(דף עג) אמר רב יהודה אמר רב אסופי כל זמן",
+            evidence("דף עג." to "א", "דף עג:" to "ב"),
+        ))
+    }
+
+    @Test
     fun `orders amudim by gematria, amud a first`() {
-        val keys = listOf("(דף קעו.)", "(דף י.)", "(דף ט:)", "(דף ט.)").map { findGemaraDafMarkers(it).single() }
+        val keys = listOf("דף קעו.", "דף י.", "דף ט:", "דף ט.").map { title ->
+            findGemaraDafMarkers("($title)", evidence(title to "")).single()
+        }
         assertEquals(listOf("דף ט.", "דף ט:", "דף י.", "דף קעו."), keys.sortedBy { it.key }.map { it.text })
     }
 
@@ -72,16 +103,23 @@ class GemaraDafAltTocTest {
     private val lines = listOf(
         MarkerLineRow(100, 0, "<h1>רי\"ף ברכות</h1>", 1),
         MarkerLineRow(101, 1, "<h2>דף א.</h2>", 2),
-        MarkerLineRow(102, 2, "(דף ב.) מאימתי (דף ח:) קורין (דף ח:) עוד", 2),
+        MarkerLineRow(102, 2, "(דף ב.) מאימתי (דף ח:) אמר רב יהודה אמר רב פלוני כתב בדבר", 2),
         MarkerLineRow(103, 3, "(דף ח:) המשך באותו דף רי\"ף", 2),
-        MarkerLineRow(104, 4, "(דף ט.) ו(דף ב:)", 2),
+        MarkerLineRow(104, 4, "(דף ט.) ו(דף ב:) אמר רבי יהודה עד סוף זמן קריאת שמע", 2),
         MarkerLineRow(105, 5, "<h2>דף ג:</h2>", 3),
         MarkerLineRow(106, 6, "<b>גמ'</b> (דף ח:) תנו רבנן", 3),
     )
 
+    private val baseEvidence = mapOf(
+        102L to evidence("דף ב." to "מאימתי", "דף ח:" to "אמר רב יהודה אמר רב פלוני כתב בדבר"),
+        103L to evidence("דף ח:" to "המשך באותו דף"),
+        104L to evidence("דף ט." to "", "דף ב:" to "אמר רבי יהודה עד סוף זמן קריאת שמע"),
+        106L to evidence("דף ח:" to "תנו רבנן"),
+    )
+
     @Test
     fun `an amud reached from two Rif pages gets one child per page`() {
-        val plan = planGemaraDafEntries(lines, toc)
+        val plan = planGemaraDafEntries(lines, toc, baseEvidence)
         assertEquals(
             listOf(
                 PlannedMarkerEntry("1", null, 0, "דף ב.", 102, 2, isMarker = true),
@@ -98,7 +136,7 @@ class GemaraDafAltTocTest {
 
     @Test
     fun `an amud reached twice from one Rif page is a single leaf`() {
-        val plan = planGemaraDafEntries(lines.filter { it.index != 6 }, toc)
+        val plan = planGemaraDafEntries(lines.filter { it.index != 6 }, toc, baseEvidence)
         assertEquals(PlannedMarkerEntry("3", null, 0, "דף ח:", 102, 2, isMarker = true), plan.entries.single { it.text == "דף ח:" })
         assertEquals(mapOf(2 to "3", 3 to "3", 4 to "2"), plan.ownerPathByLineIndex)
     }
@@ -109,7 +147,9 @@ class GemaraDafAltTocTest {
             MarkerLineRow(102, 2, "(דף יט:) א", 2),
             MarkerLineRow(106, 6, "(דף י\"ט ע\"ב) ב", 3),
         )
-        val entries = planGemaraDafEntries(spelled, toc).entries
+        val entries = planGemaraDafEntries(
+            spelled, toc, mapOf(102L to evidence("דף יט:" to "א"), 106L to evidence("דף יט:" to "ב")),
+        ).entries
         assertEquals(listOf("דף יט:", "דף יט: – רי\"ף דף א.", "דף י\"ט: – רי\"ף דף ג:"), entries.map { it.text })
         for (entry in entries) {
             val marker = entry.text.substringBefore(" – ")
@@ -120,17 +160,19 @@ class GemaraDafAltTocTest {
     }
 
     @Test
-    fun `markers past the tractate's last daf are dropped`() {
-        val plan = planGemaraDafEntries(lines, toc, lastDaf = 8)
+    fun `unsupported markers are omitted without mapping unrelated lines`() {
+        val plan = planGemaraDafEntries(
+            lines, toc, baseEvidence + (104L to evidence("דף ב:" to "אמר רבי יהודה עד סוף זמן קריאת שמע")),
+        )
         assertEquals(listOf("דף ב.", "דף ב:", "דף ח:"), plan.entries.filter { it.parentPath == null }.map { it.text })
-        assertEquals(listOf("דף ט." to 4), plan.dropped.map { (amud, index) -> amud.text to index })
         assertEquals("2", plan.ownerPathByLineIndex[4])
+        assertEquals(null, plan.ownerPathByLineIndex[5])
     }
 
     @Test
     fun `an occurrence without a Rif page heading is numbered`() {
         val flat = lines.map { it.copy(tocEntryId = 1) }
-        val texts = planGemaraDafEntries(flat, toc).entries.map { it.text }
+        val texts = planGemaraDafEntries(flat, toc, baseEvidence).entries.map { it.text }
         assertEquals(listOf("דף ח: – 1", "דף ח: – 2", "דף ח: – 3"), texts.filter { it.startsWith("דף ח: –") })
     }
 
@@ -145,7 +187,7 @@ class GemaraDafAltTocTest {
     }
 
     @Test
-    fun `replaces a structure of the same key and maps every line to its occurrence`() = runBlocking {
+    fun `replaces a structure and maps lines with a proved correspondence`() = runBlocking {
         SeforimDb.Schema.create(driver)
         repo = SeforimRepository(dbFile.toString(), driver)
         val catId = repo.insertCategory(Category(0, null, "ראשונים", level = 0, order = 1))
@@ -157,6 +199,30 @@ class GemaraDafAltTocTest {
             )
         }
         for (line in lines) repo.upsertLineToc(lineIds[line.index], line.tocEntryId!!)
+        val baseId = repo.insertBook(Book(categoryId = catId, sourceId = repo.insertSource("Sefaria"), title = "ברכות"))
+        repo.insertBookBaseText(bookId, baseId)
+        var baseLineIndex = 0
+        for ((id, proof) in baseEvidence) {
+            for ((amud, texts) in proof.baseTextByAmud) {
+                val hebrew = when (amud) {
+                    4 -> "ב."
+                    5 -> "ב:"
+                    17 -> "ח:"
+                    else -> "ט."
+                }
+                for (text in texts) {
+                    val baseLineId = repo.insertLine(Line(
+                        bookId = baseId, lineIndex = baseLineIndex++, content = text, heRef = "ברכות, $hebrew, א",
+                    ))
+                    val targetIndex = lines.single { it.id == id }.index
+                    repo.insertLink(Link(
+                        sourceBookId = baseId, targetBookId = bookId, sourceLineId = baseLineId,
+                        targetLineId = lineIds[targetIndex], targetLineIndex = targetIndex,
+                        connectionType = ConnectionType.COMMENTARY,
+                    ))
+                }
+            }
+        }
         val old = repo.upsertAltTocStructure(AltTocStructure(bookId = bookId, key = "GemaraDapim", title = "x", heTitle = "x"))
         repo.insertAltTocEntry(AltTocEntry(structureId = old, text = "ישן", level = 0, lineId = lineIds[2]))
 
@@ -193,7 +259,7 @@ class GemaraDafAltTocTest {
             }
             assertEquals(
                 listOf(
-                    2 to "דף ח: – רי\"ף דף א.", 3 to "דף ח: – רי\"ף דף א.", 4 to "דף ב:", 5 to "דף ב:",
+                    2 to "דף ח: – רי\"ף דף א.", 3 to "דף ח: – רי\"ף דף א.", 4 to "דף ב:",
                     6 to "דף ח: – רי\"ף דף ג:",
                 ),
                 owners,
@@ -206,45 +272,13 @@ class GemaraDafAltTocTest {
     }
 
     @Test
-    fun `the last daf comes from the one Bavli tractate of the same name`() = runBlocking {
-        SeforimDb.Schema.create(driver)
-        repo = SeforimRepository(dbFile.toString(), driver)
-        val catId = repo.insertCategory(Category(0, null, "תלמוד בבלי", level = 0, order = 1))
-        val source = repo.insertSource("Sefaria")
-        suspend fun addBook(title: String, headings: List<String>) {
-            val bookId = repo.insertBook(Book(categoryId = catId, sourceId = source, title = title))
-            headings.forEachIndexed { i, text ->
-                val lineId = repo.insertLine(Line(bookId = bookId, lineIndex = i, content = text))
-                repo.insertTocEntry(TocEntry(bookId = bookId, text = text, level = 1, lineId = lineId))
-            }
-        }
-        addBook("ברכות", listOf("ברכות", "דף ב.", "דף סד.", "דף י:"))
-        addBook("רי\"ף ברכות", listOf("דף קה:"))
-        DriverManager.getConnection("jdbc:sqlite:$dbFile").use { conn ->
-            assertEquals(64, bavliLastDaf(conn, "רי\"ף ברכות"))
-            assertEquals(null, bavliLastDaf(conn, "רי\"ף שבת"))
-            assertEquals(null, bavliLastDaf(conn, "ברכות"))
-            // A second book of that title (the repository dedupes titles, so copy the rows).
-            conn.createStatement().use { st ->
-                for (sql in listOf(
-                    "CREATE TEMP TABLE b AS SELECT * FROM book WHERE title = 'ברכות'",
-                    "UPDATE b SET id = 999",
-                    "INSERT INTO book SELECT * FROM b",
-                    "CREATE TEMP TABLE t AS SELECT * FROM tocEntry WHERE bookId = (SELECT id FROM book WHERE title = 'ברכות' AND id <> 999)",
-                    "UPDATE t SET id = id + 1000, bookId = 999, parentId = NULL",
-                    "INSERT INTO tocEntry SELECT * FROM t",
-                )) st.execute(sql)
-            }
-            assertEquals(null, bavliLastDaf(conn, "רי\"ף ברכות"))
-        }
-    }
-
-    @Test
     fun `a listed book without markers fails`() = runBlocking {
         SeforimDb.Schema.create(driver)
         repo = SeforimRepository(dbFile.toString(), driver)
         val catId = repo.insertCategory(Category(0, null, "ראשונים", level = 0, order = 1))
         val bookId = repo.insertBook(Book(categoryId = catId, sourceId = repo.insertSource("Sefaria"), title = rule.bookTitle))
+        val baseId = repo.insertBook(Book(categoryId = catId, sourceId = repo.insertSource("Sefaria"), title = "ברכות"))
+        repo.insertBookBaseText(bookId, baseId)
         repo.insertLine(Line(bookId = bookId, lineIndex = 0, content = "(דף ח: ע\"ש)"))
         DriverManager.getConnection("jdbc:sqlite:$dbFile").use { conn ->
             assertFailsWith<IllegalStateException> { writeGemaraDafAltTocs(conn, listOf(rule)) }

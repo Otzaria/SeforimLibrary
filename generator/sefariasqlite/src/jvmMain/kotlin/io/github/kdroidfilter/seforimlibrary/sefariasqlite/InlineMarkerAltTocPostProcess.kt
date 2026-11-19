@@ -258,7 +258,7 @@ internal fun readMarkerToc(conn: Connection, bookId: Long): List<MarkerTocRow> =
 
 /**
  * Replaces the book's structure of [structureKey] with [planned]. Each line belongs to
- * the entry of [ownerPathByLineIndex] at or before it.
+ * its entry in [ownerPathByLineIndex], or the preceding entry when [carryOwner] is set.
  */
 internal fun writeMarkerStructure(
     conn: Connection,
@@ -270,6 +270,7 @@ internal fun writeMarkerStructure(
     stableIds: AttachedBuildStateIds?,
     // One line with several markers maps to its last (the app keeps a clicked earlier one selected).
     ownerPathByLineIndex: Map<Int, String> = planned.filter { it.isMarker }.associate { it.lineIndex to it.path },
+    carryOwner: Boolean = true,
 ): Int {
     for (sql in listOf(
         "DELETE FROM line_alt_toc WHERE structureId IN (SELECT id FROM alt_toc_structure WHERE bookId = ? AND key = ?)",
@@ -323,7 +324,7 @@ internal fun writeMarkerStructure(
     conn.prepareStatement("INSERT INTO line_alt_toc (lineId, structureId, altTocEntryId) VALUES (?, ?, ?)").use { st ->
         var owner: Long? = null
         for (line in lines) {
-            owner = ownerByLineIndex[line.index] ?: owner
+            owner = ownerByLineIndex[line.index] ?: owner.takeIf { carryOwner }
             st.setLong(1, line.id)
             st.setLong(2, structureId)
             st.setLong(3, owner ?: continue)

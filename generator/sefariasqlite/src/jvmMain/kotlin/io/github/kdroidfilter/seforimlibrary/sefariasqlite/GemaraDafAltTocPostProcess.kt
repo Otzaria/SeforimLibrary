@@ -1,6 +1,5 @@
 package io.github.kdroidfilter.seforimlibrary.sefariasqlite
 
-import co.touchlab.kermit.Logger
 import io.github.kdroidfilter.seforimlibrary.common.ids.altTocChildPath
 import java.sql.Connection
 
@@ -10,7 +9,9 @@ import java.sql.Connection
  *
  * Entries follow the Gemara's order, one per amud; an amud the text reaches from more
  * than one main-TOC heading (Rif page) gets a child per heading, in reading order.
- * Each line belongs to the entry of the last marker at or before it.
+ * A marker needs a link to the corresponding page of the declared base tractate.
+ * Without a marker, the line can keep the preceding entry if its links confirm
+ * that it still discusses that page.
  * Like [INLINE_MARKER_ALT_TOC_FILE], the stage owns the rule's structure key for the
  * listed books, and ids come from the build-state allocator keyed on ancestor paths.
  *
@@ -52,57 +53,103 @@ internal fun parseGemaraDafRules(lines: List<String>): List<GemaraDafRule> {
 
 /** One amud; [daf] keeps the letters as written, [value] orders and identifies it. */
 internal data class GemaraAmud(val daf: String, val value: Int, val side: Char) {
-    /** The app finds the entry's line by searching for `(text)` or its ע"א/ע"ב form. */
     val text get() = "דף $daf$side"
     val key get() = value * 2 + if (side == '.') 0 else 1
 }
 
-// Nothing but the daf and amud inside round brackets: `(דף ח: ע"ש)` and `(דף לעיל מח:)`
-// are references. A stray extra `(` is common in the text, so `((דף` counts too.
-private val GEMARA_DAF_MARKER = Regex("""(?<!\()(\(?)\(דף ([א-ת"'׳״]{1,5})(?:([.:])| ע"([אב]))\)""")
-private val GEMARA_DAF_HEADING = Regex("""דף ([א-ת"'׳״]{1,5})[.:]""")
+private val GEMARA_DAF_MARKER = Regex("""(?<!\()(?:\()?\(דף ([א-ת"'׳״]{1,5})(?:([.:])| ע["״]([אב]))?( ע["״]ש)?\)""")
 private val HTML_TAG = Regex("<[^>]*>")
 private val WHITESPACE = Regex("""\s+""")
-private val REFERENCE_WORD = Regex("""ו?(?:ד|כד)?(?:לקמן|לעיל|בפרק|בפירקא)""")
+private val HEBREW_MARK = Regex("""\p{M}+""")
+private val HEBREW_WORD = Regex("[א-ת]+")
+private const val INLINE_QUOTE_WORDS = 8
+private val OPENING_PREFIX = Regex("""(?:(?:גמ(?:רא)?|מתני(?:תין|תהין)?)["'״׳]?)?""")
+private val REFERENCE_WORD = Regex("""ו?(?:ד|כד)?(?:לקמן|לעיל|בפרק|בפירקא)|במסכת""")
 
-/** `לקמן ((דף יט ע"ב)`: one of the three words before a `((` marker makes it a reference. */
-private fun followsReferenceWord(textBefore: String): Boolean =
-    textBefore.replace(HTML_TAG, " ").split(WHITESPACE).filter { it.isNotEmpty() }.takeLast(3)
-        .any { REFERENCE_WORD.matches(it.trim('(', ')', '\'', '"', ',', '.', ':')) }
+internal data class GemaraDafEvidence(
+    val baseTextByAmud: Map<Int, List<String>> = emptyMap(),
+    val foreignAmudim: Set<Int> = emptySet(),
+)
 
-/** The Gemara-daf markers of [content], in order. */
-internal fun findGemaraDafMarkers(content: String): List<GemaraAmud> =
-    GEMARA_DAF_MARKER.findAll(content).mapNotNull { match ->
-        val (extraParen, daf, side, amud) = match.destructured
-        if (extraParen.isNotEmpty() && followsReferenceWord(content.substring(0, match.range.first))) return@mapNotNull null
+private data class PrintedDaf(
+    val letters: String,
+    val number: Int,
+    val side: Char?,
+    val qualified: Boolean,
+    val range: IntRange,
+) {
+    fun possibleAmudim(): List<GemaraAmud> =
+        (side?.let(::listOf) ?: listOf('.', ':')).map { GemaraAmud(letters, number, it) }
+}
+
+private fun hebrewWords(text: String): Sequence<String> =
+    HEBREW_WORD.findAll(HEBREW_MARK.replace(text, "")).map { it.value }
+
+/**
+ * An inline citation can name the same daf number as a base link while quoting
+ * a different tractate. Require a contiguous quotation from immediately after
+ * an inline marker in a linked segment of that page. A marker at the start
+ * already marks the start of the paragraph, including `גמ' (דף עג: ע"ש)`.
+ */
+internal fun findGemaraDafMarkers(
+    content: String,
+    evidence: GemaraDafEvidence,
+): List<GemaraAmud> {
+    if (evidence.baseTextByAmud.isEmpty()) return emptyList()
+    val plain = WHITESPACE.replace(HTML_TAG.replace(content, " "), " ").trim()
+    val candidates = GEMARA_DAF_MARKER.findAll(plain).mapNotNull { match ->
+        val (daf, punctuation, amud, qualification) = match.destructured
         val value = gematriaValue(daf) ?: return@mapNotNull null
-        GemaraAmud(daf, value, side.firstOrNull() ?: if (amud == "א") '.' else ':')
+        val side = punctuation.firstOrNull() ?: when (amud) {
+            "א" -> '.'
+            "ב" -> ':'
+            else -> null
+        }
+        PrintedDaf(daf, value, side, qualification.isNotEmpty(), match.range)
     }.toList()
+    val candidateCounts = candidates.flatMap { it.possibleAmudim() }.groupingBy { it.key }.eachCount()
+    return candidates.mapNotNull { printed ->
+        val amud = printed.possibleAmudim()
+            .singleOrNull { it.key in evidence.baseTextByAmud } ?: return@mapNotNull null
+        if (amud.key in evidence.foreignAmudim || candidateCounts[amud.key] != 1) return@mapNotNull null
+        val prefix = plain.substring(0, printed.range.first)
+        if (prefix.lastIndexOf('[') > prefix.lastIndexOf(']')) return@mapNotNull null
+        // The sidebar also searches square brackets and would scroll to an earlier occurrence.
+        if ("[${amud.text}]" in prefix || "[${amud.text} " in prefix) return@mapNotNull null
+        val terminalWords = prefix.trimEnd().split(' ').takeLast(3)
+        if (terminalWords.any { REFERENCE_WORD.matches(it.trim('(', ')', '\'', '"', ',', '.', ':')) }) return@mapNotNull null
+        val beginsParagraph = OPENING_PREFIX.matches(prefix.trim())
+        if (beginsParagraph && printed.side != null) return@mapNotNull amud
+        // The app cannot scroll to these variants inside a paragraph.
+        if (!beginsParagraph && (printed.qualified || printed.side == null)) return@mapNotNull null
+        val followingWords = hebrewWords(plain.substring(printed.range.last + 1)).take(INLINE_QUOTE_WORDS).toList()
+        if (followingWords.size != INLINE_QUOTE_WORDS) return@mapNotNull null
+        val matchesLinkedText = evidence.baseTextByAmud.getValue(amud.key).any { linkedText ->
+            hebrewWords(HTML_TAG.replace(linkedText, " ")).windowed(INLINE_QUOTE_WORDS).any { it == followingWords }
+        }
+        amud.takeIf { matchesLinkedText }
+    }
+}
 
 internal data class GemaraDafPlan(
     val entries: List<PlannedMarkerEntry>,
     val ownerPathByLineIndex: Map<Int, String>,
-    /** Markers past [planGemaraDafEntries]'s lastDaf, with their line index. */
-    val dropped: List<Pair<GemaraAmud, Int>> = emptyList(),
 )
 
-/**
- * Plans the structure; markers whose daf is past [lastDaf] (the tractate's end) cite
- * another tractate and are dropped.
- */
-internal fun planGemaraDafEntries(lines: List<MarkerLineRow>, toc: List<MarkerTocRow>, lastDaf: Int? = null): GemaraDafPlan {
+internal fun planGemaraDafEntries(
+    lines: List<MarkerLineRow>,
+    toc: List<MarkerTocRow>,
+    evidenceByLineId: Map<Long, GemaraDafEvidence>,
+): GemaraDafPlan {
     val tocById = toc.associateBy { it.id }
     val soleRoot = toc.filter { it.parentId == null }.singleOrNull()?.id
-    // Several markers of one amud on one line are one occurrence.
     val occurrences = LinkedHashMap<Int, MutableList<Pair<GemaraAmud, MarkerLineRow>>>()
     val lastKeyByLineIndex = HashMap<Int, Int>()
-    val dropped = mutableListOf<Pair<GemaraAmud, Int>>()
     for (line in lines) {
-        val (markers, beyond) = findGemaraDafMarkers(line.content).partition { lastDaf == null || it.value <= lastDaf }
-        beyond.mapTo(dropped) { it to line.index }
+        val evidence = evidenceByLineId[line.id] ?: continue
+        val markers = findGemaraDafMarkers(line.content, evidence)
         for (amud in markers) {
-            val list = occurrences.getOrPut(amud.key) { mutableListOf() }
-            if (list.lastOrNull()?.second?.index != line.index) list += amud to line
+            occurrences.getOrPut(amud.key) { mutableListOf() } += amud to line
         }
         markers.lastOrNull()?.let { lastKeyByLineIndex[line.index] = it.key }
     }
@@ -129,37 +176,83 @@ internal fun planGemaraDafEntries(lines: List<MarkerLineRow>, toc: List<MarkerTo
             for ((_, occurrence) in group) pathByOccurrence[key to occurrence.index] = childPath
         }
     }
-    val owners = lastKeyByLineIndex.mapValues { (index, key) -> pathByOccurrence.getValue(key to index) }
-    return GemaraDafPlan(entries, owners, dropped)
-}
-
-/**
- * Last daf of the Bavli tractate a `רי"ף X` book follows: the highest `דף` heading of
- * the one book titled X that has them; null when there is no single such book.
- */
-internal fun bavliLastDaf(conn: Connection, rifTitle: String): Int? {
-    val tractate = rifTitle.removePrefix(RIF_TITLE_PREFIX).takeIf { it != rifTitle } ?: return null
-    val lastByBook = conn.prepareStatement(
-        """
-        SELECT t.bookId, tt.text FROM tocEntry t JOIN tocText tt ON tt.id = t.textId
-        WHERE t.bookId IN (SELECT id FROM book WHERE title = ?)
-        """.trimIndent(),
-    ).use { st ->
-        st.setString(1, tractate)
-        st.executeQuery().use { rs ->
-            val last = HashMap<Long, Int>()
-            while (rs.next()) {
-                val daf = GEMARA_DAF_HEADING.matchEntire(rs.getString(2).trimHeadingStart().trim())?.groupValues?.get(1)
-                val value = daf?.let(::gematriaValue) ?: continue
-                last.merge(rs.getLong(1), value, ::maxOf)
+    val owners = buildMap {
+        var lastKey: Int? = null
+        var path: String? = null
+        for (line in lines) {
+            val markerKey = lastKeyByLineIndex[line.index]
+            if (markerKey != null) {
+                lastKey = markerKey
+                path = pathByOccurrence.getValue(markerKey to line.index)
             }
-            last
+            val linkedPages = evidenceByLineId[line.id]?.baseTextByAmud?.keys.orEmpty()
+            val owner = path ?: continue
+            if (markerKey != null || (linkedPages.size == 1 && lastKey in linkedPages)) put(line.index, owner)
         }
     }
-    return lastByBook.values.singleOrNull()
+    return GemaraDafPlan(entries, owners)
 }
 
-private const val RIF_TITLE_PREFIX = "רי\"ף "
+/** Resolve the declared base, even when a different book has the same title. */
+private fun readGemaraBaseBookId(conn: Connection, bookId: Long): Long =
+    conn.prepareStatement("SELECT baseBookId FROM book_base_text WHERE bookId = ?").use { st ->
+        st.setLong(1, bookId)
+        st.executeQuery().use { rs ->
+            check(rs.next()) { "Rif book $bookId has no declared base tractate" }
+            val baseId = rs.getLong(1)
+            check(!rs.next()) { "Rif book $bookId has multiple declared base tractates" }
+            baseId
+        }
+    }
+
+private fun readGemaraEvidence(
+    conn: Connection,
+    bookId: Long,
+    baseId: Long,
+): Map<Long, GemaraDafEvidence> {
+    val baseByLine = mutableMapOf<Long, MutableMap<Int, MutableList<String>>>()
+    val foreignByLine = mutableMapOf<Long, MutableSet<Int>>()
+    conn.prepareStatement(
+        """
+        WITH rif_links(rifLineId, otherLineId, otherBookId, typeId) AS (
+            SELECT targetLineId, sourceLineId, sourceBookId, connectionTypeId
+            FROM link INDEXED BY idx_link_target_book WHERE targetBookId = ?
+            UNION ALL
+            SELECT sourceLineId, targetLineId, targetBookId, connectionTypeId
+            FROM link INDEXED BY idx_link_source_book WHERE sourceBookId = ?
+        )
+        SELECT r.rifLineId, b.id, l.heRef, l.content
+        FROM rif_links r
+        JOIN book b ON b.id = r.otherBookId
+        JOIN line l ON l.id = r.otherLineId
+        JOIN connection_type t ON t.id = r.typeId
+        WHERE (b.id = ? AND t.name = 'COMMENTARY')
+           OR (b.id <> ? AND b.isBaseBook = 1 AND t.name IN ('COMMENTARY', 'OTHER', 'REFERENCE', 'RELATED', 'QUOTATION')
+               AND EXISTS (
+                   SELECT 1 FROM category_closure cc JOIN category c ON c.id = cc.ancestorId
+                   WHERE cc.descendantId = b.categoryId AND c.title = 'תלמוד בבלי'
+               ))
+        """.trimIndent(),
+    ).use { st ->
+        st.setLong(1, bookId)
+        st.setLong(2, bookId)
+        st.setLong(3, baseId)
+        st.setLong(4, baseId)
+        st.executeQuery().use { rs ->
+            while (rs.next()) {
+                val lineId = rs.getLong(1)
+                val amud = parseHeRefAmud(rs.getString(3)) ?: continue
+                if (rs.getLong(2) == baseId) {
+                    baseByLine.getOrPut(lineId) { mutableMapOf() }
+                        .getOrPut(amud) { mutableListOf() } += rs.getString(4).orEmpty()
+                } else {
+                    foreignByLine.getOrPut(lineId) { mutableSetOf() } += amud
+                }
+            }
+        }
+    }
+    return baseByLine.mapValues { (lineId, base) -> GemaraDafEvidence(base, foreignByLine[lineId].orEmpty()) }
+}
 
 /** Atomically replaces each rule's structure; returns entry counts by book title. */
 internal fun writeGemaraDafAltTocs(
@@ -167,19 +260,11 @@ internal fun writeGemaraDafAltTocs(
     rules: List<GemaraDafRule>,
     stableIds: AttachedBuildStateIds? = null,
 ): Map<String, Int> = writeEachBookAtomically(conn, GEMARA_DAF_ALT_TOC_FILE, rules.map { it.bookTitle to it }) { bookId, rule ->
-    val logger = Logger.withTag("GemaraDafAltToc")
-    val lastDaf = bavliLastDaf(conn, rule.bookTitle)
-    if (lastDaf == null) logger.w { "${rule.bookTitle}: no single Bavli tractate found; markers are not limited to its dapim" }
+    val baseId = readGemaraBaseBookId(conn, bookId)
     val lines = readMarkerLines(conn, bookId)
-    val plan = planGemaraDafEntries(lines, readMarkerToc(conn, bookId), lastDaf)
-    if (plan.dropped.isNotEmpty()) {
-        logger.i {
-            "${rule.bookTitle}: dropped ${plan.dropped.size} markers past the tractate's end: " +
-                plan.dropped.joinToString { (amud, index) -> "${amud.text} (line $index)" }
-        }
-    }
-    check(plan.entries.isNotEmpty()) { "$GEMARA_DAF_ALT_TOC_FILE: no '(דף …)' marker in '${rule.bookTitle}'" }
+    val plan = planGemaraDafEntries(lines, readMarkerToc(conn, bookId), readGemaraEvidence(conn, bookId, baseId))
+    check(plan.entries.isNotEmpty()) { "$GEMARA_DAF_ALT_TOC_FILE: no verified Gemara daf marker in '${rule.bookTitle}'" }
     writeMarkerStructure(
-        conn, bookId, rule.structureKey, rule.structureHeTitle, plan.entries, lines, stableIds, plan.ownerPathByLineIndex,
+        conn, bookId, rule.structureKey, rule.structureHeTitle, plan.entries, lines, stableIds, plan.ownerPathByLineIndex, carryOwner = false,
     )
 }
