@@ -2574,6 +2574,16 @@ class SeforimRepository(databasePath: String, private val driver: SqlDriver) : L
         }
     }
 
+    /** Clears the specified reason on the target side of finalized, non-ranged commentary links. */
+    suspend fun clearPointCommentaryTargetSuppressions(linkIds: Set<Long>, reasonMask: Int) = withContext(Dispatchers.IO) {
+        if (linkIds.isEmpty()) return@withContext
+        database.transaction {
+            linkIds.chunked(500).forEach { ids ->
+                database.linkRangeQueriesQueries.clearPointCommentaryTargetSuppressions(ids, reasonMask.toLong())
+            }
+        }
+    }
+
     suspend fun countLinkSuppressedSides(): Long = withContext(Dispatchers.IO) {
         database.linkRangeQueriesQueries.countSuppressedSides().executeAsOne()
     }

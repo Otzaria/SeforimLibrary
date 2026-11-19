@@ -38,5 +38,15 @@ SET reasonMask = excluded.reasonMask;
 selectSuppressedSidesByLinkIds:
 SELECT linkId, side, reasonMask FROM link_suppressed_side WHERE linkId IN ?;
 
+-- A section candidate may have merged with a range or changed type since import.
+clearPointCommentaryTargetSuppressions:
+DELETE FROM link_suppressed_side
+WHERE linkId IN :linkIds AND side = 1 AND reasonMask = :reasonMask
+  AND EXISTS (
+      SELECT 1 FROM link l JOIN connection_type ct ON ct.id = l.connectionTypeId
+      WHERE l.id = link_suppressed_side.linkId AND ct.name = 'COMMENTARY'
+  )
+  AND NOT EXISTS (SELECT 1 FROM link_range r WHERE r.linkId = link_suppressed_side.linkId);
+
 countSuppressedSides:
 SELECT COUNT(*) FROM link_suppressed_side;

@@ -34,6 +34,7 @@ internal class SefariaLinksImporter(
     private val pathIndexCache = ConcurrentHashMap<String, PathRefPrefixIndex>()
     private val pendingRanges = ConcurrentLinkedQueue<LinkRange>()
     private val pendingCoverage = ConcurrentLinkedQueue<LinkCoverage>()
+    private val turCommentarySectionLinks = ConcurrentHashMap.newKeySet<Long>()
 
     // Range accounting — surfaced in the end-of-phase summary log.
     private val rangedRowsSeen = LongAdder()
@@ -631,7 +632,19 @@ internal class SefariaLinksImporter(
                             val srcSideMask = if (wasSwapped) exportedMask2 else exportedMask1
                             val tgtSideMask = if (wasSwapped) exportedMask1 else exportedMask2
                             queueSuppression(linkId, side = 0, mask = srcSideMask)
-                            queueSuppression(linkId, side = 1, mask = commentarySideMask(storedType, tgtSideMask))
+                            queueSuppression(linkId, side = 1, mask = tgtSideMask)
+                            if (csvConnectionType == ConnectionType.COMMENTARY && storedType == ConnectionType.COMMENTARY &&
+                                srcSideMask == 0 && tgtSideMask == SuppressionReason.ANCHOR_NOT_SEGMENT &&
+                                fromRefs.size == 1 && toRefs.size == 1 &&
+                                isTurCommentarySection(
+                                    base = if (wasSwapped) canonical2 else canonical1,
+                                    section = if (wasSwapped) canonical1 else canonical2,
+                                    baseLine = if (wasSwapped) to else from,
+                                    sectionStart = if (wasSwapped) from else to,
+                                )
+                            ) {
+                                turCommentarySectionLinks += linkId
+                            }
                         }
 
                         // Ranged sides: record the range end + per-line coverage.
@@ -1086,6 +1099,12 @@ internal class SefariaLinksImporter(
         // hasSourceConnection: target side of a SOURCE_VIEW_TYPES link.
         repository.recomputeHasSourceConnection()
     }
+
+    /** Restore the reverse side after duplicate rows and link types have both been resolved. */
+    suspend fun showTurCommentarySectionLinks() {
+        repository.clearPointCommentaryTargetSuppressions(turCommentarySectionLinks, SuppressionReason.ANCHOR_NOT_SEGMENT)
+        turCommentarySectionLinks.clear()
+    }
 }
 
 /**
@@ -1236,12 +1255,26 @@ internal fun computeBaseProvenance(storedSrcBook: Long, storedTgtMeta: BookMeta?
 /** The reasons that make a ranged side stop covering its unit's lines. */
 internal const val WHOLE_UNIT_REASONS = SuppressionReason.WHOLE_PEREK or SuppressionReason.WHOLE_PARASHA
 
+private const val TUR_CHOSHEN_MISHPAT_PREFIX = "tur choshen mishpat "
+private val SIMAN_AND_SEIF = Regex("""[1-9]\d*:[1-9]\d*""")
+private val TUR_CHOSHEN_MISHPAT_COMMENTARIES = setOf(
+    "beit yosef choshen mishpat", "bach choshen mishpat", "prisha choshen mishpat",
+    "drisha choshen mishpat", "darkhei moshe choshen mishpat",
+)
+
 /**
- * The commentary side of a COMMENTARY link stays visible when Sefaria hid it only for citing a
- * whole section (Tur Choshen Mishpat → Beit Yosef 157:1): the link resolves to the section's first line.
+ * In these Tur commentaries Sefaria links a whole se'if to the same se'if of the Tur.
+ * Require a single section address and verify the importer landed in that section.
  */
-internal fun commentarySideMask(storedType: ConnectionType, mask: Int): Int =
-    if (storedType == ConnectionType.COMMENTARY && mask == SuppressionReason.ANCHOR_NOT_SEGMENT) 0 else mask
+private fun isTurCommentarySection(base: String, section: String, baseLine: RefEntry, sectionStart: RefEntry): Boolean {
+    if (!base.startsWith(TUR_CHOSHEN_MISHPAT_PREFIX)) return false
+    val address = base.removePrefix(TUR_CHOSHEN_MISHPAT_PREFIX)
+    return SIMAN_AND_SEIF.matches(address) &&
+        section.substringBeforeLast(' ') in TUR_CHOSHEN_MISHPAT_COMMENTARIES &&
+        section.substringAfterLast(' ') == address &&
+        canonicalCitation(baseLine.ref) == base &&
+        canonicalBase(sectionStart.ref) == section
+}
 
 /**
  * A required `Suppression Mask 1/2` cell from a new-format export. Zero must be
