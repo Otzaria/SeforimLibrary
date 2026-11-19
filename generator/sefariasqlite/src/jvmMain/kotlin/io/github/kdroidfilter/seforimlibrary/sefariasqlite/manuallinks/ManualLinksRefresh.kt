@@ -168,6 +168,8 @@ internal data class ManualLinksCounters(
     var anchorsChecked: Int = 0,
     var anchorsRelocated: Int = 0,
     var anchorsContextFilled: Int = 0,
+    var fingerprintsVerified: Int = 0,
+    var fingerprintsNew: Int = 0,
 )
 
 internal data class ManualLinksResult(
@@ -202,6 +204,10 @@ internal class ManualLinksRefresh(
 
     // Successful re-anchorings, with the window pair that produced the unique match.
     private val anchorRelocations = mutableListOf<ObjectNode>()
+
+    // Refs whose segment text was edited in place (same ref, same section size): accepted, listed.
+    private val fingerprintEdits = mutableListOf<ObjectNode>()
+    private var inputFingerprintsPresent = false
 
     fun run(): ManualLinksResult = try {
         runInternal()
@@ -240,15 +246,18 @@ internal class ManualLinksRefresh(
         index = SefariaCorpusIndex.load(
             exportRoot = arguments.sefariaExport,
             candidates = candidates,
-            retainedLines = collectRetainedLineRequirements(),
+            retainedLines = collectRetainedLineRequirements(mayBootstrap),
             fullLineTitles = if (requiresTashmaProof) setOf("משנה ברורה") else emptySet(),
             logger = logger,
         )
         val tashmaProof = if (requiresTashmaProof) {
             proveTashmaVector()
         } else null
+        val inputFingerprints = readInputFingerprints(chain)
+        verifyRefFingerprints(inputFingerprints)
         processDocuments(initialBootstrap = inputLineage == null, mayBootstrap = mayBootstrap, tashmaProof = tashmaProof)
         reportUnrelocatableAnchors()
+        val outputFingerprints = collectOutputFingerprints()
         persistChangedDocuments()
 
         val scan = ManualLinksTreeHash.scan(arguments.output, config)
@@ -279,13 +288,14 @@ internal class ManualLinksRefresh(
             configSha256 = configSha,
         )
         val status = if (inputLineage != null && inputLineage == outputLineage &&
-            counters.filesChanged == 0 && counters.filesRenamed == 0
+            counters.filesChanged == 0 && counters.filesRenamed == 0 && inputFingerprints == outputFingerprints
         ) "no_op" else "ok"
         if (arguments.mode == ManualLinksMode.BOOTSTRAP && inputLineage != null) {
             require(status == "no_op") { "bootstrap with existing lineage is restricted to an exact idempotent no-op" }
         }
         val lineagePath = arguments.output.resolve("manual_links_lineage.json")
         Files.write(lineagePath, outputLineage.canonicalBytes())
+        Files.write(arguments.output.resolve(ManualLinksRefFingerprints.FILE_NAME), outputFingerprints.render())
         logger.i {
             "Manual-links reader: scanned=${index.stats.mergedFilesScanned}, loaded=${index.stats.payloadsLoaded}, " +
                 "retainedAnchors=${index.stats.retainedAnchorLines}, fullProofLines=${index.stats.fullLinesLoaded}, " +
@@ -453,13 +463,28 @@ internal class ManualLinksRefresh(
         }
     }
 
-    private fun collectRetainedLineRequirements(): Map<String, RetainedLineRequirements> {
+    private fun collectRetainedLineRequirements(mayBootstrap: Boolean): Map<String, RetainedLineRequirements> {
         data class MutableRequirements(
             val refs: MutableSet<String> = linkedSetOf(),
             val lineIndexes: MutableSet<Int> = linkedSetOf(),
+            val sections: MutableSet<String> = linkedSetOf(),
+            var allSections: Boolean = false,
         )
 
         val requirements = linkedMapOf<String, MutableRequirements>()
+        sefariaRefs().forEach { (title, ref) ->
+            requirements.getOrPut(title, ::MutableRequirements).sections += ManualLinksRefFingerprints.sectionOf(ref)
+        }
+        // Titles that are not Sefaria books are never loaded, so local↔local records cost nothing here.
+        if (mayBootstrap) documents.forEach { (path, document) ->
+            repeat(document.records.size()) { recordIndex ->
+                val record = document.record(recordIndex)
+                if (!record.has("ref_1")) requirements.getOrPut(sourceTitle(Path.of(path).name), ::MutableRequirements).allSections = true
+                if (!record.has("ref_2")) targetTitleOrNull(record.get("path_2").textValue())?.let {
+                    requirements.getOrPut(it, ::MutableRequirements).allSections = true
+                }
+            }
+        }
         documents.forEach { (path, document) ->
             val title = sourceTitle(Path.of(path).name)
             repeat(document.records.size()) { recordIndex ->
@@ -476,8 +501,107 @@ internal class ManualLinksRefresh(
             }
         }
         return requirements.mapValues { (_, value) ->
-            RetainedLineRequirements(refs = value.refs, lineIndexes = value.lineIndexes)
+            RetainedLineRequirements(
+                refs = value.refs,
+                lineIndexes = value.lineIndexes,
+                fingerprintSections = value.sections,
+                fingerprintAllSections = value.allSections,
+            )
         }
+    }
+
+    /** Every distinct (book heTitle, ref) a record names on either side, in document order. */
+    private fun sefariaRefs(): Set<Pair<String, String>> = buildSet {
+        documents.forEach { (path, document) ->
+            repeat(document.records.size()) { index ->
+                val record = document.record(index)
+                record.get("ref_1")?.takeIf { it.isTextual }?.let { add(sourceTitle(Path.of(path).name) to it.textValue()) }
+                val ref2 = record.get("ref_2")?.takeIf { it.isTextual } ?: return@repeat
+                targetTitleOrNull(record.get("path_2").textValue())?.let { add(it to ref2.textValue()) }
+            }
+        }
+    }
+
+    private fun readInputFingerprints(chain: List<VerifiedChangelog>): ManualLinksRefFingerprints? {
+        val path = arguments.repository.resolve(ManualLinksRefFingerprints.FILE_NAME)
+        if (!path.isRegularFile()) {
+            logger.w { "::warning::${ManualLinksRefFingerprints.FILE_NAME} is missing: refs are stamped, not verified" }
+            return null
+        }
+        inputFingerprintsPresent = true
+        return chain.flatMap { it.renames }.fold(ManualLinksRefFingerprints.read(path)) { fingerprints, event ->
+            if (event.oldEn != null && event.newEn != null && event.oldEn != event.newEn) {
+                fingerprints.renamed(event.oldEn, event.newEn)
+            } else fingerprints
+        }
+    }
+
+    /**
+     * Fails on every ref whose segment moved: the ref vanished, its section changed size, or its
+     * old text now sits on another segment of the section. A text change with the section intact
+     * is an in-place edit and only warns. Runs before any record is processed, so it names all of
+     * them at once instead of stopping on the first unresolvable ref.
+     */
+    private fun verifyRefFingerprints(stored: ManualLinksRefFingerprints?) {
+        if (stored == null) return
+        val problems = mutableListOf<String>()
+        sefariaRefs().forEach { (title, ref) ->
+            val expected = stored.refs[ref]
+            if (expected == null) {
+                counters.fingerprintsNew++
+                return@forEach
+            }
+            // An ambiguous or missing book is processDocuments' own failure, with its record context.
+            if (index.primaryHeTitleCount(title) != 1) return@forEach
+            val section = ManualLinksRefFingerprints.sectionOf(ref)
+            val segments = index.bookByHeTitle(title).sectionFingerprints[section].orEmpty()
+            val actual = segments.firstOrNull { it.ref == ref }?.hash
+            if (actual == expected) {
+                counters.fingerprintsVerified++
+                return@forEach
+            }
+            val storedCount = stored.sections.getValue(section)
+            val movedTo = segments.filter { it.ref != ref && it.hash == expected }.map { it.ref }
+            if (actual != null && storedCount == segments.size && movedTo.isEmpty()) {
+                counters.fingerprintsVerified++
+                fingerprintEdits += ManualLinksJson.mapper.createObjectNode().apply {
+                    put("ref", ref)
+                    put("old_hash", expected)
+                    put("new_hash", actual)
+                }
+                logger.w { "::warning::ref_text_edited $ref: Sefaria edited the segment in place; the link keeps it" }
+                return@forEach
+            }
+            val now = when (movedTo.size) {
+                0 -> "on no segment of the section"
+                1 -> "at ${movedTo.single()}"
+                else -> "on ${movedTo.size} segments (${movedTo.joinToString()})"
+            }
+            problems += "ref_resegmented $ref: section '$section' had $storedCount segment(s), now ${segments.size}; " +
+                (if (actual == null) "the ref no longer exists" else "its text changed") + "; its old text is now $now"
+        }
+        if (problems.isEmpty()) return
+        problems.take(REPORT_DETAIL_LIMIT).forEach { logger.e { "::error::$it" } }
+        throw IllegalArgumentException(
+            "ref_resegmented: ${problems.size} manual-link ref(s) point at re-segmented Sefaria text; " +
+                "fix ref_2/heRef_2 (or ref_1) on main. First: ${problems.first()}",
+        )
+    }
+
+    private fun collectOutputFingerprints(): ManualLinksRefFingerprints {
+        val sections = HashMap<String, Int>()
+        val refs = HashMap<String, String>()
+        sefariaRefs().forEach { (title, ref) ->
+            if (index.primaryHeTitleCount(title) != 1) return@forEach
+            val section = ManualLinksRefFingerprints.sectionOf(ref)
+            val segments = index.bookByHeTitle(title).sectionFingerprints[section]
+            val hash = segments?.firstOrNull { it.ref == ref }?.hash
+            // Every ref is fingerprinted at load, so a gap here is a bug, never a ref to skip.
+            requireNotNull(hash) { "ref $ref resolved but its section '$section' was not fingerprinted" }
+            refs[ref] = hash
+            sections[section] = segments.size
+        }
+        return ManualLinksRefFingerprints(sections, refs)
     }
 
     private fun processDocuments(initialBootstrap: Boolean, mayBootstrap: Boolean, tashmaProof: TashmaProof?) {
@@ -915,6 +1039,14 @@ internal class ManualLinksRefresh(
                 put("anchors_relocations_omitted", omitted(anchorRelocations))
                 set<ArrayNode>("anchors_unrelocatable", detailArray(anchorDrifts))
                 put("anchors_unrelocatable_omitted", omitted(anchorDrifts))
+            })
+            set<ObjectNode>("ref_fingerprints", ManualLinksJson.mapper.createObjectNode().apply {
+                put("input_present", inputFingerprintsPresent)
+                put("verified", counters.fingerprintsVerified)
+                put("new", counters.fingerprintsNew)
+                put("text_edited", fingerprintEdits.size)
+                set<ArrayNode>("text_edits", detailArray(fingerprintEdits))
+                put("text_edits_omitted", omitted(fingerprintEdits))
             })
             set<ObjectNode>("refs", ManualLinksJson.mapper.createObjectNode().apply {
                 put("renamed", counters.refsRenamed)

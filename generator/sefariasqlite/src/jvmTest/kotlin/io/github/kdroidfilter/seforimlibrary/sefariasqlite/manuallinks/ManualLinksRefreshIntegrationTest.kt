@@ -32,6 +32,7 @@ class ManualLinksRefreshIntegrationTest {
         assertTrue(fixture.output.resolve("manual_links_lineage.json").exists())
 
         Files.copy(outputFile, fixture.linkFile, java.nio.file.StandardCopyOption.REPLACE_EXISTING)
+        copyFingerprintsBack(fixture)
         val lineage = fixture.arguments.repository.resolve("manual_links_lineage.json")
         Files.copy(fixture.output.resolve("manual_links_lineage.json"), lineage)
         val lineageWithPriorAudit = ManualLinksLineage.read(lineage).copy(
@@ -125,6 +126,7 @@ class ManualLinksRefreshIntegrationTest {
             fixture.output.resolve("manual_links_lineage.json"),
             fixture.arguments.repository.resolve("manual_links_lineage.json"),
         )
+        copyFingerprintsBack(fixture)
 
         assertFailsWith<IllegalArgumentException> {
             ManualLinksRefresh(
@@ -230,6 +232,92 @@ class ManualLinksRefreshIntegrationTest {
         assertTrue(error.message!!.contains("start is allowed only on a Sefaria source"))
     }
 
+    @Test
+    fun aRefWhoseTextMovedToAnotherSegmentFailsAndNamesItsNewRef() {
+        // 19/11, Rashi on Eruvin 17a:4: two segments prepended, the stored ref now names another text.
+        val fixture = fixture("יעד א,")
+        ManualLinksRefresh(fixture.arguments, logger).run()
+        val lineage = feedOutputBackIntoTheCheckout(fixture)
+        rewriteTargetText(fixture, "תוכן חדש", "תוכן ראשון", "תוכן שני")
+
+        val error = assertFailsWith<IllegalArgumentException> {
+            ManualLinksRefresh(rerun(fixture, lineage, ManualLinksMode.REFRESH, "shifted"), logger).run()
+        }
+        assertTrue(error.message!!.startsWith("ref_resegmented: 1 manual-link ref(s)"), error.message)
+        assertTrue(
+            error.message!!.contains(
+                "ref_resegmented Target 1: section 'Target' had 2 segment(s), now 3; its text changed; " +
+                    "its old text is now at Target 2",
+            ),
+            error.message,
+        )
+        assertFalse(fixture.output.parent.resolve("shifted/.manual-links-refresh-complete").exists())
+    }
+
+    @Test
+    fun aRefThatVanishedFailsWithTheSegmentHoldingItsText() {
+        // 19/11, Rashi on Kiddushin 57a:3: the first segment was deleted, the last ref no longer exists.
+        val fixture = quotedTargetFixture()
+        ManualLinksRefresh(fixture.arguments, logger).run()
+        val lineage = feedOutputBackIntoTheCheckout(fixture)
+        rewriteTargetText(fixture, "תוכן שני")
+
+        val error = assertFailsWith<IllegalArgumentException> {
+            ManualLinksRefresh(rerun(fixture, lineage, ManualLinksMode.REFRESH, "vanished"), logger).run()
+        }
+        assertTrue(
+            error.message!!.contains(
+                "ref_resegmented Target 2: section 'Target' had 2 segment(s), now 1; the ref no longer exists; " +
+                    "its old text is now at Target 1",
+            ),
+            error.message,
+        )
+    }
+
+    @Test
+    fun anInPlaceTextEditIsAcceptedAndListed() {
+        val fixture = fixture("יעד א,")
+        ManualLinksRefresh(fixture.arguments, logger).run()
+        val lineage = feedOutputBackIntoTheCheckout(fixture)
+        val before = ManualLinksRefFingerprints.read(fixture.arguments.repository.resolve(ManualLinksRefFingerprints.FILE_NAME))
+        rewriteTargetText(fixture, "תוכן ראשון מתוקן", "תוכן שני")
+
+        val result = ManualLinksRefresh(rerun(fixture, lineage, ManualLinksMode.REFRESH, "edited"), logger).run()
+
+        assertEquals("ok", result.status)
+        val report = ManualLinksJson.readStrict(result.reportPath).get("ref_fingerprints")
+        assertEquals(1, report.get("verified").intValue())
+        assertEquals(1, report.get("text_edited").intValue())
+        assertEquals("Target 1", report.get("text_edits").single().get("ref").textValue())
+        val after = ManualLinksRefFingerprints.read(fixture.output.parent.resolve("edited/${ManualLinksRefFingerprints.FILE_NAME}"))
+        assertEquals(before.sections, after.sections)
+        assertEquals(ManualLinksRefFingerprints.hash("תוכן ראשון מתוקן"), after.refs.getValue("Target 1"))
+    }
+
+    @Test
+    fun markupAndWhitespaceChangesAreNotTextEdits() {
+        val fixture = fixture("יעד א,")
+        ManualLinksRefresh(fixture.arguments, logger).run()
+        val lineage = feedOutputBackIntoTheCheckout(fixture)
+        rewriteTargetText(fixture, "<b>תוכן</b>  ראשון ", "תוכן שני")
+
+        val result = ManualLinksRefresh(rerun(fixture, lineage, ManualLinksMode.REFRESH, "markup"), logger).run()
+
+        assertEquals("no_op", result.status)
+        val report = ManualLinksJson.readStrict(result.reportPath).get("ref_fingerprints")
+        assertEquals(1, report.get("verified").intValue())
+        assertEquals(0, report.get("text_edited").intValue())
+    }
+
+    private fun rewriteTargetText(fixture: Fixture, vararg segments: String) {
+        val merged = fixture.export.resolve("json/Target/merged.json")
+        val heTitle = ManualLinksJson.readStrict(merged).get("heTitle").textValue()
+        Files.writeString(
+            merged,
+            """{"title":"Target","heTitle":${jsonText(heTitle)},"text":${jsonText(segments.toList())}}""",
+        )
+    }
+
     /** Turns a completed bootstrap into the next run's input checkout and returns its lineage. */
     private fun feedOutputBackIntoTheCheckout(fixture: Fixture): Path {
         Files.copy(
@@ -239,7 +327,16 @@ class ManualLinksRefreshIntegrationTest {
         )
         val lineage = fixture.arguments.repository.resolve("manual_links_lineage.json")
         Files.copy(fixture.output.resolve("manual_links_lineage.json"), lineage)
+        copyFingerprintsBack(fixture)
         return lineage
+    }
+
+    private fun copyFingerprintsBack(fixture: Fixture) {
+        Files.copy(
+            fixture.output.resolve(ManualLinksRefFingerprints.FILE_NAME),
+            fixture.arguments.repository.resolve(ManualLinksRefFingerprints.FILE_NAME),
+            java.nio.file.StandardCopyOption.REPLACE_EXISTING,
+        )
     }
 
     private fun rerun(

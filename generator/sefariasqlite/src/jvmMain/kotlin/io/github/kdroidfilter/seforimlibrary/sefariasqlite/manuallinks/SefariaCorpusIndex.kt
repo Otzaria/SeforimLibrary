@@ -21,6 +21,8 @@ internal data class ManualBookIndex(
     val refsByRef: Map<String, List<RefEntry>>,
     val refsByHeRef: Map<String, List<RefEntry>>,
     val refsByLineIndex: Map<Int, List<RefEntry>>,
+    /** Requested sections only: every segment's text fingerprint, in book order. */
+    val sectionFingerprints: Map<String, List<FingerprintedRef>> = emptyMap(),
 ) {
     fun retainedContent(lineIndex: Int): String? = retainedLines[lineIndex] ?: proofLines?.getOrNull(lineIndex - 1)
 
@@ -37,6 +39,9 @@ internal data class ManualBookIndex(
 internal data class RetainedLineRequirements(
     val refs: Set<String> = emptySet(),
     val lineIndexes: Set<Int> = emptySet(),
+    val fingerprintSections: Set<String> = emptySet(),
+    /** Bootstrap only: records about to be enriched name no ref yet, so every section is needed. */
+    val fingerprintAllSections: Boolean = false,
 )
 
 internal data class SefariaCorpusStats(
@@ -173,7 +178,22 @@ internal fun BookPayload.toManualIndex(
         refsByRef = refEntries.groupBy { it.ref },
         refsByHeRef = refEntries.groupBy { legacyHeRefKey(heTitle, it.heRef) },
         refsByLineIndex = refEntries.groupBy { it.lineIndex },
+        sectionFingerprints = sectionFingerprints(requirements),
     )
+}
+
+private fun BookPayload.sectionFingerprints(requirements: RetainedLineRequirements): Map<String, List<FingerprintedRef>> {
+    val sections = requirements.fingerprintSections
+    if (sections.isEmpty() && !requirements.fingerprintAllSections) return emptyMap()
+    return refEntries
+        .filter { requirements.fingerprintAllSections || ManualLinksRefFingerprints.sectionOf(it.ref) in sections }
+        .groupBy { ManualLinksRefFingerprints.sectionOf(it.ref) }
+        .mapValues { (_, entries) ->
+            entries.map { entry ->
+                val content = lines.getOrNull(entry.lineIndex - 1) ?: error("Ref ${entry.ref} is outside $heTitle")
+                FingerprintedRef(entry.ref, ManualLinksRefFingerprints.hash(content))
+            }
+        }
 }
 
 /**
