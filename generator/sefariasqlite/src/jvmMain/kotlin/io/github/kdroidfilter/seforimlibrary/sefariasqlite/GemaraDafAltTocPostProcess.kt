@@ -1,5 +1,6 @@
 package io.github.kdroidfilter.seforimlibrary.sefariasqlite
 
+import co.touchlab.kermit.Logger
 import io.github.kdroidfilter.seforimlibrary.common.ids.altTocChildPath
 import java.sql.Connection
 
@@ -51,32 +52,45 @@ internal fun parseGemaraDafRules(lines: List<String>): List<GemaraDafRule> {
 
 /** One amud; [daf] keeps the letters as written, [value] orders and identifies it. */
 internal data class GemaraAmud(val daf: String, val value: Int, val side: Char) {
+    /** The app finds the entry's line by searching for `(text)` or its ע"א/ע"ב form. */
     val text get() = "דף $daf$side"
     val key get() = value * 2 + if (side == '.') 0 else 1
 }
 
-// Nothing but the daf and amud inside the brackets: `(דף ח: ע"ש)`, `(דף לעיל מח:)` are references.
-private val GEMARA_DAF_MARKER = Regex("""([(\[])דף ([א-ת"'׳״]{1,5})(?:([.:])|\s+ע["״]([אב]))([)\]])""")
+// Nothing but the daf and amud inside one pair of round brackets: `(דף ח: ע"ש)`,
+// `(דף לעיל מח:)` and `((דף יט ע"ב)` are references.
+private val GEMARA_DAF_MARKER = Regex("""(?<!\()\(דף ([א-ת"'׳״]{1,5})(?:([.:])| ע"([אב]))\)""")
+private val GEMARA_DAF_HEADING = Regex("""דף ([א-ת"'׳״]{1,5})[.:]""")
 
 /** The Gemara-daf markers of [content], in order. */
 internal fun findGemaraDafMarkers(content: String): List<GemaraAmud> =
     GEMARA_DAF_MARKER.findAll(content).mapNotNull { match ->
-        val (open, daf, side, amud, close) = match.destructured
-        if ((open == "(") != (close == ")")) return@mapNotNull null
+        val (daf, side, amud) = match.destructured
         val value = gematriaValue(daf) ?: return@mapNotNull null
         GemaraAmud(daf, value, side.firstOrNull() ?: if (amud == "א") '.' else ':')
     }.toList()
 
-internal data class GemaraDafPlan(val entries: List<PlannedMarkerEntry>, val ownerPathByLineIndex: Map<Int, String>)
+internal data class GemaraDafPlan(
+    val entries: List<PlannedMarkerEntry>,
+    val ownerPathByLineIndex: Map<Int, String>,
+    /** Markers past [planGemaraDafEntries]'s lastDaf, with their line index. */
+    val dropped: List<Pair<GemaraAmud, Int>> = emptyList(),
+)
 
-internal fun planGemaraDafEntries(lines: List<MarkerLineRow>, toc: List<MarkerTocRow>): GemaraDafPlan {
+/**
+ * Plans the structure; markers whose daf is past [lastDaf] (the tractate's end) cite
+ * another tractate and are dropped.
+ */
+internal fun planGemaraDafEntries(lines: List<MarkerLineRow>, toc: List<MarkerTocRow>, lastDaf: Int? = null): GemaraDafPlan {
     val tocById = toc.associateBy { it.id }
     val soleRoot = toc.filter { it.parentId == null }.singleOrNull()?.id
     // Several markers of one amud on one line are one occurrence.
     val occurrences = LinkedHashMap<Int, MutableList<Pair<GemaraAmud, MarkerLineRow>>>()
     val lastKeyByLineIndex = HashMap<Int, Int>()
+    val dropped = mutableListOf<Pair<GemaraAmud, Int>>()
     for (line in lines) {
-        val markers = findGemaraDafMarkers(line.content)
+        val (markers, beyond) = findGemaraDafMarkers(line.content).partition { lastDaf == null || it.value <= lastDaf }
+        beyond.mapTo(dropped) { it to line.index }
         for (amud in markers) {
             val list = occurrences.getOrPut(amud.key) { mutableListOf() }
             if (list.lastOrNull()?.second?.index != line.index) list += amud to line
@@ -88,28 +102,55 @@ internal fun planGemaraDafEntries(lines: List<MarkerLineRow>, toc: List<MarkerTo
     val pathByOccurrence = HashMap<Pair<Int, Int>, String>()
     occurrences.entries.sortedBy { it.key }.forEachIndexed { i, (key, list) ->
         val path = altTocChildPath("", i + 1)
-        val amud = list.first().first
         // One child per Rif page; lines without a page heading stay separate.
         val byPage = list.groupBy { (_, line) -> line.tocEntryId?.takeIf { it != soleRoot && it in tocById } ?: -1L - line.index }
-            .values.map { group -> group.map { it.second } }
-        val first = byPage.first().first()
+            .values.toList()
+        val (amud, first) = byPage.first().first()
         entries += PlannedMarkerEntry(path, null, 0, amud.text, first.id, first.index, isMarker = byPage.size == 1)
         if (byPage.size == 1) {
-            for (line in byPage.single()) pathByOccurrence[key to line.index] = path
+            for ((_, line) in byPage.single()) pathByOccurrence[key to line.index] = path
             return@forEachIndexed
         }
         byPage.forEachIndexed { j, group ->
-            val line = group.first()
+            val (own, line) = group.first()
             val heading = line.tocEntryId?.takeIf { it != soleRoot }?.let(tocById::get)?.text?.trimHeadingStart()?.trim()
             val childPath = altTocChildPath(path, j + 1)
-            val text = "${amud.text} – ${heading?.let { "רי\"ף $it" } ?: "${j + 1}"}"
+            val text = "${own.text} – ${heading?.let { "רי\"ף $it" } ?: "${j + 1}"}"
             entries += PlannedMarkerEntry(childPath, path, 1, text, line.id, line.index, isMarker = true)
-            for (occurrence in group) pathByOccurrence[key to occurrence.index] = childPath
+            for ((_, occurrence) in group) pathByOccurrence[key to occurrence.index] = childPath
         }
     }
     val owners = lastKeyByLineIndex.mapValues { (index, key) -> pathByOccurrence.getValue(key to index) }
-    return GemaraDafPlan(entries, owners)
+    return GemaraDafPlan(entries, owners, dropped)
 }
+
+/**
+ * Last daf of the Bavli tractate a `רי"ף X` book follows: the highest `דף` heading of
+ * the one book titled X that has them; null when there is no single such book.
+ */
+internal fun bavliLastDaf(conn: Connection, rifTitle: String): Int? {
+    val tractate = rifTitle.removePrefix(RIF_TITLE_PREFIX).takeIf { it != rifTitle } ?: return null
+    val lastByBook = conn.prepareStatement(
+        """
+        SELECT t.bookId, tt.text FROM tocEntry t JOIN tocText tt ON tt.id = t.textId
+        WHERE t.bookId IN (SELECT id FROM book WHERE title = ?)
+        """.trimIndent(),
+    ).use { st ->
+        st.setString(1, tractate)
+        st.executeQuery().use { rs ->
+            val last = HashMap<Long, Int>()
+            while (rs.next()) {
+                val daf = GEMARA_DAF_HEADING.matchEntire(rs.getString(2).trimHeadingStart().trim())?.groupValues?.get(1)
+                val value = daf?.let(::gematriaValue) ?: continue
+                last.merge(rs.getLong(1), value, ::maxOf)
+            }
+            last
+        }
+    }
+    return lastByBook.values.singleOrNull()
+}
+
+private const val RIF_TITLE_PREFIX = "רי\"ף "
 
 /** Atomically replaces each rule's structure; returns entry counts by book title. */
 internal fun writeGemaraDafAltTocs(
@@ -117,8 +158,17 @@ internal fun writeGemaraDafAltTocs(
     rules: List<GemaraDafRule>,
     stableIds: AttachedBuildStateIds? = null,
 ): Map<String, Int> = writeEachBookAtomically(conn, GEMARA_DAF_ALT_TOC_FILE, rules.map { it.bookTitle to it }) { bookId, rule ->
+    val logger = Logger.withTag("GemaraDafAltToc")
+    val lastDaf = bavliLastDaf(conn, rule.bookTitle)
+    if (lastDaf == null) logger.w { "${rule.bookTitle}: no single Bavli tractate found; markers are not limited to its dapim" }
     val lines = readMarkerLines(conn, bookId)
-    val plan = planGemaraDafEntries(lines, readMarkerToc(conn, bookId))
+    val plan = planGemaraDafEntries(lines, readMarkerToc(conn, bookId), lastDaf)
+    if (plan.dropped.isNotEmpty()) {
+        logger.i {
+            "${rule.bookTitle}: dropped ${plan.dropped.size} markers past the tractate's end: " +
+                plan.dropped.joinToString { (amud, index) -> "${amud.text} (line $index)" }
+        }
+    }
     check(plan.entries.isNotEmpty()) { "$GEMARA_DAF_ALT_TOC_FILE: no '(דף …)' marker in '${rule.bookTitle}'" }
     writeMarkerStructure(
         conn, bookId, rule.structureKey, rule.structureHeTitle, plan.entries, lines, stableIds, plan.ownerPathByLineIndex,

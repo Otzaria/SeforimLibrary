@@ -41,10 +41,10 @@ class GemaraDafAltTocTest {
         assertEquals(listOf("דף ב.", "דף ב:"), texts("<b><big>גמ'</big></b> (דף ב.) תנו רבנן (דף ב:) עוד"))
         assertEquals(listOf("דף קעו."), texts("(דף קעו.)"))
         assertEquals(listOf("דף יז.", "דף ג:"), texts("(דף יז ע\"א) ו(דף ג ע\"ב)"))
-        assertEquals(listOf("דף ח."), texts("[דף ח ע\"א]"))
         for (reference in listOf(
             "(דף ח: ע\"ש)", "(דף לעיל מח:)", "(דף לקמן יח.)", "(דף יד: טו.)", "(דף ו. דף לג.)",
             "(דף כא. ובפ\"א דחלה)", "(דף נ. ע\"ש (ג\"א)", "(דף ס)", "(דף קל)", "(ברכות דף יב.)", "(דף ח.]",
+            "[דף ח ע\"א]", "([דף ח ע\"א])", "לקמן ((דף י\"ט ע\"ב)", "(דף יז  ע\"א)",
         )) {
             assertEquals(emptyList(), texts(reference), reference)
         }
@@ -94,6 +94,30 @@ class GemaraDafAltTocTest {
         val plan = planGemaraDafEntries(lines.filter { it.index != 6 }, toc)
         assertEquals(PlannedMarkerEntry("3", null, 0, "דף ח:", 102, 2, isMarker = true), plan.entries.single { it.text == "דף ח:" })
         assertEquals(mapOf(2 to "3", 3 to "3", 4 to "2"), plan.ownerPathByLineIndex)
+    }
+
+    @Test
+    fun `each entry is spelled like the marker it points to`() {
+        val spelled = listOf(
+            MarkerLineRow(102, 2, "(דף יט:) א", 2),
+            MarkerLineRow(106, 6, "(דף י\"ט ע\"ב) ב", 3),
+        )
+        val entries = planGemaraDafEntries(spelled, toc).entries
+        assertEquals(listOf("דף יט:", "דף יט: – רי\"ף דף א.", "דף י\"ט: – רי\"ף דף ג:"), entries.map { it.text })
+        for (entry in entries) {
+            val marker = entry.text.substringBefore(" – ")
+            val content = spelled.single { it.index == entry.lineIndex }.content
+            val amudForm = "(${marker.dropLast(1)} ע\"${if (marker.last() == '.') 'א' else 'ב'})"
+            assert("($marker)" in content || amudForm in content) { "${entry.text} not found in '$content'" }
+        }
+    }
+
+    @Test
+    fun `markers past the tractate's last daf are dropped`() {
+        val plan = planGemaraDafEntries(lines, toc, lastDaf = 8)
+        assertEquals(listOf("דף ב.", "דף ב:", "דף ח:"), plan.entries.filter { it.parentPath == null }.map { it.text })
+        assertEquals(listOf("דף ט." to 4), plan.dropped.map { (amud, index) -> amud.text to index })
+        assertEquals("2", plan.ownerPathByLineIndex[4])
     }
 
     @Test
@@ -171,6 +195,40 @@ class GemaraDafAltTocTest {
                 st.executeQuery("SELECT group_concat(heTitle) FROM alt_toc_structure").use { rs -> rs.next(); rs.getString(1) }
             }
             assertEquals("דפי הגמרא", heTitle)
+        }
+    }
+
+    @Test
+    fun `the last daf comes from the one Bavli tractate of the same name`() = runBlocking {
+        SeforimDb.Schema.create(driver)
+        repo = SeforimRepository(dbFile.toString(), driver)
+        val catId = repo.insertCategory(Category(0, null, "תלמוד בבלי", level = 0, order = 1))
+        val source = repo.insertSource("Sefaria")
+        suspend fun addBook(title: String, headings: List<String>) {
+            val bookId = repo.insertBook(Book(categoryId = catId, sourceId = source, title = title))
+            headings.forEachIndexed { i, text ->
+                val lineId = repo.insertLine(Line(bookId = bookId, lineIndex = i, content = text))
+                repo.insertTocEntry(TocEntry(bookId = bookId, text = text, level = 1, lineId = lineId))
+            }
+        }
+        addBook("ברכות", listOf("ברכות", "דף ב.", "דף סד.", "דף י:"))
+        addBook("רי\"ף ברכות", listOf("דף קה:"))
+        DriverManager.getConnection("jdbc:sqlite:$dbFile").use { conn ->
+            assertEquals(64, bavliLastDaf(conn, "רי\"ף ברכות"))
+            assertEquals(null, bavliLastDaf(conn, "רי\"ף שבת"))
+            assertEquals(null, bavliLastDaf(conn, "ברכות"))
+            // A second book of that title (the repository dedupes titles, so copy the rows).
+            conn.createStatement().use { st ->
+                for (sql in listOf(
+                    "CREATE TEMP TABLE b AS SELECT * FROM book WHERE title = 'ברכות'",
+                    "UPDATE b SET id = 999",
+                    "INSERT INTO book SELECT * FROM b",
+                    "CREATE TEMP TABLE t AS SELECT * FROM tocEntry WHERE bookId = (SELECT id FROM book WHERE title = 'ברכות' AND id <> 999)",
+                    "UPDATE t SET id = id + 1000, bookId = 999, parentId = NULL",
+                    "INSERT INTO tocEntry SELECT * FROM t",
+                )) st.execute(sql)
+            }
+            assertEquals(null, bavliLastDaf(conn, "רי\"ף ברכות"))
         }
     }
 
