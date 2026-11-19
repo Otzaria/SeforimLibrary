@@ -63,9 +63,9 @@ jobs:
       TOOL_COMMIT: ${{ inputs.seforim_tool_commit }}
       EXPECTED_OLD_CONFIG_SHA: ${{ inputs.expected_old_config_sha256 }}
       EXPECTED_OLD_TOOL_COMMIT: ${{ inputs.expected_old_tool_commit }}
-      EXPECTED_TARGET_RECORDS: '81496'
-      EXPECTED_SOURCE_RECORDS: '17980'
-      EXPECTED_ANCHORS: '17980'
+      EXPECTED_TARGET_RECORDS: '300302'
+      EXPECTED_SOURCE_RECORDS: '24793'
+      EXPECTED_ANCHORS: '18706'
       EXPECTED_UNRELOCATABLE_ANCHORS: '0'
     steps:
       - name: Validate immutable inputs

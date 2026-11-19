@@ -255,13 +255,13 @@ class ManualGenerateReleaseWorkflowContractTest {
         assertTrue(workflow.contains("ref: \${{ inputs.otzaria_commit }}"))
         assertTrue(workflow.contains("validate-sefaria-release-metadata.py"))
         assertTrue(workflow.contains(":sefariasqlite:manualLinksCorpusTest"))
-        assertTrue(workflow.contains("EXPECTED_TARGET_RECORDS: '81496'"))
-        assertTrue(workflow.contains("EXPECTED_SOURCE_RECORDS: '17980'"))
+        assertTrue(workflow.contains("EXPECTED_TARGET_RECORDS: '300302'"))
+        assertTrue(workflow.contains("EXPECTED_SOURCE_RECORDS: '24793'"))
         assertFalse(
             workflow.contains(Regex("excluded", RegexOption.IGNORE_CASE)),
             "the excluded_files mechanism is gone, in any casing",
         )
-        assertTrue(workflow.contains("EXPECTED_ANCHORS: '17980'"))
+        assertTrue(workflow.contains("EXPECTED_ANCHORS: '18706'"))
         assertTrue(workflow.contains("EXPECTED_UNRELOCATABLE_ANCHORS: '0'"))
         assertTrue(
             workflow.contains("-PexpectedUnrelocatableAnchors=\"\$EXPECTED_UNRELOCATABLE_ANCHORS\""),
