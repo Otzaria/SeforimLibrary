@@ -55,11 +55,11 @@ object GeneratorPipelineProbe {
             sampler.start()
             if (profile) profileStage("lines-start")
             val start = System.nanoTime()
-            DatabaseGenerator(fixture, repo, allocator = allocator).generateLinesOnly()
+            testDatabaseGenerator(fixture, repo, allocator = allocator).generateLinesOnly()
             val linesEnd = System.nanoTime()
             if (profile) profileStage("links-start")
             // Production starts phase two in a new process; do not depend on phase-one caches.
-            DatabaseGenerator(fixture, repo, allocator = allocator).generateLinksOnly()
+            testDatabaseGenerator(fixture, repo, allocator = allocator).generateLinksOnly()
             val linksEnd = System.nanoTime()
             sampler.close()
             if (profile) profileStage("complete")

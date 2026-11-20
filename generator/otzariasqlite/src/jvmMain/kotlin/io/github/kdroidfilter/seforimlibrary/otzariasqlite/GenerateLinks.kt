@@ -1,5 +1,6 @@
 package io.github.kdroidfilter.seforimlibrary.otzariasqlite
 
+import io.github.kdroidfilter.seforimlibrary.common.fordb.requiredForDbArchiveFile
 import app.cash.sqldelight.driver.jdbc.sqlite.JdbcSqliteDriver
 import app.cash.sqldelight.db.SqlCursor
 import app.cash.sqldelight.db.QueryResult
@@ -150,6 +151,7 @@ fun main(args: Array<String>) = runBlocking {
             acronymDbPath = null,
             filterSourcesForLinks = false,
             allocator = allocator,
+            titleAcronyms = requiredForDbArchiveFile(BookDisplayTitles.FOR_DB_FILE, logger),
         )
         generator.generateLinksOnly()
         // The DB and allocator snapshot describe one ID space. Prepare and

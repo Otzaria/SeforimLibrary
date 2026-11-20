@@ -29,6 +29,7 @@ kotlin {
             implementation(project(":dao"))
             implementation(libs.jsoup)
             implementation(libs.zstd)
+            implementation(libs.kotlinx.serialization.json)
         }
 
         jvmTest.dependencies {

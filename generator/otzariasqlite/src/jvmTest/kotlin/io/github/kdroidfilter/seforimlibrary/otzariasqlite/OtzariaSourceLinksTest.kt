@@ -94,7 +94,7 @@ class OtzariaSourceLinksTest {
             """.trimMargin()
         )
 
-        DatabaseGenerator(sourceDirectory = sourceDir, repository = repo).generateLinksOnly()
+        testDatabaseGenerator(sourceDirectory = sourceDir, repository = repo).generateLinksOnly()
 
         // SOURCE link is flipped to canonical base→dependant storage:
         // source = רמבם line (101), target = commentary line (201).
@@ -182,7 +182,7 @@ class OtzariaSourceLinksTest {
             """.trimMargin()
         )
 
-        DatabaseGenerator(sourceDirectory = sourceDir, repository = repo).generateLinksOnly()
+        testDatabaseGenerator(sourceDirectory = sourceDir, repository = repo).generateLinksOnly()
 
         val flipped = repo.getLinkIdsBetweenLines(101, 201)
         assertEquals(1, flipped.size)
@@ -237,7 +237,7 @@ class OtzariaSourceLinksTest {
             linksDir.resolve("קרן אורה על עירובין_links.json"),
             """[{"line_index_1":1,"heRef_2":"עירובין","path_2":"עירובין.txt","line_index_2":1,"Conection Type":"commentary"}]""",
         )
-        val generator = DatabaseGenerator(sourceDirectory = sourceDir, repository = repo)
+        val generator = testDatabaseGenerator(sourceDirectory = sourceDir, repository = repo)
         generator.generateLinksOnly()
 
         assertNull(repo.getLink(900))
@@ -282,7 +282,7 @@ class OtzariaSourceLinksTest {
             """[{"line_index_1":1,"heRef_2":"בראשית","path_2":"בראשית.txt","line_index_2":1,"Conection Type":"commentary"}]""",
         )
 
-        DatabaseGenerator(sourceDirectory = sourceDir, repository = repo).generateLinksOnly()
+        testDatabaseGenerator(sourceDirectory = sourceDir, repository = repo).generateLinksOnly()
 
         val link = repo.getLink(repo.getLinkIdsBetweenLines(200, 100).single())!!
         assertEquals(ConnectionType.OTHER, link.connectionType)
@@ -312,7 +312,7 @@ class OtzariaSourceLinksTest {
                 """{"line_index_1":1,"heRef_2":"מ","path_2":"מצטט.txt","line_index_2":1,"Conection Type":"quotation"}]""",
         )
 
-        DatabaseGenerator(sourceDirectory = sourceDir, repository = repo).generateLinksOnly()
+        testDatabaseGenerator(sourceDirectory = sourceDir, repository = repo).generateLinksOnly()
 
         assertEquals(ConnectionType.FOOTNOTES, repo.getLink(repo.getLinkIdsBetweenLines(100, 200).single())!!.connectionType)
         assertTrue(repo.getBookCore(2)!!.hasSourceConnection)

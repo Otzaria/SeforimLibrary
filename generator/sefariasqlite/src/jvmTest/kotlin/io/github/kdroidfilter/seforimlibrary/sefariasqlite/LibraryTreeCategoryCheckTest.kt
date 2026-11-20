@@ -83,6 +83,14 @@ class LibraryTreeCategoryCheckTest {
     }
 
     @Test
+    fun `a book whose title gained gershayim is still matched to its file`() = withReleasedDb { conn ->
+        conn.createStatement().use { it.execute("UPDATE book SET title = 'שו״ת משכיל' WHERE id = 10") }
+        val baseFiles = setOf("קבלה/מחברי זמננו/שות משכיל.txt", "קבלה/אחרונים/אחר.txt")
+        val candidate = setOf("קבלה/אחרונים/שות משכיל.txt", "קבלה/אחרונים/אחר.txt")
+        assertEquals(mapOf(2L to "קבלה/מחברי זמננו"), lost(conn, candidate, baseFiles))
+    }
+
+    @Test
     fun `tree file must list relative paths`() {
         val path = Files.createTempFile("tree-", ".bin")
         try {
