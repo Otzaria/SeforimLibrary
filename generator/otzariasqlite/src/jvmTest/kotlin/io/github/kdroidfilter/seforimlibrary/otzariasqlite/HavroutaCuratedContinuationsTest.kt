@@ -50,7 +50,7 @@ class HavroutaCuratedContinuationsTest {
         ConnectionType.entries.forEach { bindings.upsertConnectionType(it.name) }
 
         // Actual build order: the manual-link phase has no Havrouta anchors on a clean DB.
-        DatabaseGenerator(sourceDir, repo, allocator = allocator).generateLinksOnly()
+        testDatabaseGenerator(sourceDir, repo, allocator = allocator).generateLinksOnly()
         val manualPhaseConnection = driver.getConnection()
         try {
             assertEquals(0L, count(manualPhaseConnection, "link_coverage"))

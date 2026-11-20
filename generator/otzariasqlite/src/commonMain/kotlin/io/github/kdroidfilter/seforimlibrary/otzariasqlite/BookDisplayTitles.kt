@@ -57,14 +57,12 @@ internal class BookDisplayTitles(acronyms: Collection<String>) {
 
         private fun isAcronymWord(word: String): Boolean = ACRONYM_WORD.matches(word)
 
-        /** Loads the curated acronyms from the `title-acronyms.txt` resource. */
-        fun fromResources(): BookDisplayTitles {
-            val stream = BookDisplayTitles::class.java.getResourceAsStream("/title-acronyms.txt")
-                ?: error("title-acronyms.txt resource is missing")
-            val acronyms = stream.bufferedReader(Charsets.UTF_8).use { reader ->
-                reader.lineSequence().map { it.trim() }.filter { it.isNotEmpty() && !it.startsWith("#") }.toList()
-            }
-            return BookDisplayTitles(acronyms)
-        }
+        /** The ForDB file the library keeps the curated acronyms in, shared with its own name check. */
+        const val FOR_DB_FILE = "title_acronyms.txt"
+
+        /** The acronyms in [FOR_DB_FILE]'s lines; an empty list fails, as the file cannot mean none. */
+        fun parse(lines: List<String>): List<String> =
+            lines.map { it.removePrefix("﻿").trim() }.filter { it.isNotEmpty() && !it.startsWith("#") }
+                .also { check(it.isNotEmpty()) { "ForDB $FOR_DB_FILE lists no acronyms" } }
     }
 }

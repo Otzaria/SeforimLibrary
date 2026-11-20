@@ -154,7 +154,7 @@ class OtzariaGeneratorDiagnosticsTest {
         reportDir()
         val capture = installCapture()
 
-        val generator = DatabaseGenerator(sourceDirectory = root, repository = repo)
+        val generator = testDatabaseGenerator(sourceDirectory = root, repository = repo)
         generator.generateLinesOnly()
         generator.generateLinksOnly()
 
@@ -191,7 +191,7 @@ class OtzariaGeneratorDiagnosticsTest {
         val dir = reportDir()
         val capture = installCapture()
 
-        val generator = DatabaseGenerator(sourceDirectory = root, repository = repo)
+        val generator = testDatabaseGenerator(sourceDirectory = root, repository = repo)
         generator.generateLinesOnly()
         generator.generateLinksOnly()
 
@@ -228,7 +228,7 @@ class OtzariaGeneratorDiagnosticsTest {
         val dir = reportDir()
         val capture = installCapture()
 
-        DatabaseGenerator(sourceDirectory = root, repository = repo).generateLinesOnly()
+        testDatabaseGenerator(sourceDirectory = root, repository = repo).generateLinesOnly()
 
         // None of the shipped priority.txt entries exist under this fixture, so
         // the pass is a total miss — as it very nearly is in production (430/431).
@@ -265,7 +265,7 @@ class OtzariaGeneratorDiagnosticsTest {
         val dir = reportDir()
         val capture = installCapture()
 
-        DatabaseGenerator(sourceDirectory = root, repository = repo).generateLinesOnly()
+        testDatabaseGenerator(sourceDirectory = root, repository = repo).generateLinesOnly()
 
         assertEquals(
             listOf("Recorded source hashes for 1 / 3 Otzaria books"),
@@ -319,7 +319,7 @@ class OtzariaGeneratorDiagnosticsTest {
         reportDir()
         val capture = installCapture()
 
-        val generator = DatabaseGenerator(
+        val generator = testDatabaseGenerator(
             sourceDirectory = root,
             repository = repo,
             allocator = FailingBookIdAllocator(InMemoryIdAllocator.load(path = null), failFor = "ספר א"),
@@ -342,7 +342,7 @@ class OtzariaGeneratorDiagnosticsTest {
         val capture = installCapture()
 
         assertFailsWith<IllegalStateException> {
-            DatabaseGenerator(sourceDirectory = root, repository = repo).generateLinesOnly()
+            testDatabaseGenerator(sourceDirectory = root, repository = repo).generateLinesOnly()
         }
 
         val line = capture.lines.map { it.second }.single { it.startsWith("Error during phase 1") }

@@ -118,6 +118,8 @@ class DatabaseGenerator(
     // documented in BoundedGeneratorInput.kt to tune forked generator runs.
     private val inputBufferBytes: Long = configuredGeneratorInputBytes(),
     private val inputSpillDirectory: Path? = null,
+    // The lines of ForDB's title_acronyms.txt (see [BookDisplayTitles.parse]).
+    titleAcronyms: List<String>,
 ) {
 
     init { require(inputBufferBytes >= 1024) { "inputBufferBytes must be at least 1024" } }
@@ -199,7 +201,7 @@ class DatabaseGenerator(
     private var booksByTitle: Map<String, Book> = emptyMap()
     // File-stem title → stored title, for the books whose title gained gershayim.
     private var displayTitleByStem: Map<String, String> = emptyMap()
-    private val displayTitles = BookDisplayTitles.fromResources()
+    private val displayTitles = BookDisplayTitles(BookDisplayTitles.parse(titleAcronyms))
     private var booksById: Map<Long, Book> = emptyMap()
     // Fixed-size, byte-capped LRU pages; a single link must not load an entire
     // book's text, or leave every referenced book's IDs resident for the phase.

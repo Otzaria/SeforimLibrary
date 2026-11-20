@@ -75,7 +75,7 @@ class OtzariaAltTocTest {
             """[{"key": "Chapters", "heTitle": "פרקים", "nodes": [{"heTitle": "פרק", "line": 1}]}]""",
         )
 
-        DatabaseGenerator(sourceDirectory = sourceDir, repository = repo).generateLinksOnly()
+        testDatabaseGenerator(sourceDirectory = sourceDir, repository = repo).generateLinksOnly()
 
         val structures = repo.getAltTocStructuresForBook(1)
         assertEquals(1, structures.size)
@@ -124,7 +124,7 @@ class OtzariaAltTocTest {
         assertTrue(!repo.getBook(2)!!.hasAltStructures)
 
         // Re-running the phase rebuilds wholesale — no duplicated entries.
-        DatabaseGenerator(sourceDirectory = sourceDir, repository = repo).generateLinksOnly()
+        testDatabaseGenerator(sourceDirectory = sourceDir, repository = repo).generateLinksOnly()
         assertEquals(1, repo.getAltTocStructuresForBook(1).size)
         assertEquals(5, repo.getAltTocEntriesForStructure(structureId).size)
         assertEquals(8, repo.getLineAltTocMappings(structureId).size)
@@ -145,7 +145,7 @@ class OtzariaAltTocTest {
             |]
             """.trimMargin()
         )
-        DatabaseGenerator(sourceDirectory = sourceDir, repository = repo).generateLinksOnly()
+        testDatabaseGenerator(sourceDirectory = sourceDir, repository = repo).generateLinksOnly()
         assertEquals("פרשות", repo.getAltTocStructuresForBook(1).single().heTitle)
         val remaining = repo.getAltTocEntriesForStructure(structureId).sortedBy { it.id }
         assertEquals(listOf("בראשית", "עליה א", "עליה ב"), remaining.map { it.text })
@@ -160,7 +160,7 @@ class OtzariaAltTocTest {
             altTocDir.resolve("חומש_alt_toc.json"),
             """[{"key": "Parasha", "heTitle": "פרשה", "nodes": []}]""",
         )
-        DatabaseGenerator(sourceDirectory = sourceDir, repository = repo).generateLinksOnly()
+        testDatabaseGenerator(sourceDirectory = sourceDir, repository = repo).generateLinksOnly()
         assertTrue(repo.getAltTocStructuresForBook(1).isEmpty())
         assertEquals(0, repo.getLineAltTocMappings(structureId).size)
         assertTrue(!repo.getBook(1)!!.hasAltStructures)
@@ -170,11 +170,11 @@ class OtzariaAltTocTest {
             altTocDir.resolve("חומש_alt_toc.json"),
             """[{"key": "Parasha", "heTitle": "פרשה", "nodes": [{"heTitle": "בראשית", "line": 1}]}]""",
         )
-        DatabaseGenerator(sourceDirectory = sourceDir, repository = repo).generateLinksOnly()
+        testDatabaseGenerator(sourceDirectory = sourceDir, repository = repo).generateLinksOnly()
         assertEquals(1, repo.getAltTocStructuresForBook(1).size)
         assertTrue(repo.getBook(1)!!.hasAltStructures)
         Files.delete(altTocDir.resolve("חומש_alt_toc.json"))
-        DatabaseGenerator(sourceDirectory = sourceDir, repository = repo).generateLinksOnly()
+        testDatabaseGenerator(sourceDirectory = sourceDir, repository = repo).generateLinksOnly()
         assertTrue(repo.getAltTocStructuresForBook(1).isEmpty())
         assertTrue(!repo.getBook(1)!!.hasAltStructures)
 
@@ -218,7 +218,7 @@ class OtzariaAltTocTest {
                {"heTitle": "P4", "line": 3}]}]}]""",
         )
 
-        DatabaseGenerator(sourceDirectory = sourceDir, repository = repo).generateLinksOnly()
+        testDatabaseGenerator(sourceDirectory = sourceDir, repository = repo).generateLinksOnly()
 
         val structureId = repo.getAltTocStructuresForBook(1).single().id
         val entries = repo.getAltTocEntriesForStructure(structureId).sortedBy { it.id }
@@ -284,7 +284,7 @@ class OtzariaAltTocTest {
             // appendOtzaria registers books through the allocator; without it the
             // snapshot GC drops this structure's keys as orphans.
             allocator.bookId("Tashma", "Book")
-            DatabaseGenerator(sourceDirectory = sourceDir, repository = repo, allocator = allocator)
+            testDatabaseGenerator(sourceDirectory = sourceDir, repository = repo, allocator = allocator)
                 .generateLinksOnly()
             allocator.snapshotTo(state)
             val structureId = repo.getAltTocStructuresForBook(1).single().id

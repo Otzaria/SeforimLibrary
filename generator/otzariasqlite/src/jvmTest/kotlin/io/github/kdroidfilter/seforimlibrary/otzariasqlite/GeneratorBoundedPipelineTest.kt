@@ -42,7 +42,7 @@ class GeneratorBoundedPipelineTest {
                 Files.writeString(links.resolve("מקור_links.json"), requests.joinToString(",", "[", "]") { (from, to) ->
                     """{"heRef_2":"יעד","line_index_1":${from + 1},"line_index_2":${to + 1},"path_2":"יעד.txt","Conection Type":"commentary"}"""
                 })
-                DatabaseGenerator(root, repo, inputBufferBytes = 1024, inputSpillDirectory = root.resolve("spill"))
+                testDatabaseGenerator(root, repo, inputBufferBytes = 1024, inputSpillDirectory = root.resolve("spill"))
                     .generateLinksOnly()
                 assertEquals(
                     requests.filter { it.first in indices }.map { (from, to) ->
@@ -86,7 +86,7 @@ class GeneratorBoundedPipelineTest {
                 Files.writeString(root.resolve("links/מקור_links.json"), invalid)
                 withRepo { driver, repo ->
                     val allocator = InMemoryIdAllocator.load(null)
-                    val generator = DatabaseGenerator(
+                    val generator = testDatabaseGenerator(
                         root, repo, allocator = allocator,
                         inputBufferBytes = 1024, inputSpillDirectory = root.resolve("spill"),
                     )
@@ -104,7 +104,7 @@ class GeneratorBoundedPipelineTest {
         withFixture { root ->
             writeFixture(root, withNotes = false)
             withRepo { driver, repo ->
-                val generator = DatabaseGenerator(
+                val generator = testDatabaseGenerator(
                     root, repo, inputBufferBytes = 1024, inputSpillDirectory = root.resolve("spill"),
                 )
                 generator.generateLinesOnly()
@@ -154,7 +154,7 @@ class GeneratorBoundedPipelineTest {
                     links.resolve("מקור_links.json"),
                     "[${List(4) { row }.joinToString()}]",
                 )
-                val generator = DatabaseGenerator(
+                val generator = testDatabaseGenerator(
                     root, repo, allocator = allocator,
                     inputBufferBytes = 1024, inputSpillDirectory = root.resolve("spill"),
                 )
@@ -170,7 +170,7 @@ class GeneratorBoundedPipelineTest {
         withFixture { root ->
             writeFixture(root, withNotes = false)
             withRepo { driver, repo ->
-                val generator = DatabaseGenerator(
+                val generator = testDatabaseGenerator(
                     root, repo, inputBufferBytes = 1024, inputSpillDirectory = root.resolve("spill"),
                 )
                 generator.generateLinesOnly()
@@ -190,7 +190,7 @@ class GeneratorBoundedPipelineTest {
         withFixture { root ->
             writeFixture(root, withNotes = false)
             withRepo { driver, repo ->
-                val generator = DatabaseGenerator(
+                val generator = testDatabaseGenerator(
                     root, repo, inputBufferBytes = 1024, inputSpillDirectory = root.resolve("spill"),
                 )
                 generator.generateLinesOnly()
@@ -217,7 +217,7 @@ class GeneratorBoundedPipelineTest {
             writeFixture(root, withNotes = false)
             withRepo { driver, repo ->
                 val allocator = InMemoryIdAllocator.load(null)
-                val generator = DatabaseGenerator(
+                val generator = testDatabaseGenerator(
                     root, repo, allocator = allocator,
                     inputBufferBytes = 1024, inputSpillDirectory = root.resolve("spill"),
                 )
@@ -236,7 +236,7 @@ class GeneratorBoundedPipelineTest {
     private suspend fun buildSnapshot(root: Path, budget: Long): Map<String, List<List<String?>>> =
         withRepo { driver, repo ->
             val allocator = InMemoryIdAllocator.load(null)
-            val generator = DatabaseGenerator(
+            val generator = testDatabaseGenerator(
                 root, repo, allocator = allocator,
                 inputBufferBytes = budget, inputSpillDirectory = root.resolve("spill"),
             )

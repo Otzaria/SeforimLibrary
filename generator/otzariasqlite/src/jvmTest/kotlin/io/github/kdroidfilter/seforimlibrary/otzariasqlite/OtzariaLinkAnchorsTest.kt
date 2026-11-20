@@ -67,7 +67,7 @@ class OtzariaLinkAnchorsTest {
             """.trimMargin()
         )
 
-        DatabaseGenerator(sourceDirectory = sourceDir, repository = repo).generateLinksOnly()
+        testDatabaseGenerator(sourceDirectory = sourceDir, repository = repo).generateLinksOnly()
 
         // Sefaria(MB) → Tashma(שער הציון): imported, with the converted anchor.
         val linkIds = repo.getLinkIdsBetweenLines(101, 201)

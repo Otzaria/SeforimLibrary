@@ -17,7 +17,7 @@ import kotlin.test.assertTrue
 /** Otzaria/otzaria#2766: file stems lose their gershayim; the stored title gets them back. */
 class OtzariaBookDisplayTitleTest {
 
-    private val titles = BookDisplayTitles.fromResources()
+    private val titles = BookDisplayTitles(BookDisplayTitles.parse(TEST_TITLE_ACRONYMS))
 
     @Test
     fun theWholeHeadingIsTakenWhenItIsTheStemWithGershayim() {
@@ -44,6 +44,13 @@ class OtzariaBookDisplayTitleTest {
     @Test
     fun curatedAcronymsAlsoFillWordsTheWholeHeadingLeftBare() {
         assertEquals("שו״ת פני יצחק ח״ב", titles.displayTitle("שות פני יצחק חב", "שות פני יצחק ח\"ב"))
+    }
+
+    @Test
+    fun theForDbFileFailsClosedWhenItListsNothing() {
+        assertEquals(listOf("שו״ת", "הש״ס"), BookDisplayTitles.parse(listOf("﻿# comment", "", " שו״ת ", "הש״ס")))
+        assertFailsWith<IllegalStateException> { BookDisplayTitles.parse(listOf("# only a comment", "")) }
+        assertFailsWith<IllegalStateException> { testDatabaseGenerator(Files.createTempDirectory("x"), repo(), titleAcronyms = emptyList()) }
     }
 
     @Test
@@ -103,9 +110,9 @@ class OtzariaBookDisplayTitleTest {
         val repo = SeforimRepository(":memory:", driver)
         try {
             val allocator = InMemoryIdAllocator.load(null)
-            DatabaseGenerator(sourceDirectory = root, repository = repo, allocator = allocator, buildVersion = 1)
+            testDatabaseGenerator(sourceDirectory = root, repository = repo, allocator = allocator, buildVersion = 1)
                 .generateLinesOnly()
-            DatabaseGenerator(sourceDirectory = root, repository = repo, allocator = allocator, buildVersion = 1)
+            testDatabaseGenerator(sourceDirectory = root, repository = repo, allocator = allocator, buildVersion = 1)
                 .generateLinksOnly()
 
             val books = repo.getAllBooks().associateBy { it.title }
@@ -125,6 +132,12 @@ class OtzariaBookDisplayTitleTest {
         } finally {
             repo.close()
         }
+    }
+
+    private fun repo(): SeforimRepository {
+        val driver = JdbcSqliteDriver(url = "jdbc:sqlite::memory:")
+        SeforimDb.Schema.create(driver)
+        return SeforimRepository(":memory:", driver)
     }
 
     private fun writeBook(root: Path, stem: String, heading: String) {

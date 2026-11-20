@@ -343,3 +343,13 @@ tasks.register<JavaExec>("generatorPipelineProbe") {
         systemProperty("seforim.generator.inputBufferMiB", it)
     }
 }
+
+// The Otzaria import reads ForDB's title_acronyms.txt; forward the release build's pinned
+// archive so it reads the same bytes as every ForDB post-process (see sefariasqlite).
+tasks.matching { it.name in setOf("generateLines", "generateLinks", "appendOtzariaLines", "appendOtzariaLinks") }
+    .configureEach {
+        this as JavaExec
+        for (p in listOf("forDbArchive", "forDbSha256")) {
+            if (project.hasProperty(p)) systemProperty(p, project.property(p) as String)
+        }
+    }
