@@ -10,7 +10,7 @@ import io.github.kdroidfilter.seforimlibrary.common.ids.CategoryLabels
  * and heRef change, and only by quote marks ([CategoryLabels.onlyAddsQuoteMarks]).
  *
  *  1. The whole first heading, when it is the stem plus gershayim.
- *  2. Otherwise per word: an acronym word of the heading, or one of [acronyms].
+ *  2. Then per word still without them: an acronym word of the heading, or one of [acronyms].
  */
 internal class BookDisplayTitles(acronyms: Collection<String>) {
 
@@ -25,7 +25,7 @@ internal class BookDisplayTitles(acronyms: Collection<String>) {
      */
     fun displayTitle(stemTitle: String, firstHeading: String?): String {
         val heading = firstHeading?.let(CategoryLabels::normalize).orEmpty()
-        val candidate = CategoryLabels.bookTitle(fromWholeHeading(stemTitle, heading) ?: byWords(stemTitle, heading))
+        val candidate = CategoryLabels.bookTitle(byWords(fromWholeHeading(stemTitle, heading) ?: stemTitle, heading))
         return if (CategoryLabels.onlyAddsQuoteMarks(candidate, stemTitle)) candidate else stemTitle
     }
 

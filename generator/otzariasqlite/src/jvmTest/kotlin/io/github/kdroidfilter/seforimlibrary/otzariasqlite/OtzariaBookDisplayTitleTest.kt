@@ -38,6 +38,12 @@ class OtzariaBookDisplayTitleTest {
         assertEquals("דברי שאול עה״ת ומגילות", titles.displayTitle("דברי שאול עהת ומגילות", "דברי שאול"))
         assertEquals("חידושי הריטב״א על הש״ס", titles.displayTitle("חידושי הריטבא על השס", null))
         assertEquals("דבש תמר (פירוש המשניות להרמב״ם)", titles.displayTitle("דבש תמר (פירוש המשניות להרמבם)", null))
+        assertEquals("חידושי הר״ן על שבת [מיוחס להריטב״א]", titles.displayTitle("חידושי הרן על שבת [מיוחס להריטבא]", "חידושי הר\"ן על שבת [מיוחס להריטבא]"))
+    }
+
+    @Test
+    fun curatedAcronymsAlsoFillWordsTheWholeHeadingLeftBare() {
+        assertEquals("שו״ת פני יצחק ח״ב", titles.displayTitle("שות פני יצחק חב", "שות פני יצחק ח\"ב"))
     }
 
     @Test
