@@ -281,4 +281,55 @@ class SuperCommentaryChainingRegressionTest {
         assertFalse(200L in meta.getValue(300L).baseTextBookIds)
         assertEquals(null, storedCommentary(300L, 200L, meta), "still OTHER without a base edge")
     }
+
+    // ── פורום 49457: פלפולא חריפתא ↔ פסקי הרא"ש ────────────────────────────────
+
+    private data class RoshTractate(val name: String, val roshGemara: Int, val pilpulaGemara: Int, val pilpulaRosh: Int)
+
+    private val pilpulaCharifta = listOf(
+        RoshTractate("Bava Batra", 591, 28, 590),
+        RoshTractate("Avodah Zarah", 302, 29, 600),
+        RoshTractate("Shevuot", 133, 5, 228),
+        RoshTractate("Makkot", 35, 1, 35),
+    )
+
+    private fun pilpulaOnRosh(tractates: List<RoshTractate>): Pair<MutableMap<Long, BookMeta>, Map<Pair<Long, Long>, Int>> {
+        val meta = HashMap<Long, BookMeta>()
+        val rows = ArrayList<Triple<Long, Long, Int>>()
+        tractates.forEachIndexed { i, t ->
+            val gemara = 100L + i
+            val rosh = 200L + i
+            val pilpula = 300L + i
+            meta[gemara] = primary()
+            meta[rosh] = dependant(setOf(gemara), "Rosh", setOf("רא\"ש"))
+            // Sefaria declares the tractate, not the Rosh, as Pilpula Charifta's base.
+            meta[pilpula] = dependant(setOf(gemara), "Pilpula Charifta", setOf("יום-טוב ליפמן הלר"))
+            rows += Triple(rosh, gemara, t.roshGemara)
+            rows += Triple(pilpula, gemara, t.pilpulaGemara)
+            rows += Triple(pilpula, rosh, t.pilpulaRosh)
+        }
+        return meta to counts(*rows.toTypedArray())
+    }
+
+    @Test
+    fun pilpulaChariftaChainsToTheRoshAlthoughItHardlyCitesTheTractate() {
+        val (meta, c) = pilpulaOnRosh(pilpulaCharifta)
+        runDensityPipeline(meta, c)
+        // Makkot (35 against 1) is below the floor on its own and chains through the work.
+        pilpulaCharifta.forEachIndexed { i, t ->
+            val rosh = 200L + i
+            val pilpula = 300L + i
+            assertTrue(rosh in meta.getValue(pilpula).baseTextBookIds, "${t.name}: Pilpula Charifta → Rosh")
+            assertFalse(pilpula in meta.getValue(rosh).baseTextBookIds, "${t.name}: no reverse edge")
+            assertEquals(rosh to pilpula, storedCommentary(pilpula, rosh, meta), t.name)
+        }
+    }
+
+    @Test
+    fun aSparsePairBelowTheFloorOnBothSidesDoesNotChain() {
+        val (meta, c) = pilpulaOnRosh(pilpulaCharifta.filter { it.name == "Makkot" })
+        applyLinkDensitySiblingChaining(meta, c, log)
+        assertFalse(200L in meta.getValue(300L).baseTextBookIds)
+        assertEquals(null, storedCommentary(300L, 200L, meta))
+    }
 }

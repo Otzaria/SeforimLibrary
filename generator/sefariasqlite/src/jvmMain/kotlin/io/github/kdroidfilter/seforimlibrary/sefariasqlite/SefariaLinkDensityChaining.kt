@@ -235,6 +235,9 @@ internal fun completeDeclaredBaseFamilies(
  *    yet Chullin fell from 0.86 to 0.79 between two exports and Ketubot sits at
  *    0.79, so their typed commentary links were downgraded to OTHER. The
  *    per-volume result is never withdrawn by the aggregate.
+ *  - **A base `D` hardly cites still counts.** Only the larger side of the ratio
+ *    must clear [LINK_DENSITY_BASE_FLOOR]: Pilpula Charifta on Bava Batra has 28
+ *    links to the tractate it declares and 590 to the Rosh on it.
  *
  * This *augments* Sefaria's metadata; it never removes a base text that
  * Sefaria already declared. Returns `(booksTouched, edgesAdded)` for logging.
@@ -289,7 +292,6 @@ internal fun applyLinkDensitySiblingChaining(
         val sharedBasesByCollective = HashMap<String, MutableSet<Long>>()
         for (p in declaredBases) {
             val nDP = linkCount(d, p)
-            if (nDP < LINK_DENSITY_BASE_FLOOR) continue
             val siblings = basesToDependants[p] ?: continue
             for (s in siblings) {
                 if (s == d || s in declaredBases) continue
@@ -320,10 +322,8 @@ internal fun applyLinkDensitySiblingChaining(
             val sharedBases = sharedBasesByCollective[key] ?: continue
             val sumDS = members.sumOf { linkCount(d, it) }
             val sumDP = sharedBases.sumOf { linkCount(d, it) }
-            if (sumDP == 0) continue
             candidates[key] = Candidate(members, sumDS, sumDP)
-            val ratio = sumDS.toDouble() / sumDP.toDouble()
-            if (ratio >= LINK_DENSITY_CHAIN_THRESHOLD) {
+            if (clearsChainThreshold(sumDS.toLong(), sumDP.toLong())) {
                 additionsByBook.getOrPut(d) { HashSet() }.addAll(members)
             }
         }
@@ -344,7 +344,7 @@ internal fun applyLinkDensitySiblingChaining(
         val key = workPair.second
         val sumDS = volumes.sumOf { candidatesByBook.getValue(it).getValue(key).sumDS.toLong() }
         val sumDP = volumes.sumOf { candidatesByBook.getValue(it).getValue(key).sumDP.toLong() }
-        if (sumDP == 0L || sumDS.toDouble() / sumDP.toDouble() < LINK_DENSITY_CHAIN_THRESHOLD) continue
+        if (!clearsChainThreshold(sumDS, sumDP)) continue
         for (d in volumes) {
             val added = additionsByBook.getOrPut(d) { HashSet() }
             for (s in candidatesByBook.getValue(d).getValue(key).members) {
@@ -378,6 +378,10 @@ internal fun applyLinkDensitySiblingChaining(
     }
     return booksTouched to edgesAdded
 }
+
+private fun clearsChainThreshold(sumDS: Long, sumDP: Long): Boolean =
+    maxOf(sumDS, sumDP) >= LINK_DENSITY_BASE_FLOOR &&
+        (sumDP == 0L || sumDS.toDouble() / sumDP >= LINK_DENSITY_CHAIN_THRESHOLD)
 
 /**
  * Per-pair count of links Sefaria typed commentary/targum: `links_by_book.csv`
