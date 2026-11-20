@@ -1,5 +1,6 @@
 package io.github.kdroidfilter.seforimlibrary.sefariasqlite
 
+import io.github.kdroidfilter.seforimlibrary.common.ids.CategoryLabels
 import java.sql.Connection
 
 /** A book whose title is no longer its heRef: a prefixed display title or a book_renames.csv rename. */
@@ -18,9 +19,10 @@ internal fun loadRetitledBooks(conn: Connection): List<RetitledBook> =
     }
 
 /**
- * Fails when a ForDB [file] names a book only by its former title (its heRef): that row
- * matches no book, so its data would be silently dropped. Exact matching only; a row
- * whose book also has a row under its current title is a stale duplicate and passes.
+ * Fails when a ForDB [file] names a book only by its former title (its heRef, or the title
+ * without the gershayim an Otzaria title gained from its book): that row matches no book, so
+ * its data would be silently dropped. A row whose book also has a row under its current title
+ * is a stale duplicate and passes.
  */
 internal fun requireForDbUsesDisplayTitles(
     file: String,
@@ -29,9 +31,14 @@ internal fun requireForDbUsesDisplayTitles(
     retitledBooks: List<RetitledBook>,
 ) {
     val titles = rowTitles.toSet()
-    val byHeRef = retitledBooks.groupBy { it.heRef }
-    val stale = titles.filter { it !in bookTitles }.sorted().flatMap { former ->
-        byHeRef[former].orEmpty().filter { it.title !in titles }.map { "'$former' → '${it.title}'" }
+    val byHeRef = retitledBooks.groupBy({ it.heRef }, { it.title })
+    val unmatched = titles.filter { it !in bookTitles }
+    val byBareTitle = bookTitles.groupBy(CategoryLabels::stripQuoteMarks)
+    val stale = unmatched.sorted().flatMap { former ->
+        val withGershayim = byBareTitle[CategoryLabels.stripQuoteMarks(former)].orEmpty()
+            .filter { it != former && CategoryLabels.onlyAddsQuoteMarks(it, former) }
+        (byHeRef[former].orEmpty() + withGershayim).distinct()
+            .filter { it !in titles }.map { "'$former' → '$it'" }
     }
     check(stale.isEmpty()) {
         "$file names ${stale.size} book(s) by their former title, so their rows would match nothing: " +
