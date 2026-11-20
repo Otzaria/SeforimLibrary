@@ -771,6 +771,12 @@ internal fun renameBookTitle(conn: Connection, oldTitle: String, newTitle: Strin
             logger.i { "Book rename '$oldTitle' -> '$newTitle' already applied (${alreadyRenamed.size} row(s))" }
             return 0
         }
+        // An Otzaria title gains the gershayim its file name lacks; the row would silently no-op.
+        val gainedQuotes = allBookTitles(conn).filter { it != oldTitle && CategoryLabels.onlyAddsQuoteMarks(it, oldTitle) }
+        check(gainedQuotes.isEmpty()) {
+            "Book rename '$oldTitle' -> '$newTitle': the book is now titled ${gainedQuotes.joinToString { "'$it'" }}; " +
+                "update book_renames.csv to that title"
+        }
         logger.w { "Book rename: '$oldTitle' not found; no rows changed" }
         return 0
     }
@@ -794,6 +800,11 @@ private fun findBookIdsByTitle(conn: Connection, title: String): List<Long> =
                 while (rs.next()) add(rs.getLong(1))
             }
         }
+    }
+
+private fun allBookTitles(conn: Connection): List<String> =
+    conn.createStatement().use { st ->
+        st.executeQuery("SELECT title FROM book").use { rs -> buildList { while (rs.next()) add(rs.getString(1)) } }
     }
 
 internal data class BookMove(val name: String, val sourcePath: String, val destPath: String)

@@ -76,6 +76,21 @@ class ForDbTitleGateTest {
     }
 
     @Test
+    fun `a book rename naming an Otzaria book without its gained gershayim fails`() {
+        generationsDb("שו״ת אהל משה", "שו״ת אהל משה").use { conn ->
+            val e = assertFailsWith<IllegalStateException> {
+                renameBookTitle(conn, "שות אהל משה", "שו״ת אהל משה (קרינס)", logger)
+            }
+            assertContains(e.message!!, "'שו״ת אהל משה'")
+            assertEquals(1, renameBookTitle(conn, "שו״ת אהל משה", "שו״ת אהל משה (קרינס)", logger))
+        }
+        // The released DB still has the stem: a migrated row only warns.
+        generationsDb("שות אהל משה", "שות אהל משה").use { conn ->
+            assertEquals(0, renameBookTitle(conn, "שו״ת אהל משה", "שו״ת אהל משה (קרינס)", logger))
+        }
+    }
+
+    @Test
     fun `an unmatched title that is no book's former title passes`() {
         // The released DB still has the old titles: ForDB rows with new titles only warn.
         requireForDbUsesDisplayTitles("book_info.csv", listOf(display), setOf(former), emptyList())
