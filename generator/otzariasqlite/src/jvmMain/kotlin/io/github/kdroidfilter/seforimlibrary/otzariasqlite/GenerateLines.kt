@@ -1,5 +1,6 @@
 package io.github.kdroidfilter.seforimlibrary.otzariasqlite
 
+import io.github.kdroidfilter.seforimlibrary.common.fordb.requiredForDbArchiveFile
 import app.cash.sqldelight.db.QueryResult
 import app.cash.sqldelight.db.SqlCursor
 import app.cash.sqldelight.driver.jdbc.sqlite.JdbcSqliteDriver
@@ -235,6 +236,7 @@ fun main(args: Array<String>) = runBlocking {
             allocator = allocator,
             buildVersion = buildVersion,
             allowBookIdLoss = (System.getProperty("allowBookIdLoss") ?: System.getenv("ALLOW_BOOK_ID_LOSS")) == "true",
+            titleAcronyms = requiredForDbArchiveFile(BookDisplayTitles.FOR_DB_FILE, logger),
         )
         generator.generateLinesOnly()
         // Build both members beside their targets, verify the candidate state
