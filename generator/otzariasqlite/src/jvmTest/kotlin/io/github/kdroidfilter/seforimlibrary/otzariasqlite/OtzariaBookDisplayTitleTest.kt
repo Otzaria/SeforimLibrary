@@ -48,7 +48,7 @@ class OtzariaBookDisplayTitleTest {
 
     @Test
     fun ambiguousWordsAreLeftAlone() {
-        for (stem in listOf("קול הרמז", "שבות יעקב", "דעת תורה", "שי למורא", "מר דרור", "שולחן ערוך יוד")) {
+        for (stem in listOf("קול הרמז", "שבות יעקב", "דעת תורה", "שי למורא", "מר דרור", "שולחן ערוך יוד", "פירוש החסיד יעבץ על אבות")) {
             assertEquals(stem, titles.displayTitle(stem, null))
         }
     }
