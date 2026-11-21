@@ -72,6 +72,21 @@ private val NUMBERED_PARAGRAPH_BOOKS = setOf(
 
 internal fun hasNumberedParagraphs(bookEnTitle: String): Boolean = bookEnTitle in NUMBERED_PARAGRAPH_BOOKS
 
+/**
+ * Books whose second address level Sefaria names "סעיף" (sectionNames Seif) although it
+ * numbers the commentator's סעיפים קטנים, not the Shulchan Aruch's se'ifim: "סעיף קטן"
+ * is the printed and cited label (Otzaria/otzaria#4488). English title (the reader's key)
+ * to Sefaria's Hebrew title (`book.heRef`, the alt-TOC stage's key).
+ * Only the book's main (default) node is relabelled.
+ */
+internal val SEIF_KATAN_LEVEL_BOOKS = mapOf(
+    "Siftei Kohen on Shulchan Arukh, Yoreh De'ah" to "שפתי כהן על שולחן ערוך יורה דעה",
+    "Siftei Kohen on Shulchan Arukh, Choshen Mishpat" to "שפתי כהן על שולחן ערוך חושן משפט",
+    "Ketzot HaChoshen on Shulchan Arukh, Choshen Mishpat" to "קצות החושן על שולחן ערוך חושן משפט",
+)
+
+internal const val SEIF_KATAN_SECTION_NAME = "סעיף קטן"
+
 // Some simanim of the Mishnah Berurah (494-529) mark the seif katan as "{א}"
 // instead of the printed "(א)".
 private val BRACED_SEGMENT_MARKER_REGEX = Regex("""^\{([א-ת]{1,4})\}""")

@@ -392,6 +392,32 @@ class SynthesizeSeifimAltTocIntegrationTest {
     }
 
     @Test
+    fun `a relabelled seif-katan main TOC stays excluded like its old seif headings`() = runBlocking {
+        // otzaria#4488: הש"ך והקצות מציגים עכשיו "סעיף קטן א" במקום "סעיף א" — הכותרות
+        // האלה הן אותו פירוק לסעיפים, והספר נשאר מחוץ לסינתזה כמו קודם.
+        val (_, mbId) = seedMiniDb()
+        for (heRef in listOf(
+            "שפתי כהן על שולחן ערוך יורה דעה",
+            "שפתי כהן על שולחן ערוך חושן משפט",
+            "קצות החושן על שולחן ערוך חושן משפט",
+        )) {
+            DriverManager.getConnection("jdbc:sqlite:$dbFile").use { conn ->
+                conn.prepareStatement("UPDATE book SET heRef = ? WHERE id = ?").use { st ->
+                    st.setString(1, heRef)
+                    st.setLong(2, mbId)
+                    st.executeUpdate()
+                }
+                assertTrue(readLinkedSeifimCandidateSnapshots(conn).isEmpty(), "$heRef must stay excluded")
+            }
+        }
+        // Before the relabel the same book showed "סעיף א" there — excluded, the same output.
+        DriverManager.getConnection("jdbc:sqlite:$dbFile").use { conn ->
+            conn.prepareStatement("UPDATE tocText SET text = 'סעיף א' WHERE text = 'סעיף קטן א'").use { it.executeUpdate() }
+            assertTrue(readLinkedSeifimCandidateSnapshots(conn).isEmpty())
+        }
+    }
+
+    @Test
     fun `incidental SA links do not qualify a commentary on another declared base`() = runBlocking {
         val (_, mbId) = seedMiniDb()
         val sourceId = repo.insertSource("Other")
