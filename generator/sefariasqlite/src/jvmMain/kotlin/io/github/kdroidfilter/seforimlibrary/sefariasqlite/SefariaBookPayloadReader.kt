@@ -794,7 +794,8 @@ internal class SefariaBookPayloadReader(
             } else {
                 val firstContentLine = output.size
                 val firstRefIndex = refs.size
-                val sectionNames = readHeSectionNames(node)
+                val keySectionNames = readHeSectionNames(node)
+                val sectionNames = withSeifKatanLevel(keySectionNames, refPrefix, bookEnTitle)
                 val depth = node["depth"]?.jsonPrimitive?.intOrNullSafe() ?: sectionNames.size
                 val addressTypes = node["addressTypes"]?.jsonArray?.mapNotNull { it.jsonPrimitive.contentOrNull } ?: emptyList()
                 val referenceableSections = node["referenceableSections"]?.jsonArray?.mapNotNull { it.jsonPrimitive.booleanOrNull } ?: emptyList()
@@ -802,6 +803,7 @@ internal class SefariaBookPayloadReader(
                 val nextLevel = if (hasTitle) level + 1 else level
                 recursiveSections(
                     sectionNames = sectionNames,
+                    keySectionNames = keySectionNames,
                     text = text,
                     depth = depth,
                     level = nextLevel,
@@ -863,13 +865,15 @@ internal class SefariaBookPayloadReader(
             }
         } else {
             val firstRefIndex = refs.size
-            val sectionNames = readHeSectionNames(schemaObj)
+            val keySectionNames = readHeSectionNames(schemaObj)
+            val sectionNames = withSeifKatanLevel(keySectionNames, "$bookEnTitle, ", bookEnTitle)
             val depth = schemaObj["depth"]?.jsonPrimitive?.intOrNullSafe() ?: sectionNames.size
             val addressTypes = schemaObj["addressTypes"]?.jsonArray?.mapNotNull { it.jsonPrimitive.contentOrNull } ?: emptyList()
             val referenceableSections = schemaObj["referenceableSections"]?.jsonArray?.mapNotNull { it.jsonPrimitive.booleanOrNull } ?: emptyList()
             val indexOffsets = readIndexOffsets(schemaObj, depth)
             recursiveSections(
                 sectionNames = sectionNames,
+                keySectionNames = keySectionNames,
                 text = textElement,
                 depth = depth,
                 level = 1,
@@ -964,6 +968,8 @@ internal class SefariaBookPayloadReader(
 
     private fun recursiveSections(
         sectionNames: List<String?>,
+        // The names line keys were built from before a display relabel (SEIF_KATAN_LEVEL_BOOKS).
+        keySectionNames: List<String?> = sectionNames,
         text: JsonElement?,
         depth: Int,
         level: Int,
@@ -1183,8 +1189,10 @@ internal class SefariaBookPayloadReader(
                 }
                 val title = sectionName?.let { "$it $letter" } ?: letter
                 val legacy = if (currentAddressType == "Talmud") null else legacyThousandsGematria(idx + 1)
-                if (lineKeyHashOverrides != null && legacy != null) {
-                    val oldTitle = sectionName?.let { "$it $legacy" } ?: legacy
+                val keySectionName = keySectionNames.getOrElse(index) { "" }
+                if (lineKeyHashOverrides != null && (legacy != null || keySectionName != sectionName)) {
+                    val keyNumber = legacy ?: letter
+                    val oldTitle = keySectionName?.let { "$it $keyNumber" } ?: keyNumber
                     lineKeyHashOverrides[output.size] =
                         IdAllocatorBindings.lineNaturalKeyHash("${tag.first}$oldTitle${tag.second}")
                 }
@@ -1212,6 +1220,7 @@ internal class SefariaBookPayloadReader(
 
             recursiveSections(
                 sectionNames = sectionNames,
+                keySectionNames = keySectionNames,
                 text = item,
                 depth = depth - 1,
                 level = level + 1,
@@ -1249,6 +1258,22 @@ internal class SefariaBookPayloadReader(
             if (isNumberedParagraph && output.size > lineCountBefore) {
                 headings += Heading(title = "אות $letter", level = level, lineIndex = lineCountBefore)
             }
+        }
+    }
+
+    /**
+     * [SEIF_KATAN_LEVEL_BOOKS]: level 2 of the book's main node reads "סעיף קטן". Loud when
+     * Sefaria reshapes the node, so the override never lands on another level.
+     */
+    private fun withSeifKatanLevel(sectionNames: List<String?>, refPrefix: String, bookEnTitle: String): List<String?> {
+        if (refPrefix != "$bookEnTitle, " || bookEnTitle !in SEIF_KATAN_LEVEL_BOOKS) return sectionNames
+        return when {
+            sectionNames.size == 3 && sectionNames[0] == "סימן" && sectionNames[1] == "סעיף" ->
+                sectionNames.toMutableList().also { it[1] = SEIF_KATAN_SECTION_NAME }
+            sectionNames.size == 3 && sectionNames[1] == SEIF_KATAN_SECTION_NAME -> sectionNames
+            else -> throw SefariaSchemaException(
+                "$bookEnTitle: expected section names [סימן, סעיף, …] to relabel as סעיף קטן, found $sectionNames",
+            )
         }
     }
 

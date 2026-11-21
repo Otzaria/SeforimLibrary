@@ -471,7 +471,8 @@ internal fun readLinkedSeifimCandidateSnapshots(conn: Connection): List<SeifimBo
         if (linkRows.size * 2 < declaredBaseLinkCount) continue
 
         val headingRows = readTocHeadingRows(conn, candidate.bookId)
-        val headings = simanHeadingMirror(headingRows) ?: continue
+        val seifKatanLevel = candidate.heRef in SEIF_KATAN_LEVEL_BOOKS.values
+        val headings = simanHeadingMirror(headingRows, seifKatanLevel) ?: continue
         if (headings.isEmpty()) continue
         val markers = readLinkedSeifMarkers(conn, linkRows, commentPrefix, candidate.commentator)
         if (markers.isEmpty()) continue
@@ -684,9 +685,14 @@ private fun readTocHeadingRows(conn: Connection, bookId: Long): List<SeifimHeadi
  * main TOC already breaks simanim into se'ifim (Shach, Taz on Yoreh De'ah) —
  * the reader would then show "סעיף ג" twice, once per structure, pointing at
  * adjacent lines. Lower-level headings such as "סעיף קטן א" are content inside
- * the new se'if group, not containers above it.
+ * the new se'if group, not containers above it — except in [SEIF_KATAN_LEVEL_BOOKS]
+ * ([seifKatanLevel]): there "סעיף קטן" relabels the very headings that read
+ * "סעיף X" before (Otzaria/otzaria#4488), so they keep excluding the book.
  */
-private fun simanHeadingMirror(headingRows: List<SeifimHeadingRow>): List<SeifimHeading>? {
+private fun simanHeadingMirror(
+    headingRows: List<SeifimHeadingRow>,
+    seifKatanLevel: Boolean = false,
+): List<SeifimHeading>? {
     val headingById = headingRows.associateBy { it.id }
     val relevantHeadingIds = HashSet<Long>()
     for (row in headingRows) {
@@ -697,7 +703,13 @@ private fun simanHeadingMirror(headingRows: List<SeifimHeadingRow>): List<Seifim
         }
     }
     val simanIds = headingRows.filter { isSimanHeading(it.heading.text) }.map { it.id }.toHashSet()
-    if (headingRows.any { it.parentId in simanIds && isSeifHeading(it.heading.text) }) return null
+    if (headingRows.any {
+            it.parentId in simanIds &&
+                (isSeifHeading(it.heading.text) || (seifKatanLevel && isSeifKatanHeading(it.heading.text)))
+        }
+    ) {
+        return null
+    }
     return headingRows
         .filter { it.id in relevantHeadingIds && it.heading.tocLevel >= 1 }
         .map { it.heading }
@@ -749,6 +761,13 @@ private fun isSeifHeading(text: String): Boolean {
         trimmed.length > "סעיף".length &&
         trimmed["סעיף".length].isWhitespace() &&
         !trimmed.removePrefix("סעיף").trimStart().startsWith("קטן")
+}
+
+/** "סעיף קטן א". */
+private fun isSeifKatanHeading(text: String): Boolean {
+    val rest = text.trimHeadingStart().removePrefix("סעיף")
+    return rest.length < text.trimHeadingStart().length && rest.firstOrNull()?.isWhitespace() == true &&
+        rest.trimStart().let { it.startsWith("קטן") && it.length > "קטן".length && it["קטן".length].isWhitespace() }
 }
 
 internal fun queryMaxId(conn: Connection, table: String): Long =
