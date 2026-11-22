@@ -367,6 +367,51 @@ class CiWorkflowTest(unittest.TestCase):
         # The pairing runs in both inputs_from modes.
         self.assertNotIn("if", named_step(doc, "Stage the Otzaria source"))
 
+    def test_delta_can_pin_different_fordb_archives_for_each_build(self):
+        doc = yaml.safe_load(DELTA.read_text(encoding="utf-8"))
+        script = named_step(doc, "Stage the ForDB rules archive")["run"]
+        v1 = named_step(doc, "Build v1 baseline with the production pipeline")["run"]
+        v2 = named_step(doc, "Build v2 with the production pipeline")["run"]
+        self.assertIn('-PforDbArchive="$FORDB_ARCHIVE"', v1)
+        self.assertIn('-PforDbSha256="$FORDB_ARCHIVE_SHA"', v1)
+        self.assertIn('-PforDbArchive="$FORDB_ARCHIVE_V2"', v2)
+        self.assertIn('-PforDbSha256="$FORDB_ARCHIVE_SHA_V2"', v2)
+        baseline = b"ForDB historical"
+        candidate = b"ForDB with title_acronyms.txt"
+        baseline_sha = hashlib.sha256(baseline).hexdigest()
+        candidate_sha = hashlib.sha256(candidate).hexdigest()
+        baseline_tag = "fordb-sha256-" + baseline_sha
+        candidate_tag = "fordb-sha256-" + candidate_sha
+        for override, corrupt in (("", False), (candidate_tag, False), (candidate_tag, True)):
+            with self.subTest(override=override, corrupt=corrupt), tempfile.TemporaryDirectory() as tmp:
+                root = Path(os.path.realpath(tmp))
+                (root / "delta-inputs-1-1").mkdir()
+                (root / baseline_tag).write_bytes(baseline)
+                (root / candidate_tag).write_bytes(b"wrong bytes" if corrupt else candidate)
+                gh = root / "gh"
+                gh.write_text(
+                    '#!/usr/bin/env bash\nset -euo pipefail\ncp "$RUNNER_TEMP/$3" "$9/$7"\n',
+                    encoding="utf-8",
+                )
+                gh.chmod(0o755)
+                env_file = root / "env"
+                run = subprocess.run(
+                    ["bash", "-c", script], cwd=root, capture_output=True, text=True,
+                    env={**os.environ, "PATH": f"{root}{os.pathsep}{os.environ['PATH']}",
+                         "GITHUB_RUN_ID": "1", "GITHUB_RUN_ATTEMPT": "1", "GITHUB_ENV": str(env_file),
+                         "RUNNER_TEMP": tmp, "XDG_CACHE_HOME": tmp, "CANDIDATE_FORDB_TAG": override,
+                         "FORDB_TAG": baseline_tag, "FORDB_ARCHIVE_SHA": baseline_sha},
+                )
+                if corrupt:
+                    self.assertNotEqual(run.returncode, 0)
+                    self.assertFalse(env_file.exists())
+                    continue
+                self.assertEqual(run.returncode, 0, run.stderr + run.stdout)
+                staged = dict(line.split("=", 1) for line in env_file.read_text().splitlines())
+                self.assertEqual(Path(staged["FORDB_ARCHIVE"]).read_bytes(), baseline)
+                self.assertEqual(Path(staged["FORDB_ARCHIVE_V2"]).read_bytes(), candidate if override else baseline)
+                self.assertEqual(staged["FORDB_ARCHIVE_SHA_V2"], candidate_sha if override else baseline_sha)
+
     COMPRESS_STEP = "Compress v1 + v2 line text (zstd dictionary)"
     FRAMES_STEP = "Verify both DBs hold only zstd frames of one dictionary"
 

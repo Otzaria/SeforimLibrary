@@ -80,14 +80,19 @@ internal fun findCategoriesLostWithLibraryFolders(
     val movedTitles = bookMoves.map { it.name }.toSet()
     val baseBooks = libraryBooks(baseFiles, bookRenames)
 
-    fun otzariaCategoriesOf(title: String): Set<Long> =
-        conn.prepareStatement(
-            "SELECT b.categoryId FROM book b JOIN source s ON s.id = b.sourceId WHERE b.title = ? AND s.name <> ?",
-        ).use { stmt ->
-            stmt.setString(1, title)
-            stmt.setString(2, SEFARIA_SOURCE_NAME)
-            stmt.executeQuery().use { rs -> buildSet { while (rs.next()) add(rs.getLong(1)) } }
+    // By title without quote marks: a book title gains the gershayim its file name cannot hold.
+    val otzariaCategoriesByBareTitle = conn.prepareStatement(
+        "SELECT b.title, b.categoryId FROM book b JOIN source s ON s.id = b.sourceId WHERE s.name <> ?",
+    ).use { stmt ->
+        stmt.setString(1, SEFARIA_SOURCE_NAME)
+        stmt.executeQuery().use { rs ->
+            val out = HashMap<String, MutableSet<Long>>()
+            while (rs.next()) out.getOrPut(CategoryLabels.stripQuoteMarks(rs.getString(1))) { HashSet() } += rs.getLong(2)
+            out
         }
+    }
+    fun otzariaCategoriesOf(title: String): Set<Long> =
+        otzariaCategoriesByBareTitle[CategoryLabels.stripQuoteMarks(title)].orEmpty()
 
     val categoriesByFolder = HashMap<String, MutableSet<Long>>()
     for (book in baseBooks) {
@@ -139,7 +144,7 @@ internal fun findCategoriesLostWithLibraryFolders(
         if (path in survivingPaths) continue
 
         val folderTitlesUnder = baseBooks.filter { it.folderKey == gone || it.folderKey.startsWith("$gone/") }
-            .map { it.title }.toSet()
+            .map { CategoryLabels.stripQuoteMarks(it.title) }.toSet()
         val subtreeBooks = conn.prepareStatement(
             """
             WITH RECURSIVE sub(id) AS (SELECT ? UNION ALL SELECT c.id FROM category c JOIN sub ON c.parentId = sub.id)
@@ -150,7 +155,7 @@ internal fun findCategoriesLostWithLibraryFolders(
             stmt.executeQuery().use { rs -> buildList { while (rs.next()) add(rs.getString(1) to rs.getString(2)) } }
         }
         if (subtreeBooks.isEmpty()) continue
-        if (subtreeBooks.any { (bookTitle, source) -> source == SEFARIA_SOURCE_NAME || bookTitle !in folderTitlesUnder }) continue
+        if (subtreeBooks.any { (bookTitle, source) -> source == SEFARIA_SOURCE_NAME || CategoryLabels.stripQuoteMarks(bookTitle) !in folderTitlesUnder }) continue
 
         lost[categoryId] = baseBooks.first { it.folderKey == gone }.folder
     }

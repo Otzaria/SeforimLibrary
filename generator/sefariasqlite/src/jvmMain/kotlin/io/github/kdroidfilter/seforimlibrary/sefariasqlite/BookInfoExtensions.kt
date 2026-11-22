@@ -112,6 +112,7 @@ internal suspend fun applyBookInfoExtensions(
     extensions: Map<String, BookInfoExtension>,
     retitledBooks: List<RetitledBook>,
     logger: Logger,
+    checkRestoredQuoteTitles: Boolean = false,
 ): BookInfoExtensionResult {
     val writable = extensions.filterValues {
         it.topics.isNotEmpty() || it.pubDate != null || it.pubPlace != null || it.description != null
@@ -119,7 +120,7 @@ internal suspend fun applyBookInfoExtensions(
     if (writable.isEmpty()) return BookInfoExtensionResult(0, 0)
     val bookIdsByTitle = repository.getAllBookTitleIds().groupBy({ it.second.trim() }, { it.first })
     // Before any write: this stage has no transaction to roll back.
-    requireForDbUsesDisplayTitles(BOOK_INFO_FILE, writable.keys, bookIdsByTitle.keys, retitledBooks)
+    requireForDbUsesDisplayTitles(BOOK_INFO_FILE, writable.keys, bookIdsByTitle.keys, retitledBooks, checkRestoredQuoteTitles)
 
     var updated = 0
     val unmatched = ArrayList<String>()

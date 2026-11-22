@@ -66,6 +66,23 @@ object CategoryLabels {
             else -> listOf(cleaned)
         }
 
+    private const val QUOTE_MARKS = "\"״”“'׳’‘`"
+    private val WHITESPACE = "\\s+".toRegex()
+
+    /** [raw] without any quote mark (gershayim, geresh and their ASCII/typographic stand-ins). */
+    fun stripQuoteMarks(raw: String): String = raw.filterNot { it in QUOTE_MARKS }.replace(WHITESPACE, " ").trim()
+
+    /** True when [title] is [base] with quote marks inserted and nothing else changed (after [normalize]). */
+    fun onlyAddsQuoteMarks(title: String, base: String): Boolean {
+        val t = normalize(title)
+        val b = normalize(base)
+        var j = 0
+        for (c in t) {
+            if (j < b.length && c == b[j]) j++ else if (c !in QUOTE_MARKS) return false
+        }
+        return j == b.length
+    }
+
     /** The book.title the Otzaria stage gives a library file stem. */
     fun bookTitle(rawStem: String): String =
         when (val base = normalize(rawStem)) {

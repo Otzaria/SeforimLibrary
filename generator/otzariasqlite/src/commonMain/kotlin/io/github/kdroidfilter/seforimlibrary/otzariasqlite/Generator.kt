@@ -74,6 +74,9 @@ private const val HEADINGS_FILE_SUFFIX = "_headings"
 private fun isLinkJsonFile(file: Path): Boolean =
     file.extension == "json" && !file.nameWithoutExtension.endsWith(HEADINGS_FILE_SUFFIX)
 
+/** The first `<h1>` of an Otzaria book is its first line in all but a handful of files. */
+private const val FIRST_HEADING_SCAN_LINES = 10
+
 /** Longest bounded name list any single summary line prints. */
 private const val MAX_NAMES_PER_SUMMARY_LINE = 20
 
@@ -115,6 +118,8 @@ class DatabaseGenerator(
     // documented in BoundedGeneratorInput.kt to tune forked generator runs.
     private val inputBufferBytes: Long = configuredGeneratorInputBytes(),
     private val inputSpillDirectory: Path? = null,
+    // An archive predating title_acronyms.txt keeps the filename title.
+    titleAcronyms: List<String>? = null,
 ) {
 
     init { require(inputBufferBytes >= 1024) { "inputBufferBytes must be at least 1024" } }
@@ -193,7 +198,11 @@ class DatabaseGenerator(
     private val fileNameBlacklist: Set<String> = loadFileNameBlacklistFromResources()
 
     // In-memory caches to accelerate link processing using available RAM
-    private var booksByTitle: Map<String, Book> = emptyMap()
+    private var booksByTitle: Map<String, List<Book>> = emptyMap()
+    private var booksByStem: Map<String, List<Book>> = emptyMap()
+    private var booksByBareRef: Map<String, List<Book>> = emptyMap()
+    private val bookMatchesByFileTitle = HashMap<String, List<Book>>()
+    private val displayTitles = titleAcronyms?.let { BookDisplayTitles(BookDisplayTitles.parse(it)) }
     private var booksById: Map<Long, Book> = emptyMap()
     // Fixed-size, byte-capped LRU pages; a single link must not load an entire
     // book's text, or leave every referenced book's IDs resident for the phase.
@@ -352,6 +361,38 @@ class DatabaseGenerator(
     }
 
     private fun normalizeBookTitle(rawTitle: String): String = CategoryLabels.bookTitle(rawTitle)
+
+    /** The stored title of the book in [path], whose key title is [stemTitle]. */
+    private fun displayTitleFor(path: Path, stemTitle: String): String =
+        displayTitles?.displayTitle(stemTitle, firstHeadingOf(path)) ?: stemTitle
+
+    private fun firstHeadingOf(path: Path): String? =
+        Files.newInputStream(path).reader(Charsets.UTF_8).buffered().use { reader ->
+            reader.lineSequence().take(FIRST_HEADING_SCAN_LINES)
+                .mapIndexed { index, raw -> if (index == 0) Utf8Bom.strip(raw) else raw }
+                .firstOrNull { detectHeaderLevel(it) == 1 }
+                ?.let { cleanHtml(HearotCompanionMerge.stripFootnotes(it)) }
+        }
+
+    /** Resolve an authored file stem without rereading the text or its title dictionary. */
+    private fun booksForFileTitle(fileTitle: String): List<Book> = bookMatchesByFileTitle.getOrPut(fileTitle) {
+        val stem = normalizeBookTitle(fileTitle)
+        val exact = booksByTitle[fileTitle].orEmpty()
+        val byStem = booksByStem[stem] ?: run {
+            // Direct phase-2 callers can supply a DB without its allocator snapshot.
+            // Only consider Otzaria references that add quote marks to the file stem.
+            booksByBareRef[CategoryLabels.stripQuoteMarks(stem)].orEmpty().filter { book ->
+                CategoryLabels.onlyAddsQuoteMarks(book.heRef.orEmpty(), stem)
+            }
+        }
+        (exact + byStem).distinctBy(Book::id)
+    }
+
+    private fun bookByFileTitle(fileTitle: String): Book? {
+        val matches = booksForFileTitle(fileTitle)
+        // Preserve the old exact-title choice when every candidate has that title.
+        return matches.lastOrNull()?.takeIf { matches.size == 1 || matches.all { it.title == fileTitle } }
+    }
 
     /** Returns true only when a dependant-style title explicitly names [baseTitle]. */
     private fun titleDeclaresDependencyOn(dependantTitle: String, baseTitle: String): Boolean {
@@ -741,28 +782,40 @@ class DatabaseGenerator(
     private suspend fun ensureCachesLoaded() {
         if (booksByTitle.isEmpty()) {
             val allBooks = repository.getAllBooks()
+            val sourceNames = repository.getAllSources().associate { it.id to it.name }
+            val blockedSources = sourceBlacklist.mapTo(HashSet(), ::comparableLabel)
             val filtered = if (filterSourcesForLinks) {
                 allBooks.filter { book ->
-                    val src = runCatching { repository.getSourceById(book.sourceId) }.getOrNull()
-                    val name = src?.name ?: "Unknown"
-                    val normalized = comparableLabel(name)
-                    !sourceBlacklist.any { comparableLabel(it) == normalized }
+                    comparableLabel(sourceNames[book.sourceId] ?: "Unknown") !in blockedSources
                 }
             } else {
                 allBooks
             }
-            booksByTitle = filtered.associateBy { it.title }
+            booksByTitle = filtered.groupBy { it.title }
             booksById = filtered.associateBy { it.id }
 
-            // Build set of Sefaria book IDs to skip Otzaria links for these books
+            // A primary allocator key is the source and filename stem from phase 1.
+            // Ignore historical keys unless the live row still matches the source and reference.
             sefariaBookIds.clear()
-            for (book in filtered) {
-                val src = runCatching { repository.getSourceById(book.sourceId) }.getOrNull()
-                val sourceName = src?.name ?: ""
-                if (sourceName.contains("sefaria", ignoreCase = true)) {
-                    sefariaBookIds.add(book.id)
-                }
-            }
+            val otzariaBooksById = filtered.filter { book ->
+                val isSefaria = sourceNames[book.sourceId].orEmpty().contains("sefaria", ignoreCase = true)
+                if (isSefaria) sefariaBookIds += book.id
+                !isSefaria
+            }.associateBy { it.id }
+            booksByStem = allocator.bookIds().entries.mapNotNull { (key, id) ->
+                val book = otzariaBooksById[id] ?: return@mapNotNull null
+                val ref = book.heRef ?: return@mapNotNull null
+                val stem = key.canonicalHeTitle
+                if (key.sourceName != sourceNames[book.sourceId] ||
+                    (ref != stem && !CategoryLabels.onlyAddsQuoteMarks(ref, stem))
+                ) return@mapNotNull null
+                key.canonicalHeTitle to book
+            }.groupBy({ it.first }, { it.second })
+            booksByBareRef = otzariaBooksById.values.mapNotNull { book ->
+                val ref = book.heRef ?: return@mapNotNull null
+                val bare = CategoryLabels.stripQuoteMarks(ref)
+                if (bare == ref) null else bare to book
+            }.groupBy({ it.first }, { it.second })
 
             val skipped = allBooks.size - filtered.size
             if (filterSourcesForLinks && skipped > 0) {
@@ -804,6 +857,9 @@ class DatabaseGenerator(
         lineIdCacheBytes = 0
         booksById = emptyMap()
         booksByTitle = emptyMap()
+        booksByStem = emptyMap()
+        booksByBareRef = emptyMap()
+        bookMatchesByFileTitle.clear()
         sefariaBookIds.clear()
         headingLineIds.clear()
     }
@@ -1352,12 +1408,13 @@ class DatabaseGenerator(
         } ?: emptyList()
 
         val sourceId = resolveSourceIdFor(path)
+        val displayTitle = displayTitleFor(path, title)
         val book = Book(
             id = currentBookId,
             categoryId = categoryId,
             sourceId = sourceId,
-            title = title,
-            heRef = title,
+            title = displayTitle,
+            heRef = displayTitle,
             authors = authors,
             pubPlaces = pubPlaces,
             pubDates = pubDates,
@@ -1399,7 +1456,7 @@ class DatabaseGenerator(
         // ERROR level so the breadcrumb survives without the INFO chatter.
         val startedAtMs = monotonicMillis()
         val stats = try {
-            processBookContent(path, insertedBookId, title, categoryId)
+            processBookContent(path, insertedBookId, title, categoryId, refTitle = displayTitle)
         } catch (e: Throwable) {
             logger.e(e) { "Failed processing book $insertedBookId '$title' (file=$filename, categoryId=$categoryId)" }
             throw e
@@ -1425,6 +1482,7 @@ class DatabaseGenerator(
         bookId: Long,
         bookTitle: String,
         categoryId: Long,
+        refTitle: String,
     ): BookContentStats = coroutineScope {
         logger.d { "Processing content for book ID: $bookId" }
 
@@ -1444,7 +1502,7 @@ class DatabaseGenerator(
                     val notes = plan?.get(index)
                     if (notes == null) line else HearotCompanionMerge.mergeLine(bookTitle, line, index, notes, mergeStats)
                 }
-                processLinesWithTocEntries(bookId, bookTitle, categoryId, lines, input.size, input.firstLineHasBom)
+                processLinesWithTocEntries(bookId, refTitle, categoryId, lines, input.size, input.firstLineHasBom)
             }
             repository.updateBookTotalLines(bookId, input.size)
             if (plan != null) {
@@ -1922,12 +1980,15 @@ class DatabaseGenerator(
     /** Otzaria: the Otzaria keys the previous import brought in (see [previousOtzariaImportKeys]). */
     private fun previousImportKeys(): Set<BookKey> = allocator.previousOtzariaImportKeys(SEFARIA_SOURCE, buildVersion)
 
+    /** The title a book is keyed by: its file stem for an Otzaria book this import made. */
+    private fun keyTitleOf(book: Book): String = importedBookKeys[book.id]?.canonicalHeTitle ?: book.title
+
     /** Fails the build when a previous book is still there under another id. */
     private suspend fun checkNoLostBookIds(continuity: BookIdContinuity) {
         // Otzaria: books of the previous build only, and a book Sefaria now covers is left to
         // otzaria-library's check (it changes id by design: Sefaria's edition replaces it).
         val (coveredBySefaria, lost) = continuity
-            .findLostIds(repository.getAllBooks().associate { it.id to it.title }) { it in previousImportBookKeys }
+            .findLostIds(repository.getAllBooks().associate { it.id to keyTitleOf(it) }) { it in previousImportBookKeys }
             .partition { it.key.canonicalHeTitle in skippedSefariaShadowedTitles }
         coveredBySefaria.forEach { logger.w { "Book ${it.key} is now covered by Sefaria and lost id ${it.id}" } }
         if (lost.isEmpty()) return
@@ -2181,7 +2242,7 @@ class DatabaseGenerator(
         legacyLinksByKey: Map<LegacyAuthoredLinkKey, List<Long>>,
         legacyLinkIdsToDelete: MutableSet<Long>,
     ): Int {
-        val sourceBook = booksByTitle[bookTitle]
+        val sourceBook = bookByFileTitle(bookTitle)
         if (sourceBook == null) {
             logger.w { "Source book not found for links: $bookTitle" }
             return 0
@@ -2242,7 +2303,7 @@ class DatabaseGenerator(
                     targetPath.fileName.toString().substringBeforeLast('.')
                 }
 
-                val targetBook = booksByTitle[targetTitle]
+                val targetBook = bookByFileTitle(targetTitle)
                 if (targetBook == null) {
                     // Companion notes merged into their base have no book — expected
                     if (HearotCompanionMerge.isMergeableCompanionTitle(normalizeBookTitle(targetTitle))) {
@@ -2445,9 +2506,14 @@ class DatabaseGenerator(
         // Global sync: an Otzaria book whose alt_toc file disappeared loses its
         // structures. Only non-Sefaria books can carry Otzaria-authored structures,
         // so Sefaria books (whose structures come from their schemas) stay untouched.
-        val titlesWithFile = files.map { it.nameWithoutExtension.removeSuffix("_alt_toc") }.toSet()
+        val filesByBookTitle = files.associateWith { file ->
+            file.nameWithoutExtension.removeSuffix("_alt_toc")
+        }
+        val booksWithFiles = filesByBookTitle.values.flatMap { stem ->
+            booksForFileTitle(stem).map(Book::id)
+        }.toSet()
         for (book in booksById.values) {
-            if (book.id in sefariaBookIds || !book.hasAltStructures || book.title in titlesWithFile) continue
+            if (book.id in sefariaBookIds || !book.hasAltStructures || book.id in booksWithFiles) continue
             for (structure in repository.getAltTocStructuresForBook(book.id)) {
                 deleteAltTocStructure(structure.id)
             }
@@ -2456,9 +2522,8 @@ class DatabaseGenerator(
         }
 
         var builtBooks = 0
-        for (file in files) {
-            val bookTitle = file.nameWithoutExtension.removeSuffix("_alt_toc")
-            val book = booksByTitle[bookTitle]
+        for ((file, bookTitle) in filesByBookTitle) {
+            val book = bookByFileTitle(bookTitle)
             if (book == null) {
                 logger.w { "Alt-toc file for unknown book: $bookTitle — skipped" }
                 continue
@@ -2654,9 +2719,9 @@ class DatabaseGenerator(
         val sourceNames = repository.getAllSources().associate { it.id to it.name }
         val withAcronyms = books.filter { repository.getAcronymsForBook(it.id).isNotEmpty() }.mapTo(HashSet()) { it.id }
         val targets = books
-            .filter { it.id !in withAcronyms && lookup.rawTerms(it.title).isEmpty() }
+            .filter { it.id !in withAcronyms && lookup.rawTerms(keyTitleOf(it)).isEmpty() }
             .mapTo(HashSet()) { it.id }
-        val library = books.map { LibraryBook(it.id, it.title, sourceNames[it.sourceId].orEmpty()) }
+        val library = books.map { LibraryBook(it.id, keyTitleOf(it), sourceNames[it.sourceId].orEmpty()) }
         val formerTitles = RenamedBookTitles().resolve(
             books = library,
             targets = targets,

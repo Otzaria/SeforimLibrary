@@ -2,6 +2,7 @@ package io.github.kdroidfilter.seforimlibrary.common.dh
 
 import co.touchlab.kermit.Logger
 import co.touchlab.kermit.Severity
+import io.github.kdroidfilter.seforimlibrary.common.ids.CategoryLabels
 import java.nio.file.Files
 import java.nio.file.Paths
 import java.sql.Connection
@@ -321,6 +322,10 @@ internal fun indexAllBooks(
         }
     }
 
+    // Keep reviewed Otzaria rules keyed by their original spelling across the display-title migration.
+    val overridesByBareTitle = overrides.entries.groupBy { (key, _) ->
+        key.copy(title = CategoryLabels.stripQuoteMarks(key.title))
+    }
     conn.prepareStatement(
         "INSERT OR IGNORE INTO line_dh (bookId, dhText, lineIndex, dhDisplay) VALUES (?, ?, ?, ?)",
     ).use { insert ->
@@ -328,7 +333,13 @@ internal fun indexAllBooks(
             "SELECT lineIndex, content FROM line WHERE bookId = ? ORDER BY lineIndex",
         ).use { selectLines ->
             for (book in books) {
-                val override = overrides[BookOverrideKey(book.source, book.title)]
+                val key = BookOverrideKey(book.source, book.title)
+                val override = overrides[key] ?: if (book.source == "Sefaria") null else {
+                    val bareKey = key.copy(title = CategoryLabels.stripQuoteMarks(book.title))
+                    overridesByBareTitle[bareKey]?.singleOrNull { (original, _) ->
+                        CategoryLabels.onlyAddsQuoteMarks(book.title, original.title)
+                    }?.value
+                }
                 val metadataEligible =
                     (!book.isBaseBook || book.hasBaseText) &&
                         (book.dependenceType.equals("commentary", ignoreCase = true) ||
