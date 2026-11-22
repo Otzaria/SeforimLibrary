@@ -1,6 +1,7 @@
 package io.github.kdroidfilter.seforimlibrary.sefariasqlite
 
 import app.cash.sqldelight.driver.jdbc.sqlite.JdbcSqliteDriver
+import app.cash.sqldelight.db.QueryResult
 import co.touchlab.kermit.LogWriter
 import co.touchlab.kermit.Logger
 import co.touchlab.kermit.Severity
@@ -157,7 +158,7 @@ class BookInfoExtensionsTest {
                 "מסילת ישרים" to BulkMetadata(listOf(1740, 1800), "אמשטרדם"),
                 "אחר" to BulkMetadata(listOf(1740), "אמשטרדם"),
             ),
-            mapOf("מסילת ישרים" to Description("קצר", "ישן")),
+            mapOf("מסילת ישרים" to Description(DescriptionEdit.Replace("קצר"), DescriptionEdit.Replace("ישן"))),
             emptyList(), logger,
         )
         val extensions = mapOf(
@@ -186,24 +187,37 @@ class BookInfoExtensionsTest {
     }
 
     @Test
-    fun `a delete marker clears the book description, an empty cell keeps it`() = runBlocking {
+    fun `book description edits apply together and empty cells keep existing text`() = runBlocking {
         val driver = JdbcSqliteDriver(url = "jdbc:sqlite::memory:")
         SeforimDb.Schema.create(driver)
         val repo = SeforimRepository(":memory:", driver)
         val sourceId = repo.insertSource("Sefaria")
         val catId = repo.insertCategory(Category(0, null, "תלמוד", level = 0, order = 1))
-        fun book(title: String) = repo.insertBook(
+        suspend fun book(title: String) = repo.insertBook(
             Book(categoryId = catId, sourceId = sourceId, title = title, heShortDesc = "קצר ספריא", heDesc = "ארוך ספריא"),
         )
         val cleared = book("כרך")
-        val shortOnly = book("קצר בלבד")
+        val mixed = book("קצר למחיקה")
+        val longOnly = book("ארוך בלבד")
         val kept = book("נשמר")
+        driver.execute(null, "CREATE TABLE description_update (bookId INTEGER NOT NULL)", 0)
+        driver.execute(
+            null,
+            """
+            CREATE TRIGGER count_description_updates AFTER UPDATE OF heShortDesc, heDesc ON book
+            BEGIN
+                INSERT INTO description_update (bookId) VALUES (NEW.id);
+            END
+            """.trimIndent(),
+            0,
+        )
         val bindings = IdAllocatorBindings(InMemoryIdAllocator.load(path = null), repo)
         val descriptions = parseDescriptionOverrides(
             listOf(
                 "categoryPath,title,author,heShortDesc,heDesc,heDescNew",
                 "תלמוד,כרך,,[מחק],ארוך ספריא,[מחק]",
-                "תלמוד,קצר בלבד,,[מחק],ארוך ספריא,ארוך חדש",
+                "תלמוד,קצר למחיקה,,[מחק],ארוך ספריא,ארוך חדש",
+                "תלמוד,ארוך בלבד,,,ארוך ספריא,[מחק]",
                 "תלמוד,נשמר,,,ארוך ספריא,",
             ),
         )
@@ -214,14 +228,29 @@ class BookInfoExtensionsTest {
             assertEquals(null, it.heShortDesc)
             assertEquals(null, it.heDesc)
         }
-        repo.getBook(shortOnly)!!.let {
+        repo.getBook(mixed)!!.let {
             assertEquals(null, it.heShortDesc)
             assertEquals("ארוך חדש", it.heDesc)
+        }
+        repo.getBook(longOnly)!!.let {
+            assertEquals("קצר ספריא", it.heShortDesc)
+            assertEquals(null, it.heDesc)
         }
         repo.getBook(kept)!!.let {
             assertEquals("קצר ספריא", it.heShortDesc)
             assertEquals("ארוך ספריא", it.heDesc)
         }
+        val writtenBooks = driver.executeQuery(
+            identifier = null,
+            sql = "SELECT bookId FROM description_update ORDER BY bookId",
+            mapper = { cursor ->
+                QueryResult.Value(buildList {
+                    while (cursor.next().value) add(cursor.getLong(0)!!)
+                })
+            },
+            parameters = 0,
+        ).value
+        assertEquals(listOf(cleared, mixed, longOnly).sorted(), writtenBooks)
         repo.close()
     }
 
@@ -237,7 +266,7 @@ class BookInfoExtensionsTest {
         val logger = Logger.withTag("test")
         applyMetadata(
             repo, bindings, mapOf("ספר" to BulkMetadata(listOf(1740), "אמשטרדם")),
-            mapOf("ספר" to Description(null, "תיאור ספריא")), emptyList(), logger,
+            mapOf("ספר" to Description(longEdit = DescriptionEdit.Replace("תיאור ספריא"))), emptyList(), logger,
         )
 
         val result = applyBookInfoExtensions(

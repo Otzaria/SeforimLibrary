@@ -3,8 +3,6 @@ package io.github.kdroidfilter.seforimlibrary.sefariasqlite
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
-import kotlin.test.assertFalse
-import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 /** Parsing and source-matching for the seedAllMetadata post-process. */
@@ -56,10 +54,10 @@ class SeedAllMetadataTest {
 
         assertEquals(2, map.size)
         val mahram = map.getValue("שות מהרם פדוואה")
-        assertEquals("קובץ שאלות\nותשובות מהמאה ה-16", mahram.heShortDesc)
+        assertEquals(DescriptionEdit.Replace("קובץ שאלות\nותשובות מהמאה ה-16"), mahram.shortEdit)
         // heDesc comes from heDescNew (column index 5), not the original heDesc (index 4).
-        assertEquals("new long desc", mahram.heDesc)
-        assertEquals("new", map.getValue("בראשית").heDesc)
+        assertEquals(DescriptionEdit.Replace("new long desc"), mahram.longEdit)
+        assertEquals(DescriptionEdit.Replace("new"), map.getValue("בראשית").longEdit)
     }
 
     @Test
@@ -69,27 +67,15 @@ class SeedAllMetadataTest {
                 "categoryPath,title,author,heShortDesc,heDesc,heDescNew",
                 "cat,שני התאים,author,[מחק],old,[מחק]",
                 "cat,רק הקצר,author,[מחק],old,new long",
-                "cat,ריק,author,,old,",
+                "cat,רק הארוך,author, ,[מחק],\" [מחק] \"",
+                "cat,ריק,author,,[מחק],",
             ),
         )
 
-        val both = map.getValue("שני התאים")
-        assertTrue(both.clearShortDesc)
-        assertTrue(both.clearDesc)
-        assertNull(both.heShortDesc)
-        assertNull(both.heDesc)
-
-        val shortOnly = map.getValue("רק הקצר")
-        assertTrue(shortOnly.clearShortDesc)
-        assertFalse(shortOnly.clearDesc)
-        assertEquals("new long", shortOnly.heDesc)
-
-        // An empty cell still keeps the existing text: nothing is cleared.
-        val empty = map.getValue("ריק")
-        assertFalse(empty.clearShortDesc)
-        assertFalse(empty.clearDesc)
-        assertNull(empty.heShortDesc)
-        assertNull(empty.heDesc)
+        assertEquals(Description(DescriptionEdit.Clear, DescriptionEdit.Clear), map.getValue("שני התאים"))
+        assertEquals(Description(DescriptionEdit.Clear, DescriptionEdit.Replace("new long")), map.getValue("רק הקצר"))
+        assertEquals(Description(longEdit = DescriptionEdit.Clear), map.getValue("רק הארוך"))
+        assertEquals(Description(), map.getValue("ריק"))
     }
 
     @Test

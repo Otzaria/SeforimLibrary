@@ -1228,20 +1228,26 @@ class SeforimRepository(databasePath: String, private val driver: SqlDriver) : L
         bookId: Long,
         heShortDesc: String?,
         heDesc: String?,
-    ) = withContext(Dispatchers.IO) {
-        if (heShortDesc != null || heDesc != null) {
-            database.bookQueriesQueries.updateDescriptions(heShortDesc, heDesc, bookId)
-        }
-    }
+    ) = updateBookMetadata(bookId, heShortDesc, heDesc, clearShortDesc = false, clearDesc = false)
 
-    /** Clears the descriptions that an explicit `[מחק]` override names. */
-    suspend fun clearBookDescriptions(
+    /** Updates both descriptions together. Each clear flag takes precedence over its replacement. */
+    suspend fun updateBookMetadata(
         bookId: Long,
+        heShortDesc: String?,
+        heDesc: String?,
         clearShortDesc: Boolean,
         clearDesc: Boolean,
-    ) = withContext(Dispatchers.IO) {
-        if (clearShortDesc) database.bookQueriesQueries.clearShortDescription(bookId)
-        if (clearDesc) database.bookQueriesQueries.clearDescription(bookId)
+    ) {
+        if (heShortDesc == null && heDesc == null && !clearShortDesc && !clearDesc) return
+        withContext(Dispatchers.IO) {
+            database.bookQueriesQueries.updateDescriptions(
+                clearShortDesc = if (clearShortDesc) 1 else 0,
+                heShortDesc = heShortDesc,
+                clearDesc = if (clearDesc) 1 else 0,
+                heDesc = heDesc,
+                id = bookId,
+            )
+        }
     }
 
     /** Lightweight (id, title) pairs for every book — used by ForDB metadata post-processes. */

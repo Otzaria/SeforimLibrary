@@ -41,7 +41,7 @@ import kotlin.system.exitProcess
  * library (a superset of any single generated DB), so unmatched titles are
  * skipped and counted — not fatal. Download/parse failures ARE fatal.
  *
- * Per matched book: heShortDesc/heDesc replaced only when present; pub dates/place
+ * Per matched book: heShortDesc/heDesc changed only by an explicit edit; pub dates/place
  * linked via the IdAllocator (stable ids for delta). The book's source is NOT set
  * here — it is authoritative from the manifest at import; all_metadata's Sourcefolder
  * is stale and ignored. build_state is snapshotted at the end.
@@ -149,12 +149,8 @@ internal data class BulkMetadata(
 )
 
 internal data class Description(
-    val heShortDesc: String?,
-    val heDesc: String?,
-    /** `[מחק]` in heShortDesc: clear the book's short description instead of keeping it. */
-    val clearShortDesc: Boolean = false,
-    /** `[מחק]` in heDescNew: clear the book's description instead of keeping it. */
-    val clearDesc: Boolean = false,
+    val shortEdit: DescriptionEdit = DescriptionEdit.Keep,
+    val longEdit: DescriptionEdit = DescriptionEdit.Keep,
 )
 
 internal data class MetadataResult(
@@ -352,15 +348,10 @@ internal fun parseDescriptionOverrides(lines: List<String>): Map<String, Descrip
     // Rejoin the readLines() split so the record parser can stitch quoted fields
     // that span multiple physical lines (heShortDesc/heDesc carry embedded newlines).
     return parseForDbCsvRecords(lines.joinToString("\n")).drop(1).mapNotNull { record ->
-        val cols = record.map { it.trim() }
-        val title = cols.getOrNull(1)?.takeIf { it.isNotBlank() } ?: return@mapNotNull null
-        val shortEdit = parseDescriptionEdit(cols.getOrNull(3).orEmpty())
-        val longEdit = parseDescriptionEdit(cols.getOrNull(5).orEmpty())
+        val title = record.getOrNull(1)?.trim()?.takeIf { it.isNotEmpty() } ?: return@mapNotNull null
         title to Description(
-            heShortDesc = (shortEdit as? DescriptionEdit.Replace)?.value,
-            heDesc = (longEdit as? DescriptionEdit.Replace)?.value,
-            clearShortDesc = shortEdit == DescriptionEdit.Clear,
-            clearDesc = longEdit == DescriptionEdit.Clear,
+            shortEdit = parseDescriptionEdit(record.getOrNull(3).orEmpty()),
+            longEdit = parseDescriptionEdit(record.getOrNull(5).orEmpty()),
         )
     }.toMap()
 }
@@ -404,16 +395,13 @@ internal suspend fun applyMetadata(
         val meta = bulk[title]
         val description = descriptions[title]
 
-        repository.updateBookMetadata(
-            bookId = bookId,
-            heShortDesc = description?.heShortDesc,
-            heDesc = description?.heDesc,
-        )
-        if (description != null && (description.clearShortDesc || description.clearDesc)) {
-            repository.clearBookDescriptions(
+        if (description != null) {
+            repository.updateBookMetadata(
                 bookId = bookId,
-                clearShortDesc = description.clearShortDesc,
-                clearDesc = description.clearDesc,
+                heShortDesc = (description.shortEdit as? DescriptionEdit.Replace)?.value,
+                heDesc = (description.longEdit as? DescriptionEdit.Replace)?.value,
+                clearShortDesc = description.shortEdit == DescriptionEdit.Clear,
+                clearDesc = description.longEdit == DescriptionEdit.Clear,
             )
         }
 
