@@ -29,14 +29,17 @@ internal fun requireForDbUsesDisplayTitles(
     rowTitles: Collection<String>,
     bookTitles: Set<String>,
     retitledBooks: List<RetitledBook>,
+    checkRestoredQuoteTitles: Boolean = false,
 ) {
     val titles = rowTitles.toSet()
     val byHeRef = retitledBooks.groupBy({ it.heRef }, { it.title })
     val unmatched = titles.filter { it !in bookTitles }
-    val byBareTitle = bookTitles.groupBy(CategoryLabels::stripQuoteMarks)
+    val byBareTitle = if (checkRestoredQuoteTitles) bookTitles.groupBy(CategoryLabels::stripQuoteMarks) else emptyMap()
     val stale = unmatched.sorted().flatMap { former ->
-        val withGershayim = byBareTitle[CategoryLabels.stripQuoteMarks(former)].orEmpty()
-            .filter { it != former && CategoryLabels.onlyAddsQuoteMarks(it, former) }
+        val withGershayim = if (byBareTitle.isEmpty()) emptyList() else {
+            byBareTitle[CategoryLabels.stripQuoteMarks(former)].orEmpty()
+                .filter { it != former && CategoryLabels.onlyAddsQuoteMarks(it, former) }
+        }
         (byHeRef[former].orEmpty() + withGershayim).distinct()
             .filter { it !in titles }.map { "'$former' → '$it'" }
     }

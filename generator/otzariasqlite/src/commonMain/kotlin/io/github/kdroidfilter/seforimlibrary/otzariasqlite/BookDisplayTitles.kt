@@ -1,5 +1,6 @@
 package io.github.kdroidfilter.seforimlibrary.otzariasqlite
 
+import io.github.kdroidfilter.seforimlibrary.common.fordb.TITLE_ACRONYMS_FILE
 import io.github.kdroidfilter.seforimlibrary.common.ids.CategoryLabels
 
 /**
@@ -57,12 +58,9 @@ internal class BookDisplayTitles(acronyms: Collection<String>) {
 
         private fun isAcronymWord(word: String): Boolean = ACRONYM_WORD.matches(word)
 
-        /** The ForDB file the library keeps the curated acronyms in, shared with its own name check. */
-        const val FOR_DB_FILE = "title_acronyms.txt"
-
-        /** The acronyms in [FOR_DB_FILE]'s lines; an empty list fails, as the file cannot mean none. */
+        /** The acronyms in [TITLE_ACRONYMS_FILE]; a present file must contain a nonempty list. */
         fun parse(lines: List<String>): List<String> =
             lines.map { it.removePrefix("﻿").trim() }.filter { it.isNotEmpty() && !it.startsWith("#") }
-                .also { check(it.isNotEmpty()) { "ForDB $FOR_DB_FILE lists no acronyms" } }
+                .also { check(it.isNotEmpty()) { "ForDB $TITLE_ACRONYMS_FILE lists no acronyms" } }
     }
 }

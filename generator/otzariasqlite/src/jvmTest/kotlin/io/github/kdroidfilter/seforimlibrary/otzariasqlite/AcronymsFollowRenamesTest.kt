@@ -315,7 +315,7 @@ class AcronymsFollowRenamesTest {
             }
             val allocator = InMemoryIdAllocator.load(state.takeIf { Files.exists(it) })
             val sourceDir = library(books).also(::writeFilesManifest)
-            testDatabaseGenerator(
+            DatabaseGenerator(
                 sourceDirectory = sourceDir,
                 repository = repo,
                 acronymDbPath = acronyms.toString(),

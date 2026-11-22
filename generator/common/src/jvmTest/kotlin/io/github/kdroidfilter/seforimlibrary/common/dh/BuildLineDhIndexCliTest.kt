@@ -311,6 +311,31 @@ class BuildLineDhIndexCliTest {
     }
 
     @Test
+    fun `legacy Otzaria override follows added quote marks within the same source`() {
+        withDb { conn ->
+            conn.createStatement().use { st ->
+                st.execute("INSERT INTO source VALUES (2, 'Sefaria')")
+                st.execute(
+                    "INSERT INTO book (id, title, sourceId, dependenceType) VALUES " +
+                        "(16, 'גליוני הש״ס', 1, NULL), (17, 'גליוני הש״ס', 2, NULL)",
+                )
+            }
+            for (id in 16L..17L) insertLines(conn, id, List(10) { "<b>דיבור $it</b> פירוש" })
+            val include = BookOverride(BookOverrideDecision.INCLUDE, "manually audited")
+            val overrides = mapOf(
+                BookOverrideKey("test", "גליוני השס") to include,
+                BookOverrideKey("Sefaria", "גליוני השס") to include,
+            )
+
+            val report = indexAllBooks(conn, Logger.withTag("test"), overrides)
+
+            assertEquals(1, report.overrideBooks)
+            assertEquals(10, report.indexed)
+            assertTrue(dhRows(conn).all { it.first == 16L })
+        }
+    }
+
+    @Test
     fun `CSV exclude wins over commentary metadata`() {
         withDb { conn ->
             conn.createStatement().use { it.execute("INSERT INTO book (id, title) VALUES (17, 'פרשנות חריגה')") }

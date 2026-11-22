@@ -3,6 +3,7 @@ package io.github.kdroidfilter.seforimlibrary.otzariasqlite
 import app.cash.sqldelight.driver.jdbc.sqlite.JdbcSqliteDriver
 import io.github.kdroidfilter.seforimlibrary.common.ids.CategoryLabels
 import io.github.kdroidfilter.seforimlibrary.common.ids.InMemoryIdAllocator
+import io.github.kdroidfilter.seforimlibrary.core.models.Book
 import io.github.kdroidfilter.seforimlibrary.dao.repository.SeforimRepository
 import io.github.kdroidfilter.seforimlibrary.db.SeforimDb
 import kotlinx.coroutines.runBlocking
@@ -16,8 +17,10 @@ import kotlin.test.assertTrue
 
 /** Otzaria/otzaria#2766: file stems lose their gershayim; the stored title gets them back. */
 class OtzariaBookDisplayTitleTest {
+    private val titleAcronyms = listOf("שו״ת", "הש״ס", "עה״ת", "הריטב״א", "להריטב״א", "להרמב״ם")
 
-    private val titles = BookDisplayTitles(BookDisplayTitles.parse(TEST_TITLE_ACRONYMS))
+
+    private val titles = BookDisplayTitles(BookDisplayTitles.parse(titleAcronyms))
 
     @Test
     fun theWholeHeadingIsTakenWhenItIsTheStemWithGershayim() {
@@ -50,7 +53,7 @@ class OtzariaBookDisplayTitleTest {
     fun theForDbFileFailsClosedWhenItListsNothing() {
         assertEquals(listOf("שו״ת", "הש״ס"), BookDisplayTitles.parse(listOf("﻿# comment", "", " שו״ת ", "הש״ס")))
         assertFailsWith<IllegalStateException> { BookDisplayTitles.parse(listOf("# only a comment", "")) }
-        assertFailsWith<IllegalStateException> { testDatabaseGenerator(Files.createTempDirectory("x"), repo(), titleAcronyms = emptyList()) }
+        assertFailsWith<IllegalStateException> { DatabaseGenerator(Files.createTempDirectory("x"), repo(), titleAcronyms = emptyList()) }
     }
 
     @Test
@@ -110,10 +113,13 @@ class OtzariaBookDisplayTitleTest {
         val repo = SeforimRepository(":memory:", driver)
         try {
             val allocator = InMemoryIdAllocator.load(null)
-            testDatabaseGenerator(sourceDirectory = root, repository = repo, allocator = allocator, buildVersion = 1)
+            DatabaseGenerator(root, repo, allocator = allocator, buildVersion = 1, titleAcronyms = titleAcronyms)
                 .generateLinesOnly()
-            testDatabaseGenerator(sourceDirectory = root, repository = repo, allocator = allocator, buildVersion = 1)
-                .generateLinksOnly()
+            val statePath = root.resolve("buildstate.db")
+            allocator.snapshotTo(statePath)
+            Files.delete(root.resolve("אוצריא/שות/$base.txt"))
+            Files.delete(root.resolve("אוצריא/שות/$commentary.txt"))
+            DatabaseGenerator(root, repo, allocator = InMemoryIdAllocator.load(statePath)).generateLinksOnly()
 
             val books = repo.getAllBooks().associateBy { it.title }
             val baseBook = books.getValue("שו״ת באר מרדכי")
@@ -129,8 +135,35 @@ class OtzariaBookDisplayTitleTest {
             assertEquals(1, repo.getLinkIdsBetweenLines(baseLine, commentaryLine).size)
             assertEquals(1, repo.getAltTocStructuresForBook(baseBook.id).size)
             assertTrue(repo.getBook(baseBook.id)!!.hasAltStructures)
+
+            // A separate exact-title book makes the same file stem ambiguous.
+            val exactId = repo.insertBook(
+                Book(id = 99, categoryId = baseBook.categoryId, sourceId = baseBook.sourceId, title = base, heRef = base),
+            )
+            DatabaseGenerator(root, repo, allocator = InMemoryIdAllocator.load(statePath)).generateLinksOnly()
+            assertEquals(1, repo.getAltTocStructuresForBook(baseBook.id).size)
+            assertTrue(repo.getBook(baseBook.id)!!.hasAltStructures)
+            assertTrue(repo.getAltTocStructuresForBook(exactId).isEmpty())
         } finally {
             repo.close()
+        }
+    }
+
+    @Test
+    fun anArchiveWithoutTitleAcronymsKeepsTheFilenameTitle() = runBlocking {
+        val root = Files.createTempDirectory("otzaria-legacy-title")
+        val stem = "שות באר מרדכי"
+        writeBook(root, stem, "<h1>שו״ת באר מרדכי</h1>")
+        writeFilesManifest(root)
+        val repository = repo()
+        try {
+            DatabaseGenerator(root, repository).generateLinesOnly()
+            val book = repository.getAllBooks().single()
+            assertEquals(stem, book.title)
+            assertEquals(stem, book.heRef)
+            assertEquals("$stem 2", repository.getLines(book.id, 1, 1).single().heRef)
+        } finally {
+            repository.close()
         }
     }
 

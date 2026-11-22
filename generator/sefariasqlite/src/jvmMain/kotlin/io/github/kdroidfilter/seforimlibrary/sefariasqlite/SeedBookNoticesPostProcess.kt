@@ -64,16 +64,22 @@ fun main(args: Array<String>) {
         exitProcess(1)
     }
     try {
+        val checkRestoredQuoteTitles = forDbUsesRestoredQuoteTitles(logger)
         val rows = loadBookNoticeRows(logger)
         DriverManager.getConnection("jdbc:sqlite:$dbPath").use { conn ->
             conn.autoCommit = false
             val result = try {
-                // An unmatched banner row only warns, so a stale title must fail here instead.
-                val titles = conn.createStatement().use { st ->
-                    st.executeQuery("SELECT title FROM book").use { rs -> buildSet { while (rs.next()) add(rs.getString(1)) } }
+                if (checkRestoredQuoteTitles) {
+                    // An unmatched banner row only warns, so a stale title must fail here instead.
+                    val titles = conn.createStatement().use { st ->
+                        st.executeQuery("SELECT title FROM book").use { rs -> buildSet { while (rs.next()) add(rs.getString(1)) } }
+                    }
+                    val named = (rows.banners + rows.protections).map { it.bookName }.filter { it.isNotEmpty() }
+                    requireForDbUsesDisplayTitles(
+                        "$BOOK_BANNERS_FILE / $BOOK_PROTECTION_FILE", named, titles, loadRetitledBooks(conn),
+                        checkRestoredQuoteTitles = true,
+                    )
                 }
-                val named = (rows.banners + rows.protections).map { it.bookName }.filter { it.isNotEmpty() }
-                requireForDbUsesDisplayTitles("$BOOK_BANNERS_FILE / $BOOK_PROTECTION_FILE", named, titles, loadRetitledBooks(conn))
                 applyBookNotices(conn, rows, logger).also { conn.commit() }
             } catch (e: Exception) {
                 runCatching { conn.rollback() }

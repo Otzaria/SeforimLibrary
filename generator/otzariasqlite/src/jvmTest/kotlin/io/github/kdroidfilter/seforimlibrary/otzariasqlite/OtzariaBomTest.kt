@@ -45,7 +45,7 @@ class OtzariaBomTest {
         val repo = newRepo()
         try {
             writeFilesManifest(sourceDir)
-            testDatabaseGenerator(sourceDirectory = sourceDir, repository = repo, allocator = allocator, buildVersion = ++builds)
+            DatabaseGenerator(sourceDirectory = sourceDir, repository = repo, allocator = allocator, buildVersion = ++builds)
                 .generateLinesOnly()
             val book = repo.getAllBooks().single { it.title == "ספר" }
             return ImportedBook(repo.getBookToc(book.id), repo.getLines(book.id, 0, Int.MAX_VALUE))
@@ -141,7 +141,7 @@ class OtzariaBomTest {
             writeFilesManifest(sourceDir)
             val repo = newRepo()
             try {
-                val generator = testDatabaseGenerator(sourceDirectory = sourceDir, repository = repo)
+                val generator = DatabaseGenerator(sourceDirectory = sourceDir, repository = repo)
                 generator.generateLinesOnly()
                 generator.generateLinksOnly()
                 val base = assertNotNull(repo.getAllBooks().find { it.title == "ספר" })
@@ -198,7 +198,7 @@ class OtzariaBomTest {
                 bom + """[{"key": "Chapters", "heTitle": "פרקים", "nodes": [{"heTitle": "פרק", "line": 1}]}]""",
             )
 
-            testDatabaseGenerator(sourceDirectory = sourceDir, repository = repo).generateLinksOnly()
+            DatabaseGenerator(sourceDirectory = sourceDir, repository = repo).generateLinksOnly()
 
             assertEquals(1, repo.getLinkIdsBetweenLines(101, 201).size)
             assertEquals(listOf("פרקים"), repo.getAltTocStructuresForBook(1).map { it.heTitle })

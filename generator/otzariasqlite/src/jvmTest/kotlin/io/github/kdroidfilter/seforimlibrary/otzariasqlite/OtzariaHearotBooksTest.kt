@@ -60,7 +60,7 @@ class OtzariaHearotBooksTest {
             linksJson = "[${linksEntry(i1 = 2, i2 = 2)}]",
         )
 
-        val generator = testDatabaseGenerator(sourceDirectory = sourceDir, repository = repo)
+        val generator = DatabaseGenerator(sourceDirectory = sourceDir, repository = repo)
         generator.generateLinesOnly()
         generator.generateLinksOnly()
 
@@ -86,9 +86,9 @@ class OtzariaHearotBooksTest {
             hearotLines = "<h1>הערות על מזור ותרופה</h1>\n<sup>1</sup> גוף ההערה",
             linksJson = "[${linksEntry(i1 = 2, i2 = 2)}]",
         )
-        testDatabaseGenerator(sourceDirectory = sourceDir, repository = repo).generateLinesOnly()
+        DatabaseGenerator(sourceDirectory = sourceDir, repository = repo).generateLinesOnly()
         // Production runs phase 2 in a fresh process — no in-memory plan state.
-        testDatabaseGenerator(sourceDirectory = sourceDir, repository = repo).generateLinksOnly()
+        DatabaseGenerator(sourceDirectory = sourceDir, repository = repo).generateLinksOnly()
 
         assertNull(repo.getAllBooks().find { it.title == "הערות על מזור ותרופה" })
         assertEquals(0, repo.countLinks(), "merged companion links must be skipped in a fresh phase-2 instance")
@@ -104,7 +104,7 @@ class OtzariaHearotBooksTest {
             hearotLines = "<sup>1</sup> גוף עם <i>הדגשה</i>",
             linksJson = "[${linksEntry(i1 = 2, i2 = 1)}]",
         )
-        val generator = testDatabaseGenerator(sourceDirectory = sourceDir, repository = repo)
+        val generator = DatabaseGenerator(sourceDirectory = sourceDir, repository = repo)
         generator.generateLinesOnly()
         generator.generateLinksOnly()
 
@@ -135,7 +135,7 @@ class OtzariaHearotBooksTest {
             hearotLines = "<sup>1</sup> גוף ההערה",
             linksJson = "[${linksEntry(i1 = 2, i2 = 1)}]",
         )
-        testDatabaseGenerator(sourceDirectory = sourceDir, repository = repo).generateLinesOnly()
+        DatabaseGenerator(sourceDirectory = sourceDir, repository = repo).generateLinesOnly()
 
         assertNotNull(
             repo.getAllBooks().find { it.title == "הערות על מזור ותרופה" },
@@ -155,7 +155,7 @@ class OtzariaHearotBooksTest {
             hearotLines = "<sup>1</sup> גוף ההערה",
             linksJson = "[${linksEntry(i1 = 2, i2 = 1)},\n$anchored]",
         )
-        testDatabaseGenerator(sourceDirectory = sourceDir, repository = repo).generateLinesOnly()
+        DatabaseGenerator(sourceDirectory = sourceDir, repository = repo).generateLinesOnly()
 
         val base = repo.getAllBooks().find { it.title == "מזור ותרופה" }!!
         assertNotNull(repo.getAllBooks().find { it.title == "הערות על מזור ותרופה" })
@@ -172,7 +172,7 @@ class OtzariaHearotBooksTest {
             hearotLines = "<sup>1</sup> חלק ראשון\nחלק שני",
             linksJson = "[$ranged]",
         )
-        val generator = testDatabaseGenerator(sourceDirectory = sourceDir, repository = repo)
+        val generator = DatabaseGenerator(sourceDirectory = sourceDir, repository = repo)
         generator.generateLinesOnly()
 
         assertNotNull(
@@ -207,7 +207,7 @@ class OtzariaHearotBooksTest {
             linksJson = "[${linksEntry(i1 = 2, i2 = 1)},\n${linksEntry(i1 = 2, i2 = 2)}]",
         )
 
-        testDatabaseGenerator(sourceDirectory = sourceDir, repository = repo).generateLinesOnly()
+        DatabaseGenerator(sourceDirectory = sourceDir, repository = repo).generateLinesOnly()
 
         val base = repo.getAllBooks().find { it.title == "מזור ותרופה" }!!
         assertEquals(
@@ -227,7 +227,7 @@ class OtzariaHearotBooksTest {
             linksJson = "[${linksEntry(i1 = 2, i2 = 1)}]",
         )
 
-        testDatabaseGenerator(sourceDirectory = sourceDir, repository = repo).generateLinesOnly()
+        DatabaseGenerator(sourceDirectory = sourceDir, repository = repo).generateLinesOnly()
 
         val base = repo.getAllBooks().find { it.title == "מזור ותרופה" }!!
         assertEquals(
@@ -245,7 +245,7 @@ class OtzariaHearotBooksTest {
             linksJson = "[${linksEntry(i1 = 2, i2 = 1)}]",
         )
 
-        testDatabaseGenerator(sourceDirectory = sourceDir, repository = repo).generateLinesOnly()
+        DatabaseGenerator(sourceDirectory = sourceDir, repository = repo).generateLinesOnly()
 
         val base = repo.getAllBooks().find { it.title == "מזור ותרופה" }!!
         val chapterEntry = repo.getTocEntriesForBook(base.id).find { it.level == 2 }
@@ -268,7 +268,7 @@ class OtzariaHearotBooksTest {
             linksJson = "[${linksEntry(i1 = 2, i2 = 1)}]",
         )
 
-        val generator = testDatabaseGenerator(sourceDirectory = sourceDir, repository = repo)
+        val generator = DatabaseGenerator(sourceDirectory = sourceDir, repository = repo)
         generator.generateLinesOnly()
         generator.generateLinksOnly()
 
@@ -290,7 +290,7 @@ class OtzariaHearotBooksTest {
             hearotName = "הערות על חברותא על ברכות",
         )
 
-        val generator = testDatabaseGenerator(sourceDirectory = sourceDir, repository = repo)
+        val generator = DatabaseGenerator(sourceDirectory = sourceDir, repository = repo)
         generator.generateLinesOnly()
         generator.generateLinksOnly()
 
@@ -316,7 +316,7 @@ class OtzariaHearotBooksTest {
             hearotName = "הערות על חברותא על ברכות",
         )
 
-        val generator = testDatabaseGenerator(sourceDirectory = sourceDir, repository = repo)
+        val generator = DatabaseGenerator(sourceDirectory = sourceDir, repository = repo)
         generator.generateLinesOnly()
         generator.generateLinksOnly()
 

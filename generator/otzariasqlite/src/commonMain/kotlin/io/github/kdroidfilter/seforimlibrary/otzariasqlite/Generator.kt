@@ -118,8 +118,8 @@ class DatabaseGenerator(
     // documented in BoundedGeneratorInput.kt to tune forked generator runs.
     private val inputBufferBytes: Long = configuredGeneratorInputBytes(),
     private val inputSpillDirectory: Path? = null,
-    // The lines of ForDB's title_acronyms.txt (see [BookDisplayTitles.parse]).
-    titleAcronyms: List<String>,
+    // An archive predating title_acronyms.txt keeps the filename title.
+    titleAcronyms: List<String>? = null,
 ) {
 
     init { require(inputBufferBytes >= 1024) { "inputBufferBytes must be at least 1024" } }
@@ -198,10 +198,11 @@ class DatabaseGenerator(
     private val fileNameBlacklist: Set<String> = loadFileNameBlacklistFromResources()
 
     // In-memory caches to accelerate link processing using available RAM
-    private var booksByTitle: Map<String, Book> = emptyMap()
-    // File-stem title → stored title, for the books whose title gained gershayim.
-    private var displayTitleByStem: Map<String, String> = emptyMap()
-    private val displayTitles = BookDisplayTitles(BookDisplayTitles.parse(titleAcronyms))
+    private var booksByTitle: Map<String, List<Book>> = emptyMap()
+    private var booksByStem: Map<String, List<Book>> = emptyMap()
+    private var booksByBareRef: Map<String, List<Book>> = emptyMap()
+    private val bookMatchesByFileTitle = HashMap<String, List<Book>>()
+    private val displayTitles = titleAcronyms?.let { BookDisplayTitles(BookDisplayTitles.parse(it)) }
     private var booksById: Map<Long, Book> = emptyMap()
     // Fixed-size, byte-capped LRU pages; a single link must not load an entire
     // book's text, or leave every referenced book's IDs resident for the phase.
@@ -363,7 +364,7 @@ class DatabaseGenerator(
 
     /** The stored title of the book in [path], whose key title is [stemTitle]. */
     private fun displayTitleFor(path: Path, stemTitle: String): String =
-        displayTitles.displayTitle(stemTitle, firstHeadingOf(path))
+        displayTitles?.displayTitle(stemTitle, firstHeadingOf(path)) ?: stemTitle
 
     private fun firstHeadingOf(path: Path): String? =
         Files.newInputStream(path).reader(Charsets.UTF_8).buffered().use { reader ->
@@ -373,24 +374,24 @@ class DatabaseGenerator(
                 ?.let { cleanHtml(HearotCompanionMerge.stripFootnotes(it)) }
         }
 
-    /** The book a links/alt-toc file named after [fileTitle] belongs to. */
-    private fun bookByFileTitle(fileTitle: String): Book? =
-        booksByTitle[fileTitle] ?: displayTitleByStem[fileTitle]?.let(booksByTitle::get)
-
-    private fun loadDisplayTitlesByStem(): Map<String, String> {
-        val library = sourceDirectory.resolve("אוצריא")
-        if (!library.exists()) return emptyMap()
-        val files = Files.walk(library).use { s -> s.filter { Files.isRegularFile(it) && it.extension == "txt" }.toList() }
-        val out = HashMap<String, String>()
-        for (file in files) {
-            val rawStem = file.nameWithoutExtension
-            val stemTitle = normalizeBookTitle(rawStem)
-            val display = displayTitleFor(file, stemTitle)
-            if (display == stemTitle) continue
-            out.putIfAbsent(rawStem, display)
-            out.putIfAbsent(stemTitle, display)
+    /** Resolve an authored file stem without rereading the text or its title dictionary. */
+    private fun booksForFileTitle(fileTitle: String): List<Book> = bookMatchesByFileTitle.getOrPut(fileTitle) {
+        val stem = normalizeBookTitle(fileTitle)
+        val exact = booksByTitle[fileTitle].orEmpty()
+        val byStem = booksByStem[stem] ?: run {
+            // Direct phase-2 callers can supply a DB without its allocator snapshot.
+            // Only consider Otzaria references that add quote marks to the file stem.
+            booksByBareRef[CategoryLabels.stripQuoteMarks(stem)].orEmpty().filter { book ->
+                CategoryLabels.onlyAddsQuoteMarks(book.heRef.orEmpty(), stem)
+            }
         }
-        return out
+        (exact + byStem).distinctBy(Book::id)
+    }
+
+    private fun bookByFileTitle(fileTitle: String): Book? {
+        val matches = booksForFileTitle(fileTitle)
+        // Preserve the old exact-title choice when every candidate has that title.
+        return matches.lastOrNull()?.takeIf { matches.size == 1 || matches.all { it.title == fileTitle } }
     }
 
     /** Returns true only when a dependant-style title explicitly names [baseTitle]. */
@@ -781,29 +782,40 @@ class DatabaseGenerator(
     private suspend fun ensureCachesLoaded() {
         if (booksByTitle.isEmpty()) {
             val allBooks = repository.getAllBooks()
+            val sourceNames = repository.getAllSources().associate { it.id to it.name }
+            val blockedSources = sourceBlacklist.mapTo(HashSet(), ::comparableLabel)
             val filtered = if (filterSourcesForLinks) {
                 allBooks.filter { book ->
-                    val src = runCatching { repository.getSourceById(book.sourceId) }.getOrNull()
-                    val name = src?.name ?: "Unknown"
-                    val normalized = comparableLabel(name)
-                    !sourceBlacklist.any { comparableLabel(it) == normalized }
+                    comparableLabel(sourceNames[book.sourceId] ?: "Unknown") !in blockedSources
                 }
             } else {
                 allBooks
             }
-            booksByTitle = filtered.associateBy { it.title }
+            booksByTitle = filtered.groupBy { it.title }
             booksById = filtered.associateBy { it.id }
-            displayTitleByStem = loadDisplayTitlesByStem()
 
-            // Build set of Sefaria book IDs to skip Otzaria links for these books
+            // A primary allocator key is the source and filename stem from phase 1.
+            // Ignore historical keys unless the live row still matches the source and reference.
             sefariaBookIds.clear()
-            for (book in filtered) {
-                val src = runCatching { repository.getSourceById(book.sourceId) }.getOrNull()
-                val sourceName = src?.name ?: ""
-                if (sourceName.contains("sefaria", ignoreCase = true)) {
-                    sefariaBookIds.add(book.id)
-                }
-            }
+            val otzariaBooksById = filtered.filter { book ->
+                val isSefaria = sourceNames[book.sourceId].orEmpty().contains("sefaria", ignoreCase = true)
+                if (isSefaria) sefariaBookIds += book.id
+                !isSefaria
+            }.associateBy { it.id }
+            booksByStem = allocator.bookIds().entries.mapNotNull { (key, id) ->
+                val book = otzariaBooksById[id] ?: return@mapNotNull null
+                val ref = book.heRef ?: return@mapNotNull null
+                val stem = key.canonicalHeTitle
+                if (key.sourceName != sourceNames[book.sourceId] ||
+                    (ref != stem && !CategoryLabels.onlyAddsQuoteMarks(ref, stem))
+                ) return@mapNotNull null
+                key.canonicalHeTitle to book
+            }.groupBy({ it.first }, { it.second })
+            booksByBareRef = otzariaBooksById.values.mapNotNull { book ->
+                val ref = book.heRef ?: return@mapNotNull null
+                val bare = CategoryLabels.stripQuoteMarks(ref)
+                if (bare == ref) null else bare to book
+            }.groupBy({ it.first }, { it.second })
 
             val skipped = allBooks.size - filtered.size
             if (filterSourcesForLinks && skipped > 0) {
@@ -845,7 +857,9 @@ class DatabaseGenerator(
         lineIdCacheBytes = 0
         booksById = emptyMap()
         booksByTitle = emptyMap()
-        displayTitleByStem = emptyMap()
+        booksByStem = emptyMap()
+        booksByBareRef = emptyMap()
+        bookMatchesByFileTitle.clear()
         sefariaBookIds.clear()
         headingLineIds.clear()
     }
@@ -2492,12 +2506,14 @@ class DatabaseGenerator(
         // Global sync: an Otzaria book whose alt_toc file disappeared loses its
         // structures. Only non-Sefaria books can carry Otzaria-authored structures,
         // so Sefaria books (whose structures come from their schemas) stay untouched.
-        val titlesWithFile = files.flatMap {
-            val stem = it.nameWithoutExtension.removeSuffix("_alt_toc")
-            listOfNotNull(stem, displayTitleByStem[stem])
+        val filesByBookTitle = files.associateWith { file ->
+            file.nameWithoutExtension.removeSuffix("_alt_toc")
+        }
+        val booksWithFiles = filesByBookTitle.values.flatMap { stem ->
+            booksForFileTitle(stem).map(Book::id)
         }.toSet()
         for (book in booksById.values) {
-            if (book.id in sefariaBookIds || !book.hasAltStructures || book.title in titlesWithFile) continue
+            if (book.id in sefariaBookIds || !book.hasAltStructures || book.id in booksWithFiles) continue
             for (structure in repository.getAltTocStructuresForBook(book.id)) {
                 deleteAltTocStructure(structure.id)
             }
@@ -2506,8 +2522,7 @@ class DatabaseGenerator(
         }
 
         var builtBooks = 0
-        for (file in files) {
-            val bookTitle = file.nameWithoutExtension.removeSuffix("_alt_toc")
+        for ((file, bookTitle) in filesByBookTitle) {
             val book = bookByFileTitle(bookTitle)
             if (book == null) {
                 logger.w { "Alt-toc file for unknown book: $bookTitle — skipped" }

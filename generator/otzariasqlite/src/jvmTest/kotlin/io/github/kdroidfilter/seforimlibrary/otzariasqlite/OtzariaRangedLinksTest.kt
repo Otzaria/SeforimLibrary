@@ -76,7 +76,7 @@ class OtzariaRangedLinksTest {
             """.trimMargin()
         )
 
-        testDatabaseGenerator(sourceDirectory = sourceDir, repository = repo).generateLinksOnly()
+        DatabaseGenerator(sourceDirectory = sourceDir, repository = repo).generateLinksOnly()
 
         fun query(sql: String): List<List<Long>> {
             val conn: Connection = driver.getConnection()
@@ -132,7 +132,7 @@ class OtzariaRangedLinksTest {
             |]
             """.trimMargin()
         )
-        testDatabaseGenerator(sourceDirectory = sourceDir, repository = repo).generateLinksOnly()
+        DatabaseGenerator(sourceDirectory = sourceDir, repository = repo).generateLinksOnly()
 
         // Same stable link ids → still 5 link rows, no duplicates.
         assertEquals(5, query("SELECT COUNT(*) FROM link").single().single().toInt())

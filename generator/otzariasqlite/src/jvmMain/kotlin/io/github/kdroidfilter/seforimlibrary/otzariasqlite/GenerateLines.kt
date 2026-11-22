@@ -1,12 +1,13 @@
 package io.github.kdroidfilter.seforimlibrary.otzariasqlite
 
-import io.github.kdroidfilter.seforimlibrary.common.fordb.requiredForDbArchiveFile
 import app.cash.sqldelight.db.QueryResult
 import app.cash.sqldelight.db.SqlCursor
 import app.cash.sqldelight.driver.jdbc.sqlite.JdbcSqliteDriver
 import co.touchlab.kermit.Logger
 import co.touchlab.kermit.Severity
 import io.github.kdroidfilter.seforimlibrary.common.db.SEFORIM_DB_PAGE_SIZE_PRAGMA
+import io.github.kdroidfilter.seforimlibrary.common.fordb.TITLE_ACRONYMS_FILE
+import io.github.kdroidfilter.seforimlibrary.common.fordb.forDbArchiveFiles
 import io.github.kdroidfilter.seforimlibrary.common.buildstate.BuildStateVerifier
 import io.github.kdroidfilter.seforimlibrary.common.buildstate.IdTable
 import io.github.kdroidfilter.seforimlibrary.common.ids.InMemoryIdAllocator
@@ -236,7 +237,7 @@ fun main(args: Array<String>) = runBlocking {
             allocator = allocator,
             buildVersion = buildVersion,
             allowBookIdLoss = (System.getProperty("allowBookIdLoss") ?: System.getenv("ALLOW_BOOK_ID_LOSS")) == "true",
-            titleAcronyms = requiredForDbArchiveFile(BookDisplayTitles.FOR_DB_FILE, logger),
+            titleAcronyms = forDbArchiveFiles(logger)[TITLE_ACRONYMS_FILE],
         )
         generator.generateLinesOnly()
         // Build both members beside their targets, verify the candidate state

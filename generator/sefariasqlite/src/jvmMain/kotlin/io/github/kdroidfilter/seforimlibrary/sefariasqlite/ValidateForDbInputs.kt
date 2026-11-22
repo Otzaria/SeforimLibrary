@@ -48,6 +48,7 @@ internal fun collectForDbRuleFailures(
     bookMoves: List<BookMove>,
     logger: Logger,
     categoryDescriptionOverrides: List<CategoryDescriptionOverride> = emptyList(),
+    checkRestoredQuoteTitles: Boolean = false,
 ): List<ForDbRuleFailure> {
     val failures = mutableListOf<ForDbRuleFailure>()
     val descriptionOverridesByPath = categoryDescriptionOverrides.associateBy { it.canonicalPath }
@@ -85,7 +86,7 @@ internal fun collectForDbRuleFailures(
             applyCategoryMove(conn, it, logger)
         }
         section("book_renames.csv", bookRenames, { "'${it.first}' -> '${it.second}'" }) {
-            renameBookTitle(conn, it.first, it.second, logger)
+            renameBookTitle(conn, it.first, it.second, logger, checkRestoredQuoteTitles)
         }
         section("book_moves.csv", bookMoves, { "'${it.name}': '${it.sourcePath}' -> '${it.destPath}'" }) {
             applyBookMove(conn, it, logger)
@@ -152,6 +153,7 @@ fun main(args: Array<String>) {
     }
     val libraryTrees = baseTreePath?.let { readLibraryTree(Path.of(it)) to readLibraryTree(Path.of(candidateTreePath!!)) }
     if (libraryTrees == null) logger.w { "No library trees given: categories of removed library folders are not checked" }
+    val checkRestoredQuoteTitles = forDbUsesRestoredQuoteTitles(logger)
     val bookNotices = loadBookNoticeRows(logger)
     val inlineMarkerRules = downloadOptionalForDbFile(INLINE_MARKER_ALT_TOC_FILE, logger)
         ?.let(::parseInlineMarkerRules).orEmpty()
@@ -163,6 +165,7 @@ fun main(args: Array<String>) {
         val failures = try {
             collectForDbRuleFailures(
                 conn, categoryRenames, categoryMoves, bookRenames, bookMoves, logger, categoryDescriptionOverrides,
+                checkRestoredQuoteTitles = checkRestoredQuoteTitles,
             )
         } finally {
             conn.rollback() // dry-run only — the DB is NEVER mutated by this task
@@ -194,6 +197,7 @@ fun main(args: Array<String>) {
             conn.autoCommit = false
             val replayFailures = collectForDbRuleFailures(
                 conn, categoryRenames, categoryMoves, bookRenames, bookMoves, logger, categoryDescriptionOverrides,
+                checkRestoredQuoteTitles = checkRestoredQuoteTitles,
             )
             check(replayFailures.isEmpty()) { "rename/move replay unexpectedly diverged on the validation copy" }
             lostCategories = libraryTrees?.let { (base, candidate) ->
@@ -201,7 +205,7 @@ fun main(args: Array<String>) {
                     conn, base, candidate, categoryRenames, bookRenames, categoryMoves, bookMoves,
                 )
             }.orEmpty()
-            applyGenerations(conn, generations, logger)
+            applyGenerations(conn, generations, logger, checkRestoredQuoteTitles)
             conn.commit()
         }
         val retitledBooks = DriverManager.getConnection("jdbc:sqlite:$tempDb").use(::loadRetitledBooks)
@@ -215,8 +219,8 @@ fun main(args: Array<String>) {
                 )
                 val bindings = IdAllocatorBindings(allocator, repository)
                 failOnLostCategoryDescriptions(repository, categoryDescriptionOverrides, lostCategories)
-                applyMetadata(repository, bindings, bulkMetadata, descriptionOverrides, retitledBooks, logger)
-                applyBookInfoExtensions(repository, bindings, bookInfoFields, retitledBooks, logger)
+                applyMetadata(repository, bindings, bulkMetadata, descriptionOverrides, retitledBooks, logger, checkRestoredQuoteTitles)
+                applyBookInfoExtensions(repository, bindings, bookInfoFields, retitledBooks, logger, checkRestoredQuoteTitles)
                 applyCategoryDescriptionOverrides(repository, categoryDescriptionOverrides, logger)
             } finally {
                 repository.close()

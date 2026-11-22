@@ -75,7 +75,7 @@ class OtzariaBookIdContinuityTest {
                 val manifest = sourceDir.resolve("files_manifest.json")
                 Files.write(manifest, Files.readAllLines(manifest).filterNot { "/$unhashed.txt\"" in it })
             }
-            testDatabaseGenerator(
+            DatabaseGenerator(
                 sourceDirectory = sourceDir,
                 repository = repo,
                 allocator = allocator,

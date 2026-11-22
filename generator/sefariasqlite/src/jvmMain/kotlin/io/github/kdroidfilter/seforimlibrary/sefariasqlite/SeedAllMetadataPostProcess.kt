@@ -67,6 +67,7 @@ fun main(args: Array<String>) = runBlocking {
     }
     logger.i { "Seeding all-metadata in $dbPath" }
 
+    val checkRestoredQuoteTitles = forDbUsesRestoredQuoteTitles(logger)
     val bulk = parseBulkMetadata(downloadRequiredForDbFile(ALL_METADATA_FILE, logger))
     val descriptions = parseDescriptionOverrides(downloadRequiredForDbFile(METADATA_CHANGES_FILE, logger))
     val categoryOverrides = parseCategoryDescriptionOverrides(
@@ -96,9 +97,9 @@ fun main(args: Array<String>) = runBlocking {
         // write.  Otherwise a missing late category could leave earlier book/pub
         // metadata committed even though the task reports failure.
         val categoryPlan = planCategoryDescriptionOverrides(repository, categoryOverrides)
-        val result = applyMetadata(repository, bindings, bulk, descriptions, retitledBooks, logger)
+        val result = applyMetadata(repository, bindings, bulk, descriptions, retitledBooks, logger, checkRestoredQuoteTitles)
         val bookInfoResult =
-            applyBookInfoExtensions(repository, bindings, bookInfo.orEmpty(), retitledBooks, logger)
+            applyBookInfoExtensions(repository, bindings, bookInfo.orEmpty(), retitledBooks, logger, checkRestoredQuoteTitles)
         val categoryResult = applyCategoryDescriptionPlan(repository, categoryPlan, logger)
         // This stage writes straight to the on-disk DB (no VACUUM INTO), so there
         // is no persist step for the snapshot to run ahead of.
@@ -363,14 +364,15 @@ internal suspend fun applyMetadata(
     descriptions: Map<String, Description>,
     retitledBooks: List<RetitledBook>,
     logger: Logger,
+    checkRestoredQuoteTitles: Boolean = false,
 ): MetadataResult {
     // Keys on both sides are trimmed: the CSV/JSON parsers trim every title, but a
     // Sefaria heTitle can arrive with a trailing space (one v28 book did), and an
     // untrimmed DB key could then never match its own ForDB row.
     val bookIdsByTitle = repository.getAllBookTitleIds().groupBy({ it.second.trim() }, { it.first })
     // Before any write: this stage has no transaction to roll back.
-    requireForDbUsesDisplayTitles(ALL_METADATA_FILE, bulk.keys, bookIdsByTitle.keys, retitledBooks)
-    requireForDbUsesDisplayTitles(METADATA_CHANGES_FILE, descriptions.keys, bookIdsByTitle.keys, retitledBooks)
+    requireForDbUsesDisplayTitles(ALL_METADATA_FILE, bulk.keys, bookIdsByTitle.keys, retitledBooks, checkRestoredQuoteTitles)
+    requireForDbUsesDisplayTitles(METADATA_CHANGES_FILE, descriptions.keys, bookIdsByTitle.keys, retitledBooks, checkRestoredQuoteTitles)
 
     var updated = 0
     // Names, not just a count: `unmatched=1116` (24.5% of the ForDB metadata

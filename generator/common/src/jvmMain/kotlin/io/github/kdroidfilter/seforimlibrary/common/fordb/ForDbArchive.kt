@@ -28,6 +28,7 @@ private const val FOR_DB_USER_AGENT = "SeforimLibrary-ForDBFetcher/1.0"
 // inputs. The release build pins it; -PforDbSha256 must accompany it.
 const val FOR_DB_ARCHIVE_PROPERTY = "forDbArchive"
 const val FOR_DB_SHA256_PROPERTY = "forDbSha256"
+const val TITLE_ACRONYMS_FILE = "title_acronyms.txt"
 private val FOR_DB_TEXT_EXTENSIONS = setOf("csv", "json", "txt")
 
 private var cachedForDbFiles: Map<String, List<String>>? = null
@@ -48,10 +49,6 @@ fun forDbArchiveFiles(logger: Logger): Map<String, List<String>> {
     cachedForDbFiles = files
     return files
 }
-
-/** [fileName] from [forDbArchiveFiles]; an absent file fails the build by name. */
-fun requiredForDbArchiveFile(fileName: String, logger: Logger): List<String> =
-    forDbArchiveFiles(logger)[fileName] ?: error("ForDB release archive is missing required file $fileName")
 
 /**
  * Reads ForDB files from a pinned local archive whose SHA-256 must equal the

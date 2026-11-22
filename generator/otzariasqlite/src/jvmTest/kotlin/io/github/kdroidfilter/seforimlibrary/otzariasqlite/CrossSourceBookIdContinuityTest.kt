@@ -72,7 +72,7 @@ class CrossSourceBookIdContinuityTest {
                 val id = allocator.bookId("Sefaria", title)
                 repo.insertBook(Book(id = id, categoryId = categoryId, sourceId = sourceId, title = title, heRef = title))
             }
-            testDatabaseGenerator(
+            DatabaseGenerator(
                 sourceDirectory = library(files).also(::writeFilesManifest),
                 repository = repo,
                 allocator = allocator,

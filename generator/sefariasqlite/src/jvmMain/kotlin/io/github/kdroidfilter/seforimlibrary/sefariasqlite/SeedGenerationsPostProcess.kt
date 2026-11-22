@@ -68,6 +68,7 @@ fun main(args: Array<String>) {
 
     logger.i { "Seeding generations in $dbPath" }
 
+    val checkRestoredQuoteTitles = forDbUsesRestoredQuoteTitles(logger)
     val rows = loadGenerationRows(logger)
 
     try {
@@ -75,7 +76,7 @@ fun main(args: Array<String>) {
             conn.autoCommit = false
 
             val result = try {
-                applyGenerations(conn, rows, logger).also {
+                applyGenerations(conn, rows, logger, checkRestoredQuoteTitles).also {
                     conn.commit()
                 }
             } catch (e: Exception) {
@@ -223,6 +224,7 @@ internal fun applyGenerations(
     conn: Connection,
     rows: List<Pair<String, String>>,
     logger: Logger,
+    checkRestoredQuoteTitles: Boolean = false,
 ): GenerationApplyResult {
     if (rows.isEmpty()) return GenerationApplyResult(0, 0, 0)
 
@@ -234,7 +236,7 @@ internal fun applyGenerations(
     }
     val exactMap = books.groupBy({ it.second }, { it.first })
     // Before any write: a row keyed by a renamed book's former title must not be dropped.
-    requireForDbUsesDisplayTitles("generation rows", rows.map { it.first }, exactMap.keys, loadRetitledBooks(conn))
+    requireForDbUsesDisplayTitles("generation rows", rows.map { it.first }, exactMap.keys, loadRetitledBooks(conn), checkRestoredQuoteTitles)
 
     var generationsCreated = 0
     conn.prepareStatement("INSERT OR IGNORE INTO generation(name) VALUES (?)").use { stmt ->

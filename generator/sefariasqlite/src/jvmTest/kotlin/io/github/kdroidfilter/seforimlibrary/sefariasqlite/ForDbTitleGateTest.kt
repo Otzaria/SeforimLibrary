@@ -65,28 +65,31 @@ class ForDbTitleGateTest {
 
     @Test
     fun `a row naming an Otzaria book without the gershayim its title gained fails`() {
+        val names = listOf("שות באר מרדכי")
+        val books = setOf("שו״ת באר מרדכי", "שות אחר")
+        requireForDbUsesDisplayTitles("book_info.csv", names, books, emptyList())
         val e = assertFailsWith<IllegalStateException> {
-            requireForDbUsesDisplayTitles("book_info.csv", listOf("שות באר מרדכי"), setOf("שו״ת באר מרדכי", "שות אחר"), emptyList())
+            requireForDbUsesDisplayTitles("book_info.csv", names, books, emptyList(), checkRestoredQuoteTitles = true)
         }
         assertContains(e.message!!, "'שות באר מרדכי' → 'שו״ת באר מרדכי'")
         // The released DB still has the stem: a row already migrated only warns.
-        requireForDbUsesDisplayTitles("book_info.csv", listOf("שו״ת באר מרדכי"), setOf("שות באר מרדכי"), emptyList())
+        requireForDbUsesDisplayTitles("book_info.csv", listOf("שו״ת באר מרדכי"), setOf("שות באר מרדכי"), emptyList(), checkRestoredQuoteTitles = true)
         // A title that differs by more than quote marks is another book.
-        requireForDbUsesDisplayTitles("book_info.csv", listOf("שות באר"), setOf("שו״ת באר מרדכי"), emptyList())
+        requireForDbUsesDisplayTitles("book_info.csv", listOf("שות באר"), setOf("שו״ת באר מרדכי"), emptyList(), checkRestoredQuoteTitles = true)
     }
 
     @Test
     fun `a book rename naming an Otzaria book without its gained gershayim fails`() {
         generationsDb("שו״ת אהל משה", "שו״ת אהל משה").use { conn ->
             val e = assertFailsWith<IllegalStateException> {
-                renameBookTitle(conn, "שות אהל משה", "שו״ת אהל משה (קרינס)", logger)
+                renameBookTitle(conn, "שות אהל משה", "שו״ת אהל משה (קרינס)", logger, checkRestoredQuoteTitles = true)
             }
             assertContains(e.message!!, "'שו״ת אהל משה'")
-            assertEquals(1, renameBookTitle(conn, "שו״ת אהל משה", "שו״ת אהל משה (קרינס)", logger))
+            assertEquals(1, renameBookTitle(conn, "שו״ת אהל משה", "שו״ת אהל משה (קרינס)", logger, checkRestoredQuoteTitles = true))
         }
         // The released DB still has the stem: a migrated row only warns.
         generationsDb("שות אהל משה", "שות אהל משה").use { conn ->
-            assertEquals(0, renameBookTitle(conn, "שו״ת אהל משה", "שו״ת אהל משה (קרינס)", logger))
+            assertEquals(0, renameBookTitle(conn, "שו״ת אהל משה", "שו״ת אהל משה (קרינס)", logger, checkRestoredQuoteTitles = true))
         }
     }
 

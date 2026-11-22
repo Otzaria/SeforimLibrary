@@ -346,7 +346,7 @@ tasks.register<JavaExec>("generatorPipelineProbe") {
 
 // The Otzaria import reads ForDB's title_acronyms.txt; forward the release build's pinned
 // archive so it reads the same bytes as every ForDB post-process (see sefariasqlite).
-tasks.matching { it.name in setOf("generateLines", "generateLinks", "appendOtzariaLines", "appendOtzariaLinks") }
+tasks.matching { it.name == "generateLines" || it.name == "appendOtzariaLines" }
     .configureEach {
         this as JavaExec
         for (p in listOf("forDbArchive", "forDbSha256")) {

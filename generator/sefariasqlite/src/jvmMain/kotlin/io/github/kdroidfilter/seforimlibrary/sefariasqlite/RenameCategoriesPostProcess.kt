@@ -3,6 +3,7 @@ package io.github.kdroidfilter.seforimlibrary.sefariasqlite
 import co.touchlab.kermit.Logger
 import co.touchlab.kermit.Severity
 import io.github.kdroidfilter.seforimlibrary.common.buildstate.BuildStateVerifier
+import io.github.kdroidfilter.seforimlibrary.common.fordb.TITLE_ACRONYMS_FILE
 import io.github.kdroidfilter.seforimlibrary.common.fordb.forDbArchiveFiles
 import io.github.kdroidfilter.seforimlibrary.common.buildstate.IdTable
 import io.github.kdroidfilter.seforimlibrary.common.ids.BOOK_MOVE_LEAF_KEY_PREFIX
@@ -92,6 +93,7 @@ fun main(args: Array<String>) {
     // category_renames.csv and book_renames.csv have no header; book_moves.csv has one.
     val categoryRenames: List<CategoryRename> =
         parseCategoryRenames(downloadRequiredForDbFile(FOR_DB_CSV_FILES.getValue("categoryRenames"), logger))
+    val checkRestoredQuoteTitles = forDbUsesRestoredQuoteTitles(logger)
     val bookRenames: List<Pair<String, String>> =
         parsePairs(
             downloadRequiredForDbFile(FOR_DB_CSV_FILES.getValue("bookRenames"), logger),
@@ -142,6 +144,7 @@ fun main(args: Array<String>) {
             // bad row. The transaction is rolled back; the real pass then starts clean.
             val preflight = collectForDbRuleFailures(
                 conn, categoryRenames, categoryMoves, bookRenames, bookMoves, logger, categoryDescriptionOverrides,
+                checkRestoredQuoteTitles = checkRestoredQuoteTitles,
             )
             conn.rollback()
             if (preflight.isNotEmpty()) {
@@ -174,7 +177,7 @@ fun main(args: Array<String>) {
             }
 
             val booksRenamed = runSection("Book renames", bookRenames, logger) { (oldTitle, newTitle) ->
-                renameBookTitle(conn, oldTitle, newTitle, logger)
+                renameBookTitle(conn, oldTitle, newTitle, logger, checkRestoredQuoteTitles)
             }
 
             val booksMoved = runSection("Book moves", bookMoves, logger) { move ->
@@ -741,7 +744,13 @@ private fun findSourceCategories(conn: Connection, rule: CategoryRename): List<P
     }
 }
 
-internal fun renameBookTitle(conn: Connection, oldTitle: String, newTitle: String, logger: Logger): Int {
+internal fun renameBookTitle(
+    conn: Connection,
+    oldTitle: String,
+    newTitle: String,
+    logger: Logger,
+    checkRestoredQuoteTitles: Boolean = false,
+): Int {
     val ids = findBookIdsByTitle(conn, oldTitle)
     if (ids.isEmpty()) {
         val alreadyRenamed = findBookIdsByTitle(conn, newTitle)
@@ -749,11 +758,12 @@ internal fun renameBookTitle(conn: Connection, oldTitle: String, newTitle: Strin
             logger.i { "Book rename '$oldTitle' -> '$newTitle' already applied (${alreadyRenamed.size} row(s))" }
             return 0
         }
-        // An Otzaria title gains the gershayim its file name lacks; the row would silently no-op.
-        val gainedQuotes = allBookTitles(conn).filter { it != oldTitle && CategoryLabels.onlyAddsQuoteMarks(it, oldTitle) }
-        check(gainedQuotes.isEmpty()) {
-            "Book rename '$oldTitle' -> '$newTitle': the book is now titled ${gainedQuotes.joinToString { "'$it'" }}; " +
-                "update book_renames.csv to that title"
+        if (checkRestoredQuoteTitles) {
+            val gainedQuotes = allBookTitles(conn).filter { it != oldTitle && CategoryLabels.onlyAddsQuoteMarks(it, oldTitle) }
+            check(gainedQuotes.isEmpty()) {
+                "Book rename '$oldTitle' -> '$newTitle': the book is now titled ${gainedQuotes.joinToString { "'$it'" }}; " +
+                    "update book_renames.csv to that title"
+            }
         }
         logger.w { "Book rename: '$oldTitle' not found; no rows changed" }
         return 0
@@ -1228,6 +1238,9 @@ internal fun requiredForDbFile(files: Map<String, List<String>>, fileName: Strin
  */
 internal fun downloadOptionalForDbFile(fileName: String, logger: Logger): List<String>? =
     forDbReleaseFiles(logger)[fileName]
+
+/** Older immutable archives still supply their original filename-based titles. */
+internal fun forDbUsesRestoredQuoteTitles(logger: Logger): Boolean = TITLE_ACRONYMS_FILE in forDbReleaseFiles(logger)
 
 private fun forDbReleaseFiles(logger: Logger): Map<String, List<String>> {
     val files = forDbArchiveFiles(logger)
