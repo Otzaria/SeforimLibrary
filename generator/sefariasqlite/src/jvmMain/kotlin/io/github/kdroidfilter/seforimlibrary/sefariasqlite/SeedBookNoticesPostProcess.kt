@@ -69,18 +69,8 @@ fun main(args: Array<String>) {
         DriverManager.getConnection("jdbc:sqlite:$dbPath").use { conn ->
             conn.autoCommit = false
             val result = try {
-                if (checkRestoredQuoteTitles) {
-                    // An unmatched banner row only warns, so a stale title must fail here instead.
-                    val titles = conn.createStatement().use { st ->
-                        st.executeQuery("SELECT title FROM book").use { rs -> buildSet { while (rs.next()) add(rs.getString(1)) } }
-                    }
-                    val named = (rows.banners + rows.protections).map { it.bookName }.filter { it.isNotEmpty() }
-                    requireForDbUsesDisplayTitles(
-                        "$BOOK_BANNERS_FILE / $BOOK_PROTECTION_FILE", named, titles, loadRetitledBooks(conn),
-                        checkRestoredQuoteTitles = true,
-                    )
-                }
-                applyBookNotices(conn, rows, logger).also { conn.commit() }
+                applyBookNotices(conn, rows, logger, checkRestoredQuoteTitles = checkRestoredQuoteTitles)
+                    .also { conn.commit() }
             } catch (e: Exception) {
                 runCatching { conn.rollback() }
                 throw e
@@ -162,19 +152,41 @@ internal fun applyBookNotices(
     rows: BookNoticeRows,
     logger: Logger,
     strict: Boolean = true,
+    checkRestoredQuoteTitles: Boolean = false,
 ): BookNoticesResult {
-    conn.createStatement().use { st ->
-        listOf("banner", "book_banner", "book_protection").forEach { st.execute(SCHEMA_7_TABLE_DDL.getValue(it)) }
-    }
-
-    data class Book(val id: Long, val title: String, val source: String)
+    data class Book(val id: Long, val title: String, val source: String, val heRef: String?)
     val books = conn.createStatement().use { st ->
         st.executeQuery(
-            "SELECT b.id, b.title, s.name FROM book b JOIN source s ON s.id = b.sourceId ORDER BY b.id",
-        ).use { rs -> buildList { while (rs.next()) add(Book(rs.getLong(1), rs.getString(2), rs.getString(3))) } }
+            "SELECT b.id, b.title, s.name, b.heRef FROM book b JOIN source s ON s.id = b.sourceId ORDER BY b.id",
+        ).use { rs ->
+            buildList { while (rs.next()) add(Book(rs.getLong(1), rs.getString(2), rs.getString(3), rs.getString(4))) }
+        }
     }
     val bySource = books.groupBy { it.source }
     val bySourceAndTitle = books.groupBy { it.source to it.title }
+
+    fun requirePresentTitles(file: String, entries: List<BookNoticeRow<*>>) {
+        for ((source, named) in entries.filter { it.bookName.isNotEmpty() }.groupBy { it.sourceName }) {
+            val sourceBooks = bySource[source].orEmpty()
+            val titles = sourceBooks.mapTo(HashSet()) { it.title }
+            val retitled = sourceBooks.mapNotNull { book ->
+                val ref = book.heRef
+                if (ref == null || ref == book.title) null else RetitledBook(book.id, book.title, ref)
+            }
+            requireForDbUsesDisplayTitles(
+                "$file ($source)", named.map { it.bookName }, titles, retitled,
+                checkRestoredQuoteTitles = true,
+            )
+        }
+    }
+    if (checkRestoredQuoteTitles) {
+        requirePresentTitles(BOOK_BANNERS_FILE, rows.banners)
+        requirePresentTitles(BOOK_PROTECTION_FILE, rows.protections)
+    }
+
+    conn.createStatement().use { st ->
+        listOf("banner", "book_banner", "book_protection").forEach { st.execute(SCHEMA_7_TABLE_DDL.getValue(it)) }
+    }
 
     fun <T> resolve(entries: List<BookNoticeRow<T>>, unmatched: MutableList<String>): Map<Long, Pair<Book, T>> {
         val out = HashMap<Long, Pair<Book, T>>()

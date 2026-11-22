@@ -230,7 +230,9 @@ fun main(args: Array<String>) {
         // The build itself (seedBookNotices) fails on an unmatched protection row.
         DriverManager.getConnection("jdbc:sqlite:$tempDb").use { conn ->
             conn.autoCommit = false
-            applyBookNotices(conn, bookNotices, logger, strict = false)
+            applyBookNotices(
+                conn, bookNotices, logger, strict = false, checkRestoredQuoteTitles = checkRestoredQuoteTitles,
+            )
             conn.commit()
         }
         // Parsed above; a book this published DB lacks (a new one) only warns. Its line text is

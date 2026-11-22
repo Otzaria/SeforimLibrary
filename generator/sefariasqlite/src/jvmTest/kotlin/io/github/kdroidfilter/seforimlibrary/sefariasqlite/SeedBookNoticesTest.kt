@@ -138,6 +138,34 @@ class SeedBookNoticesTest {
     }
 
     @Test
+    fun `a migrated banner must use the current title within its own source`() {
+        db().use { conn ->
+            conn.createStatement().use { st ->
+                st.execute("UPDATE book SET title = 'שו״ת א', heRef = 'שו״ת א' WHERE id = 1")
+                st.execute("UPDATE book SET title = 'שות א', heRef = 'שות א' WHERE id = 3")
+            }
+            val notices = BookNoticeRows(
+                banners = listOf(
+                    BookNoticeRow("Wiki", "", BannerText(1, "source default")),
+                    BookNoticeRow("Wiki", "שות א", BannerText(2, "stale title")),
+                    BookNoticeRow("KSK", "שות א", BannerText(3, "correct title in another source")),
+                ),
+                protections = listOf(BookNoticeRow("Wiki", "שו״ת א", 1)),
+            )
+            val legacy = applyBookNotices(conn, notices, logger)
+            assertEquals(listOf("Wiki / שות א"), legacy.unmatchedBanners)
+            val before = rows(conn, "SELECT * FROM book_banner ORDER BY bookId")
+
+            val error = assertFailsWith<IllegalStateException> {
+                applyBookNotices(conn, notices, logger, checkRestoredQuoteTitles = true)
+            }
+            assertContains(error.message.orEmpty(), "book_banners.csv (Wiki)")
+            assertContains(error.message.orEmpty(), "'שות א' → 'שו״ת א'")
+            assertEquals(before, rows(conn, "SELECT * FROM book_banner ORDER BY bookId"))
+        }
+    }
+
+    @Test
     fun `books that share a text share one banner row`() {
         val shared = parseBookBanners(
             "id,sourceName,bookName,text\n" +
@@ -208,9 +236,9 @@ class SeedBookNoticesTest {
         val conn = DriverManager.getConnection("jdbc:sqlite:${tmp.newFolder().toPath().resolve("s.db")}")
         conn.createStatement().use { st ->
             st.execute("CREATE TABLE source (id INTEGER PRIMARY KEY NOT NULL, name TEXT NOT NULL UNIQUE)")
-            st.execute("CREATE TABLE book (id INTEGER PRIMARY KEY NOT NULL, title TEXT NOT NULL, sourceId INTEGER NOT NULL)")
+            st.execute("CREATE TABLE book (id INTEGER PRIMARY KEY NOT NULL, title TEXT NOT NULL, sourceId INTEGER NOT NULL, heRef TEXT)")
             st.execute("INSERT INTO source VALUES (1, 'Wiki'), (2, 'KSK')")
-            st.execute("INSERT INTO book VALUES (1, 'ספר א', 1), (2, 'ספר ב', 1), (3, 'קסק א', 2), (4, 'קסק ב', 2)")
+            st.execute("INSERT INTO book (id, title, sourceId) VALUES (1, 'ספר א', 1), (2, 'ספר ב', 1), (3, 'קסק א', 2), (4, 'קסק ב', 2)")
         }
         return conn
     }
