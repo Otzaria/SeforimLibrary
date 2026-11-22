@@ -1,7 +1,7 @@
 name: Delta pipeline — real diff test
 
 # The one implementation behind all three delta buttons. It builds the database
-# TWICE from the same pinned inputs and verifies the patch between them:
+# TWICE from pinned inputs and verifies the patch between them:
 #
 #   v1 ← built from `baseline_ref` (empty = this tree)
 #   v2 ← built from this tree, seeded by v1's buildstate
@@ -12,14 +12,14 @@ name: Delta pipeline — real diff test
 #   latest   — the newest published Sefaria/Otzaria/ForDB releases, i.e. what
 #              the next release will consume (delta-pipeline-dryrun)
 #
-# Both sides always get the SAME snapshot. That is what makes the patch
-# readable: with no baseline_ref it proves the build is reproducible and IDs
-# are stable, and with one it holds the code transition and nothing else.
+# Both sides normally get the same snapshot. An explicit candidate_fordb_tag
+# changes only the v2 rules archive, for example when testing a code and ForDB
+# migration against the last release. The Sefaria and Otzaria sources stay pinned.
 # producePatchAndVerify's strict `prev + patch == new` invariant is the verdict.
 # Both DBs are compressed first (compressLineContent), as the release ships
 # them, so that verdict and its content hash are on zstd frames.
 #
-# It no longer diffs two content snapshots against each other. Run 34455675206
+# It does not diff two text snapshots against each other. Run 34455675206
 # built v1 from the N-1 otzaria-library release and died in seedGenerations on
 # a duplicate title that exists only in that older snapshot — a baseline made
 # of historical content fails on every data regression ever shipped, which is
@@ -69,6 +69,11 @@ on:
         required: false
         type: string
         default: ''
+      candidate_fordb_tag:
+        description: 'Optional immutable ForDB tag for v2 only (fordb-sha256-<digest>)'
+        required: false
+        type: string
+        default: ''
   workflow_call:
     inputs:
       runner_selection:
@@ -80,6 +85,10 @@ on:
         type: string
         default: 'released'
       baseline_ref:
+        required: false
+        type: string
+        default: ''
+      candidate_fordb_tag:
         required: false
         type: string
         default: ''
@@ -396,13 +405,33 @@ jobs:
           echo "OTZARIA_EXTRACT_ROOT=$OTZARIA_EXTRACT_ROOT" >> "$GITHUB_ENV"
 
       - name: Stage the ForDB rules archive
+        env:
+          CANDIDATE_FORDB_TAG: ${{ inputs.candidate_fordb_tag }}
         run: |
           set -euo pipefail
           INPUTS="$RUNNER_TEMP/delta-inputs-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          V2_TAG="${CANDIDATE_FORDB_TAG:-$FORDB_TAG}"
+          [[ "$V2_TAG" =~ ^fordb-sha256-[0-9a-f]{64}$ ]] || {
+            echo "::error::candidate ForDB tag must carry its SHA-256"; exit 1; }
+          V2_SHA="${V2_TAG#fordb-sha256-}"
           gh release download "$FORDB_TAG" -R otzaria/otzaria-library \
             --pattern fordb_latest.zip --dir "$INPUTS"
-          echo "$FORDB_ARCHIVE_SHA  $INPUTS/fordb_latest.zip" | sha256sum -c -
-          echo "FORDB_ARCHIVE=$INPUTS/fordb_latest.zip" >> "$GITHUB_ENV"
+          BASELINE_ARCHIVE="$INPUTS/fordb_latest.zip"
+          echo "$FORDB_ARCHIVE_SHA  $BASELINE_ARCHIVE" | sha256sum -c -
+          V2_ARCHIVE="$BASELINE_ARCHIVE"
+          if [ "$V2_TAG" != "$FORDB_TAG" ]; then
+            mkdir -p "$INPUTS/fordb-v2"
+            gh release download "$V2_TAG" -R otzaria/otzaria-library \
+              --pattern fordb_latest.zip --dir "$INPUTS/fordb-v2"
+            V2_ARCHIVE="$INPUTS/fordb-v2/fordb_latest.zip"
+            echo "$V2_SHA  $V2_ARCHIVE" | sha256sum -c -
+          fi
+          {
+            echo "FORDB_ARCHIVE=$BASELINE_ARCHIVE"
+            echo "FORDB_ARCHIVE_V2=$V2_ARCHIVE"
+            echo "FORDB_ARCHIVE_SHA_V2=$V2_SHA"
+          } >> "$GITHUB_ENV"
+          echo "ForDB v1=$FORDB_TAG v2=$V2_TAG"
           # The release build's durable image cache, shared on purpose: without
           # it every build re-downloads ~420 textimages.sefaria.org images.
           IMAGE_CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/seforimlibrary/textimages"
@@ -476,8 +505,8 @@ jobs:
           $GRADLE generateSeforimDb -PdbVersion=2 -PtoVersion=2
           -PexportDir="$SEFARIA_EXTRACT_ROOT"
           -PsourceDir="$OTZARIA_EXTRACT_ROOT"
-          -PforDbArchive="$FORDB_ARCHIVE"
-          -PforDbSha256="$FORDB_ARCHIVE_SHA"
+          -PforDbArchive="$FORDB_ARCHIVE_V2"
+          -PforDbSha256="$FORDB_ARCHIVE_SHA_V2"
           -PimageCacheDir="$IMAGE_CACHE_DIR"
           -PinMemoryDb=false
           --no-daemon --stacktrace
