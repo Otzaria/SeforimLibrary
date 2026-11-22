@@ -332,4 +332,46 @@ class SuperCommentaryChainingRegressionTest {
         assertFalse(200L in meta.getValue(300L).baseTextBookIds)
         assertEquals(null, storedCommentary(300L, 200L, meta))
     }
+
+    @Test
+    fun chainsWithNoLinksToTheDeclaredBase() {
+        val (meta, c) = pilpulaOnRosh(listOf(RoshTractate("Example", 60, 0, 50)))
+        applyLinkDensitySiblingChaining(meta, c - (100L to 300L), log)
+        assertEquals(200L to 300L, storedCommentary(300L, 200L, meta))
+    }
+
+    private fun twoCommentariesWithSharedBases(vararg linksToBase: Pair<Int, Int>, siblingLinks: Int): Map<Long, BookMeta> {
+        val baseIds = linksToBase.indices.map { 100L + it }
+        val meta = baseIds.associateWith { primary() }.toMutableMap()
+        meta[200L] = dependant(baseIds.toSet(), "First", emptySet())
+        meta[300L] = dependant(baseIds.toSet(), "Second", emptySet())
+        val links = buildList {
+            for ((index, links) in linksToBase.withIndex()) {
+                add(Triple(baseIds[index], 200L, links.first))
+                add(Triple(baseIds[index], 300L, links.second))
+            }
+            add(Triple(200L, 300L, siblingLinks))
+        }
+        applyLinkDensitySiblingChaining(meta, counts(*links.toTypedArray()), log)
+        return meta
+    }
+
+    @Test
+    fun sparseSharedBaseDoesNotDiluteDenseDirection() {
+        val meta = twoCommentariesWithSharedBases(100 to 120, 49 to 60, siblingLinks = 80)
+        assertEquals(300L to 200L, storedCommentary(200L, 300L, meta))
+    }
+
+    @Test
+    fun sparseSharedBaseDoesNotCancelDenseDirection() {
+        val meta = twoCommentariesWithSharedBases(50 to 51, 10 to 1, siblingLinks = 50)
+        assertEquals(300L to 200L, storedCommentary(200L, 300L, meta))
+    }
+
+    @Test
+    fun sparseSharedBaseDoesNotResolveConflictingDenseDirections() {
+        val meta = twoCommentariesWithSharedBases(50 to 60, 60 to 50, 49 to 51, siblingLinks = 50)
+        assertFalse(300L in meta.getValue(200L).baseTextBookIds)
+        assertFalse(200L in meta.getValue(300L).baseTextBookIds)
+    }
 }
