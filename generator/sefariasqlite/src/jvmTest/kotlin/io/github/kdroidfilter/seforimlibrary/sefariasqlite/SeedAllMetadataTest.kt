@@ -3,6 +3,7 @@ package io.github.kdroidfilter.seforimlibrary.sefariasqlite
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 /** Parsing and source-matching for the seedAllMetadata post-process. */
