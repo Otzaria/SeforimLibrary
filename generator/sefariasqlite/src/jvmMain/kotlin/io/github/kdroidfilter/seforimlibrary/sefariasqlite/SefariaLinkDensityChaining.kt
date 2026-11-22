@@ -222,7 +222,7 @@ internal fun completeDeclaredBaseFamilies(
  * ratio to `D` clears [LINK_DENSITY_CHAIN_THRESHOLD], and adds `S` to
  * `D.baseTextBookIds`.
  *
- * Two rules keep the heuristic stable as Sefaria's link counts drift:
+ * The heuristic uses these rules as Sefaria's link counts drift:
  *  - **Never against a declaration.** `S` is skipped when it already lists `D`
  *    as its base. Chaining it anyway made the pair mutual, the resolver could no
  *    longer orient it, and every link fell to OTHER or to priorityRank: Magen
@@ -235,6 +235,12 @@ internal fun completeDeclaredBaseFamilies(
  *    yet Chullin fell from 0.86 to 0.79 between two exports and Ketubot sits at
  *    0.79, so their typed commentary links were downgraded to OTHER. The
  *    per-volume result is never withdrawn by the aggregate.
+ *  - **Sparse bases can fill gaps.** First score only shared bases with at least
+ *    [LINK_DENSITY_BASE_FLOOR] links to `D`. Then also score the sparse shared
+ *    bases, applying the floor to the larger side of the ratio. For example,
+ *    Pilpula Charifta on Bava Batra has 28 links to the tractate and 590 to the
+ *    Rosh. The second score can add edges where the first offered no direction
+ *    or conflict for the pair.
  *
  * This *augments* Sefaria's metadata; it never removes a base text that
  * Sefaria already declared. Returns `(booksTouched, edgesAdded)` for logging.
@@ -267,10 +273,7 @@ internal fun applyLinkDensitySiblingChaining(
     // bases (see the KDoc); every check reads this pre-chaining snapshot.
     val snapshot = bookMetaById.toMap()
 
-    // Per-volume candidates, kept so the per-work aggregate below can reuse them.
-    class Candidate(val members: Set<Long>, val sumDS: Int, val sumDP: Int)
-    val candidatesByBook = HashMap<Long, Map<String, Candidate>>()
-    val additionsByBook = HashMap<Long, MutableSet<Long>>()
+    val candidatesByBook = HashMap<Long, Map<String, SiblingCandidates>>()
     val mutualSkipped = HashSet<Pair<Long, Long>>()
     for ((d, meta) in snapshot) {
         if (meta.dependence == null) continue
@@ -285,11 +288,9 @@ internal fun applyLinkDensitySiblingChaining(
         // `Σ lc(D, S_i) / Σ lc(D, p_i_shared)` collapses that volume noise:
         // Mizrachi→Rashi = 0.94, Levush HaOrah→Rashi = 0.83, Bartenura→Rashi
         // = 0.69. Threshold 0.8 then cleanly separates them.
-        val membersByCollective = HashMap<String, MutableSet<Long>>()
-        val sharedBasesByCollective = HashMap<String, MutableSet<Long>>()
+        val evidenceByCollective = HashMap<String, SiblingEvidence>()
         for (p in declaredBases) {
             val nDP = linkCount(d, p)
-            if (nDP < LINK_DENSITY_BASE_FLOOR) continue
             val siblings = basesToDependants[p] ?: continue
             for (s in siblings) {
                 if (s == d || s in declaredBases) continue
@@ -310,74 +311,130 @@ internal fun applyLinkDensitySiblingChaining(
                 // Singletons (no collective_title) get a per-book bucket so
                 // they're still considered, just on a per-book ratio.
                 val key = snapshot[s]?.collectiveTitleEn ?: "book#$s"
-                membersByCollective.getOrPut(key) { HashSet() }.add(s)
-                sharedBasesByCollective.getOrPut(key) { HashSet() }.add(p)
+                evidenceByCollective.getOrPut(key) { SiblingEvidence() }.add(s, p, nDS, nDP)
             }
         }
 
-        val candidates = HashMap<String, Candidate>()
-        for ((key, members) in membersByCollective) {
-            val sharedBases = sharedBasesByCollective[key] ?: continue
-            val sumDS = members.sumOf { linkCount(d, it) }
-            val sumDP = sharedBases.sumOf { linkCount(d, it) }
-            if (sumDP == 0) continue
-            candidates[key] = Candidate(members, sumDS, sumDP)
-            val ratio = sumDS.toDouble() / sumDP.toDouble()
-            if (ratio >= LINK_DENSITY_CHAIN_THRESHOLD) {
-                additionsByBook.getOrPut(d) { HashSet() }.addAll(members)
-            }
+        if (evidenceByCollective.isNotEmpty()) {
+            candidatesByBook[d] = evidenceByCollective.mapValues { (_, evidence) -> evidence.toCandidates() }
         }
-        if (candidates.isNotEmpty()) candidatesByBook[d] = candidates
     }
 
-    // Per-work aggregate: (D's collective, sibling collective) over every volume
-    // of D that has candidates in that sibling collective. Needs two volumes —
-    // with one it is the per-volume ratio again.
-    val volumesByWorkPair = HashMap<Pair<String, String>, MutableList<Long>>()
-    for ((d, candidates) in candidatesByBook) {
-        val work = snapshot[d]?.collectiveTitleEn ?: continue
-        for (key in candidates.keys) volumesByWorkPair.getOrPut(work to key) { ArrayList() }.add(d)
-    }
+    val dense = proposeSiblingEdges(candidatesByBook, snapshot, SiblingCandidates::dense)
+    val combined = proposeSiblingEdges(candidatesByBook, snapshot, SiblingCandidates::combined)
+    val additionsByBook = HashMap<Long, MutableSet<Long>>()
     var workEdges = 0
-    for ((workPair, volumes) in volumesByWorkPair) {
-        if (volumes.size < 2) continue
-        val key = workPair.second
-        val sumDS = volumes.sumOf { candidatesByBook.getValue(it).getValue(key).sumDS.toLong() }
-        val sumDP = volumes.sumOf { candidatesByBook.getValue(it).getValue(key).sumDP.toLong() }
-        if (sumDP == 0L || sumDS.toDouble() / sumDP.toDouble() < LINK_DENSITY_CHAIN_THRESHOLD) continue
-        for (d in volumes) {
-            val added = additionsByBook.getOrPut(d) { HashSet() }
-            for (s in candidatesByBook.getValue(d).getValue(key).members) {
-                if (added.add(s)) workEdges++
-            }
+    var conflicts = 0
+    var sparseEdges = 0
+    for (edge in dense.edges) {
+        val (d, s) = edge
+        if (s to d in dense.edges) {
+            conflicts++
+            continue
         }
+        additionsByBook.getOrPut(d) { HashSet() }.add(s)
+        if (edge in dense.workEdges) workEdges++
+    }
+    for (edge in combined.edges) {
+        if (edge in dense.edges) continue
+        val (d, s) = edge
+        val reverse = s to d
+        // A sparse proposal cannot reverse a dense direction or resolve a dense tie.
+        if (reverse in dense.edges || reverse in combined.edges) {
+            conflicts++
+            continue
+        }
+        additionsByBook.getOrPut(d) { HashSet() }.add(s)
+        sparseEdges++
+        if (edge in combined.workEdges) workEdges++
     }
 
-    // Edges from different shared bases could still point both ways within this
-    // pass; such a pair would be as unorientable as a mutual declaration.
-    val twoWay = additionsByBook.flatMap { (d, added) ->
-        added.filter { s -> additionsByBook[s]?.contains(d) == true }.map { s -> d to s }
-    }
-    for ((d, s) in twoWay) additionsByBook[d]?.remove(s)
-    val mutualDropped = twoWay.size
-
-    var booksTouched = 0
-    var edgesAdded = 0
     for ((d, additions) in additionsByBook) {
-        if (additions.isEmpty()) continue
         val meta = bookMetaById.getValue(d)
         bookMetaById[d] = meta.copy(baseTextBookIds = meta.baseTextBookIds + additions)
-        booksTouched++
-        edgesAdded += additions.size
     }
+    val booksTouched = additionsByBook.size
+    val edgesAdded = additionsByBook.values.sumOf { it.size }
     logger.i {
         "Link-density chaining: added $edgesAdded sibling base edges across $booksTouched books " +
             "(threshold $LINK_DENSITY_CHAIN_THRESHOLD; $workEdges of them from the per-work aggregate; " +
+            "$sparseEdges using sparse shared bases; " +
             "${mutualSkipped.size} siblings skipped because they already depend on the book" +
-            (if (mutualDropped > 0) "; $mutualDropped two-way edges dropped" else "") + ")"
+            (if (conflicts > 0) "; $conflicts conflicting proposals dropped" else "") + ")"
     }
     return booksTouched to edgesAdded
 }
+
+private class SiblingEvidence {
+    private val members = HashSet<Long>()
+    private val denseMembers = HashSet<Long>()
+    private val sharedBases = HashSet<Long>()
+    private var sumDS = 0L
+    private var sumDP = 0L
+    private var denseSumDS = 0L
+    private var denseSumDP = 0L
+
+    fun add(sibling: Long, sharedBase: Long, linksToSibling: Int, linksToSharedBase: Int) {
+        // Count each sibling and shared base once, even if several share the same base.
+        if (members.add(sibling)) sumDS += linksToSibling
+        val newBase = sharedBases.add(sharedBase)
+        if (newBase) sumDP += linksToSharedBase
+        if (linksToSharedBase >= LINK_DENSITY_BASE_FLOOR) {
+            if (denseMembers.add(sibling)) denseSumDS += linksToSibling
+            if (newBase) denseSumDP += linksToSharedBase
+        }
+    }
+
+    fun toCandidates(): SiblingCandidates {
+        val dense = if (denseMembers.isEmpty()) null else SiblingCandidate(denseMembers, denseSumDS, denseSumDP)
+        return SiblingCandidates(dense, SiblingCandidate(members, sumDS, sumDP))
+    }
+}
+
+private class SiblingCandidate(val members: Set<Long>, val sumDS: Long, val sumDP: Long)
+
+private class SiblingCandidates(val dense: SiblingCandidate?, val combined: SiblingCandidate)
+
+private class SiblingProposals(val edges: Set<Pair<Long, Long>>, val workEdges: Set<Pair<Long, Long>>)
+
+private fun proposeSiblingEdges(
+    candidatesByBook: Map<Long, Map<String, SiblingCandidates>>,
+    bookMetaById: Map<Long, BookMeta>,
+    select: (SiblingCandidates) -> SiblingCandidate?,
+): SiblingProposals {
+    val edges = HashSet<Pair<Long, Long>>()
+    val volumesByWorkPair = HashMap<Pair<String, String>, MutableList<Pair<Long, SiblingCandidate>>>()
+    for ((d, groups) in candidatesByBook) {
+        val work = bookMetaById[d]?.collectiveTitleEn
+        for ((key, group) in groups) {
+            val candidate = select(group) ?: continue
+            if (clearsChainThreshold(candidate.sumDS, candidate.sumDP)) {
+                for (s in candidate.members) edges.add(d to s)
+            }
+            if (work != null) volumesByWorkPair.getOrPut(work to key) { ArrayList() }.add(d to candidate)
+        }
+    }
+
+    // Per-work aggregate over at least two volumes with the same sibling collective.
+    val workEdges = HashSet<Pair<Long, Long>>()
+    for (volumes in volumesByWorkPair.values) {
+        if (volumes.size < 2) continue
+        val sumDS = volumes.sumOf { it.second.sumDS }
+        val sumDP = volumes.sumOf { it.second.sumDP }
+        if (!clearsChainThreshold(sumDS, sumDP)) continue
+        for ((d, candidate) in volumes) {
+            for (s in candidate.members) {
+                val edge = d to s
+                if (edges.add(edge)) workEdges.add(edge)
+            }
+        }
+    }
+    return SiblingProposals(edges, workEdges)
+}
+
+private fun clearsChainThreshold(sumDS: Long, sumDP: Long): Boolean =
+    maxOf(sumDS, sumDP) >= LINK_DENSITY_BASE_FLOOR &&
+        (sumDP == 0L || sumDS.toDouble() / sumDP >= LINK_DENSITY_CHAIN_THRESHOLD)
 
 /**
  * Per-pair count of links Sefaria typed commentary/targum: `links_by_book.csv`
