@@ -84,6 +84,16 @@ class SefariaBaseAnchorLetteredNotesTest {
     }
 
     @Test
+    fun anAlreadyLetteredLoneNoteKeepsItsPrintedLetter() {
+        val alreadyLettered = listOf("(א) הגהה יחידה בסימן א", "(ב) הגהה יחידה בסימן ב")
+        val book = readBook(
+            "Haggahot Rabbeinu Peretz on Sefer Mitzvot Katan",
+            listOf(listOf(alreadyLettered[0]), listOf("", alreadyLettered[1])),
+        )
+        assertEquals(alreadyLettered, book.notes())
+    }
+
+    @Test
     fun anotherBookOfTheSameShapeStaysUnlettered() {
         val notes = readBook("Some Other Glosses on Sefer Mitzvot Katan", simanim).notes()
         assertEquals(simanim.flatten(), notes)

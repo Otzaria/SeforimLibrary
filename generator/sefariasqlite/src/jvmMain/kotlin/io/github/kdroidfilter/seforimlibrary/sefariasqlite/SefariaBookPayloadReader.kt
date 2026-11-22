@@ -1128,6 +1128,10 @@ internal class SefariaBookPayloadReader(
 
         // Their segments open with their own printed marker (upstream 641666f4).
         val selfLabeledBook = hasSelfLabeledSegments(bookEnTitle) || baseLetters != null
+        val isReferenceable = referenceableSections.getOrNull(sectionNames.size - depth) ?: true
+        val numbered = depth == 1 && isReferenceable && prefixesLeaf &&
+            (nonEmptyCount > 1 || lettersLoneLeaf) && !selfLabeledBook
+        val isNumberedParagraph = depth == 1 && hasNumberedParagraphs(bookEnTitle)
 
         // Items that drop the generated prefix because they already carry their own
         // label for that same number. Most shapes are enough alone. Two can also be
@@ -1135,7 +1139,7 @@ internal class SefariaBookPayloadReader(
         // "יש אומרים", "<b>  לא  </b> פלוג") and a label after an opening heading
         // ("<br>א." opens a list of topics). Those count only when another item of
         // the array carries its own label too.
-        val ownLabelled: BooleanArray? = if (depth == 1 && nonEmptyCount > 1 && prefixesLeaf && !selfLabeledBook) {
+        val ownLabelled: BooleanArray? = if (numbered) {
             val found = text.mapIndexed { idx, item ->
                 ownLabel(item, idx + 1, labels.variants, namedSeifLabels = bookEnTitle == "Shulchan Arukh HaRav")
             }
@@ -1161,14 +1165,9 @@ internal class SefariaBookPayloadReader(
                 else -> toGematria(idx + 1)
             }
 
-            val sectionIndex = sectionNames.size - depth
-            val isReferenceable = referenceableSections.getOrNull(sectionIndex) ?: true
-            val isNumberedParagraph = depth == 1 && hasNumberedParagraphs(bookEnTitle)
             // An item that already carries its own label for this very number keeps
             // that label alone: "(נח) [נח]" is noise. Any other number keeps the prefix.
-            val numbered = depth == 1 && isReferenceable && prefixesLeaf &&
-                (nonEmptyCount > 1 || lettersLoneLeaf) && !selfLabeledBook
-            val selfLabelled = numbered && currentAddressType != "Talmud" && ownLabelled?.get(idx) == true
+            val selfLabelled = currentAddressType != "Talmud" && ownLabelled?.get(idx) == true
             if (numbered) labels.count(selfLabelled)
             val nextLinePrefix = when {
                 baseLetters != null -> baseTextLetterPrefix(baseLetters[idx]!!, (item as? JsonPrimitive)?.content.orEmpty())
