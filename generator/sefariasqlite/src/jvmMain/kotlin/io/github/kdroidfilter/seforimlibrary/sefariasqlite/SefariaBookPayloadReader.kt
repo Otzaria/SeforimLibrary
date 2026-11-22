@@ -820,6 +820,7 @@ internal class SefariaBookPayloadReader(
                     lineKeyHashOverrides = lineKeyHashOverrides,
                     simanTopicLines = simanTopicLines,
                     numbersIntegerLeaf = numbersIntegerLeaf(node, refPrefix),
+                    lettersLoneLeaf = lettersLoneLeaf(refPrefix),
                     labels = labels.section(refPrefix),
                     titleSegmentHeadings = if (foldTitleSegments) titleSegmentHeadings else null,
                     preservedTitleRefs = preservedTitleRefs,
@@ -890,7 +891,8 @@ internal class SefariaBookPayloadReader(
                 cleanShifts = cleanShifts,
                 lineKeyHashOverrides = lineKeyHashOverrides,
                 simanTopicLines = simanTopicLines,
-                numbersIntegerLeaf = numbersIntegerLeaf(schemaObj),
+                numbersIntegerLeaf = numbersIntegerLeaf(schemaObj, "$bookEnTitle, "),
+                lettersLoneLeaf = lettersLoneLeaf("$bookEnTitle, "),
                 labels = labels.section(bookEnTitle),
                 titleSegmentHeadings = if (foldTitleSegments) titleSegmentHeadings else null,
                 preservedTitleRefs = preservedTitleRefs,
@@ -990,6 +992,8 @@ internal class SefariaBookPayloadReader(
         lineKeyHashOverrides: MutableMap<Int, ByteArray>? = null,
         simanTopicLines: MutableSet<Int>? = null,
         numbersIntegerLeaf: Boolean = false,
+        // A section's only leaf is lettered too (BASE_ANCHOR_LETTERED_SECTIONS).
+        lettersLoneLeaf: Boolean = false,
         labels: SectionLabels,
         // Omitted segment line -> the section heading it repeats (see walkBook).
         titleSegmentHeadings: MutableMap<Int, Int>? = null,
@@ -1124,6 +1128,10 @@ internal class SefariaBookPayloadReader(
 
         // Their segments open with their own printed marker (upstream 641666f4).
         val selfLabeledBook = hasSelfLabeledSegments(bookEnTitle) || baseLetters != null
+        val isReferenceable = referenceableSections.getOrNull(sectionNames.size - depth) ?: true
+        val numbered = depth == 1 && isReferenceable && prefixesLeaf &&
+            (nonEmptyCount > 1 || lettersLoneLeaf) && !selfLabeledBook
+        val isNumberedParagraph = depth == 1 && hasNumberedParagraphs(bookEnTitle)
 
         // Items that drop the generated prefix because they already carry their own
         // label for that same number. Most shapes are enough alone. Two can also be
@@ -1131,7 +1139,7 @@ internal class SefariaBookPayloadReader(
         // "יש אומרים", "<b>  לא  </b> פלוג") and a label after an opening heading
         // ("<br>א." opens a list of topics). Those count only when another item of
         // the array carries its own label too.
-        val ownLabelled: BooleanArray? = if (depth == 1 && nonEmptyCount > 1 && prefixesLeaf && !selfLabeledBook) {
+        val ownLabelled: BooleanArray? = if (numbered) {
             val found = text.mapIndexed { idx, item ->
                 ownLabel(item, idx + 1, labels.variants, namedSeifLabels = bookEnTitle == "Shulchan Arukh HaRav")
             }
@@ -1157,13 +1165,9 @@ internal class SefariaBookPayloadReader(
                 else -> toGematria(idx + 1)
             }
 
-            val sectionIndex = sectionNames.size - depth
-            val isReferenceable = referenceableSections.getOrNull(sectionIndex) ?: true
-            val isNumberedParagraph = depth == 1 && hasNumberedParagraphs(bookEnTitle)
             // An item that already carries its own label for this very number keeps
             // that label alone: "(נח) [נח]" is noise. Any other number keeps the prefix.
-            val numbered = depth == 1 && isReferenceable && prefixesLeaf && nonEmptyCount > 1 && !selfLabeledBook
-            val selfLabelled = numbered && currentAddressType != "Talmud" && ownLabelled?.get(idx) == true
+            val selfLabelled = currentAddressType != "Talmud" && ownLabelled?.get(idx) == true
             if (numbered) labels.count(selfLabelled)
             val nextLinePrefix = when {
                 baseLetters != null -> baseTextLetterPrefix(baseLetters[idx]!!, (item as? JsonPrimitive)?.content.orEmpty())
@@ -1230,6 +1234,7 @@ internal class SefariaBookPayloadReader(
                 lineKeyHashOverrides = lineKeyHashOverrides,
                 simanTopicLines = simanTopicLines,
                 numbersIntegerLeaf = numbersIntegerLeaf,
+                lettersLoneLeaf = lettersLoneLeaf,
                 labels = labels,
                 titleSegmentHeadings = titleSegmentHeadings,
                 preservedTitleRefs = preservedTitleRefs,
@@ -1256,11 +1261,14 @@ internal class SefariaBookPayloadReader(
     // numbered unless its own Hebrew name is blank or paragraph/comment/line-like.
     private fun numbersIntegerLeaf(node: JsonObject, refPrefix: String = ""): Boolean {
         if (NUMBERED_PARAGRAPH_SECTIONS.any(refPrefix::startsWith)) return true
+        if (lettersLoneLeaf(refPrefix)) return true
         val he = node["heSectionNames"]?.jsonArray ?: return false
         val leafIndex = maxOf(he.size, node["sectionNames"]?.jsonArray?.size ?: 0) - 1
         val leaf = he.getOrNull(leafIndex)?.jsonPrimitive?.contentOrNull?.trim().orEmpty()
         return leaf.isNotEmpty() && leaf !in UNNUMBERED_INTEGER_LEAF_NAMES
     }
+
+    private fun lettersLoneLeaf(refPrefix: String): Boolean = BASE_ANCHOR_LETTERED_SECTIONS.any(refPrefix::startsWith)
 
     /**
      * Reads `index_offsets_by_depth` from a schema node. Sefaria keys it by the
@@ -1336,6 +1344,15 @@ private val UNNUMBERED_INTEGER_LEAF_NAMES = setOf("פסקה", "פירוש", "פ�
 private val NUMBERED_PARAGRAPH_SECTIONS = listOf(
     "Shulchan Arukh HaRav, Yoreh Deah, ",
     "Shulchan Arukh HaRav, Choshen Mishpat, ",
+)
+
+// Notes Sefaria leaves unlabelled while their base text shows each anchor as the letter
+// of the note's position in its siman (SefariaInlineAnchors: toGematria(data-order)).
+// Each note gets that same letter, a siman's only note included, so the reader can
+// match note to anchor (Otzaria/otzaria#4898: data-order is the note's position in
+// all 134 simanim with notes, 709 notes).
+private val BASE_ANCHOR_LETTERED_SECTIONS = listOf(
+    "Haggahot Rabbeinu Peretz on Sefer Mitzvot Katan, ",
 )
 
 // Pure emphasis only: any other tag (an <i data-commentator> marker, <sup>, <br>…) keeps the segment.
