@@ -125,7 +125,7 @@ class ForDbTitleGateTest {
 
                 val result = applyMetadata(
                     repo, bindings, mapOf(display to BulkMetadata(listOf(1600), null)),
-                    mapOf(display to Description(heShortDesc = "קצר", heDesc = null)), retitled, logger,
+                    mapOf(display to Description(shortEdit = DescriptionEdit.Replace("קצר"))), retitled, logger,
                 )
                 assertEquals(0, result.updated)
                 assertEquals(listOf(display), result.unmatchedTitles)
@@ -151,7 +151,7 @@ class ForDbTitleGateTest {
             val e = assertFailsWith<IllegalStateException> {
                 applyMetadata(
                     repo, bindings, emptyMap(),
-                    mapOf(former to Description(heShortDesc = "קצר", heDesc = null)), retitled, logger,
+                    mapOf(former to Description(shortEdit = DescriptionEdit.Replace("קצר"))), retitled, logger,
                 )
             }
             assertContains(e.message!!, "sefaria_metadata_changes.csv")
@@ -159,7 +159,7 @@ class ForDbTitleGateTest {
 
             val ok = applyMetadata(
                 repo, bindings, emptyMap(),
-                mapOf(display to Description(heShortDesc = "קצר", heDesc = null)), retitled, logger,
+                mapOf(display to Description(shortEdit = DescriptionEdit.Replace("קצר"))), retitled, logger,
             )
             assertEquals(1, ok.updated)
             repo.close()

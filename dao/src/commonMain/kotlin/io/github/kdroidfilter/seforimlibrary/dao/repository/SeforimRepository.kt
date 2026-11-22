@@ -1228,9 +1228,25 @@ class SeforimRepository(databasePath: String, private val driver: SqlDriver) : L
         bookId: Long,
         heShortDesc: String?,
         heDesc: String?,
-    ) = withContext(Dispatchers.IO) {
-        if (heShortDesc != null || heDesc != null) {
-            database.bookQueriesQueries.updateDescriptions(heShortDesc, heDesc, bookId)
+    ) = updateBookMetadata(bookId, heShortDesc, heDesc, clearShortDesc = false, clearDesc = false)
+
+    /** Updates both descriptions together. Each clear flag takes precedence over its replacement. */
+    suspend fun updateBookMetadata(
+        bookId: Long,
+        heShortDesc: String?,
+        heDesc: String?,
+        clearShortDesc: Boolean,
+        clearDesc: Boolean,
+    ) {
+        if (heShortDesc == null && heDesc == null && !clearShortDesc && !clearDesc) return
+        withContext(Dispatchers.IO) {
+            database.bookQueriesQueries.updateDescriptions(
+                clearShortDesc = if (clearShortDesc) 1 else 0,
+                heShortDesc = heShortDesc,
+                clearDesc = if (clearDesc) 1 else 0,
+                heDesc = heDesc,
+                id = bookId,
+            )
         }
     }
 

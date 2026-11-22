@@ -76,11 +76,11 @@ SELECT MAX(id) FROM book;
 updateCategoryId:
 UPDATE book SET categoryId = ? WHERE id = ?;
 
--- Metadata enrichment (seedAllMetadata): replace descriptions only when an override is supplied.
+-- Apply both description edits atomically. A clear flag takes precedence over a replacement.
 updateDescriptions:
 UPDATE book SET
-    heShortDesc = COALESCE(:heShortDesc, heShortDesc),
-    heDesc = COALESCE(:heDesc, heDesc)
+    heShortDesc = CASE WHEN :clearShortDesc = 1 THEN NULL ELSE COALESCE(:heShortDesc, heShortDesc) END,
+    heDesc = CASE WHEN :clearDesc = 1 THEN NULL ELSE COALESCE(:heDesc, heDesc) END
 WHERE id = :id;
 
 updateSourceId:

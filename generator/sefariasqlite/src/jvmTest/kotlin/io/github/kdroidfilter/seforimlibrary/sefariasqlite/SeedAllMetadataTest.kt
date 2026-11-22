@@ -55,10 +55,28 @@ class SeedAllMetadataTest {
 
         assertEquals(2, map.size)
         val mahram = map.getValue("שות מהרם פדוואה")
-        assertEquals("קובץ שאלות\nותשובות מהמאה ה-16", mahram.heShortDesc)
+        assertEquals(DescriptionEdit.Replace("קובץ שאלות\nותשובות מהמאה ה-16"), mahram.shortEdit)
         // heDesc comes from heDescNew (column index 5), not the original heDesc (index 4).
-        assertEquals("new long desc", mahram.heDesc)
-        assertEquals("new", map.getValue("בראשית").heDesc)
+        assertEquals(DescriptionEdit.Replace("new long desc"), mahram.longEdit)
+        assertEquals(DescriptionEdit.Replace("new"), map.getValue("בראשית").longEdit)
+    }
+
+    @Test
+    fun descriptions_deleteMarkerClearsOnlyItsCell() {
+        val map = parseDescriptionOverrides(
+            listOf(
+                "categoryPath,title,author,heShortDesc,heDesc,heDescNew",
+                "cat,שני התאים,author,[מחק],old,[מחק]",
+                "cat,רק הקצר,author,[מחק],old,new long",
+                "cat,רק הארוך,author, ,[מחק],\" [מחק] \"",
+                "cat,ריק,author,,[מחק],",
+            ),
+        )
+
+        assertEquals(Description(DescriptionEdit.Clear, DescriptionEdit.Clear), map.getValue("שני התאים"))
+        assertEquals(Description(DescriptionEdit.Clear, DescriptionEdit.Replace("new long")), map.getValue("רק הקצר"))
+        assertEquals(Description(longEdit = DescriptionEdit.Clear), map.getValue("רק הארוך"))
+        assertEquals(Description(), map.getValue("ריק"))
     }
 
     @Test

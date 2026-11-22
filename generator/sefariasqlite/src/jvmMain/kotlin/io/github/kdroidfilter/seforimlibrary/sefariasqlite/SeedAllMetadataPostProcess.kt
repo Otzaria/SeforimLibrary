@@ -41,7 +41,7 @@ import kotlin.system.exitProcess
  * library (a superset of any single generated DB), so unmatched titles are
  * skipped and counted — not fatal. Download/parse failures ARE fatal.
  *
- * Per matched book: heShortDesc/heDesc replaced only when present; pub dates/place
+ * Per matched book: heShortDesc/heDesc changed only by an explicit edit; pub dates/place
  * linked via the IdAllocator (stable ids for delta). The book's source is NOT set
  * here — it is authoritative from the manifest at import; all_metadata's Sourcefolder
  * is stale and ignored. build_state is snapshotted at the end.
@@ -149,8 +149,8 @@ internal data class BulkMetadata(
 )
 
 internal data class Description(
-    val heShortDesc: String?,
-    val heDesc: String?,
+    val shortEdit: DescriptionEdit = DescriptionEdit.Keep,
+    val longEdit: DescriptionEdit = DescriptionEdit.Keep,
 )
 
 internal data class MetadataResult(
@@ -335,6 +335,10 @@ internal fun parseBulkMetadata(lines: List<String>): Map<String, BulkMetadata> =
  * categoryPath,title,author,heShortDesc,heDesc,heDescNew. Only heShortDesc and
  * heDescNew are used (heDescNew is the corrected text that becomes the book's
  * heDesc); the original heDesc column and the rest are ignored.
+ *
+ * Each of the two cells follows [parseDescriptionEdit], as in the category file:
+ * an empty cell keeps the book's existing text, `[מחק]` clears it, and any other
+ * value replaces it.
  */
 internal fun parseDescriptionOverrides(lines: List<String>): Map<String, Description> {
     if (lines.isEmpty()) return emptyMap()
@@ -344,11 +348,10 @@ internal fun parseDescriptionOverrides(lines: List<String>): Map<String, Descrip
     // Rejoin the readLines() split so the record parser can stitch quoted fields
     // that span multiple physical lines (heShortDesc/heDesc carry embedded newlines).
     return parseForDbCsvRecords(lines.joinToString("\n")).drop(1).mapNotNull { record ->
-        val cols = record.map { it.trim() }
-        val title = cols.getOrNull(1)?.takeIf { it.isNotBlank() } ?: return@mapNotNull null
+        val title = record.getOrNull(1)?.trim()?.takeIf { it.isNotEmpty() } ?: return@mapNotNull null
         title to Description(
-            heShortDesc = cols.getOrNull(3)?.takeIf { it.isNotBlank() },
-            heDesc = cols.getOrNull(5)?.takeIf { it.isNotBlank() },
+            shortEdit = parseDescriptionEdit(record.getOrNull(3).orEmpty()),
+            longEdit = parseDescriptionEdit(record.getOrNull(5).orEmpty()),
         )
     }.toMap()
 }
@@ -392,11 +395,15 @@ internal suspend fun applyMetadata(
         val meta = bulk[title]
         val description = descriptions[title]
 
-        repository.updateBookMetadata(
-            bookId = bookId,
-            heShortDesc = description?.heShortDesc,
-            heDesc = description?.heDesc,
-        )
+        if (description != null) {
+            repository.updateBookMetadata(
+                bookId = bookId,
+                heShortDesc = (description.shortEdit as? DescriptionEdit.Replace)?.value,
+                heDesc = (description.longEdit as? DescriptionEdit.Replace)?.value,
+                clearShortDesc = description.shortEdit == DescriptionEdit.Clear,
+                clearDesc = description.longEdit == DescriptionEdit.Clear,
+            )
+        }
 
         // pub_date / pub_place go through the allocator for stable ids (delta-safety).
         meta?.pubDates?.forEach { year ->
