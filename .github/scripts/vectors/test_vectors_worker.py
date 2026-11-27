@@ -231,6 +231,53 @@ class ParitySample(unittest.TestCase):
                     vs.check_parity(parity)
 
 
+class WorkerPackageDefaults(unittest.TestCase):
+    def test_direct_worker_fetches_qa491_and_reuses_its_verified_cache(self):
+        import embed_worker
+        graph, tokenizer = b"QA491 graph", b"{}"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            seed = root / "seed"
+            seed.mkdir()
+            (seed / "document.fp32.onnx").write_bytes(graph)
+            (seed / "tokenizer.json").write_bytes(tokenizer)
+            plan = {"passage_package": {"checksum": mp.package_checksum(seed, "document.fp32.onnx")}}
+            args = embed_worker.parse_args(["--plan", "plan", "--out", "out", "--cache", str(root / "cache")])
+            base = f"{mp.HUB}/{PINS['MODEL_REPO']}/resolve/{PINS['MODEL_REVISION']}/"
+            files = {base + "onnx/document.fp32.onnx": graph, base + "tokenizer.json": tokenizer}
+
+            def download(url, dest, token):
+                dest.write_bytes(files[url])
+
+            with mock.patch.object(mp, "_download", side_effect=download) as fetch:
+                cached = embed_worker.resolve_package(args, plan)
+                self.assertEqual((cached / args.graph).read_bytes(), graph)
+                self.assertEqual(mp.package_checksum(cached, args.graph), plan["passage_package"]["checksum"])
+                self.assertEqual(fetch.call_count, 2)
+                args.cache_only = True
+                self.assertEqual(embed_worker.resolve_package(args, plan), cached)
+                self.assertEqual(fetch.call_count, 2)
+
+    def test_explicit_sources_keep_their_graph_paths(self):
+        import embed_worker
+        for flags, remote in ((["--repo", "custom/repo"], None),
+                              (["--revision", "custom-revision"], None),
+                              (["--graph", "custom.onnx"], None),
+                              (["--remote-graph", "exports/custom.onnx"], "exports/custom.onnx"),
+                              (["--remote-graph", ""], "")):
+            with self.subTest(flags=flags):
+                args = embed_worker.parse_args(["--plan", "plan", "--out", "out", *flags])
+                with mock.patch.object(mp, "fetch_package", return_value=Path("cache")) as fetch:
+                    embed_worker.resolve_package(args, {"passage_package": {"checksum": "a" * 64}})
+                self.assertEqual(fetch.call_args.kwargs["remote_graph"], remote)
+                if "--graph" in flags:
+                    self.assertEqual(fetch.call_args.args[2], "custom.onnx")
+                if "--repo" in flags:
+                    self.assertEqual(fetch.call_args.kwargs["repo"], "custom/repo")
+                if "--revision" in flags:
+                    self.assertEqual(fetch.call_args.kwargs["revision"], "custom-revision")
+
+
 @unittest.skipIf(np is None, "NumPy is not installed")
 class WorkerOnSmallPlans(unittest.TestCase):
     """embed_worker.main on plans of 1, 100, 958 and 959 texts: its own sample selection, parity

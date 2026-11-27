@@ -1,6 +1,12 @@
 # QA491 complete main text and separate notes
 
-This family is opt-in: `all` retains the existing families. Its model packages
+This experiment is not an available build family. Automatic builds select only
+QA491 anchor/windows, and Pardes remains opt-in. The workflow and driver reject
+complete-notes; bootstrap does not build its private index tool. Retained work
+and the recovery implementation remain on disk. The procedures below describe
+the experiment and require a checkout that enables it explicitly.
+
+Its model packages
 are the existing QA491 fp32 passage and int8 query packages; chunking version 3
 and embedding text version 4 give it a different artifact identity.
 

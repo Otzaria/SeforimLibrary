@@ -77,12 +77,21 @@ TAG = "v30-20260930165019"
 TAG_COMMIT = "c66256253b25c0aa0b13d04e399647496f3b0bee"   # the commit TAG names (the stub gh's answer)
 # (name, release prefix) of each family, in build order
 CONFIGURED_FAMILIES = [(c.split(":")[0].rsplit("/", 1)[-1], c.split(":")[1]) for c in PIN["FAMILY_CONFIGS"].strip('"').split()]
-# Existing regression scenarios select Round2 explicitly; adoption tests exercise every family.
-FAMILIES = CONFIGURED_FAMILIES[:2]
+# Historical codecs and recovery remain covered with explicit test-only pins.
+FAMILIES = [("meivin-round2-onnx", "vectors"), ("meivin-round2-windows-onnx", "vectors-windows")]
+RECOVERY_FAMILY = ("meivin-qa491-complete-notes-onnx", "vectors-qa491-complete-notes")
+FIXTURE_FAMILIES = FAMILIES + CONFIGURED_FAMILIES
+LEGACY_PIN = {
+    "PASSAGE_PACKAGE_CHECKSUM": "4a4a2ae88a86f15ffe6069bfcefc3abd13c207cec5d7aaef52c0c59d752ade46",
+    "QUERY_PACKAGE_CHECKSUM": "9e408407922b4aab26dd148cbe4b9a0e573c65591cfc799ba28e991d77d9d065",
+    "QUERY_GRAPH": "seforim-embed-round2-int8.onnx", "MODEL_REPO": "otzaria/judaic-semantic-round2-onnx-zayit",
+    "MODEL_REVISION": "99b8a61", "MODEL_GRAPH": "seforim-embed-round2-fp32.onnx",
+}
 OPT_IN_FAMILIES = [(c.split(":")[0].rsplit("/", 1)[-1], c.split(":")[1]) for c in PIN.get("OPT_IN_FAMILY_CONFIGS", "").strip('"').split()]
 LEGACY, WINDOWS = FAMILIES[0][0], FAMILIES[1][0]
 # family -> (recall@10, recall@50) floors pins.env sets below the validator's own
 G6_FLOORS = dict((e.split("=")[0], tuple(e.split("=")[1].split(","))) for e in PIN.get("G6_FLOORS", "").strip('"').split())
+G6_FLOORS["meivin-round2-windows-onnx"] = ("0.97", "0.97")
 ROTATION_KEY = f"{FAMILIES[1][0]}.fp32-4a4a2ae8"   # the windows family's rotation, fitted on the stub warehouse
 CHUNKING_IDENTITY = {"meivin-round2-onnx": 2685558872390372738, "meivin-round2-windows-onnx": 320260894818558297}
 CHUNKING_IDENTITY.update({"meivin-qa491-onnx": 2685558872390372738, "meivin-qa491-windows-onnx": 320260894818558297})
@@ -162,7 +171,7 @@ class Workflow(unittest.TestCase):
 
     @unittest.skipIf(sys.platform == "win32" or not shutil.which("bash"), "needs a Linux bash")
     def test_an_index_rebuild_of_a_release_whose_vectors_are_published_embeds_nothing(self):
-        first, second = FAMILIES[0][1], FAMILIES[1][1]
+        first, second = CONFIGURED_FAMILIES[0][1], CONFIGURED_FAMILIES[1][1]
 
         def gate(releases):
             with tempfile.TemporaryDirectory() as d:
@@ -314,7 +323,7 @@ printf '%s %s %s %s %s\\n' "$PASSAGE_PACKAGE_CHECKSUM" "$QUERY_GRAPH" "$MODEL_RE
         self.assertRegex(pins["MODEL_REVISION"], r"^[0-9a-f]{7,40}$")   # the mirror at a commit, never a branch
         self.assertEqual(pins["PASSAGE_QUANTIZATION"], "fp32")
         self.assertRegex(pins["QUERY_PACKAGE_CHECKSUM"], r"^[0-9a-f]{64}$")      # G6 measures the int8 query model
-        self.assertTrue(pins["QUERY_GRAPH"].endswith("-int8.onnx"))
+        self.assertEqual(pins["QUERY_GRAPH"], "query.int8.onnx")
 
     def test_every_pinned_rotation_is_committed_at_its_digest(self):
         for entry in PIN["ROTATIONS"].strip('"').split():
@@ -322,12 +331,9 @@ printf '%s %s %s %s %s\\n' "$PASSAGE_PACKAGE_CHECKSUM" "$QUERY_GRAPH" "$MODEL_RE
             self.assertEqual(hashlib.sha256((HERE / "rotation" / f"{family}.bin").read_bytes()).hexdigest(), digest)
 
     def test_the_family_released_applications_install_is_built_first_under_its_own_tag(self):
-        # the application asks for exactly releases/tags/vectors-<tag>; the windows family
-        # must not match its library-tag pattern ^v(\d+)- nor that tag
-        self.assertEqual(CONFIGURED_FAMILIES, [("meivin-round2-onnx", "vectors"),
-                                    ("meivin-round2-windows-onnx", "vectors-windows"),
-                                    ("meivin-qa491-onnx", "vectors-qa491"),
+        self.assertEqual(CONFIGURED_FAMILIES, [("meivin-qa491-onnx", "vectors-qa491"),
                                     ("meivin-qa491-windows-onnx", "vectors-qa491-windows")])
+        self.assertEqual(OPT_IN_FAMILIES, [("pardesqa491-windows-onnx", "vectors-pardesqa491-windows")])
         self.assertEqual(len({name for name, _ in CONFIGURED_FAMILIES}), len(CONFIGURED_FAMILIES))
         for _, prefix in CONFIGURED_FAMILIES[1:]:
             self.assertIsNone(re.match(r"^v(\d+)-", f"{prefix}-{TAG}"))
@@ -726,7 +732,7 @@ class Driver(unittest.TestCase):
         self.write_provenance()
         self.state = r / "state"
         (self.state / "bin").mkdir(parents=True)
-        for name, _ in CONFIGURED_FAMILIES + OPT_IN_FAMILIES:
+        for name, _ in FIXTURE_FAMILIES + OPT_IN_FAMILIES + [RECOVERY_FAMILY]:
             family = self.state / "bin" / "families" / name
             family.mkdir(parents=True)
             model = {"family_id": "stub", "chunking_identity": CHUNKING_IDENTITY[name]}
@@ -995,29 +1001,37 @@ echo "{\\"semantic_projection_version\\":${REBUILT_PROJECTION:-1}}" > "$out/otza
 
     def assert_every_family_is_built_in_order(self, p, calls):
         self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
-        expected = ["meivin-round2-onnx", "meivin-round2-windows-onnx",
-                    "meivin-qa491-onnx", "meivin-qa491-windows-onnx"]
+        expected = ["meivin-qa491-onnx", "meivin-qa491-windows-onnx"]
         exports = [c for c in calls if c.startswith("export --index")]
         self.assertEqual(len(exports), len(expected))
         for call, name in zip(exports, expected):
             self.assertIn(f"--model {self.model(name)} ", call)
-        for name, prefix in [("meivin-round2-onnx", "vectors"),
-                             ("meivin-round2-windows-onnx", "vectors-windows"),
-                             ("meivin-qa491-onnx", "vectors-qa491"),
+        for name, prefix in [("meivin-qa491-onnx", "vectors-qa491"),
                              ("meivin-qa491-windows-onnx", "vectors-qa491-windows")]:
             self.assertTrue(any(c.startswith(f"gh release edit {prefix}-{TAG} ") for c in calls), name)
-        self.assertLess(self.index_of(calls, f"gh release edit vectors-windows-{TAG} "),
-                        self.index_of(calls, f"--model {self.model('meivin-qa491-onnx')} "))
+        for name in [LEGACY, WINDOWS, RECOVERY_FAMILY[0], "pardesqa491-windows-onnx"]:
+            self.assertFalse(any(str(self.model(name)) in c for c in calls), name)
+        self.assertFalse(any("seforim-embed-round2" in c or "pardesqa491" in c for c in calls))
         self.assertTrue((self.warehouse / "warehouse.json").exists())
         self.assertTrue((self.state / "warehouse/fp32-5f80c47d/warehouse.json").exists())
 
-    def test_automatic_builds_qa491_after_both_legacy_families(self):
-        p, calls = self.run_driver(mode="auto", TO_EMBED=0, all_families=True)
+    def test_automatic_builds_only_current_qa491_families(self):
+        p, calls = self.run_driver(mode="auto", TO_EMBED=5, all_families=True, driver=DRIVER)
         self.assert_every_family_is_built_in_order(p, calls)
 
-    def test_all_builds_qa491_after_both_legacy_families(self):
-        p, calls = self.run_driver(mode="base", TO_EMBED=0, args=("--family", "all"))
+    def test_all_builds_only_current_qa491_families(self):
+        p, calls = self.run_driver(mode="base", TO_EMBED=5, args=("--family", "all"), driver=DRIVER)
         self.assert_every_family_is_built_in_order(p, calls)
+
+    def test_removed_families_are_refused_before_export_embedding_or_download(self):
+        for name in [LEGACY, WINDOWS, RECOVERY_FAMILY[0]]:
+            for extra in [(), ("--family", "meivin-qa491-onnx"), ("--resume",)]:
+                with self.subTest(family=name, extra=extra):
+                    self.calls.unlink(missing_ok=True)
+                    p, calls = self.run_driver(driver=DRIVER, args=("--family", name, *extra))
+                    self.assertEqual(p.returncode, 64, p.stdout + p.stderr)
+                    self.assertIn("is not a family of FAMILY_CONFIGS", p.stdout)
+                    self.assertEqual(calls, [])
 
     def test_legacy_selection_needs_no_qa491_cache_and_keeps_its_own_packages(self):
         p, calls = self.run_driver(mode="base", TO_EMBED=0, QA491_CACHE_MISSING=1,
@@ -1031,7 +1045,7 @@ echo "{\\"semantic_projection_version\\":${REBUILT_PROJECTION:-1}}" > "$out/otza
         self.assertFalse(any("document.fp32.onnx" in c or "query.int8.onnx" in c for c in calls))
 
     def test_automatic_requires_verified_qa491_cache_before_building(self):
-        p, calls = self.run_driver(mode="auto", TO_EMBED=0, QA491_CACHE_MISSING=1, all_families=True)
+        p, calls = self.run_driver(mode="auto", TO_EMBED=0, QA491_CACHE_MISSING=1, all_families=True, driver=DRIVER)
         self.assertEqual(p.returncode, 1, p.stdout + p.stderr)
         self.assertIn("needs a verified cache seed", p.stdout)
         self.assertFalse(any(c.startswith("export ") or "release download" in c or "embed_worker.py" in c for c in calls))
@@ -1091,7 +1105,7 @@ echo "{\\"semantic_projection_version\\":${REBUILT_PROJECTION:-1}}" > "$out/otza
         self.assertEqual(len(workers), len(FAMILIES) * -(-n // int(PIN["EMBED_WINDOW"])))   # each family's plan
         self.assertIn("--skip 0 --take", workers[0])
         self.assertFalse([c for c in calls if "cli embed-shard" in c
-                          or ("model_package.py" in c and PIN["PASSAGE_PACKAGE_CHECKSUM"] in c)])   # not the CPU path
+                          or ("model_package.py" in c and LEGACY_PIN["PASSAGE_PACKAGE_CHECKSUM"] in c)])   # not the CPU path
         self.assertIn('"worker":"seforim-gpu-worker 1.1"', calls[self.index_of(calls, "cli assemble --kind base")])
         add = self.index_of(calls, "cli warehouse-add")
         self.assertGreater(add, self.index_of(calls, "embed_worker.py"))
@@ -1105,14 +1119,14 @@ echo "{\\"semantic_projection_version\\":${REBUILT_PROJECTION:-1}}" > "$out/otza
                 p, calls = self.run_driver(TO_EMBED=n)
                 self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
                 self.assertFalse([c for c in calls if "embed_worker.py" in c])
-                package = self.state / "model-cache" / PIN["PASSAGE_PACKAGE_CHECKSUM"]
+                package = self.state / "model-cache" / LEGACY_PIN["PASSAGE_PACKAGE_CHECKSUM"]
                 fetch = calls[self.index_of(calls, "model_package.py fetch")]
-                for arg in ("--cache " + str(self.state / "model-cache"), "--checksum " + PIN["PASSAGE_PACKAGE_CHECKSUM"],
-                            "--graph " + PIN["MODEL_GRAPH"], "--repo " + PIN["MODEL_REPO"], "--revision " + PIN["MODEL_REVISION"]):
+                for arg in ("--cache " + str(self.state / "model-cache"), "--checksum " + LEGACY_PIN["PASSAGE_PACKAGE_CHECKSUM"],
+                            "--graph " + LEGACY_PIN["MODEL_GRAPH"], "--repo " + LEGACY_PIN["MODEL_REPO"], "--revision " + LEGACY_PIN["MODEL_REVISION"]):
                     self.assertIn(arg + " ", fetch + " ")
                 embed = self.index_of(calls, "cli embed-shard")
                 self.assertGreater(embed, self.index_of(calls, "model_package.py fetch"))
-                for arg in ("--plan ", "--model-file " + str(package / PIN["MODEL_GRAPH"]),
+                for arg in ("--plan ", "--model-file " + str(package / LEGACY_PIN["MODEL_GRAPH"]),
                             "--processes " + PIN["CPU_PROCESSES"], "--threads " + PIN["CPU_THREADS"], "--out "):
                     self.assertIn(arg, calls[embed])
                 self.assertEqual(calls[embed + 1], "cli-env OTZARIA_ONNX_RUNTIME=" + str(self.ort))
@@ -1178,14 +1192,12 @@ echo "{\\"semantic_projection_version\\":${REBUILT_PROJECTION:-1}}" > "$out/otza
         self.assertFalse([c for c in adds[1:] if "--create" in c])
 
     def test_the_gpu_worker_fetches_the_model_at_the_pinned_revision(self):
-        pins = dict(line.split("=", 1) for line in PINS.read_text().splitlines()
-                    if line and not line.startswith("#") and "=" in line)
         p, calls = self.run_driver(TO_EMBED=2_000_000)
         self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
         workers = [c for c in calls if c.startswith("py ") and "embed_worker.py" in c]
         self.assertTrue(workers)
         for c in workers:
-            self.assertIn(f"--repo {pins['MODEL_REPO']} --revision {pins['MODEL_REVISION']} ", c + " ")
+            self.assertIn(f"--repo {LEGACY_PIN['MODEL_REPO']} --revision {LEGACY_PIN['MODEL_REVISION']} ", c + " ")
 
     def test_a_runner_with_a_warehouse_plans_against_it_and_adds_to_it(self):
         p, calls = self.run_driver(TO_EMBED=2_000_000)
@@ -1251,9 +1263,9 @@ echo "{\\"semantic_projection_version\\":${REBUILT_PROJECTION:-1}}" > "$out/otza
         p, calls = self.run_driver(mode="base", TO_EMBED=0)
         self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
         work, cache = self.state / "work" / TAG, self.state / "model-cache"
-        fetch = calls[self.index_of(calls, "--checksum " + PIN["QUERY_PACKAGE_CHECKSUM"])]   # the int8 query package
-        for arg in ("model_package.py fetch", "--cache " + str(cache), "--graph " + PIN["QUERY_GRAPH"],
-                    "--repo " + PIN["MODEL_REPO"], "--revision " + PIN["MODEL_REVISION"]):
+        fetch = calls[self.index_of(calls, "--checksum " + LEGACY_PIN["QUERY_PACKAGE_CHECKSUM"])]   # the int8 query package
+        for arg in ("model_package.py fetch", "--cache " + str(cache), "--graph " + LEGACY_PIN["QUERY_GRAPH"],
+                    "--repo " + LEGACY_PIN["MODEL_REPO"], "--revision " + LEGACY_PIN["MODEL_REVISION"]):
             self.assertIn(arg + " ", fetch + " ")
         validations = [i for i, c in enumerate(calls) if c.startswith("validate --index")]
         self.assertEqual(len(validations), len(FAMILIES))
@@ -1269,7 +1281,7 @@ echo "{\\"semantic_projection_version\\":${REBUILT_PROJECTION:-1}}" > "$out/otza
                 self.assertEqual(pairs, {
                     "--index": str(work / "index" / "index"), "--seforim-db": str(work / "seforim.db"),
                     "--release": str(fw / "release"), "--plan": str(fw / "plan"),
-                    "--warehouse": str(self.warehouse), "--model": str(cache / PIN["QUERY_PACKAGE_CHECKSUM"] / PIN["QUERY_GRAPH"]),
+                    "--warehouse": str(self.warehouse), "--model": str(cache / LEGACY_PIN["QUERY_PACKAGE_CHECKSUM"] / LEGACY_PIN["QUERY_GRAPH"]),
                     "--model-identity": str(self.model(name)), "--onnx-runtime": str(self.ort),
                     "--threads": pairs["--threads"], "--report": str(fw / "release" / "validation.json"),
                     **({"--min-recall-10": floors[0], "--min-recall-50": floors[1]} if floors else {})})
@@ -1847,7 +1859,7 @@ echo "{\\"semantic_projection_version\\":${REBUILT_PROJECTION:-1}}" > "$out/otza
         self.calls.unlink()
         p, calls = self.run_driver(TO_EMBED=0, args=("--family", "all"))
         self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
-        self.assertEqual(len([c for c in calls if c.startswith("export --index")]), len(CONFIGURED_FAMILIES))
+        self.assertEqual(len([c for c in calls if c.startswith("export --index")]), len(FIXTURE_FAMILIES))
 
     def test_a_family_that_is_not_pinned_is_refused_before_anything_runs(self):
         for args, needle in ((("--family", "meivin-round2"), "is not a family of FAMILY_CONFIGS"),
@@ -1892,7 +1904,7 @@ echo "{\\"semantic_projection_version\\":${REBUILT_PROJECTION:-1}}" > "$out/otza
                                                         "fromLibraryVersion": 0 if i == 0 else v - 1}))
         for f in ("ledger-v29.keys", "pairs-v29.bin", "occurrences-v29.bin"):
             (ledger / f).write_text(f)
-        manifest = {"library_version": 29, "passage_package": {"checksum": PIN["PASSAGE_PACKAGE_CHECKSUM"]}, "deltas_since_base": 0,
+        manifest = {"library_version": 29, "passage_package": {"checksum": LEGACY_PIN["PASSAGE_PACKAGE_CHECKSUM"]}, "deltas_since_base": 0,
                     "codec": {"name": "rot192-i8i4", "params_sha256": "e" * 64}, "alias_threshold": 0.99}
         manifest.update(changes.pop("ledger_manifest", {}))
         (ledger / "ledger-v29.manifest.json").write_text(json.dumps(manifest))
@@ -1914,7 +1926,7 @@ echo "{\\"semantic_projection_version\\":${REBUILT_PROJECTION:-1}}" > "$out/otza
                      "manifest": stem + ".manifest.json", "manifest_sha256": hashlib.sha256(published_manifest).hexdigest(),
                      "family": WINDOWS, "to": 29, "base_tag": f"vectors-windows-{self.PREV}", "codec": "rot192-i8i4",
                      "alias_threshold": "0.99", "epoch_sha256": "e" * 64,
-                     "passage_package": PIN["PASSAGE_PACKAGE_CHECKSUM"], "plan_identity_sha256": self.identity_sha(WINDOWS),
+                     "passage_package": LEGACY_PIN["PASSAGE_PACKAGE_CHECKSUM"], "plan_identity_sha256": self.identity_sha(WINDOWS),
                      "kind": "base", "from": None, "deltas_since_base": 0}
         for key, value in changes.items():
             if value is None:
@@ -2104,6 +2116,16 @@ echo "{\\"semantic_projection_version\\":${REBUILT_PROJECTION:-1}}" > "$out/otza
         pins = copy / "vectors" / "pins.env"
         rotations = f'ROTATIONS="{WINDOWS}={pinned}"' if pinned else 'ROTATIONS=""'
         pins.write_text(re.sub(r"^ROTATIONS=.*$", rotations, pins.read_text(), count=1, flags=re.M))
+        with pins.open("a") as out:
+            out.write("\n" + "\n".join(f"{key}={value}" for key, value in LEGACY_PIN.items()) + "\n")
+            out.write('\nFAMILY_CONFIGS="config/models/meivin-round2-onnx:vectors '
+                      'config/models/meivin-round2-windows-onnx:vectors-windows:rot192-i8i4:0.99 $FAMILY_CONFIGS"\n'
+                      'OPT_IN_FAMILY_CONFIGS="$OPT_IN_FAMILY_CONFIGS '
+                      'config/models/meivin-qa491-complete-notes-onnx:vectors-qa491-complete-notes:i8-sym-vec"\n'
+                      'FAMILY_MODEL_PROFILES="$FAMILY_MODEL_PROFILES meivin-qa491-complete-notes-onnx:qa491"\n'
+                      'DELTA_PREFIXES="$DELTA_PREFIXES vectors-windows"\n'
+                      'G6_FLOORS="$G6_FLOORS meivin-round2-windows-onnx=0.97,0.97 '
+                      'meivin-qa491-complete-notes-onnx=0.98,0.99"\n')
         return copy / "vectors" / DRIVER.name
 
     def unpinned_driver(self):
@@ -2112,10 +2134,11 @@ echo "{\\"semantic_projection_version\\":${REBUILT_PROJECTION:-1}}" > "$out/otza
         return driver if driver.exists() else self.driver_with_rotation("", "unpinned")
 
     def test_the_committed_pins_start_a_new_windows_base_in_the_committed_rotation(self):
-        p, calls = self.run_driver(mode="base", TO_EMBED=0, driver=DRIVER, args=("--family", WINDOWS))
+        name = "meivin-qa491-windows-onnx"
+        p, calls = self.run_driver(mode="base", TO_EMBED=0, driver=DRIVER, args=("--family", name))
         self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
         self.assertFalse([c for c in calls if "fit-rotation" in c])
-        self.assertIn(f"--rotation {HERE / 'rotation' / (WINDOWS + '.bin')} ", calls[self.index_of(calls, "cli assemble --kind base")])
+        self.assertIn(f"--rotation {HERE / 'rotation' / (name + '.bin')} ", calls[self.index_of(calls, "cli assemble --kind base")])
 
     def test_a_pinned_rotation_is_held_to_its_digest_and_never_fitted(self):
         good = hashlib.sha256(b"the committed rotation").hexdigest()
@@ -2420,6 +2443,46 @@ class Bootstrap(unittest.TestCase):
         p = subprocess.run(["bash", str(BOOTSTRAP), "--state", str(self.state), *args], capture_output=True, text=True, env=e)
         return p, (self.calls.read_text().splitlines() if self.calls.exists() else [])
 
+    def test_plugin_tools_share_one_checkout_and_dependency_target(self):
+        cargo = self.root / "bin" / "cargo"
+        cargo.write_text(STUB_CARGO + r"""
+case "${bins[0]}" in
+  otzaria-semantic-search) touch "$CARGO_TARGET_DIR/sidecar-only" ;;
+  export_semantic_plan)
+    [ ! -e "$CARGO_TARGET_DIR/sidecar-only" ] || exit 21
+    touch "$CARGO_TARGET_DIR/plugin-dependencies" ;;
+  validate_semantic_vectors)
+    [ -f "$CARGO_TARGET_DIR/plugin-dependencies" ] || exit 22 ;;
+esac
+""")
+        p, calls = self.run_bootstrap()
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        clones = [c for c in calls if c.startswith("git clone ")]
+        self.assertEqual(len(clones), 2, clones)
+        self.assertEqual(sum("otzaria_search_engine.git" in c for c in clones), 1)
+        self.assertEqual(len([c for c in calls if c.startswith("cargo ")]), 3)
+        self.assertFalse([c for c in calls if c.startswith("cargo ") and "build_semantic_index" in c])
+        self.assertFalse((self.state / "build").exists())
+
+    def test_bootstrap_discards_previous_invocation_scratch_before_building(self):
+        scratch = self.state / "build" / "target"
+        scratch.mkdir(parents=True)
+        (scratch / "stale").write_text("untrusted old output")
+        cargo = self.root / "bin" / "cargo"
+        cargo.write_text(STUB_CARGO + '\n[ ! -e "$CARGO_TARGET_DIR/stale" ] || exit 23\n')
+        p, _ = self.run_bootstrap()
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertFalse((self.state / "build").exists())
+
+    def test_failed_shared_build_stops_and_cleans_scratch(self):
+        cargo = self.root / "bin" / "cargo"
+        cargo.write_text(STUB_CARGO + '\n[ "${bins[0]}" != export_semantic_plan ] || exit 19\n')
+        p, calls = self.run_bootstrap()
+        self.assertEqual(p.returncode, 19, p.stdout + p.stderr)
+        self.assertFalse([c for c in calls if c.startswith("cargo ") and "validate_semantic_vectors" in c])
+        self.assertFalse((self.state / "bin" / "export_semantic_plan.rev").exists())
+        self.assertFalse((self.state / "build").exists())
+
     def test_a_plugin_that_pins_another_sidecar_is_refused_before_it_is_built(self):
         p, calls = self.run_bootstrap(LOCKED_SIDECAR="3aeb94ef83d80d89f3d54dad3cc34ba5ccee4200")
         self.assertNotEqual(p.returncode, 0)
@@ -2433,7 +2496,6 @@ class Bootstrap(unittest.TestCase):
         for name, rev, build in (
                 ("otzaria-semantic-search", PIN["SIDECAR_REV"], "--features onnx-backend --bin otzaria-semantic-search"),
                 ("export_semantic_plan", PIN["PLUGIN_REV"], "--features semantic-integration --bin export_semantic_plan"),
-                ("build_semantic_index", PIN["PLUGIN_REV"], "--features semantic-integration --bin build_semantic_index"),
                 ("validate_semantic_vectors", PIN["PLUGIN_REV"], "--features semantic --bin validate_semantic_vectors")):
             self.assertTrue(os.access(b / name, os.X_OK), name)
             self.assertEqual((b / f"{name}.rev").read_text().strip(), rev, name)

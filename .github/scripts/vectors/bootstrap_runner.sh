@@ -41,6 +41,11 @@ if [ -f "$SYSTEM_CA" ]; then export PIP_CERT=${PIP_CERT:-$SYSTEM_CA}; fi
 mkdir -p "$STATE/bin" "$STATE/model-cache" "$STATE/warehouse"
 exec 9>"$STATE/.lock"; flock -n 9 || { echo "another build or bootstrap holds $STATE/.lock" >&2; exit 75; }
 
+# Reuse dependencies only within this locked invocation, never an older scratch tree.
+rm -rf "$STATE/build"
+trap 'rm -rf "$STATE/build"' EXIT
+BUILD_SOURCE=""
+
 build_bin() {  # <name> <repo> <rev> <package dir in the repo> [cargo args...]
   local name=$1 repo=$2 rev=$3 sub=$4; shift 4
   local build="$*"   # the cargo arguments: a binary built with others (another feature set) is rebuilt
@@ -53,9 +58,13 @@ build_bin() {  # <name> <repo> <rev> <package dir in the repo> [cargo args...]
          "(curl --proto '=https' -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal), then run this again" >&2
     exit 69
   }
-  rm -rf "$STATE/build"; mkdir -p "$STATE/build"
-  git clone -q --filter=blob:none "https://github.com/$repo.git" "$STATE/build/src"
-  git -C "$STATE/build/src" checkout -q "$rev"
+  local source="$repo@$rev:$sub"
+  if [ "$BUILD_SOURCE" != "$source" ]; then
+    rm -rf "$STATE/build"; mkdir -p "$STATE/build"
+    git clone -q --filter=blob:none "https://github.com/$repo.git" "$STATE/build/src"
+    git -C "$STATE/build/src" checkout -q "$rev"
+    BUILD_SOURCE=$source
+  fi
   # The planner and the validator must run the CLI's sidecar: their writers and readers are its.
   if [ "$repo" = "$PLUGIN_REPO" ] \
     && ! grep -Fq "source = \"git+https://github.com/$SIDECAR_REPO?rev=$SIDECAR_REV#" "$STATE/build/src/$sub/Cargo.lock"; then
@@ -74,18 +83,17 @@ build_bin() {  # <name> <repo> <rev> <package dir in the repo> [cargo args...]
       cp "$STATE/build/src/$config/model.json" "$STATE/build/src/$config/chunking.json" "$STATE/bin/families/${config##*/}/"
     done
   fi
-  rm -rf "$STATE/build"
   echo "$name at $rev: built"
 }
 
 build_bin otzaria-semantic-search "$SIDECAR_REPO" "$SIDECAR_REV" . --features onnx-backend --bin otzaria-semantic-search
 if [ -n "$PLUGIN_REV" ]; then
   build_bin export_semantic_plan "$PLUGIN_REPO" "$PLUGIN_REV" rust --features semantic-integration --bin export_semantic_plan
-  build_bin build_semantic_index "$PLUGIN_REPO" "$PLUGIN_REV" rust --features semantic-integration --bin build_semantic_index
   build_bin validate_semantic_vectors "$PLUGIN_REPO" "$PLUGIN_REV" rust --features semantic --bin validate_semantic_vectors
 else
   echo "export_semantic_plan, validate_semantic_vectors: PLUGIN_REV is not pinned — the build can neither plan nor validate"
 fi
+rm -rf "$STATE/build"
 for family in $FAMILY_CONFIGS ${OPT_IN_FAMILY_CONFIGS:-}; do
   config=${family%%:*}
   [ -f "$STATE/bin/families/${config##*/}/chunking.json" ] \
