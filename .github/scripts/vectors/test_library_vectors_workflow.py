@@ -247,7 +247,7 @@ class Workflow(unittest.TestCase):
         for name, job in self.doc["jobs"].items():
             if name == "vectors":
                 self.assertEqual(job.get("timeout-minutes"),
-                                 "${{ inputs.family == 'pardesqa491-windows-onnx' && 4320 || 360 }}")
+                                 "${{ inputs.family == 'pardesqa491-windows-onnx' && 4320 || 720 }}")
             else:
                 self.assertIsInstance(job.get("timeout-minutes"), int, name)
 

@@ -161,7 +161,8 @@ jobs:
     # warehouse; a later release embeds only the texts the warehouse lacks, on the CPU when
     # they are few (CPU_EMBED_MAX in pins.env). The windows family's first build embeds ~3.2M
     # texts (about an hour more); if it ever outlasts this bound, a dry run of it alone fills the warehouse.
-    timeout-minutes: ${{ inputs.family == 'pardesqa491-windows-onnx' && 4320 || 360 }}
+    # Publishing each family runs ~1.5 h even with nothing to embed; v40 hit the old 6 h bound.
+    timeout-minutes: ${{ inputs.family == 'pardesqa491-windows-onnx' && 4320 || 720 }}
     env:
       GH_TOKEN: ${{ secrets.PIPELINE_TOKEN }}
       OTZARIA_HF_TOKEN: ${{ secrets.OTZARIA_HF_TOKEN }}
