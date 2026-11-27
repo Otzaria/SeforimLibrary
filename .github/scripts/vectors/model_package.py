@@ -53,6 +53,8 @@ def _pins() -> Dict[str, str]:
 _PINS = _pins()
 DEFAULT_REPO = _PINS["MODEL_REPO"]
 DEFAULT_REVISION = _PINS["MODEL_REVISION"]
+DEFAULT_GRAPH = _PINS["MODEL_GRAPH"]
+DEFAULT_REMOTE_GRAPH = _PINS.get("MODEL_REMOTE_GRAPH") or None
 HUB = "https://huggingface.co"
 
 

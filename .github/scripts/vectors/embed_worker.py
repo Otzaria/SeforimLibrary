@@ -62,7 +62,7 @@ def parse_args(argv=None):
     ap.add_argument("--repo", default=model_package.DEFAULT_REPO)
     ap.add_argument("--revision", default=model_package.DEFAULT_REVISION)
     ap.add_argument("--token-env", default=model_package.DEFAULT_TOKEN_ENV)
-    ap.add_argument("--graph", default="seforim-embed-round2-fp32.onnx")
+    ap.add_argument("--graph", default=model_package.DEFAULT_GRAPH)
     ap.add_argument("--remote-graph", help="graph path on the hub, when its local package filename differs")
     ap.add_argument("--cache-only", action="store_true", help="require a verified package already in the cache")
     ap.add_argument("--mode", default="mixed", choices=("mixed", "fp32"))
@@ -79,6 +79,10 @@ def parse_args(argv=None):
     ap.add_argument("--audit-tokens", action="store_true",
                     help="record uncapped passage lengths without changing inference token IDs")
     a = ap.parse_args(argv)
+    # A pinned remote path belongs to that exact package, not to an explicit source override.
+    if a.remote_graph is None and (a.repo, a.revision, a.graph) == (
+            model_package.DEFAULT_REPO, model_package.DEFAULT_REVISION, model_package.DEFAULT_GRAPH):
+        a.remote_graph = model_package.DEFAULT_REMOTE_GRAPH
     if a.skip < 0 or (a.take is not None and a.take < 0):
         ap.error("--skip and --take are counts")
     if a.parity_samples < vector_shard.PARITY_MIN_SAMPLES:
