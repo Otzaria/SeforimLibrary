@@ -16,6 +16,19 @@
         "url": "https://github.com/Otzaria/SeforimLibrary/releases/download/v41-20261126162443/build_provenance.json"
       },
       {
+        "apiUrl": "https://api.github.com/repos/Otzaria/SeforimLibrary/releases/assets/797502416",
+        "contentType": "text/markdown; charset=utf-8",
+        "createdAt": "2026-11-26T20:03:48Z",
+        "digest": "sha256:57982db933d1727e721d06af5484bf5c809584c1dd66e233a2113f4ad090c712",
+        "id": "RA_kwDOQ6kTXM4viOvQ",
+        "label": "",
+        "name": "library-changes.md",
+        "size": 22149,
+        "state": "uploaded",
+        "updatedAt": "2026-11-26T20:03:48Z",
+        "url": "https://github.com/Otzaria/SeforimLibrary/releases/download/v41-20261126162443/library-changes.md"
+      },
+      {
         "apiUrl": "https://api.github.com/repos/Otzaria/SeforimLibrary/releases/assets/797405753",
         "contentType": "application/json",
         "createdAt": "2026-11-26T19:34:36Z",
@@ -27,6 +40,58 @@
         "state": "uploaded",
         "updatedAt": "2026-11-26T19:34:36Z",
         "url": "https://github.com/Otzaria/SeforimLibrary/releases/download/v41-20261126162443/library_stats.json"
+      },
+      {
+        "apiUrl": "https://api.github.com/repos/Otzaria/SeforimLibrary/releases/assets/797534707",
+        "contentType": "application/json",
+        "createdAt": "2026-11-26T20:13:26Z",
+        "digest": "sha256:36c6267c3864128680ea7bed1baba357996ff5093d5af32cf655c2343c5576c1",
+        "id": "RA_kwDOQ6kTXM4viWnz",
+        "label": "",
+        "name": "otzaria-library-index.provenance.json",
+        "size": 939,
+        "state": "uploaded",
+        "updatedAt": "2026-11-26T20:13:27Z",
+        "url": "https://github.com/Otzaria/SeforimLibrary/releases/download/v41-20261126162443/otzaria-library-index.provenance.json"
+      },
+      {
+        "apiUrl": "https://api.github.com/repos/Otzaria/SeforimLibrary/releases/assets/797534708",
+        "contentType": "application/json",
+        "createdAt": "2026-11-26T20:13:26Z",
+        "digest": "sha256:56adfd23c8158897bae4004ab145ae50c5be0d8b02fa725534d66b8ff874c3c5",
+        "id": "RA_kwDOQ6kTXM4viWn0",
+        "label": "",
+        "name": "otzaria-library-index.tar.zst.manifest.json",
+        "size": 609,
+        "state": "uploaded",
+        "updatedAt": "2026-11-26T20:13:27Z",
+        "url": "https://github.com/Otzaria/SeforimLibrary/releases/download/v41-20261126162443/otzaria-library-index.tar.zst.manifest.json"
+      },
+      {
+        "apiUrl": "https://api.github.com/repos/Otzaria/SeforimLibrary/releases/assets/797534688",
+        "contentType": "application/octet-stream",
+        "createdAt": "2026-11-26T20:13:26Z",
+        "digest": "sha256:7420c6d0e0269af3939af6b63e8cf07d05ed7d714460a10f8d858008e5d06941",
+        "id": "RA_kwDOQ6kTXM4viWng",
+        "label": "",
+        "name": "otzaria-library-index.tar.zst.part-000",
+        "size": 1992294400,
+        "state": "uploaded",
+        "updatedAt": "2026-11-26T20:29:29Z",
+        "url": "https://github.com/Otzaria/SeforimLibrary/releases/download/v41-20261126162443/otzaria-library-index.tar.zst.part-000"
+      },
+      {
+        "apiUrl": "https://api.github.com/repos/Otzaria/SeforimLibrary/releases/assets/797534689",
+        "contentType": "application/octet-stream",
+        "createdAt": "2026-11-26T20:13:26Z",
+        "digest": "sha256:bcaaf635d6209f85c9d0569305e089b3f15195a5407008fa90f9b849fcbe2094",
+        "id": "RA_kwDOQ6kTXM4viWnh",
+        "label": "",
+        "name": "otzaria-library-index.tar.zst.part-001",
+        "size": 54750786,
+        "state": "uploaded",
+        "updatedAt": "2026-11-26T20:14:20Z",
+        "url": "https://github.com/Otzaria/SeforimLibrary/releases/download/v41-20261126162443/otzaria-library-index.tar.zst.part-001"
       },
       {
         "apiUrl": "https://api.github.com/repos/Otzaria/SeforimLibrary/releases/assets/797405882",
